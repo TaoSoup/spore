@@ -1,91 +1,159 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { SPORE_COIN } from "../lib/policy";
+// The front page (elevation 2026-10-24, lane home). Order: the arrival (the colony bleeding off the right
+// edge, the headline, one sentence, Launch + Explore + the agents, the trust row, the search) → the live
+// pulse at the fold → how Spore works → the numbers → the agents → the most active launches → the biggest
+// trees. Every fee and agent sentence comes from lib/copy.ts; every number comes from the API.
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { api, type Coin } from "../lib/api";
-import { useAsync, useStats } from "../lib/hooks";
-import { count, usd } from "../lib/format";
-import SporeCanvas from "../components/SporeCanvas";
+import { useAsync, useStats, type Async } from "../lib/hooks";
+import { plural } from "../lib/format";
+import { AGENT_CADENCE, AGENT_LINE, CHILD_SPLIT_YOU, LISTS_SCOPE, NETWORK_RENT_SOL, NO_LAUNCH_FEE, ROOT_SPLIT_YOU, SPORE_BUYBACK, TRUST_POINTS, WHAT_IS_SPORE } from "../lib/copy";
 import Search from "../components/Search";
-import SpawnFeed, { LaunchTicker, LiveDot } from "../components/SpawnFeed";
-import CoinCard from "../components/CoinCard";
+import CoinCard, { CoinCardSkeleton } from "../components/CoinCard";
 import LaunchButton from "../components/LaunchButton";
-import { Stat, StatStrip } from "../components/Stat";
-import { Empty, ErrorBox, Logo, SkeletonCard, SkeletonRows, nameOf, sym } from "../components/Bits";
+import AgentsStrip from "../components/agents/AgentsStrip";
+import { agentsCached, runState } from "../components/agents/data";
+import Term from "../components/Term";
+import { Empty, ErrorBox, sym } from "../components/Bits";
+import TreeRow, { TreeRowSkeleton } from "../components/TreeRow";
+import { TreePreview } from "../components/home/LiveTree";
+import Pulse from "../components/home/Pulse";
+import FlowDiagram from "../components/home/FlowDiagram";
+import Numbers from "../components/home/Numbers";
+import { AgentOrbit, IllusGrow, IllusLaunch, IllusSplit } from "../components/home/illus/HomeIllus";
+import SporeColony from "../components/hero/SporeColony";
+import SectionHead from "../components/ui/SectionHead";
+import Reveal from "../components/ui/Reveal";
+import Tilt from "../components/ui/Tilt";
 import "../components/discover.css";
+import "../components/home/home.css";
 
-/// A number that tweens to its next value and flashes once when it changes, so a stats strip fed
-/// by SSE visibly reacts to a launch or a trade instead of silently swapping digits.
-function AnimatedNumber({ value, format }: { value: number | null | undefined; format: (n: number | null | undefined) => string }) {
-  const [shown, setShown] = useState(value);
-  const [bump, setBump] = useState(false);
-  const prev = useRef(value);
-  const raf = useRef(0);
+const SEARCH_LABEL = "Have a coin in mind? Find any pump.fun coin to launch under it";
+
+/* ---------- glyphs (24-unit grid, stroked in currentColor) */
+const Ico = ({ children }: { children: ReactNode }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{children}</svg>;
+const MapIco = () => <Ico><path d="M9 4 3.5 6.2v13.6L9 17.6l6 2.4 5.5-2.2V4.2L15 6.4 9 4Z" /><path d="M9 4v13.6M15 6.4V20" /><circle cx="15" cy="11" r="1.4" /></Ico>;
+const SproutIco = () => <Ico><path d="M12 21V10" /><path d="M12 14c0-3.5 2.5-6 6-6h2c0 3.5-2.5 6-6 6h-2Z" /><path d="M12 10C12 6.5 9.5 4 6 4H4c0 3.5 2.5 6 6 6h2Z" /></Ico>;
+const AgentIco = () => <Ico><path d="M11 3.5c.5 3.9 2.6 6 6.5 6.5-3.9.5-6 2.6-6.5 6.5-.5-3.9-2.6-6-6.5-6.5 3.9-.5 6-2.6 6.5-6.5Z" /><path d="M18 14.5c.25 1.7 1.05 2.5 2.75 2.75-1.7.25-2.5 1.05-2.75 2.75-.25-1.7-1.05-2.5-2.75-2.75 1.7-.25 2.5-1.05 2.75-2.75Z" /></Ico>;
+const Check = () => <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5" /></svg>;
+const Arrow = ({ dir = "right" }: { dir?: "left" | "right" }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{dir === "right" ? <path d="M5 12h14M13 6l6 6-6 6" /> : <path d="M19 12H5M11 6l-6 6 6 6" />}</svg>;
+
+/// "2 agents live · 14 coins launched by them", from the shared agent list (one request a minute at
+/// most); the plain sentence while it loads or when no agent exists. Never a made-up number.
+function AgentsLine() {
+  const [line, setLine] = useState<string | null>(null);
   useEffect(() => {
-    const from = prev.current, to = value;
-    prev.current = value;
-    if (to == null || from == null || from === to) { setShown(to); return; }
-    const reduced = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduced) { setShown(to); return; }
-    setBump(true);
-    const t0 = performance.now(), ms = 700;
-    const step = (t: number) => {
-      const u = Math.min(1, (t - t0) / ms), e = 1 - (1 - u) ** 3;
-      setShown(from + (to - from) * e);
-      if (u < 1) raf.current = requestAnimationFrame(step); else setBump(false);
-    };
-    cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf.current);
-  }, [value]);
-  return <span className={`cnum ${bump ? "bump" : ""}`}>{format(shown)}</span>;
+    let alive = true;
+    agentsCached().then((r) => {
+      if (!alive || r.agents.length === 0) return;
+      const live = r.agents.filter((a) => runState(a).state === "live").length;
+      const launches = r.agents.reduce((n, a) => n + a.totals.launches, 0);
+      setLine(`${plural(live, "agent")} live · ${plural(launches, "coin")} launched by them`);
+    }, () => { /* no agents routes or the API is down: keep the plain sentence */ });
+    return () => { alive = false; };
+  }, []);
+  return <>{line ?? "AI agents that launch coins on their own"}</>;
 }
 
-/// Illustrative tree for the empty launchpad: a root, three children, a few grandchildren, buys
-/// flowing upward. Static shapes with placeholder tickers; nothing here is live data.
-export function TreePreview() {
-  const root = { x: 220, y: 56, r: 34 };
-  const kids = [{ x: 100, y: 170, r: 24, s: "$CHILD" }, { x: 220, y: 182, r: 28, s: "$CHILD" }, { x: 342, y: 166, r: 20, s: "$CHILD" }];
-  const grand = [{ x: 58, y: 262, r: 12, p: 0 }, { x: 128, y: 268, r: 10, p: 0 }, { x: 196, y: 272, r: 13, p: 1 }, { x: 262, y: 276, r: 9, p: 1 }, { x: 318, y: 256, r: 11, p: 2 }, { x: 380, y: 250, r: 8, p: 2 }];
-  const link = (a: { x: number; y: number }, b: { x: number; y: number }, key: string, color: string) => (
-    <g key={key}><line x1={b.x} y1={b.y} x2={a.x} y2={a.y} stroke={color} strokeOpacity=".28" strokeWidth="1.2" /><line className="tp-flow" x1={b.x} y1={b.y} x2={a.x} y2={a.y} stroke={color} strokeOpacity=".9" strokeWidth="1.6" strokeLinecap="round" /></g>
-  );
-  const bubble = (n: { x: number; y: number; r: number }, color: string, key: string, label?: string, strong = false) => (
-    <g key={key}>
-      <circle className="tp-pulse" cx={n.x} cy={n.y} r={n.r * 1.9} fill={color} fillOpacity={strong ? ".16" : ".1"} />
-      <circle cx={n.x} cy={n.y} r={n.r} fill={color} fillOpacity=".2" stroke={color} strokeOpacity=".9" strokeWidth={strong ? 1.6 : 1.1} />
-      {label && <text x={n.x} y={n.y + n.r + 14} textAnchor="middle" fill="#d8e8da" fontFamily="Geist Mono, ui-monospace, monospace" fontSize={strong ? 12 : 10.5} fontWeight={strong ? 600 : 500}>{label}</text>}
-    </g>
-  );
+/// LISTS_SCOPE with "the map" explained in place.
+function ScopeHint() {
+  const [a, b] = LISTS_SCOPE.split("the map");
+  return <p className="hint arrive-hint">{b === undefined ? LISTS_SCOPE : <>{a}<Term k="mapAll">the map</Term>{b}</>}</p>;
+}
+
+function Arrival() {
   return (
-    <figure className="tree-preview" aria-label="Illustration of a coin family tree: a root coin, children quoted in it, grandchildren under those; buys flow upward">
-      <svg viewBox="0 0 440 300" role="img">
-        <defs><radialGradient id="tp-bg" cx="50%" cy="40%" r="60%"><stop offset="0" stopColor="#0d2316" /><stop offset="1" stopColor="#06100a" /></radialGradient></defs>
-        <rect x="0" y="0" width="440" height="300" rx="18" fill="url(#tp-bg)" stroke="rgba(182,255,92,.14)" />
-        {kids.map((k, i) => link(root, k, `l${i}`, "#5ce0c8"))}
-        {grand.map((g, i) => link(kids[g.p], g, `g${i}`, "#b08cff"))}
-        {grand.map((g, i) => bubble(g, "#b08cff", `gb${i}`))}
-        {kids.map((k, i) => bubble(k, "#5ce0c8", `kb${i}`, k.s))}
-        {bubble(root, "#b6ff5c", "root", "$ROOT", true)}
-        <text x="14" y="288" fill="#5d7364" fontFamily="Geist Mono, ui-monospace, monospace" fontSize="9" letterSpacing="1">BUYS FLOW UP · PARENT TOKENS LOCK IN THE CHILD'S CURVE</text>
-      </svg>
-      <figcaption>Illustration — what a tree looks like</figcaption>
-    </figure>
+    <section className="arrive" aria-labelledby="arrive-title">
+      <div className="arrive-copy">
+        <span className="eyebrow arrive-eyebrow"><span>pump.fun launchpad ·</span> <span>coin family trees ·</span> <span>live AI agents</span></span>
+        <h1 id="arrive-title" className="display arrive-title">Coins that <em>grow</em> coins.</h1>
+        <p className="arrive-lead">{WHAT_IS_SPORE}</p>
+        <div className="arrive-actions">
+          <div className="arrive-btns">
+            <Link to="/launch" className="btn lg accent arrive-launch"><SproutIco />Launch a coin<span className="arrow" aria-hidden="true">→</span></Link>
+            <Link to="/map" className="btn lg ghost sweep arrive-map"><MapIco />Explore the map</Link>
+          </div>
+          <p className="arrive-rent">No launch fee · from ~{NETWORK_RENT_SOL} SOL network rent · one signature</p>
+          <Link to="/agents" className="arrive-agents">
+            <span className="arrive-agents-ico"><AgentIco /></span>
+            <span className="arrive-agents-text"><b>Watch the agents</b><span><AgentsLine /></span></span>
+            <span className="arrive-agents-arrow"><Arrow /></span>
+          </Link>
+        </div>
+        <ul className="arrive-trust" aria-label="Why it is safe to try">
+          {TRUST_POINTS.map((p) => <li key={p}><Check />{p}</li>)}
+        </ul>
+        <div className="arrive-search">
+          <p className="arrive-search-label" aria-hidden="true">{SEARCH_LABEL}</p>
+          <Search size="md" label={SEARCH_LABEL} placeholder="Name, ticker or mint" />
+          <ScopeHint />
+        </div>
+      </div>
+    </section>
   );
 }
 
-/// The empty launchpad (DESIGN §11.1): the three steps, one big CTA and the preview tree. It must
-/// read as "nothing yet, be first", never as a page that failed to load.
+function HowWorks({ maxDepth }: { maxDepth: number }) {
+  const steps = [
+    { illus: <IllusLaunch />, title: <>Launch a <Term k="root">root</Term></>, body: <>A normal pump.fun coin, bought with SOL. No launch fee, and it gets its own <Term k="agent">AI agent</Term>.</> },
+    { illus: <IllusGrow />, title: <>Coins grow under it</>, body: <>Anyone can launch a <Term k="child">child</Term> priced in your coin, and your coin's agent launches one {AGENT_CADENCE}. Every buy of a child buys your coin and <Term k="locked">locks it</Term> in the child's curve.</> },
+    { illus: <IllusSplit />, title: <><Term k="creatorFee">Fees</Term> split forever</>, body: <>Root: {ROOT_SPLIT_YOU}. Child: {CHILD_SPLIT_YOU}. {SPORE_BUYBACK}</> },
+  ];
+  return (
+    <section className="hw" aria-labelledby="hw-title">
+      <SectionHead n="01" id="hw-title" title="How Spore works" lede="Buying a child is one swap: SOL buys the root, the root buys the child, and the root coins stay locked in the child's curve."
+        action={<Link to="/how" className="more-link">Full details <Arrow /></Link>} />
+      <ol className="hw-steps">
+        {steps.map((s, i) => (
+          <Reveal as="li" key={i} i={i} className="hw-step">
+            <div className="hw-art">{s.illus}</div>
+            <span className="hw-n" aria-hidden="true">Step {i + 1}</span>
+            <h3>{s.title}</h3>
+            <p>{s.body}</p>
+          </Reveal>
+        ))}
+      </ol>
+      <Reveal><FlowDiagram maxDepth={maxDepth} className="hw-flow" /></Reveal>
+    </section>
+  );
+}
+
+function NumbersSection({ stats, error }: { stats: ReturnType<typeof useStats>["stats"]; error: string | null }) {
+  return (
+    <section className="home-numbers" aria-labelledby="hn-title">
+      <SectionHead n="02" id="hn-title" title="Spore in numbers" lede="Live from the index, refreshed every 30 seconds." />
+      <Reveal><Numbers stats={stats} error={error} /></Reveal>
+    </section>
+  );
+}
+
+function AgentsBand({ n }: { n: string }) {
+  return (
+    <section className="ag-band" aria-labelledby="ag-title">
+      <SectionHead n={n} id="ag-title" title="Agents at work" action={<Link to="/agents" className="more-link">All agents <Arrow /></Link>} />
+      <Reveal className="ag-band-body">
+        <div className="ag-band-art"><AgentOrbit /></div>
+        <div className="ag-band-text">
+          <p className="ag-band-line">{AGENT_LINE}</p>
+          <AgentsStrip />
+        </div>
+      </Reveal>
+    </section>
+  );
+}
+
+/// The empty launchpad: nothing launched yet must read as "be first", never as a page that failed to load.
 function EmptyLaunchpad() {
   return (
-    <section className="empty-hero card">
+    <section className="empty-hero glass">
       <div className="empty-hero-text">
         <span className="eyebrow">nothing launched yet</span>
         <h2>Be the first tree on Spore.</h2>
-        <p>Spore lists only coins launched here, so the first launch is the whole front page. Three steps from an idea to a family tree:</p>
+        <p>{LISTS_SCOPE} So the first launch is the whole front page. Three steps from an idea to a family tree:</p>
         <ol className="empty-steps">
-          <li><div><b>Launch a root with SOL.</b><span>A plain pump.fun coin, one signature, no launch fee — only network rent. Its fee split is written on-chain at creation.</span></div></li>
-          <li><div><b>Launch the next coin under it.</b><span>The child is quoted in the parent, so every buy of the child buys the parent and locks it in the child's curve.</span></div></li>
-          <li><div><b>Keep half the fees, forever.</b><span>Creator 50% / Spore 50%, paid in the coin's quote on every trade. Set once with the admin revoked. Spore's half buys $SPORE and locks it.</span></div></li>
+          <li><div><b>Launch a root with SOL.</b><span>A plain pump.fun coin, one signature. {NO_LAUNCH_FEE} Its fee split is written on-chain at creation, and it gets its own AI agent.</span></div></li>
+          <li><div><b>Launch the next coin under it.</b><span>The child is priced in the parent, so every buy of the child buys the parent and locks it in the child's curve.</span></div></li>
+          <li><div><b>One fee rule, forever.</b><span>Root: {ROOT_SPLIT_YOU}. Child: {CHILD_SPLIT_YOU}. {SPORE_BUYBACK}</span></div></li>
         </ol>
         <div className="empty-hero-cta"><Link className="btn lg accent" to="/launch">Launch the first coin</Link><Link className="btn lg ghost" to="/how">How it works</Link></div>
       </div>
@@ -94,127 +162,87 @@ function EmptyLaunchpad() {
   );
 }
 
-/// Roots ranked by what their children have locked: the trees worth launching under. Each row
-/// links to the coin, to its cluster on the map, and straight into the launch form.
-function BiggestTrees({ maxDepth }: { maxDepth: number | undefined }) {
-  const nav = useNavigate();
-  const roots = useAsync(() => api.roots("locked", 6, 0), []);
-  if (roots.loading) return <SkeletonRows n={6} h={62} />;
-  if (roots.error && !roots.data) return <ErrorBox error={roots.error} retry={roots.reload} />;
-  const rows = roots.data?.roots ?? [];
-  if (!rows.length) return <Empty title="No trees yet" hint="A tree appears with the first coin launched under a root." action={<Link to="/launch" className="btn sm accent">Launch a root</Link>} />;
-  const top = Math.max(1, ...rows.map((r) => r.lockedUsd ?? 0));
-  return (
-    <div className="trees card">
-      {rows.map((c: Coin, i) => {
-        const d1 = Math.min(c.children, 12), d2 = Math.min(Math.max(0, c.descendants - c.children), 12 - d1);
-        return (
-          <div key={c.mint} className="tree-row" role="link" tabIndex={0} onClick={() => nav(`/c/${c.mint}`)} onKeyDown={(e) => { if (e.key === "Enter") nav(`/c/${c.mint}`); }}>
-            <span className="tree-rank">{i + 1}</span>
-            <Logo src={c.image} label={c.symbol} size={40} />
-            <div className="tree-body">
-              <div className="tree-name"><b>{nameOf(c)}</b><span>{sym(c)}</span></div>
-              <div className="tree-meta"><span className="tree-dots" aria-hidden="true">{Array.from({ length: d1 }, (_, k) => <i key={`a${k}`} />)}{Array.from({ length: d2 }, (_, k) => <i key={`b${k}`} className="d2" />)}{c.descendants > 12 && <small>+{count(c.descendants - 12)}</small>}</span><span>{count(c.descendants)} coin{c.descendants === 1 ? "" : "s"} below</span>·<span><b>{usd(c.lockedUsd)}</b> locked</span>·<span>{usd(c.mcapUsd)} mcap</span></div>
-              <div className="tree-bar" aria-hidden="true"><i style={{ "--w": `${Math.max(2, ((c.lockedUsd ?? 0) / top) * 100)}%` } as CSSProperties} /></div>
-            </div>
-            <div className="tree-actions" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-              <Link to={`/map?focus=${c.mint}`} className="btn sm ghost" title="See this tree on the map">Map</Link>
-              <LaunchButton coin={c} maxDepth={maxDepth} size="sm" label="Launch under" />
-            </div>
-          </div>
-        );
-      })}
+/// The six most traded launches as a snap strip of tilted cards; arrows page it on a pointer.
+function MostActive({ feed, maxDepth }: { feed: Async<{ coins: Coin[] }>; maxDepth: number | undefined }) {
+  const top = useMemo(() => [...(feed.data?.coins ?? [])]
+    .sort((a, b) => b.volume24hUsd - a.volume24hUsd || (b.lockedUsd ?? 0) - (a.lockedUsd ?? 0) || (b.mcapUsd ?? 0) - (a.mcapUsd ?? 0))
+    .slice(0, 6), [feed.data]);
+  const strip = useRef<HTMLDivElement>(null);
+  const [edge, setEdge] = useState({ start: true, end: false });
+  const sync = () => {
+    const el = strip.current;
+    if (!el) return;
+    setEdge({ start: el.scrollLeft < 8, end: el.scrollLeft + el.clientWidth >= el.scrollWidth - 8 });
+  };
+  useEffect(sync, [top.length]);
+  const page = (dir: 1 | -1) => {
+    const el = strip.current;
+    const card = el?.querySelector<HTMLElement>(".ma-card");
+    if (!el || !card) return;
+    el.scrollBy({ left: dir * (card.offsetWidth + 20), behavior: "smooth" });
+  };
+  const nav = top.length > 1 && (
+    <div className="ma-nav">
+      <button type="button" className="ma-arrow" onClick={() => page(-1)} disabled={edge.start} aria-label="Previous coins"><Arrow dir="left" /></button>
+      <button type="button" className="ma-arrow" onClick={() => page(1)} disabled={edge.end} aria-label="Next coins"><Arrow /></button>
+      <Link to="/explore?sort=new" className="more-link">All launches <Arrow /></Link>
     </div>
+  );
+  return (
+    <section className="home-active" aria-labelledby="ha-title">
+      <SectionHead n="04" id="ha-title" title="Most active on Spore · 24h" lede="Coins launched on Spore, ranked by trading in the last 24 hours." action={nav || <Link to="/explore?sort=new" className="more-link">All launches <Arrow /></Link>} />
+      {feed.loading ? <div className="ma-strip" aria-hidden="true">{Array.from({ length: 4 }, (_, i) => <div key={i} className="ma-card"><CoinCardSkeleton /></div>)}</div>
+        : feed.error && !feed.data ? <ErrorBox error="The launch list did not load." retry={feed.reload} />
+        : !top.length ? <Empty title="Nothing launched yet" hint="Coins launched on Spore appear here, the most traded first." action={<Link to="/launch" className="btn sm accent">Launch a coin</Link>} />
+        : (
+          <div ref={strip} className="ma-strip" onScroll={sync} tabIndex={0} role="region" aria-label="Most active coins, scroll sideways">
+            {top.map((c, i) => (
+              <Tilt key={c.mint} className="ma-card" max={3} style={{ "--i": i } as CSSProperties}>
+                <CoinCard coin={c} rank={c.volume24hUsd > 0 ? i + 1 : undefined} action={<LaunchButton coin={c} maxDepth={maxDepth} variant="soft" label={`Launch under ${sym(c)}`} className="block" />} />
+              </Tilt>
+            ))}
+          </div>
+        )}
+    </section>
+  );
+}
+
+/// Roots ranked by what their children have locked: the trees worth launching under.
+function BiggestTrees({ maxDepth }: { maxDepth: number | undefined }) {
+  const roots = useAsync(() => api.roots("locked", 6, 0), []);
+  const rows = roots.data?.roots ?? [];
+  const top = Math.max(0, ...rows.map((r) => r.lockedUsd ?? 0));
+  return (
+    <section className="home-trees" aria-labelledby="ht-title">
+      <SectionHead n="05" id="ht-title" title="Biggest trees" lede={<>Roots ranked by the parent coins their children have <Term k="locked">locked</Term>.</>} action={<Link to="/map" className="more-link">Open the map <Arrow /></Link>} />
+      {roots.loading ? <div className="ht-list" aria-hidden="true">{Array.from({ length: 6 }, (_, i) => <TreeRowSkeleton key={i} />)}</div>
+        : roots.error && !roots.data ? <ErrorBox error="The trees did not load." retry={roots.reload} />
+        : !rows.length ? <Empty title="No trees yet" hint="A tree appears with the first coin launched under a root." action={<Link to="/launch" className="btn sm accent">Launch a root</Link>} />
+        : <div className="ht-list">{rows.map((c, i) => <Reveal key={c.mint} i={i} className="ht-row"><TreeRow coin={c} rank={i + 1} maxDepth={maxDepth} metric="locked" top={top} /></Reveal>)}</div>}
+    </section>
   );
 }
 
 export default function Home() {
   const { stats, error } = useStats();
-  // "Launched on Spore": our coins, the strongest six by locked value, then 24 h volume, then mcap.
+  // One feed request feeds the pulse (backfill + the mints whose trades it reports) and the cards.
   const feed = useAsync(() => api.feed(60), []);
-  const top = [...(feed.data?.coins ?? [])].sort((a: Coin, b: Coin) => (b.lockedUsd ?? 0) - (a.lockedUsd ?? 0) || b.volume24hUsd - a.volume24hUsd || (b.mcapUsd ?? 0) - (a.mcapUsd ?? 0)).slice(0, 6);
-  const depthLabel = stats ? stats.byDepth.map((n, d) => `${count(n)} at d${d}`).filter((_, d) => d > 0).join(" · ") : undefined;
-  // "ours" mode (DESIGN §11.1): the listing is Spore's launches, so the strip counts those; an older
-  // server without `mode` keeps the whole-tree wording.
   const ours = stats?.mode === "ours";
-  const launches = ours ? stats?.ourCoins ?? stats?.coins : stats?.coins;
+  const launches = stats ? (ours ? stats.ourCoins ?? stats.coins : stats.coins) : null;
   const noSpawns = !!stats && (launches ?? 0) === 0;
-  const loading = !stats && !error;
+  const maxDepth = stats?.maxDepth;
   return (
-    <>
-      <SporeCanvas />
+    <div className="home-page">
+      <Arrival />
+      <SporeColony className="home-colony" />
+      <div className="home-pulse"><Pulse coins={feed.data?.coins ?? (feed.error ? [] : null)} /></div>
       <div className="container home">
-        <section className="hero">
-          <span className="eyebrow">a pump.fun family-tree launchpad</span>
-          <h1>Coins that <em>grow</em> coins.</h1>
-          <p className="hero-tagline">Launch a coin with SOL. Launch the next one under it. Every buy of a child buys and locks its parent; half the fees stay yours.</p>
-          <p className="lead">The first coin of a tree is a plain pump.fun coin. A child coin is quoted in its parent instead of SOL, so its curve parks parent tokens forever. Creator fees are split 50/50 between you and Spore, paid in the coin's quote. <b>Nothing custodial</b> — every transaction is built in your browser and signed by your wallet.</p>
-          <div className="hero-actions">
-            <Link className="btn lg accent" to="/launch">Launch a coin</Link>
-            <Link className="btn lg ghost" to="/explore">Explore launches</Link>
-          </div>
-          <div className="hero-search"><Search size="lg" placeholder="Find any pump.fun coin by name, ticker or mint…" /></div>
-          <p className="hint">Any pump.fun coin can be a parent. Listings show only coins launched on Spore.</p>
-        </section>
-
-        {noSpawns ? (
-          <>
-            <EmptyLaunchpad />
-            <StatStrip>
-              <Stat icon="tree" label={ours ? "Spore launches" : "coins in the tree"} value="0" sub="be the first" />
-              <Stat icon="depth" label="depth cap" value={`${stats!.maxDepth}`} sub="pump.fun Global.maxCurveDepth" />
-              <Stat icon="price" label="SOL" value={usd(stats!.solUsd)} sub="no launch fee" />
-              <Stat icon="lock" label="your share of fees" value="50%" hero sub="Spore's half buys & locks $SPORE" />
-            </StatStrip>
-          </>
-        ) : (
-          <>
-            <StatStrip>
-              <Stat icon="tree" label={ours ? "Spore launches" : "coins in the tree"} value={<AnimatedNumber value={launches} format={count} />} loading={loading} sub={ours && stats?.otherChildren ? `${depthLabel && launches ? depthLabel + " · " : ""}${count(stats.otherChildren)} other children on pump.fun` : depthLabel} />
-              <Stat icon="depth" label="trees" value={<AnimatedNumber value={stats?.roots} format={count} />} loading={loading} sub={stats ? `roots with children · depth cap ${stats.maxDepth}` : undefined} />
-              <Stat icon="lock" label="locked in curves" value={<AnimatedNumber value={stats?.lockedUsd} format={usd} />} loading={loading} hero sub="parent tokens parked by children" />
-              <Stat icon="volume" label="24h volume" value={<AnimatedNumber value={stats?.volume24hUsd} format={usd} />} loading={loading} sub={stats?.solUsd ? `SOL ${usd(stats.solUsd)}` : undefined} />
-            </StatStrip>
-            {error && !stats && <ErrorBox error={error} />}
-            {stats && !stats.backfill.done && <div className="notice info">Indexing the tree: {count(stats.backfill.resolved)} of {count(stats.backfill.total)} curves resolved. Lists fill in as it goes.</div>}
-
-            <section className="home-top">
-              <div className="section-head"><h2>Live launches</h2><LiveDot /></div>
-              <LaunchTicker limit={14} />
-            </section>
-
-            <section>
-              <div className="section-head"><h2>Launched on Spore</h2><Link to="/explore" className="more">All launches →</Link></div>
-              {feed.loading ? <div className="home-cards">{[0, 1, 2, 3, 4, 5].map((i) => <SkeletonCard key={i} />)}</div>
-                : feed.error && !feed.data ? <ErrorBox error={feed.error} retry={feed.reload} />
-                : !top.length ? <Empty title="Nothing launched yet — launch the first coin" hint="Coins launched on Spore appear here, strongest first." action={<Link to="/launch" className="btn sm accent">Launch a coin</Link>} />
-                : <div className="home-cards">{top.map((c, i) => <CoinCard key={c.mint} coin={c} rank={i + 1} action={<LaunchButton coin={c} maxDepth={stats?.maxDepth} className="block" />} />)}</div>}
-            </section>
-
-            <div className="home-split">
-              <section>
-                <div className="section-head"><h2>Biggest trees</h2><Link to="/map" className="more">Open the map →</Link></div>
-                <BiggestTrees maxDepth={stats?.maxDepth} />
-              </section>
-              <section>
-                <div className="section-head"><h2>Latest launches</h2><Link to="/explore?sort=new" className="more">All →</Link></div>
-                <SpawnFeed limit={8} />
-              </section>
-            </div>
-          </>
-        )}
-
-        {!noSpawns && (
-          <section>
-            <div className="section-head"><h2>Three steps</h2><Link to="/how" className="more">How it works →</Link></div>
-            <div className="how-strip threaded">
-              <div className="how-step"><i>1</i><h3>Launch a root</h3><p>The first coin of a tree is quoted in SOL, like any pump.fun coin. One signature: <span className="mono">create_v2</span> plus a fee-sharing config that is set once and never changes.</p></div>
-              <div className="how-step"><i>2</i><h3>Launch under it</h3><p>Press “Launch a coin” on any coin below the depth cap: the child is quoted in the parent, so its curve buys and locks parent tokens on every trade.</p></div>
-              <div className="how-step"><i>3</i><h3>Fees split 50/50</h3><p>Creator 50%, Spore 50% — paid in the parent coin on every trade of the child. Set at launch with the admin revoked, so it can never change. Spore's half buys <Link to={`/c/${SPORE_COIN}`}>$SPORE</Link> and locks it.</p></div>
-            </div>
-          </section>
-        )}
+        <HowWorks maxDepth={maxDepth ?? 2} />
+        {noSpawns ? <EmptyLaunchpad /> : <NumbersSection stats={stats} error={error} />}
+        <AgentsBand n={noSpawns ? "02" : "03"} />
+        {!noSpawns && <MostActive feed={feed} maxDepth={maxDepth} />}
+        {!noSpawns && <BiggestTrees maxDepth={maxDepth} />}
       </div>
-    </>
+    </div>
   );
 }

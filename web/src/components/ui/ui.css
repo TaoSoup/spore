@@ -1,0 +1,28 @@
+/* Primitives of the elevation (components/ui). Tokens from styles.css; [data-reveal] lives there too. */
+
+/* ---------- SectionHead: hairline, serif numeral, title, lede, action */
+.shead { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; gap: 6px var(--s5); padding-top: var(--s5); border-top: 1px solid var(--rule); }
+.shead::before { content: ""; position: absolute; left: 0; top: -1px; width: 72px; height: 1px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .7; }
+.shead .numeral { align-self: start; margin-top: -4px; }
+.shead-text { display: grid; gap: 10px; min-width: 0; }
+.shead-title { font-size: var(--fs-2xl); font-weight: 600; letter-spacing: var(--tracking-tight); line-height: 1.04; }
+.shead-lede { max-width: 48ch; color: var(--ink-2); font-size: var(--fs-md); line-height: 1.5; }
+.shead-action { align-self: end; justify-self: end; padding-bottom: 4px; }
+.shead:not(:has(.numeral)) { grid-template-columns: minmax(0, 1fr) auto; }
+@media (max-width: 640px) {
+  .shead { grid-template-columns: minmax(0, 1fr); gap: 10px; padding-top: var(--s4); }
+  .shead .numeral { font-size: 32px; margin: 0; }
+  .shead-action { justify-self: start; padding: 0; }
+}
+
+/* ---------- Tilt: the element leans; children can use --mx/--my for a moving highlight */
+.tilt { transform-style: preserve-3d; --mx: 50%; --my: 50%; }
+.tilt.is-tilting { will-change: transform; }
+
+/* ---------- SlidingPill: the selection background of a segmented control or nav */
+.seg-pill { position: absolute; left: 0; top: 0; z-index: 0; border-radius: 999px; pointer-events: none; opacity: 0;
+  background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--line-2), 0 0 24px -10px rgba(var(--accent-rgb), .6); }
+.seg-pill[data-on="1"] { opacity: 1; }
+.seg-pill[data-hover="1"] { background: var(--glass-2); box-shadow: inset 0 0 0 1px var(--line-soft); }
+.seg-pill[data-ready="1"] { transition: transform var(--dur-3) var(--ease-expo), width var(--dur-3) var(--ease-expo), height var(--dur-3) var(--ease-expo), opacity var(--dur-2) var(--ease-out), background var(--dur-2), box-shadow var(--dur-2); }
+@media (prefers-reduced-motion: reduce) { .seg-pill[data-ready="1"] { transition: none; } }

@@ -2,13 +2,17 @@
 // ticker and name, resolves a pasted mint or pump.fun coin URL, and below the local hits asks the API
 // for coins that are not on the map yet (with "Open coin" / "Launch under it"). Focused and empty, it
 // lists the last picks. ↑/↓/Enter/Esc drive the list; the `.map-search input` selector is what the
-// global "/" shortcut focuses.
+// global "/" shortcut focuses. A listed asset's undrawn coins are on the map too (DESIGN-FAMILY-ALL §6): the loaded ones
+// come from the family store with the local hits, and a remote hit (or a pasted mint) quoted in an asset drawn as a
+// family top is listed under "On the map"; picking it asks the store for that family ("search") and selects the coin.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type Coin } from "../../../lib/api";
 import { useDebounced } from "../../../lib/hooks";
 import { count, usd } from "../../../lib/format";
 import type { BubbleNode } from "../../../lib/map/types";
+import type { FamilyStore } from "../../../lib/map/family-types";
+import { assetTopIn, coinNode, useFamilyVersion } from "../../../lib/map/family";
 import { Logo, nameOf, sym } from "../../Bits";
 
 const MAX_LOCAL = 8, MAX_REMOTE = 5, MAX_RECENT = 8;
@@ -42,11 +46,15 @@ type Props = {
   nodes: BubbleNode[]; byMint: Map<string, BubbleNode>;
   /// Selecting a coin on the map (the page widens the roots when it is outside the drawn ones).
   onPick: (n: BubbleNode) => void;
+  /// The family loader (lib/map/family.ts): loaded specks join the local hits. Absent = drawn coins only.
+  families?: FamilyStore | null;
 };
 
-type Option = { kind: "local"; node: BubbleNode } | { kind: "recent"; node: BubbleNode };
+type Option = { kind: "local"; node: BubbleNode } | { kind: "recent"; node: BubbleNode } | { kind: "family"; node: BubbleNode };
+type Hit = [BubbleNode, number];
+const hitCmp = (a: Hit, b: Hit) => b[1] - a[1] || (b[0].lockedUsd ?? 0) - (a[0].lockedUsd ?? 0) || (b[0].mcapUsd ?? 0) - (a[0].mcapUsd ?? 0);
 
-export default function MapSearch({ nodes, byMint, onPick }: Props) {
+export default function MapSearch({ nodes, byMint, onPick, families = null }: Props) {
   const [q, setQ] = useState("");
   const [focused, setFocused] = useState(false);
   const [active, setActive] = useState(0);
@@ -61,25 +69,49 @@ export default function MapSearch({ nodes, byMint, onPick }: Props) {
   // events never re-fires a lookup or a remote search for the same query.
   const byMintRef = useRef(byMint); byMintRef.current = byMint;
   const onPickRef = useRef(onPick); onPickRef.current = onPick;
-  const mintQ = useMemo(() => extractMint(dq), [dq]);
-  // A pasted mint or pump.fun link of a coin on the map selects it straight away.
+  const familiesRef = useRef(families); familiesRef.current = families;
+  // A pick whose family is not loaded: the store wants it ("search") until the coin is in, the family is done or failed,
+  // or the next pick; the page's own "select" want holds it from then on.
+  const [sought, setSought] = useState<{ mint: string; top: string } | null>(null);
   useEffect(() => {
-    if (!mintQ) return;
-    const n = byMintRef.current.get(mintQ);
+    if (!families || !sought) return;
+    families.want([sought.top], "search");
+    const check = () => { const st = families.info(sought.top)?.state; if (families.familyOf(sought.mint) || st === "done" || st === "error") setSought(null); };
+    const off = families.subscribe(check);
+    check();
+    return () => { off(); families.want([], "search"); };
+  }, [families, sought]);
+  const mintQ = useMemo(() => extractMint(dq), [dq]);
+  // A pasted mint or pump.fun link of a coin on the map selects it straight away: read from the raw input (not the
+  // debounced query), so the flight starts on the paste itself. The same mint pasted again picks again (the page re-flies).
+  const mintNow = useMemo(() => extractMint(q), [q]);
+  useEffect(() => {
+    if (!mintNow) return;
+    const n = byMintRef.current.get(mintNow) ?? familiesRef.current?.node(mintNow) ?? null;
     if (n) { pushRecent(n); onPickRef.current(n); setQ(""); input.current?.blur(); }
-  }, [mintQ]);
+  }, [mintNow]);
 
+  // the loaded specks' hits follow pages that land while the box is open with a query (throttled, 300 ms)
+  const famV = useFamilyVersion(families, focused && !!q.trim());
   const local = useMemo<BubbleNode[]>(() => {
     const needle = dq.trim().toLowerCase().replace(/^\$/, "");
     if (!needle || mintQ) return [];
     // The lowercase index is rebuilt only when the node list changed since the last search.
     if (!index.current || index.current.src !== nodes) index.current = { src: nodes, sym: nodes.map((n) => (n.symbol ?? "").toLowerCase()), name: nodes.map((n) => (n.name ?? "").toLowerCase()) };
     const ix = index.current;
-    const hits: [BubbleNode, number][] = [];
+    const hits: Hit[] = [];
     for (let i = 0; i < ix.src.length; i++) { const sc = score(ix.sym[i], ix.name[i], needle); if (sc > 0) hits.push([ix.src[i], sc]); }
-    hits.sort((a, b) => b[1] - a[1] || (b[0].lockedUsd ?? 0) - (a[0].lockedUsd ?? 0) || (b[0].mcapUsd ?? 0) - (a[0].mcapUsd ?? 0));
-    return hits.slice(0, MAX_LOCAL).map(([n]) => n);
-  }, [dq, nodes, mintQ]);
+    hits.sort(hitCmp);
+    const top = hits.slice(0, MAX_LOCAL);
+    // the loaded specks (ticker only), ranked by the same rules; the best 8 of both lists are the best 8 overall
+    if (families) {
+      const seen = new Set(top.map(([n]) => n.mint));
+      for (const n of families.search(needle, MAX_LOCAL)) if (!seen.has(n.mint) && !byMintRef.current.has(n.mint)) top.push([n, score((n.symbol ?? "").toLowerCase(), "", needle)]);
+      top.sort(hitCmp);
+    }
+    return top.slice(0, MAX_LOCAL).map(([n]) => n);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dq, nodes, mintQ, families, famV]);
 
   // Remote: what pump.fun has that the map does not (yet). A pasted mint not on the map asks for that mint.
   const [remote, setRemote] = useState<{ q: string; coins: Coin[]; done: boolean } | null>(null);
@@ -92,14 +124,40 @@ export default function MapSearch({ nodes, byMint, onPick }: Props) {
     api.search(term, ac.signal).then((res) => { if (!ac.signal.aborted) setRemote({ q: term, coins: res.coins ?? [], done: true }); }).catch(() => { if (!ac.signal.aborted) setRemote({ q: term, coins: [], done: true }); });
     return () => ac.abort();
   }, [rq]);
-  const offMap = useMemo(() => (remote?.coins ?? []).filter((c) => !byMint.has(c.mint)).slice(0, MAX_REMOTE), [remote, byMint]);
+  // a remote coin quoted in an asset drawn as a family top is on the map (a speck of that family), the rest is not yet
+  const familyHits = useMemo(() => {
+    if (!families) return [];
+    const have = new Set(local.map((n) => n.mint));
+    const out: BubbleNode[] = [];
+    for (const c of remote?.coins ?? []) {
+      if (out.length >= MAX_REMOTE || byMint.has(c.mint) || have.has(c.mint)) continue;
+      const top = assetTopIn(byMint, c.quoteMint);
+      if (top) out.push(families.node(c.mint) ?? coinNode(c, top.mint));
+    }
+    return out;
+  }, [remote, byMint, local, families]);
+  const offMap = useMemo(() => (remote?.coins ?? []).filter((c) => !byMint.has(c.mint) && !(families && assetTopIn(byMint, c.quoteMint))).slice(0, MAX_REMOTE), [remote, byMint, families]);
 
   const showRecent = focused && !q.trim();
-  const recentNodes = useMemo(() => (showRecent ? recent.map((r) => byMint.get(r.mint)).filter((n): n is BubbleNode => !!n) : []), [showRecent, recent, byMint]);
-  const options: Option[] = useMemo(() => (showRecent ? recentNodes.map((node) => ({ kind: "recent" as const, node })) : local.map((node) => ({ kind: "local" as const, node }))), [showRecent, recentNodes, local]);
+  const recentNodes = useMemo(() => (showRecent ? recent.map((r) => byMint.get(r.mint) ?? families?.node(r.mint) ?? null).filter((n): n is BubbleNode => !!n) : []), [showRecent, recent, byMint, families]);
+  const options: Option[] = useMemo(() => (showRecent ? recentNodes.map((node) => ({ kind: "recent" as const, node }))
+    : [...local.map((node) => ({ kind: "local" as const, node })), ...familyHits.map((node) => ({ kind: "family" as const, node }))]), [showRecent, recentNodes, local, familyHits]);
   useEffect(() => setActive(0), [options]);
 
-  const pick = (n: BubbleNode) => { pushRecent(n); onPick(n); setQ(""); setFocused(false); input.current?.blur(); };
+  const pick = (n: BubbleNode) => {
+    // a coin the drawn set does not hold: its family is asked for until it is in
+    const top = !byMint.has(n.mint) && n.parentMint ? n.parentMint : null;
+    if (top && families && !families.familyOf(n.mint)) setSought({ mint: n.mint, top });
+    pushRecent(n); onPick(n); setQ(""); setFocused(false); input.current?.blur();
+  };
+  const pickRef = useRef(pick); pickRef.current = pick;
+  // A pasted mint of a coin quoted in an on-map asset resolves like the hit: selected as soon as the lookup names its quote.
+  useEffect(() => {
+    if (!mintQ || byMintRef.current.has(mintQ) || !familiesRef.current) return;
+    const c = remote && remote.q === mintQ ? remote.coins.find((x) => x.mint === mintQ) : undefined;
+    const top = c ? assetTopIn(byMintRef.current, c.quoteMint) : null;
+    if (c && top) pickRef.current(familiesRef.current.node(c.mint) ?? coinNode(c, top.mint));
+  }, [remote, mintQ]);
   // Close on a click outside the box.
   useEffect(() => {
     if (!focused) return;
@@ -109,7 +167,7 @@ export default function MapSearch({ nodes, byMint, onPick }: Props) {
   }, [focused]);
 
   const term = q.trim();
-  const notOnMap = mintQ && !byMint.has(mintQ) ? mintQ : null;
+  const notOnMap = mintQ && !byMint.has(mintQ) && !familyHits.some((n) => n.mint === mintQ) ? mintQ : null;
   const notOnMapCoin = notOnMap ? (remote?.coins ?? []).find((c) => c.mint === notOnMap) ?? null : null;
   const open = focused && (showRecent ? recentNodes.length > 0 : !!term);
 
@@ -143,6 +201,7 @@ export default function MapSearch({ nodes, byMint, onPick }: Props) {
           else if (e.key === "Enter") { const o = options[active]; if (o) { e.preventDefault(); pick(o.node); } }
           else if (e.key === "Escape") { e.stopPropagation(); if (q) setQ(""); else { setFocused(false); input.current?.blur(); } }
         }} />
+      {!q && !focused && <kbd className="map-search-kbd" aria-hidden="true">/</kbd>}
       {open && (
         <div className="map-results" id="map-results" role="listbox" aria-label="Search results" onMouseDown={(e) => e.preventDefault()}>
           {showRecent && <><div className="map-results-head">Recent</div>{recentNodes.map((n, i) => row(n, i))}</>}
@@ -151,13 +210,13 @@ export default function MapSearch({ nodes, byMint, onPick }: Props) {
               {notOnMap ? (
                 <div className="map-offmap">
                   <div className="map-offmap-title">{notOnMapCoin ? <><Logo src={notOnMapCoin.image} label={notOnMapCoin.symbol} size={20} /><b>{nameOf(notOnMapCoin)}</b><span className="mono">{sym(notOnMapCoin)}</span></> : <span className="mono">{notOnMap.slice(0, 4)}…{notOnMap.slice(-4)}</span>}</div>
-                  <p>Not on the map yet{remote && !remote.done ? " · looking it up…" : ""}</p>
+                  <p>{remote && !remote.done ? "Looking it up…" : "Not on the map yet"}</p>
                   <div className="map-offmap-acts"><Link to={`/c/${notOnMap}`} className="btn ghost sm">Open coin</Link><Link to={`/launch?parent=${notOnMap}`} className="btn ghost sm">Launch under it</Link></div>
                 </div>
               ) : (
                 <>
                   <div className="map-results-head">On the map</div>
-                  {local.length === 0 ? <div className="none">{dq.trim() === term ? "No coin on the map matches." : "Searching…"}</div> : local.map((n, i) => row(n, i))}
+                  {local.length === 0 && familyHits.length === 0 ? <div className="none">{dq.trim() === term ? "No coin on the map matches." : "Searching…"}</div> : <>{local.map((n, i) => row(n, i))}{familyHits.map((n, i) => row(n, local.length + i))}</>}
                   {offMap.length > 0 && (
                     <>
                       <div className="map-results-head">On pump.fun · not on the map yet</div>

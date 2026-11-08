@@ -1,0 +1,394 @@
+{
+  "url": "http://127.0.0.1:5672",
+  "prod": true,
+  "ref": "/private/tmp/claude-501/-Users-metahuman/8b9f0123-db17-4735-be5c-50987e9a621c/scratchpad/mapThree/shots-final2",
+  "out": "/Users/metahuman/spore/web/test/shots-map3-flat",
+  "gpu": "metal",
+  "startedAt": "2026-10-21T21:42:48.966Z",
+  "look": {
+    "cli": "flat",
+    "page": "flat"
+  },
+  "shots": [
+    "/Users/metahuman/spore/web/test/shots-map3-flat/a-overview.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/b-pump-4x.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/e-kimchi.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/d-phone.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/h-phone-tooltip.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/f-hover.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/g-hover-child-4x.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/mid-drag-overview.png",
+    "/Users/metahuman/spore/web/test/shots-map3-flat/mid-drag-4x.png"
+  ],
+  "metrics": {
+    "a-overview": {
+      "labels": {
+        "planetsLabelled": 24,
+        "kids": 0,
+        "gens": 0,
+        "caption": 1,
+        "annotations": 1,
+        "toasts": 0,
+        "leaders": 16,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 9,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655615
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 2.6,
+      "lime": 0.00026,
+      "titles": 24,
+      "k": 1
+    },
+    "b-pump-4x": {
+      "labels": {
+        "planetsLabelled": 32,
+        "kids": 11,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 8,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 49,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 656335
+      },
+      "hdr": {
+        "hdrPx": 70,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 5.2,
+      "lime": null,
+      "titles": 32,
+      "k": 4
+    },
+    "e-kimchi": {
+      "focusFamily": {
+        "x": -175.1173489228231,
+        "y": -91.86016851819737,
+        "k": 3.735135211232552,
+        "ms": 634
+      },
+      "labels": {
+        "planetsLabelled": 9,
+        "kids": 10,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 6,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 13,
+        "draws": 4,
+        "frameDraws": 18,
+        "tris": 655567
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 6,
+      "lime": null,
+      "titles": 9,
+      "k": 6.795354485852978
+    },
+    "d-phone": {
+      "labels": {
+        "planetsLabelled": 8,
+        "kids": 0,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 6,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 4,
+        "draws": 4,
+        "frameDraws": 18,
+        "tris": 655747
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 2,
+      "lime": null,
+      "titles": 8,
+      "k": 1
+    },
+    "h-phone-tooltip": {
+      "hover": {
+        "i": 10077,
+        "sym": "Kimchi",
+        "sx": 175.25723475526067,
+        "sy": 414.05090945503736
+      },
+      "tip": {
+        "on": true,
+        "dock": true,
+        "text": "K$Kimchino trades 24hMarket cap$40.1M24h trades0Family 24h0 tradesFamily last tradeno trades 24hLineagerootFamily1,120 coins · 45%MintCSoc…pumpOpen family×"
+      },
+      "clear": {
+        "coinBottom": 492,
+        "cardTop": 564,
+        "controls": "hidden"
+      }
+    },
+    "f-hover": {
+      "point": {
+        "x": 909.7353946485396,
+        "y": 448.39844920150944,
+        "r": 9.13783073425293
+      },
+      "hovered": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "P$PUMPfamily · just nowMarket cap$4.0B24h trades0Family 24h23,764 tradesFamily last tradejust nowLineagerootFamily1,481 coins · 3.7%Mintpump…9Dfnclick to open the family"
+      }
+    },
+    "g-hover-child-4x": {
+      "child": {
+        "mint": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+        "x": 741.7887188454238,
+        "y": 454.4238220864137,
+        "r": 10.474959064166134
+      },
+      "hovered": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "C$COCKROACH17h 10m agoMarket cap$556k24h trades224h volume$52Lineagegen 1 · child of $PUMPFamily1,481 coins · 3.7%MintH4KU…nyJcclick to select"
+      }
+    },
+    "mid-drag-overview": {
+      "from": {
+        "x": 909.7353946485396,
+        "y": 448.39844920150944,
+        "r": 9.13783073425293
+      },
+      "by": [
+        240,
+        -110
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": true
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    },
+    "mid-drag-4x": {
+      "from": {
+        "x": 720,
+        "y": 481.5,
+        "r": 15.390482738206073
+      },
+      "by": [
+        260,
+        90
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": false
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    }
+  },
+  "logoWaitMs": {
+    "a-overview": 1504,
+    "b-pump-4x": 1502,
+    "e-kimchi": 1501,
+    "d-phone": 1501
+  },
+  "logoCover": {
+    "a-overview": {
+      "drawn": 61,
+      "cells": 2228
+    },
+    "b-pump-4x": {
+      "drawn": 850,
+      "cells": 2228
+    },
+    "e-kimchi": {
+      "drawn": 878,
+      "cells": 2228
+    },
+    "d-phone": {
+      "drawn": 702,
+      "cells": 2228
+    }
+  },
+  "images": {
+    "ready": 1058,
+    "failed": 0,
+    "inflight": 96,
+    "queued": 874,
+    "pixels": 4333568,
+    "budget": 48000000,
+    "e429": 0,
+    "thumbs": 768,
+    "maxInflight": 96
+  },
+  "composites": {
+    "a-overview": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-a-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "b-pump-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-b-pump-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "e-kimchi": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-e-kimchi.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "d-phone": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-d-phone.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "h-phone-tooltip": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-h-phone-tooltip.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "f-hover": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-f-hover.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "g-hover-child-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-g-hover-child-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-overview": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-mid-drag-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-flat/compare-mid-drag-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    }
+  },
+  "consoleErrors": [],
+  "networkErrors": [],
+  "failures": [],
+  "ok": true
+}

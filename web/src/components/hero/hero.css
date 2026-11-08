@@ -1,0 +1,66 @@
+/* The colony (DESIGN-ELEVATE §7): the stage, the drawn fallback, the hover label and the caption.
+   Placement on the page (bleeding off the right edge and under the nav) lives in home/home.css. */
+
+.colony { position: relative; margin: 0; display: block; min-width: 0; }
+.colony-stage { position: absolute; inset: 0; overflow: hidden; }
+/* the canvas and the drawing share the box; the canvas fades in over the drawing once it has a frame */
+.colony-canvas, .colony-fallback { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.colony-canvas { opacity: 0; transition: opacity var(--dur-5) var(--ease-out); }
+.colony.is-gl .colony-canvas { opacity: 1; }
+.colony-fallback { transition: opacity var(--dur-4) var(--ease-out); }
+/* under the 3D the drawing is invisible until SporeColony unmounts it; its motes rest meanwhile */
+.colony.is-gl .colony-fallback { opacity: 0; }
+.colony.is-gl .colony-fallback * { animation-play-state: paused; }
+.colony-fallback.is-loading { opacity: .55; }
+.colony-fallback .cf-label { font-family: var(--mono); font-size: 11px; font-weight: 500; fill: var(--muted); letter-spacing: .02em; }
+.colony-fallback .cf-label.root { font-size: 16px; font-weight: 600; fill: var(--accent); }
+/* the soft edges: the void dissolves into the page on the left and at the bottom */
+.colony-stage { -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26%), linear-gradient(180deg, #000 72%, transparent);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26%), linear-gradient(180deg, #000 72%, transparent); -webkit-mask-composite: source-in; mask-composite: intersect; }
+
+/* hover label: projected by the scene (transform written per frame), shown while a node is under the pointer */
+.colony-tip { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; display: inline-flex; align-items: center; gap: 8px; height: 26px; margin: 0; padding: 0 10px; translate: -50% -100%;
+  border-radius: 999px; background: rgba(5,11,7,.78); border: 1px solid rgba(var(--teal-rgb), .45); box-shadow: var(--edge), 0 0 30px -8px rgba(var(--teal-rgb), .6);
+  font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink); white-space: nowrap; opacity: 0; transition: opacity var(--dur-2) var(--ease-out); }
+.colony-tip.on { opacity: 1; }
+.colony-tip.root { border-color: rgba(var(--accent-rgb), .5); }
+.colony-tip b { font-weight: 600; color: var(--teal-2); }
+.colony-tip.root b { color: var(--accent); }
+.colony-tip i { font-style: normal; color: var(--muted); font-size: var(--fs-2xs); letter-spacing: .06em; text-transform: uppercase; }
+
+/* persistent tickers under the largest children in front (3D only; transform written per frame by the scene) */
+.colony-tag { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; translate: -50% 0; margin: 0; padding: 1px 6px; border-radius: 6px;
+  font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 500; line-height: 16px; letter-spacing: .02em; color: var(--teal-2); white-space: nowrap;
+  background: rgba(3,7,4,.55); box-shadow: inset 0 0 0 1px rgba(var(--teal-rgb), .14); opacity: 0; transition: opacity var(--dur-3) var(--ease-out); }
+.colony-tag.on { opacity: .92; }
+.colony.is-hover .colony-tag.on { opacity: .5; }
+
+/* the caption: which tree, how many children, what they lock; a link to the map */
+.colony-cap { position: absolute; z-index: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 16px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.colony-eyebrow { grid-row: 1; grid-column: 1 / -1; font-size: var(--fs-2xs); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); display: inline-flex; align-items: center; gap: 10px; }
+.colony-eyebrow::before { content: ""; width: 22px; height: 1px; background: linear-gradient(90deg, var(--teal), transparent); }
+.colony-cap-text { grid-row: 2; display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.colony-cap-text > span:not(.live):not(.sk):not(.sr-only) { position: relative; }
+.colony-cap-text > span:not(.live):not(.sk):not(.sr-only)::before { content: ""; position: absolute; left: -7px; top: 50%; width: 2px; height: 2px; border-radius: 50%; background: var(--faint); }
+.colony-cap-root { color: var(--accent); font-weight: 600; }
+.colony-cap-text b { font-weight: 500; }
+.colony-cap-text b.accent { color: var(--accent); }
+.colony-cap-text b.faint { color: var(--faint); }
+.colony-cap-map { grid-row: 2; color: var(--ink-2); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
+.colony-cap-map span { transition: transform var(--dur-2) var(--ease-out); }
+.colony-cap-map:hover { color: var(--accent); text-decoration: none; }
+.colony-cap-map:hover span { transform: translateX(3px); }
+.colony-note { color: var(--warn); }
+.colony-cap-sk { display: inline-block; width: min(240px, 60vw); height: 12px; vertical-align: middle; }
+/* 44 px targets on touch without 44 px rows: the negative margins give the extra height back to the layout */
+@media (pointer: coarse) { .colony-cap-map, .colony-cap-root { min-height: var(--tap); margin-block: -13px; display: inline-flex; align-items: center; } }
+
+/* keyboard path to the children: visually hidden until a link inside has focus */
+.colony-keys { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.colony-keys:focus-within { z-index: 5; width: auto; height: auto; max-height: 260px; overflow-y: auto; clip-path: none; right: max(var(--gutter), calc((100vw - var(--content)) / 2)); bottom: 168px; min-width: 240px;
+  display: grid; gap: 2px; padding: 8px; border-radius: var(--radius-lg); background: var(--surface-raised); border: 1px solid var(--line-soft); box-shadow: var(--edge), var(--shadow-pop); }
+.colony-keys a { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border-radius: var(--radius-sm); font-size: var(--fs-sm); color: var(--ink-2); }
+.colony-keys a b { font-family: var(--mono); font-weight: 600; color: var(--teal-2); }
+.colony-keys a span { overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.colony-keys a:focus-visible { outline-offset: -2px; background: var(--glass-2); text-decoration: none; }
+@media (max-width: 1023px) { .colony-keys:focus-within { left: var(--gutter); right: var(--gutter); bottom: 96px; } }

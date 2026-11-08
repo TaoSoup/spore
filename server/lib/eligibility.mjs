@@ -76,7 +76,7 @@ async function compute({ mint, model, indexer, rpc, platformWallet }) {
     const [b, q] = await rpc.getMultipleAccounts([p.baseVault, p.quoteVault]);
     const bt = b ? decodeTokenAccount(b.data) : null, qt = q ? decodeTokenAccount(q.data) : null;
     if (!bt || !qt) return null;
-    model.upsertCoin({ mint: c.mint, pool, poolBaseVault: p.baseVault, poolQuoteVault: p.quoteVault, poolBase: bt.amount, poolQuote: qt.amount });
+    model.upsertCoin({ mint: c.mint, pool, poolBaseVault: p.baseVault, poolQuoteVault: p.quoteVault, poolBase: bt.amount, poolQuote: qt.amount, poolVirtualQuote: p.virtualQuoteReserves == null ? null : String(p.virtualQuoteReserves) });
     return { baseReserves: new BN(bt.amount), quoteReserves: new BN(qt.amount), virtualQuoteReserves: new BN(p.virtualQuoteReserves) };
   }));
   if (pools.some((p) => p === null)) return { ...common, reason: "a migrated coin on the chain has no PumpSwap pool yet" };

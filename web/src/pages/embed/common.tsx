@@ -3,13 +3,15 @@
 // background), so a partner can drop one iframe into a coin page. Query params: ?theme=dark|light
 // (default dark), ?hideHeader=1. Every link leaves the iframe for the site in a new tab; nothing here
 // navigates the frame or its parent, and nothing signs or sends anything.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../lib/api";
-import { count, usd } from "../../lib/format";
+import { count, usdCard } from "../../lib/format";
 import type { BubbleNode } from "../../lib/map/types";
-import { Logo, nameOf, sym } from "../../components/Bits";
+import { Logo, nameOf, sym, useTint } from "../../components/Bits";
 import Mark from "../../components/Mark";
+import EmptySpore from "../../components/illus/EmptySpore";
+import { Filament, Illus, Motes, Node, Ring, curve } from "../../components/illus/base";
 import "./embed.css";
 
 export type EmbedTheme = "dark" | "light";
@@ -157,10 +159,11 @@ export function LaunchCta({ node, maxDepth, compact }: { node: Pick<BubbleNode, 
 /// The coin a click selected: what it is, its numbers and where to go on the site.
 export function SelectionCard({ node, parent, maxDepth, onClose, extra }: { node: BubbleNode; parent: BubbleNode | null; maxDepth: number | undefined; onClose: () => void; extra?: ReactNode }) {
   const kids = node.children;
+  const [tint, onImg] = useTint(node.image, node.mint);
   return (
-    <div className="embed-sel" role="region" aria-label={`${nameOf(node)} details`}>
+    <div className="embed-sel" role="region" aria-label={`${nameOf(node)} details`} style={{ "--tint": tint } as CSSProperties}>
       <div className="embed-sel-top">
-        <Logo src={node.image} label={node.symbol ?? node.name} size={28} />
+        <Logo src={node.image} label={node.symbol ?? node.name} size={28} className="ring" onLoad={onImg} />
         <div className="embed-sel-name">
           <b title={nameOf(node)}>{nameOf(node)}</b>
           <span><span className="mono">{sym(node)}</span><span className={`embed-depth d${Math.min(node.depth, 3)}`}>{node.depth === 0 ? "root" : `d${node.depth}`}</span>{node.ours && <span className="embed-ours" title="Launched on Spore">Spore</span>}</span>
@@ -168,9 +171,9 @@ export function SelectionCard({ node, parent, maxDepth, onClose, extra }: { node
         <button type="button" className="embed-x" aria-label="Close" onClick={onClose}>×</button>
       </div>
       <dl className="embed-sel-stats">
-        <div><dt>mcap</dt><dd>{usd(node.mcapUsd)}</dd></div>
-        <div><dt>locked</dt><dd>{usd(node.lockedUsd)}</dd></div>
-        <div><dt>{kids === 1 ? "child" : "children"}</dt><dd>{count(kids)}</dd></div>
+        <div><dt>mcap</dt><dd className={node.mcapUsd === 0 ? "zero" : ""}>{usdCard(node.mcapUsd)}</dd></div>
+        <div><dt>locked</dt><dd className={(node.lockedUsd ?? 0) >= 0.01 ? "accent" : "zero"}>{usdCard(node.lockedUsd)}</dd></div>
+        <div><dt>{kids === 1 ? "child" : "children"}</dt><dd className={kids ? "" : "zero"}>{count(kids)}</dd></div>
       </dl>
       {parent && <p className="embed-sel-under">under <b>{sym(parent)}</b></p>}
       <div className="embed-sel-acts">
@@ -186,9 +189,29 @@ export function SelectionCard({ node, parent, maxDepth, onClose, extra }: { node
 export function EmbedState({ title, hint, action, tone = "" }: { title: string; hint?: ReactNode; action?: ReactNode; tone?: "" | "bad" }) {
   return (
     <div className={`embed-state ${tone}`} role={tone === "bad" ? "alert" : "status"}>
+      <EmptySpore className="embed-state-art" />
       <b>{title}</b>
       {hint && <p>{hint}</p>}
       {action && <div className="embed-state-acts">{action}</div>}
+    </div>
+  );
+}
+
+/// The loading state, drawn: a root budding two children along filaments, motes travelling them, in a
+/// small spore cloud. Static under reduced or paused motion (the illustration kit's CSS stops it).
+export function EmbedLoading({ label }: { label: string }) {
+  return (
+    <div className="embed-loading" role="status">
+      <Illus viewBox="0 0 168 96" className="embed-loading-art">
+        <Motes seed={5} n={18} box={[6, 6, 156, 84]} tone={["lime", "teal", "violet"]} />
+        <Ring cx={60} cy={50} r={20} dashed spin opacity={0.3} />
+        <Filament d={curve(60, 50, 124, 26, -0.2)} tone="teal" mote dur={1.8} />
+        <Filament d={curve(60, 50, 134, 72, 0.2)} tone="teal" mote dur={1.8} delay={0.9} />
+        <Node cx={60} cy={50} r={9} tone="lime" pulse />
+        <Node cx={124} cy={26} r={5} tone="teal" />
+        <Node cx={134} cy={72} r={4} tone="teal" dim />
+      </Illus>
+      <span className="embed-loading-t">{label}</span>
     </div>
   );
 }

@@ -1,3 +1,6 @@
+// map3 (2026-10-21): /map now renders the Three.js map by default; this script measures the classic
+// Canvas renderer, so every /map URL it loads carries renderer=classic (Chrome keeps --disable-gpu, which
+// would also force the classic fallback). The WebGL renderer has its own scripts: map3-qa/perf/shots.
 // Interaction and data checks of the /map page (DESIGN §11.5 "Map v2") through Chrome's DevTools
 // protocol, no puppeteer (same harness as map-perf.mts), against a dev server on the full dataset:
 //   (a) cold open starts at the fit: k at first paint within ×1.3 of the settled fit, never a k ≈ 1 frame
@@ -11,9 +14,14 @@
 //   (h) logos: after zooming through three dense clusters the thumbnail cache is under its pixel
 //       budget, and a ≥ 200 px bubble draws a 256 px thumbnail
 //   (i) family tops (lib/map/sizing.ts): in every family the top is ≥ 1.5× its largest member and no
-//       member's centre lies inside the top's disc after settling; in a mid-size family a subtree drag
-//       moves rigidly, a child dropped on its top's centre ends outside it, and a drag of the top moves
-//       the whole tree rigidly, all without a member left inside the top
+//       member's centre lies inside the top's disc after settling; the live-simulation drag (owner
+//       2026-10-20, "the map as it was when we first opened the site", test/map-drag.mts): in a mid-size
+//       family a child and then the top are each pulled 300 px; the grabbed bubble stays under the
+//       pointer (≤ 2 px) and is the only one the page moves, the worker ticks during the drag, its
+//       children trail (≥ 90 px of the 300 behind a top, ≥ 30 behind a child inside a dense family),
+//       ≥ 10 bubbles outside the family flow > 2 px, the map rests ≤ 3 s after the release and nothing
+//       moves in the 3 s after that, no long task and no frame over 50 ms during the drag; the released
+//       top glides back ≥ 20 px and ends within a third of its family's radius of the family centroid
 //   and 0 console errors throughout.
 //
 //   API_PORT=8795 npx vite --port 5252 --host 127.0.0.1 &
@@ -23,6 +31,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { liveDrag, type DragIO } from "./map-drag.mts";
 
 const args = process.argv.slice(2);
 const opt = (name: string, dflt: string | null = null) => { const i = args.indexOf(name); return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : dflt; };
@@ -110,7 +119,7 @@ try {
   const onScreen = `(p) => p && p.x >= 0 && p.y >= 0 && p.x <= innerWidth && p.y <= innerHeight`;
 
   // ---------------------------------------------------------------- (a) cold open starts at the fit
-  await send("Page.navigate", { url: `${BASE}/map?roots=all` }, S);
+  await send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic` }, S);
   await mapReady();
   await settle("cold layout to settle");
   {
@@ -174,7 +183,7 @@ try {
 
   // ---------------------------------------------------------------- (d) a trade draws an effect
   if (want("d")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
     await evalJs("__sporeMap.fit()");
     await waitFor("!__sporeMap.flying()", 4000, "fit").catch(() => null);
     // a root that is a bubble target at the fit (≥ 3 px), so its tooltip can be checked afterwards
@@ -236,7 +245,7 @@ try {
       await evalJs(`history.pushState({}, "", "/"); dispatchEvent(new PopStateEvent("popstate"))`);
       await waitFor("!window.__sporeMap", 5000, "map to unmount").catch(() => null);
       result.idbClear = await clearIdb();
-      await fresh(() => send("Page.navigate", { url: `${BASE}/map?roots=all&focus=${leaf}` }, S));
+      await fresh(() => send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic&focus=${leaf}` }, S));
       await mapReady();
       await settle("cold deep link to settle");
       await waitFor("!__sporeMap.flying()", 5000, "landing").catch(() => null);
@@ -252,7 +261,7 @@ try {
 
   // ---------------------------------------------------------------- (h) logos: budget + sharpness
   if (want("h")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
     const roots = await evalJs<string[]>("__sporeMap.clusters(3).map((c) => c.root)");
     for (const m of roots) { await evalJs(`__sporeMap.zoomTo(${JSON.stringify(m)}, 2.2)`); await sleep(2500); }
     const stats = await evalJs<{ ready: number; failed: number; inflight: number; queued: number; pixels: number; budget: number }>("__sporeMap.images()");
@@ -275,7 +284,7 @@ try {
 
   // ---------------------------------------------------------------- (i) family tops: biggest, central, outside; drag
   if (want("i")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
     await settle("settle before the family-top checks", 120_000).catch(() => null);
     // one family's numbers: top radius, largest member, member centres inside / rims over the top's disc
     await evalJs(`window.__fam = (root) => { const M = __sporeMap, mem = M.members(root), t = M.node(root); let inside = 0, overlap = 0, maxC = 0; for (const m of mem) { if (m === root) continue; const d = M.node(m); const dist = Math.hypot(d.x - t.x, d.y - t.y); if (dist < t.r) inside++; if (dist < t.r + d.r) overlap++; if (d.r > maxC) maxC = d.r; } return { n: mem.length, topR: t.r, maxC, ratio: maxC ? t.r / maxC : Infinity, inside, overlap }; }; true`);
@@ -291,51 +300,43 @@ try {
       const cr = await evalJs<number>(`__sporeMap.clusters(100000).find((c) => c.root === ${F}).cr`);
       await evalJs(`__sporeMap.zoomTo(${F}, ${Math.min(3, (0.42 * H) / cr)})`);
       await sleep(2500);
-      const screenOfAll = (ms: string[]) => evalJs<[number, number][]>(`(${JSON.stringify(ms)}).map((m) => { const s = __sporeMap.screenOf(m); return [s.x, s.y]; })`);
-      const dragPath = async (x0: number, y0: number, x1: number, y1: number, mid: string | null) => {
-        await mouse("mouseMoved", x0, y0); await mouse("mousePressed", x0, y0, { button: "left", buttons: 1, clickCount: 1 });
-        let during: unknown = null;
-        for (let q = 1; q <= 12; q++) { const u = q / 12; await mouse("mouseMoved", x0 + (x1 - x0) * u, y0 + (y1 - y0) * u, { button: "left", buttons: 1 }); await sleep(30); if (q === 12 && mid) during = await evalJs(mid); }
-        await mouse("mouseReleased", x1, y1, { button: "left", buttons: 0, clickCount: 1 });
-        return during;
+      const io: DragIO = {
+        evalJs, sleep,
+        press: async (x, y) => { await mouse("mouseMoved", x, y); await mouse("mousePressed", x, y, { button: "left", buttons: 1, clickCount: 1 }); },
+        move: (x, y) => mouse("mouseMoved", x, y, { button: "left", buttons: 1 }),
+        release: (x, y) => mouse("mouseReleased", x, y, { button: "left", buttons: 0, clickCount: 1 }),
       };
-      const rigidErr = (a: [number, number][], b: [number, number][], dx: number, dy: number) => { let e = 0; for (let q = 0; q < a.length; q++) e = Math.max(e, Math.hypot(b[q][0] - a[q][0] - dx, b[q][1] - a[q][1] - dy)); return Math.round(e * 100) / 100; };
       const child = await evalJs<{ m: string; c: number; s: { x: number; y: number; r: number } } | null>(`(() => { const M = __sporeMap; let best = null; for (const m of M.children(${F})) { const s = M.screenOf(m); if (!s || s.r < 5 || s.x < 380 || s.x > ${W - 40} || s.y < 80 || s.y > ${H - 20}) continue; const c = M.children(m).length; if (!best || c > best.c) best = { m, c, s }; } return best; })()`);
       check(!!child, "(i) no child of the family on screen to drag");
       if (child) {
-        const C = JSON.stringify(child.m);
-        // subtree drag, outward: every node of the subtree moves by the pointer's delta while held
+        // (1) a child grabbed and pulled 300 px away from its top: it stays under the pointer, its own
+        // children trail behind it, the neighbourhood flows, and the map cools to rest after the release
         const top0 = (await evalJs<{ x: number; y: number }>(`__sporeMap.screenOf(${F})`))!;
-        const ux = child.s.x - top0.x, uy = child.s.y - top0.y, ul = Math.hypot(ux, uy) || 1, dx = (ux / ul) * 140, dy = (uy / ul) * 140;
-        const sub = await evalJs<string[]>(`(() => { const M = __sporeMap, out = [], st = [${C}]; while (st.length) { const m = st.pop(); out.push(m); st.push(...M.children(m)); } return out; })()`);
-        const p0 = await screenOfAll(sub);
-        const d1 = (await dragPath(child.s.x, child.s.y, child.s.x + dx, child.s.y + dy, `({ drag: __sporeMap.drag(), pos: (${JSON.stringify(sub)}).map((m) => { const s = __sporeMap.screenOf(m); return [s.x, s.y]; }) })`)) as { drag: { node: string; n: number; whole: boolean } | null; pos: [number, number][] };
-        const e1 = rigidErr(p0, d1.pos, dx, dy);
-        await settle("the subtree drop to ease", 30_000).catch(() => null);
-        const after1 = await evalJs<{ inside: number; overlap: number }>(`__fam(${F})`);
-        // the child dropped right on its top's centre
-        const c1 = await evalJs<{ x: number; y: number }>(`__sporeMap.screenOf(${C})`), t1 = await evalJs<{ x: number; y: number }>(`__sporeMap.screenOf(${F})`);
-        await dragPath(c1.x, c1.y, t1.x + 3, t1.y + 2, null);
-        await settle("the drop on the top to ease", 30_000).catch(() => null);
-        await sleep(600);
-        const after2 = await evalJs<{ inside: number; overlap: number; dist: number; need: number }>(`(() => { const f = __fam(${F}), t = __sporeMap.node(${F}), c = __sporeMap.node(${C}); return { ...f, dist: Math.hypot(c.x - t.x, c.y - t.y), need: t.r }; })()`);
-        result.shotTopDrop = await shot("interact-1440-top-drop.png");
-        // the top itself: the whole tree moves rigidly
-        const mem = await evalJs<string[]>(`__sporeMap.members(${F})`);
-        const t2 = await evalJs<{ x: number; y: number }>(`__sporeMap.screenOf(${F})`);
-        const p2 = await screenOfAll(mem);
-        const d3 = (await dragPath(t2.x, t2.y, t2.x - 120, t2.y + 60, `({ drag: __sporeMap.drag(), pos: (${JSON.stringify(mem)}).map((m) => { const s = __sporeMap.screenOf(m); return [s.x, s.y]; }) })`)) as { drag: { node: string; n: number; whole: boolean } | null; pos: [number, number][] };
-        const e3 = rigidErr(p2, d3.pos, -120, 60);
-        await settle("the tree drop to ease", 30_000).catch(() => null);
-        const after3 = await evalJs<{ inside: number; overlap: number }>(`__fam(${F})`);
-        result.topsDrag = { family: fam, child: child.m, subtree: { n: sub.length, drag: d1.drag, rigidErrPx: e1, after: after1 }, dropOnTop: after2, tree: { n: mem.length, drag: d3.drag, rigidErrPx: e3, after: after3 } };
-        check(d1.drag?.node === child.m && d1.drag.n === sub.length && !d1.drag.whole, `(i) the subtree drag did not take the child's subtree (${JSON.stringify(d1.drag)})`);
-        check(e1 <= 2, `(i) the subtree moved ${e1} px off the pointer's delta while held`);
-        check(after1.inside === 0, `(i) ${after1.inside} member(s) inside the top after a subtree drop`);
-        check(after2.inside === 0 && after2.dist >= after2.need, `(i) a child dropped on its top stayed inside it (${after2.dist.toFixed(1)} < ${after2.need.toFixed(1)})`);
-        check(d3.drag?.whole === true && d3.drag.n === mem.length, `(i) dragging the top did not take the whole tree (${JSON.stringify(d3.drag)})`);
-        check(e3 <= 2, `(i) the tree moved ${e3} px off the pointer's delta while held`);
-        check(after3.inside === 0, `(i) ${after3.inside} member(s) inside the top after the tree drop`);
+        const ux = child.s.x - top0.x, uy = child.s.y - top0.y, ul = Math.hypot(ux, uy) || 1;
+        const c1 = await liveDrag(io, { grab: child.m, x0: child.s.x, y0: child.s.y, dx: (ux / ul) * 300, dy: (uy / ul) * 300 });
+        result.shotChildDrop = await shot("interact-1440-child-drop.png");
+        // (2) the family's top pulled 300 px: the family follows it, and after the release it glides back
+        // toward its home and ends inside its family's neighbourhood
+        await evalJs(`__sporeMap.zoomTo(${F}, ${Math.min(3, (0.42 * H) / cr)})`);
+        await sleep(2000);
+        const t2 = (await evalJs<{ x: number; y: number }>(`__sporeMap.screenOf(${F})`))!;
+        const dir = t2.x + 320 < W - 20 ? 1 : -1;
+        const r2 = await liveDrag(io, { grab: fam, x0: t2.x, y0: t2.y, dx: dir * 300, dy: 0 });
+        result.shotRootDrop = await shot("interact-1440-root-drop.png");
+        result.liveDrag = { family: fam, child: child.m, childDrag: c1, rootDrag: r2 };
+        for (const [name, d, grab] of [["child", c1, child.m], ["root", r2, fam]] as const) {
+          check(d.drag?.node === grab && d.drag.n === 1, `(i) ${name} drag: the press did not grab that bubble (${JSON.stringify(d.drag)})`);
+          check(d.underPx <= 2, `(i) ${name} drag: the bubble is ${d.underPx} px off the pointer while held`);
+          check(d.ticksDuring > 0, `(i) ${name} drag: the simulation did not run during the drag (${d.ticksDuring} worker ticks)`);
+          check(d.moved2Others >= 10, `(i) ${name} drag: only ${d.moved2Others} bubbles outside the family moved > 2 px (the neighbours did not flow)`);
+          check(d.restMs !== null && d.restMs <= 3000, `(i) ${name} drag: the map came to rest ${d.restMs ?? "never"} ms after the release`);
+          check(d.movedAfterRest === 0, `(i) ${name} drag: ${d.movedAfterRest} bubbles moved in the 3 s after the rest`);
+          check(d.frames.longTasks === 0 && d.frames.max <= 50, `(i) ${name} drag: ${d.frames.longTasks} long task(s), longest frame ${d.frames.max} ms`);
+        }
+        check(c1.children === 0 || c1.childMovePx >= 30, `(i) child drag: its children moved only ${c1.childMovePx} px of the 300 px drag (they did not trail)`);
+        check(r2.children === 0 || r2.childMovePx >= 90, `(i) root drag: its children moved only ${r2.childMovePx} px of the 300 px drag`);
+        check(r2.slidePx >= 20, `(i) root drag: the root slid back only ${r2.slidePx} px after the release`);
+        check(r2.homeDist <= r2.familyR / 3, `(i) root drag: the root ended ${r2.homeDist} from its family's centroid, off its middle (family radius ${r2.familyR})`);
       }
     }
   }
@@ -349,7 +350,7 @@ try {
       await waitFor("!window.__sporeMap", 5000, "map to unmount").catch(() => null);
       result.idbClear = await clearIdb();
       await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, S);
-      await fresh(() => send("Page.navigate", { url: `${BASE}/map?focus=${gta}` }, S));
+      await fresh(() => send("Page.navigate", { url: `${BASE}/map?renderer=classic&focus=${gta}` }, S));
       await mapReady();
       await sleep(3000);
       const r = await evalJs<{ roots: string | null; sel: string | null; nodes: number; total: number }>("({ roots: new URLSearchParams(location.search).get('roots'), sel: __sporeMap.selected(), nodes: __sporeMap.nodes(), total: __sporeMapPage.total() })");
@@ -364,7 +365,7 @@ try {
 
   // ---------------------------------------------------------------- (f) production build: one since= request on an SPA reopen
   if (PROD && want("f")) {
-    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?roots=all&debug` }, S);
+    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?roots=all&renderer=classic&debug` }, S);
     await mapReady();
     await settle("production layout to settle");
     await sleep(3000); // the full cache write, then the "full" stamp
@@ -372,7 +373,7 @@ try {
     await waitFor("!window.__sporeMap", 5000, "map to unmount (prod)");
     await sleep(800);
     await evalJs("performance.clearResourceTimings()");
-    await evalJs(`history.pushState({}, "", "/map?roots=all&debug"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.pushState({}, "", "/map?roots=all&renderer=classic&debug"); dispatchEvent(new PopStateEvent("popstate"))`);
     await mapReady(60_000);
     await sleep(4000);
     const reqs = await evalJs<string[]>(`performance.getEntriesByType("resource").filter((e) => /\\/api\\/map(\\?|$)/.test(e.name)).map((e) => e.name.replace(/^.*\\/api\\/map/, "/api/map"))`);

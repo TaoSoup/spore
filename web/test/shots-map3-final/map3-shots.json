@@ -1,0 +1,587 @@
+{
+  "url": "http://127.0.0.1:5271",
+  "prod": true,
+  "ref": "/private/tmp/claude-501/-Users-metahuman/8b9f0123-db17-4735-be5c-50987e9a621c/scratchpad/mapThree/shots-final2",
+  "out": "test/shots-map3-final",
+  "gpu": "metal",
+  "startedAt": "2026-10-21T13:00:11.368Z",
+  "shots": [
+    "test/shots-map3-final/a-overview.png",
+    "test/shots-map3-final/b-pump-4x.png",
+    "test/shots-map3-final/e-kimchi.png",
+    "test/shots-map3-final/d-phone.png",
+    "test/shots-map3-final/h-phone-tooltip.png",
+    "test/shots-map3-final/f-hover.png",
+    "test/shots-map3-final/g-hover-child-4x.png",
+    "test/shots-map3-final/mid-drag-overview.png",
+    "test/shots-map3-final/mid-drag-4x.png",
+    "test/shots-map3-final/a-overview-live.png",
+    "test/shots-map3-final/b-pump-4x-live.png"
+  ],
+  "metrics": {
+    "a-overview": {
+      "labels": {
+        "planetsLabelled": 32,
+        "kids": 0,
+        "gens": 0,
+        "caption": 1,
+        "annotations": 2,
+        "toasts": 0,
+        "leaders": 3,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 41,
+        "draws": 6,
+        "frameDraws": 20,
+        "tris": 655665
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": 0.00034,
+      "titles": 32,
+      "k": 1
+    },
+    "b-pump-4x": {
+      "labels": {
+        "planetsLabelled": 2,
+        "kids": 27,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 18,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 7,
+        "draws": 6,
+        "frameDraws": 20,
+        "tris": 656385
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 2,
+      "k": 4
+    },
+    "e-kimchi": {
+      "focusFamily": {
+        "x": 61.67509223217945,
+        "y": -26.669620731614682,
+        "k": 3.735135211232552,
+        "ms": 455
+      },
+      "labels": {
+        "planetsLabelled": 14,
+        "kids": 10,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 4,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 18,
+        "draws": 7,
+        "frameDraws": 21,
+        "tris": 656433
+      },
+      "hdr": {
+        "hdrPx": 40,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 14,
+      "k": 3.054824995807251
+    },
+    "d-phone": {
+      "labels": {
+        "planetsLabelled": 8,
+        "kids": 0,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 0,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 29,
+        "draws": 6,
+        "frameDraws": 20,
+        "tris": 655865
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 8,
+      "k": 1
+    },
+    "h-phone-tooltip": {
+      "hover": {
+        "i": 10077,
+        "sym": "Kimchi",
+        "sx": 190.1756288453608,
+        "sy": 474.0506731907042
+      },
+      "tip": {
+        "on": true,
+        "dock": true,
+        "text": "K$Kimchijust nowMarket cap$40.1M24h trades35,51624h volume$2.0MFamily 24h150,946 tradesFamily last tradejust nowLineagerootFamily1,120 coins · 25%MintCSoc…pumpOpen family×"
+      },
+      "clear": {
+        "coinBottom": 532,
+        "cardTop": 546,
+        "controls": "hidden"
+      }
+    },
+    "f-hover": {
+      "point": {
+        "x": 738.5125688900636,
+        "y": 510.5515861850318,
+        "r": 17
+      },
+      "hovered": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "P$PUMPfamily · just nowMarket cap$4.0B24h trades0Family 24h23,764 tradesFamily last tradejust nowLineagerootFamily1,481 coins · 37%Mintpump…9Dfnclick to open the family"
+      }
+    },
+    "g-hover-child-4x": {
+      "child": {
+        "mint": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+        "x": 768.468265301762,
+        "y": 421.26997084921345,
+        "r": 23.301190792763478
+      },
+      "hovered": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "C$COCKROACH17h 10m agoMarket cap$556k24h trades224h volume$52Lineagegen 1 · child of $PUMPFamily1,481 coins · 37%MintH4KU…nyJcclick to select"
+      }
+    },
+    "mid-drag-overview": {
+      "from": {
+        "x": 738.5125688900636,
+        "y": 510.5515861850318,
+        "r": 17
+      },
+      "by": [
+        240,
+        -110
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": true
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    },
+    "mid-drag-4x": {
+      "from": {
+        "x": 720,
+        "y": 481.5,
+        "r": 34.23560631396324
+      },
+      "by": [
+        260,
+        90
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": false
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    },
+    "a-overview-live": {
+      "live": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 0.4,
+        "events": 4,
+        "trades": 4,
+        "tradesMapped": 1,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 27,
+        "fired": 0,
+        "flashes": 10,
+        "pings": 22,
+        "whales": 0,
+        "rims": 0,
+        "merged": 17,
+        "refused": 0,
+        "culled": {
+          "small": 2,
+          "offscreen": 0,
+          "dust": 8,
+          "drag": 0,
+          "flight": 0,
+          "short": 0,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 43,
+        "inFlight": 3,
+        "cap": 24,
+        "latency": {
+          "n": 24,
+          "p50": 9,
+          "p95": 16,
+          "max": 86
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": false
+      },
+      "labels": {
+        "planetsLabelled": 32,
+        "kids": 0,
+        "gens": 0,
+        "caption": 1,
+        "annotations": 2,
+        "toasts": 0,
+        "leaders": 3,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 41,
+        "draws": 6,
+        "frameDraws": 20,
+        "tris": 655665
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 32,
+      "k": 1
+    },
+    "b-pump-4x-live": {
+      "live": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 1.5,
+        "events": 15,
+        "trades": 15,
+        "tradesMapped": 6,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 33,
+        "fired": 6,
+        "flashes": 10,
+        "pings": 22,
+        "whales": 0,
+        "rims": 0,
+        "merged": 17,
+        "refused": 0,
+        "culled": {
+          "small": 4,
+          "offscreen": 13,
+          "dust": 8,
+          "drag": 0,
+          "flight": 0,
+          "short": 27,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 0,
+        "inFlight": 0,
+        "cap": 24,
+        "latency": {
+          "n": 30,
+          "p50": 9,
+          "p95": 16,
+          "max": 86
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": false
+      },
+      "labels": {
+        "planetsLabelled": 2,
+        "kids": 27,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 18,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 7,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655617
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 2,
+      "k": 4
+    }
+  },
+  "logoWaitMs": {
+    "a-overview": 1505,
+    "b-pump-4x": 1503,
+    "e-kimchi": 1503,
+    "d-phone": 1503,
+    "a-overview-live": 1504,
+    "b-pump-4x-live": 1503
+  },
+  "logoCover": {
+    "a-overview": {
+      "drawn": 115,
+      "cells": 122
+    },
+    "b-pump-4x": {
+      "drawn": 115,
+      "cells": 122
+    },
+    "e-kimchi": {
+      "drawn": 115,
+      "cells": 122
+    },
+    "d-phone": {
+      "drawn": 115,
+      "cells": 122
+    },
+    "a-overview-live": {
+      "drawn": 65,
+      "cells": 122
+    },
+    "b-pump-4x-live": {
+      "drawn": 111,
+      "cells": 122
+    }
+  },
+  "images": {
+    "ready": 114,
+    "failed": 0,
+    "inflight": 0,
+    "queued": 0,
+    "pixels": 4669440,
+    "budget": 24000000
+  },
+  "composites": {
+    "a-overview": {
+      "file": "test/shots-map3-final/compare-a-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "b-pump-4x": {
+      "file": "test/shots-map3-final/compare-b-pump-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "e-kimchi": {
+      "file": "test/shots-map3-final/compare-e-kimchi.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "d-phone": {
+      "file": "test/shots-map3-final/compare-d-phone.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "h-phone-tooltip": {
+      "file": "test/shots-map3-final/compare-h-phone-tooltip.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "f-hover": {
+      "file": "test/shots-map3-final/compare-f-hover.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "g-hover-child-4x": {
+      "file": "test/shots-map3-final/compare-g-hover-child-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-overview": {
+      "file": "test/shots-map3-final/compare-mid-drag-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-4x": {
+      "file": "test/shots-map3-final/compare-mid-drag-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "a-overview-live": {
+      "file": "test/shots-map3-final/compare-a-overview-live.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "b-pump-4x-live": {
+      "file": "test/shots-map3-final/compare-b-pump-4x-live.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    }
+  },
+  "consoleErrors": [],
+  "networkErrors": [],
+  "failures": [],
+  "ok": true
+}

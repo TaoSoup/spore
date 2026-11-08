@@ -1,0 +1,573 @@
+{
+  "url": "http://127.0.0.1:5721",
+  "prod": true,
+  "ref": "/Users/metahuman/spore/web/test/shots-map3-galaxy/ref",
+  "out": "/Users/metahuman/spore/web/test/shots-map3-galaxy",
+  "gpu": "metal",
+  "startedAt": "2026-10-21T17:18:43.164Z",
+  "look": {
+    "cli": "galaxy",
+    "page": "galaxy"
+  },
+  "animDiff": {
+    "diffPx": 14355,
+    "diffPxInMask": 0,
+    "masked": 0,
+    "total": 1296000,
+    "share": 0.011076388888888889,
+    "w": 1440,
+    "h": 900,
+    "sizes": [
+      [
+        1440,
+        900
+      ],
+      [
+        1440,
+        900
+      ]
+    ],
+    "diffFile": "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-b-pump-4x-diff.png",
+    "reduced": false,
+    "drained": true,
+    "rendersBetween": 68,
+    "live": {
+      "before": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 0,
+        "events": 0,
+        "trades": 0,
+        "tradesMapped": 0,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 32,
+        "fired": 5,
+        "flashes": 15,
+        "pings": 15,
+        "whales": 0,
+        "rims": 1,
+        "merged": 11,
+        "refused": 0,
+        "culled": {
+          "small": 2,
+          "offscreen": 1,
+          "dust": 13,
+          "drag": 0,
+          "flight": 0,
+          "short": 17,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 14,
+        "inFlight": 2,
+        "cap": 24,
+        "latency": {
+          "n": 22,
+          "p50": 9,
+          "p95": 16,
+          "max": 17
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": false
+      },
+      "after": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 0,
+        "events": 0,
+        "trades": 0,
+        "tradesMapped": 0,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 34,
+        "fired": 7,
+        "flashes": 15,
+        "pings": 15,
+        "whales": 0,
+        "rims": 1,
+        "merged": 11,
+        "refused": 0,
+        "culled": {
+          "small": 2,
+          "offscreen": 2,
+          "dust": 14,
+          "drag": 0,
+          "flight": 0,
+          "short": 25,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 2,
+        "inFlight": 2,
+        "cap": 24,
+        "latency": {
+          "n": 24,
+          "p50": 9,
+          "p95": 16,
+          "max": 17
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": false
+      }
+    },
+    "motion": {
+      "reduced": false,
+      "why": {
+        "moved": 5,
+        "tween": 48,
+        "hook": 371
+      },
+      "galHz": 0
+    },
+    "files": [
+      "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-b-pump-4x-1.png",
+      "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-b-pump-4x-2.png"
+    ]
+  },
+  "animDiffReduced": {
+    "diffPx": 0,
+    "diffPxInMask": 0,
+    "masked": 0,
+    "total": 1296000,
+    "share": 0,
+    "w": 1440,
+    "h": 900,
+    "sizes": [
+      [
+        1440,
+        900
+      ],
+      [
+        1440,
+        900
+      ]
+    ],
+    "diffFile": "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-reduced-b-pump-4x-diff.png",
+    "reduced": true,
+    "drained": true,
+    "rendersBetween": 0,
+    "live": {
+      "before": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 0,
+        "events": 0,
+        "trades": 0,
+        "tradesMapped": 0,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 0,
+        "fired": 0,
+        "flashes": 0,
+        "pings": 0,
+        "whales": 0,
+        "rims": 0,
+        "merged": 0,
+        "refused": 0,
+        "culled": {
+          "small": 0,
+          "offscreen": 0,
+          "dust": 0,
+          "drag": 0,
+          "flight": 0,
+          "short": 0,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 0,
+        "inFlight": 0,
+        "cap": 24,
+        "latency": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": true
+      },
+      "after": {
+        "feed": "up",
+        "spreadMs": 30000,
+        "eventsPerSec": 0,
+        "events": 0,
+        "trades": 0,
+        "tradesMapped": 0,
+        "coins": 0,
+        "pairs": 0,
+        "visualPerMin": 0,
+        "fired": 0,
+        "flashes": 0,
+        "pings": 0,
+        "whales": 0,
+        "rims": 0,
+        "merged": 0,
+        "refused": 0,
+        "culled": {
+          "small": 0,
+          "offscreen": 0,
+          "dust": 0,
+          "drag": 0,
+          "flight": 0,
+          "short": 0,
+          "rm": 0
+        },
+        "dropped": 0,
+        "expired": 0,
+        "queued": 0,
+        "inFlight": 0,
+        "cap": 24,
+        "latency": {
+          "n": 0,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "births": {
+          "seen": 0,
+          "placed": 0,
+          "spark": 0,
+          "fade": 0,
+          "noSlot": 0,
+          "skipped": 0,
+          "polled": 0,
+          "born": 0
+        },
+        "feedUp": 0,
+        "reconnects": 0,
+        "reduced": true
+      }
+    },
+    "motion": {
+      "reduced": true,
+      "why": {
+        "moved": 4,
+        "tween": 17,
+        "hook": 104
+      },
+      "galHz": 0
+    },
+    "files": [
+      "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-reduced-b-pump-4x-1.png",
+      "/Users/metahuman/spore/web/test/shots-map3-galaxy/anim-reduced-b-pump-4x-2.png"
+    ]
+  },
+  "shots": [
+    "/Users/metahuman/spore/web/test/shots-map3-galaxy/a-overview.png",
+    "/Users/metahuman/spore/web/test/shots-map3-galaxy/b-pump-4x.png",
+    "/Users/metahuman/spore/web/test/shots-map3-galaxy/c-usdc-deep.png",
+    "/Users/metahuman/spore/web/test/shots-map3-galaxy/d-phone.png"
+  ],
+  "metrics": {
+    "a-overview": {
+      "labels": {
+        "planetsLabelled": 36,
+        "kids": 0,
+        "gens": 0,
+        "caption": 1,
+        "annotations": 2,
+        "toasts": 0,
+        "leaders": 19,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 10,
+        "draws": 9,
+        "frameDraws": 23,
+        "tris": 917277
+      },
+      "hdr": {
+        "hdrPx": 5934,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 2.341,
+      "lime": 0.01947,
+      "veinShare": {
+        "share": 0.0503,
+        "px": 18622,
+        "lit": 936,
+        "fam": 0,
+        "sym": "PUMP",
+        "rPx": 77,
+        "look": "galaxy"
+      },
+      "titles": 36,
+      "gensDom": 0,
+      "k": 1,
+      "look": "galaxy"
+    },
+    "b-pump-4x": {
+      "labels": {
+        "planetsLabelled": 13,
+        "kids": 5,
+        "gens": 5,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 0,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 12,
+        "draws": 9,
+        "frameDraws": 23,
+        "tris": 917997
+      },
+      "hdr": {
+        "hdrPx": 9451,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 5.6,
+      "lime": null,
+      "veinShare": {
+        "share": 0.1036,
+        "px": 298084,
+        "lit": 30891,
+        "fam": 0,
+        "sym": "PUMP",
+        "rPx": 308,
+        "look": "galaxy"
+      },
+      "titles": 13,
+      "gensDom": 5,
+      "k": 4,
+      "look": "galaxy"
+    },
+    "c-focus": {
+      "x": -231.2715665900381,
+      "y": -63.64565789764242,
+      "k": 6.582527790763371,
+      "ms": 467
+    },
+    "c-kFocus": 21.146563614090663,
+    "c-usdc-deep": {
+      "labels": {
+        "planetsLabelled": 0,
+        "kids": 31,
+        "gens": 1,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 4,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 2,
+        "draws": 8,
+        "frameDraws": 22,
+        "tris": 917229
+      },
+      "hdr": {
+        "hdrPx": 8640,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 15,
+      "lime": null,
+      "veinShare": {
+        "share": 0.0431,
+        "px": 992900,
+        "lit": 42762,
+        "fam": 2,
+        "sym": "USDC",
+        "rPx": 642,
+        "look": "galaxy"
+      },
+      "titles": 0,
+      "gensDom": 1,
+      "k": 42.293127228181326,
+      "look": "galaxy"
+    },
+    "d-phone": {
+      "labels": {
+        "planetsLabelled": 8,
+        "kids": 0,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 4,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "foreignColony": 0,
+        "colonies": 4,
+        "draws": 9,
+        "frameDraws": 23,
+        "tris": 612125
+      },
+      "hdr": {
+        "hdrPx": 16203,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 2.341,
+      "lime": null,
+      "veinShare": {
+        "share": 0.0402,
+        "px": 19929,
+        "lit": 802,
+        "fam": 2189,
+        "sym": "PUMP",
+        "rPx": 40,
+        "look": "galaxy"
+      },
+      "titles": 8,
+      "gensDom": 0,
+      "k": 1,
+      "look": "galaxy"
+    }
+  },
+  "logoWaitMs": {
+    "a-overview": 2129,
+    "b-pump-4x": 1503,
+    "c-usdc-deep": 1502,
+    "d-phone": 1502,
+    "anim-reduced": 1703
+  },
+  "logoCover": {
+    "a-overview": {
+      "drawn": 1756,
+      "cells": 2228
+    },
+    "b-pump-4x": {
+      "drawn": 2086,
+      "cells": 2228
+    },
+    "c-usdc-deep": {
+      "drawn": 2130,
+      "cells": 2228
+    },
+    "d-phone": {
+      "drawn": 44,
+      "cells": 2228
+    },
+    "anim-reduced": {
+      "drawn": 2000,
+      "cells": 2228
+    }
+  },
+  "images": {
+    "ready": 2064,
+    "failed": 0,
+    "inflight": 0,
+    "queued": 0,
+    "pixels": 11956224,
+    "budget": 48000000,
+    "e429": 0,
+    "thumbs": 0
+  },
+  "composites": {
+    "a-overview": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-galaxy/compare-a-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "b-pump-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-galaxy/compare-b-pump-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "c-usdc-deep": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-galaxy/compare-c-usdc-deep.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "d-phone": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3-galaxy/compare-d-phone.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    }
+  },
+  "consoleErrors": [],
+  "networkErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found) http://127.0.0.1:5721/api/candles/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v?res=300&scope=all",
+    "Failed to load resource: the server responded with a status of 404 (Not Found) http://127.0.0.1:5721/api/coin/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v?children=0&trades=0"
+  ],
+  "failures": [
+    "c-usdc-deep: veinShare() {\"share\":0.0431,\"px\":992900,\"lit\":42762,\"fam\":2,\"sym\":\"USDC\",\"rPx\":642,\"look\":\"galaxy\"} (share ≥ 0.08)"
+  ],
+  "ok": false
+}

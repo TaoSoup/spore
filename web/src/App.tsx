@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { NavLink, Route, Routes, useLocation, useNavigate, useNavigationType } from "react-router-dom";
+import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from "react-router-dom";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { BaseWalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { SPORE_COIN } from "./lib/policy";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import Mark from "./components/Mark";
+import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
 import { ToastProvider } from "./components/Toast";
 import OfficialCoin from "./components/OfficialCoin";
+import LiveNumber from "./components/LiveNumber";
+import { Sprout } from "./components/LaunchButton";
 import { LiveDot } from "./components/SpawnFeed";
-import { useMotionPref } from "./components/SporeCanvas";
+import { motionPaused, useMotionPref } from "./lib/motion";
+import SlidingPill from "./components/ui/SlidingPill";
 import { useStats } from "./lib/hooks";
+import { useEvents } from "./lib/events";
 import { count } from "./lib/format";
+import { ErrorBox } from "./components/Bits";
+import { FOOTER_ABOUT, FOOTER_BOTTOM, NON_CUSTODIAL } from "./lib/copy";
 import Home from "./pages/Home";
 import Explore from "./pages/Explore";
 import MapPage from "./pages/Map";
@@ -19,13 +26,35 @@ import Fees from "./pages/Fees";
 import Claim from "./pages/Claim";
 import NotFound from "./pages/NotFound";
 import ApiDocs from "./pages/ApiDocs";
+import Agents from "./pages/Agents";
+import AgentDetail from "./pages/AgentDetail";
 import EmbedTree from "./pages/embed/EmbedTree";
 import EmbedMap from "./pages/embed/EmbedMap";
 import { EmbedNotFound } from "./pages/embed/common";
 import "./components/brand.css";
 
+/// A page that fails to render says so in plain words, inside the shell, instead of blanking the site.
+class RouteBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <div className="container route-error"><ErrorBox error="This page could not be shown. Reload to try again." retry={() => window.location.reload()} /></div>;
+  }
+}
+
 export const BRAND = { name: "Spore", tagline: "Coins that grow coins.", title: "Spore — coins that grow coins" };
-const PRIMARY = [["/explore", "Explore"], ["/map", "Map"], ["/launch", "Launch"], ["/claim", "Claim"], ["/how", "How it works"]] as const;
+/// The nav labels name what a visitor came to do; the titles say it in plain words (redesign
+/// 2026-10-20). Launch is not a link here: it is the bar's lime pill.
+const PRIMARY: readonly (readonly [string, string, string])[] = [
+  ["/map", "Map", "Every pump.fun coin pair, live"],
+  ["/explore", "Coins", "Every coin launched on Spore"],
+  ["/agents", "Agents", "AI agents launching coins on their own"],
+  ["/how", "How it works", "How launches, fees and agents work"],
+  ["/claim", "Claim fees", "Collect the creator fees your coins earned"],
+];
+const MORE: readonly (readonly [string, string])[] = [["/fees", "Fees & rules"], ["/docs/api", "API"]];
+const WALLET_LABELS = { "no-wallet": "Connect", "has-wallet": "Connect", connecting: "Connecting…", "copy-address": "Copy address", copied: "Copied", "change-wallet": "Change wallet", disconnect: "Disconnect" } as const;
 
 /// Finds a search box on the current page and focuses it. The pages own their search components;
 /// this only knows their markup (the shared Search box and the map's find box).
@@ -40,8 +69,7 @@ const typing = (t: EventTarget | null) => { const el = t as HTMLElement | null; 
 /// Back/forward return to where the reader was; a new page starts at the top (instantly, so the
 /// smooth scroll-behavior does not animate a page change); a hash scrolls to its element. Pages
 /// load their data after mounting, so a restored position is retried once the content has grown.
-function useScrollRestoration() {
-  const loc = useLocation();
+function useScrollRestoration(loc: Location) {
   const type = useNavigationType();
   const positions = useRef(new Map<string, number>());
   useLayoutEffect(() => { try { window.history.scrollRestoration = "manual"; } catch { /* older engines */ } }, []);
@@ -60,9 +88,8 @@ function useScrollRestoration() {
 
 /// `/` focuses search (jumping to Explore when the page has none), `L` opens the launch page.
 /// Nothing fires while typing or with a modifier held, so browser shortcuts keep working.
-function useShortcuts() {
+function useShortcuts(loc: Location) {
   const nav = useNavigate();
-  const loc = useLocation();
   const wantSearch = useRef(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -90,11 +117,13 @@ function useShortcuts() {
 function useRouteMeta() {
   const loc = useLocation();
   useEffect(() => {
-    const url = `${window.location.origin}${loc.pathname}`;
+    // A map link is addressed by the coin it focuses (the server's og:url for it carries ?focus= too); nothing else from the query is part of the address.
+    const focus = loc.pathname === "/map" ? new URLSearchParams(loc.search).get("focus") : null;
+    const url = `${window.location.origin}${loc.pathname}${focus ? `?focus=${encodeURIComponent(focus)}` : ""}`;
     document.querySelector('link[rel="canonical"]')?.setAttribute("href", url);
     document.querySelector('meta[property="og:url"]')?.setAttribute("content", url);
     if (loc.pathname === "/") document.title = BRAND.title;
-  }, [loc.pathname]);
+  }, [loc.pathname, loc.search]);
 }
 
 function MotionToggle() {
@@ -107,56 +136,151 @@ function MotionToggle() {
   );
 }
 
+/// The entry route of this tab session, read by the coin page's "New to Spore?" strip. Written during
+/// the shell's first render (before any page renders or runs an effect), once per tab session.
+const ENTRY_KEY = "spore.entry";
+function recordEntry() {
+  try { if (!sessionStorage.getItem(ENTRY_KEY)) sessionStorage.setItem(ENTRY_KEY, window.location.pathname); } catch { /* storage blocked: the strip falls back to its own rule */ }
+  return true;
+}
+
+/// The wallet button, quiet in the bar (see .nav in styles.css) with a lime dot once connected.
+function NavWallet({ className = "" }: { className?: string }) {
+  const { connected } = useWallet();
+  return <div className={`nav-wallet ${connected ? "on" : ""} ${className}`}><BaseWalletMultiButton labels={WALLET_LABELS} /></div>;
+}
+
+/// Restarts a one-shot CSS class (the mark's bud, the pill's ring) without re-rendering React.
+function flash(el: Element | null | undefined, cls: string, ms: number) {
+  if (!el || motionPaused()) return;
+  el.classList.remove(cls);
+  void (el as HTMLElement).offsetWidth;
+  el.classList.add(cls);
+  window.setTimeout(() => el.classList.remove(cls), ms);
+}
+
+/// FOOTER_ABOUT with each "$SPORE" linked to the official coin page.
+function AboutCopy() {
+  const parts = FOOTER_ABOUT.split("$SPORE");
+  return <p>{parts.map((p, i) => <Fragment key={i}>{p}{i < parts.length - 1 && <NavLink to={`/c/${SPORE_COIN}`}>$SPORE</NavLink>}</Fragment>)}</p>;
+}
+
+/// The bar gains blur and a hairline once the page has scrolled (state flips only on the threshold).
+function useScrolled(px = 8): boolean {
+  const [scrolled, setScrolled] = useState(() => typeof window !== "undefined" && window.scrollY > px);
+  useEffect(() => {
+    const on = () => setScrolled(window.scrollY > px);
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, [px]);
+  return scrolled;
+}
+
+/// Route transitions (DESIGN-ELEVATE §5): the outgoing page fades for 120 ms, then the incoming one
+/// rises 12 px and fades in (CSS). Returns the location to render and whether the old page is leaving.
+/// A change of only the query or hash (the launch form's parent, a map focus) keeps the page mounted
+/// and switches at once, as does paused or reduced motion. The nav reads the real location, so its
+/// active pill moves immediately.
+const ROUTE_OUT_MS = 120;
+function useRouteTransition(): [Location, boolean] {
+  const loc = useLocation();
+  const [shown, setShown] = useState(loc);
+  const [leaving, setLeaving] = useState(false);
+  useLayoutEffect(() => {
+    if (loc === shown) return;
+    if (loc.pathname === shown.pathname || motionPaused()) { setShown(loc); setLeaving(false); return; }
+    setLeaving(true);
+    const t = window.setTimeout(() => { setShown(loc); setLeaving(false); }, ROUTE_OUT_MS);
+    return () => window.clearTimeout(t);
+  }, [loc, shown]);
+  return [shown, leaving];
+}
+
+/// The footer's watermark: "spore" set huge with the mark's seed as its "o" (the same geometry as
+/// components/Mark), at 12 % alpha, bleeding off the bottom edge. Decorative.
+function FooterWordmark() {
+  return (
+    <div className="footer-mark" aria-hidden="true">
+      <span>sp</span>
+      <svg className="footer-mark-o" viewBox="6 2 58 60" focusable="false">
+        <defs>
+          <linearGradient id="fm-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#b6ff5c" stopOpacity=".13" /><stop offset=".7" stopColor="#b6ff5c" stopOpacity=".03" /><stop offset="1" stopColor="#b6ff5c" stopOpacity="0" /></linearGradient>
+        </defs>
+        <path d={MARK_PATH} fill="url(#fm-fill)" stroke="rgba(182,255,92,.13)" strokeWidth=".3" />
+        {MARK_SPORES.map((p) => <circle key={p.fill} cx={p.cx} cy={p.cy} r={p.r} fill={p.fill} fillOpacity=".09" stroke={p.fill} strokeOpacity=".2" strokeWidth=".3" />)}
+      </svg>
+      <span>re</span>
+    </div>
+  );
+}
+
 function Shell() {
   const loc = useLocation();
-  const { stats, error } = useStats(30_000);
+  const [shown, leaving] = useRouteTransition();
+  const { stats, error } = useStats();
   const [menu, setMenu] = useState(false);
+  useState(recordEntry); // during the first render, so a page can read it in its own first render
   const menuRef = useRef<HTMLElement>(null);
   const burgerRef = useRef<HTMLButtonElement>(null);
-  useScrollRestoration();
-  useShortcuts();
+  const wordRef = useRef<HTMLAnchorElement>(null);
+  const pillRef = useRef<HTMLSpanElement>(null);
+  const scrolled = useScrolled();
+  useScrollRestoration(shown);
+  useShortcuts(shown);
   useRouteMeta();
   const closeMenu = useCallback(() => setMenu(false), []);
   useEffect(() => { setMenu(false); }, [loc.pathname]);
-  // The phone menu closes on Escape (focus returns to its button) and on a tap outside it.
+  // The phone menu closes on Escape (focus returns to its button) and on a tap outside it; opening it
+  // moves focus to its first link.
   useEffect(() => {
     if (!menu) return;
+    menuRef.current?.querySelector<HTMLAnchorElement>("a[href]")?.focus();
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenu(false); burgerRef.current?.focus(); } };
     const onDown = (e: PointerEvent) => { const t = e.target as Node; if (!menuRef.current?.contains(t) && !burgerRef.current?.contains(t)) setMenu(false); };
     window.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onDown);
     return () => { window.removeEventListener("keydown", onKey); document.removeEventListener("pointerdown", onDown); };
   }, [menu]);
+  // A launch landed: the mark buds and the launches pill rings once (CSS, no re-render).
+  useEvents({ coin: () => { flash(wordRef.current?.querySelector(".mark"), "bud", 600); flash(pillRef.current, "ring", 1200); } });
   // The map fills the viewport and its canvas turns wheel events into zoom, so a footer under it
-  // could never be scrolled to; the map route drops the page padding and the footer instead.
-  const isMap = loc.pathname === "/map";
+  // could never be scrolled to; the map route drops the page padding and the footer instead. The
+  // shell follows the page being shown, so the layout swaps together with the page.
+  const isMap = shown.pathname === "/map";
   const ours = stats?.mode === "ours";
   const launches = ours ? stats?.ourCoins ?? stats?.coins : stats?.coins;
-  const pillTitle = error && !stats ? `API: ${error}` : stats ? (ours ? `${count(launches)} coins launched on Spore` : `${count(stats.coins)} coins indexed`) : "connecting to the API";
-  const pillText = error && !stats ? "api down" : stats ? (stats.backfill.done ? (ours ? `${count(launches)} launches` : `${count(stats.coins)} coins`) : `indexing ${count(stats.backfill.resolved)}/${count(stats.backfill.total)}`) : "…";
+  const down = !!error && !stats;
+  const indexing = !!stats && !stats.backfill.done;
+  const pillTitle = down ? "The Spore API is not answering right now" : stats ? (ours ? `${count(launches)} coins launched on Spore` : `${count(stats.coins)} coins indexed`) : "Connecting to the API";
+  const pillBody = down ? "api down" : !stats ? "…" : indexing ? `indexing ${count(stats.backfill.resolved)}/${count(stats.backfill.total)}`
+    : <><LiveNumber value={launches} format={count} kind="count" />{ours ? " launches" : " coins"}</>;
   return (
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
-      <header className="nav">
+      <header className={`nav ${scrolled ? "scrolled" : ""} ${isMap ? "solid" : ""} ${menu ? "menu-open" : ""}`}>
         <div className="nav-inner">
-          <NavLink to="/" className="wordmark" aria-label="Spore home"><Mark />spore</NavLink>
+          <NavLink ref={wordRef} to="/" className="wordmark" aria-label="Spore home"><Mark /><span className="wordmark-text" aria-hidden="true">spore</span></NavLink>
           <nav id="primary-nav" ref={menuRef} className={`nav-links ${menu ? "open" : ""}`} aria-label="Primary">
-            {PRIMARY.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
-            {/* Fees sits in the footer on desktop; the phone sheet is the only nav there, so it joins. */}
-            {menu && <NavLink to="/fees" onClick={closeMenu}>Fees &amp; rules</NavLink>}
+            <SlidingPill hover items="a.nav-item" />
+            {menu && <div className="nav-sheet-wallet"><NavWallet /></div>}
+            {PRIMARY.map(([to, label, title], i) => <NavLink key={to} to={to} title={title} className="nav-item" style={{ "--i": i } as CSSProperties}>{label}</NavLink>)}
+            {/* The phone sheet is the only nav there, so the footer's links join it. */}
+            {MORE.map(([to, label], i) => <NavLink key={to} to={to} className="sheet-only" onClick={closeMenu} style={{ "--i": PRIMARY.length + i } as CSSProperties}>{label}</NavLink>)}
           </nav>
           <div className="nav-right">
-            <span className={`api-pill ${error && !stats ? "down" : stats ? "up" : ""}`} title={pillTitle} aria-label={pillTitle}><LiveDot short />{pillText}</span>
-            <WalletMultiButton />
+            <span ref={pillRef} className={`api-pill ${down ? "down" : stats ? "up" : ""}`} title={pillTitle}><LiveDot short /><span aria-hidden="true">{pillBody}</span><span className="sr-only">{pillTitle}</span></span>
+            <NavLink to="/launch" className="btn sm accent nav-launch" title="Launch a coin (shortcut: L)"><Sprout />Launch</NavLink>
+            <NavWallet />
             <button ref={burgerRef} type="button" className="burger" aria-label={menu ? "Close menu" : "Open menu"} aria-expanded={menu} aria-controls="primary-nav" onClick={() => setMenu((m) => !m)}><i /><i /><i /></button>
           </div>
         </div>
       </header>
       {!isMap && <OfficialCoin />}
       <main id="main" tabIndex={-1} className={isMap ? "map-main" : undefined}>
-        {/* Keyed by path so a page change fades in; search-param changes (the launch form's parent) keep the page mounted. */}
-        <div className="route" key={loc.pathname}>
-          <Routes>
+        {/* Keyed by path so a page change plays the transition; search-param changes (the launch form's parent) keep the page mounted. */}
+        <div className={`route ${leaving ? "leaving" : ""}`} key={shown.pathname}>
+          <RouteBoundary><Routes location={shown}>
             <Route path="/" element={<Home />} />
             <Route path="/explore" element={<Explore />} />
             <Route path="/map" element={<MapPage />} />
@@ -168,31 +292,34 @@ function Shell() {
             <Route path="/fees" element={<Fees />} />
             <Route path="/claim" element={<Claim />} />
             <Route path="/docs/api" element={<ApiDocs />} />
+            <Route path="/agents" element={<Agents />} />
+            <Route path="/agents/:root" element={<AgentDetail />} />
             <Route path="*" element={<NotFound />} />
-          </Routes>
+          </Routes></RouteBoundary>
         </div>
       </main>
       {!isMap && <footer className="footer">
         <div className="footer-grid">
-          <div className="footer-col">
-            <span className="footer-brand"><Mark size={20} /><b>{BRAND.name}</b> · {BRAND.tagline}</span>
-            <p>A pump.fun launchpad for family trees. Launch a root with SOL, launch children under it, keep half of the creator fees. Spore's half buys <NavLink to={`/c/${SPORE_COIN}`}>$SPORE</NavLink> and locks it. Only coins launched here are listed.</p>
-            <p>Nothing custodial: every transaction is built in your browser and signed by your wallet. Memecoins are risky; read <NavLink to="/fees">the fees and rules</NavLink> first.</p>
+          <div className="footer-col footer-about">
+            <span className="footer-brand"><Mark size={22} /><b>{BRAND.name}</b><span>· {BRAND.tagline}</span></span>
+            <AboutCopy />
+            <p>{NON_CUSTODIAL}</p>
+            <p className="footer-risk">Memecoins are risky; read <NavLink to="/fees">the fees and rules</NavLink> first.</p>
           </div>
-          <div className="footer-col">
+          <div className="footer-col footer-site">
             <h4>Spore</h4>
-            <nav className="footer-nav" aria-label="Footer">
+            <nav className="footer-nav cols" aria-label="Footer">
               {PRIMARY.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
-              <NavLink to="/fees">Fees &amp; rules</NavLink>
-              <NavLink to="/docs/api">API</NavLink>
+              <NavLink to="/launch">Launch a coin</NavLink>
+              {MORE.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
             </nav>
           </div>
           <div className="footer-col">
             <h4>Elsewhere</h4>
             <nav className="footer-nav" aria-label="External links">
-              <a href="https://x.com/Sporemap" target="_blank" rel="noreferrer">X · @Sporemap ↗</a>
-              <a href="https://pump.fun" target="_blank" rel="noreferrer">pump.fun ↗</a>
-              <a href="https://solscan.io" target="_blank" rel="noreferrer">Solscan ↗</a>
+              <a href="https://x.com/Sporemap" target="_blank" rel="noreferrer">X · @Sporemap <span className="ext" aria-hidden="true">↗</span></a>
+              <a href="https://pump.fun" target="_blank" rel="noreferrer">pump.fun <span className="ext" aria-hidden="true">↗</span></a>
+              <a href="https://solscan.io" target="_blank" rel="noreferrer">Solscan <span className="ext" aria-hidden="true">↗</span></a>
             </nav>
           </div>
           <div className="footer-col">
@@ -202,9 +329,10 @@ function Shell() {
           </div>
         </div>
         <div className="footer-bottom">
-          <span><LiveDot short />{pillText}{stats?.solUsd ? ` · SOL $${stats.solUsd.toFixed(2)}` : ""}</span>
-          <span>half of creator fees is all Spore earns · no launch fee · no keys, no funds, no promises</span>
+          <span className="footer-live" title={pillTitle}><LiveDot short />{down ? "api down" : !stats ? "connecting…" : indexing ? `indexing ${count(stats.backfill.resolved)}/${count(stats.backfill.total)}` : `${count(launches)} ${ours ? "launches" : "coins"}`}{stats?.solUsd ? ` · SOL $${stats.solUsd.toFixed(2)}` : ""}</span>
+          <span>{FOOTER_BOTTOM}</span>
         </div>
+        <FooterWordmark />
       </footer>}
     </div>
   );

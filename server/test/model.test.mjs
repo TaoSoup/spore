@@ -124,3 +124,19 @@ test("a root quoted in a listed mint with a known USD price (PUMP) prices its wh
   again.load();
   assert.equal(again.quoteUsd.get(PUMP), 0.004, "quote prices persist");
 });
+
+test("computed(): a large index refreshes in background slices and serves the last table meanwhile", async () => {
+  const { model } = buildTree();
+  const first = model.computed();
+  const want = Object.fromEntries([K.ROOT, K.A, K.G].map((k) => [k, { ...first.get(k) }]));
+  model.computeSliceMinCoins = 1; // treat this small tree like the mainnet index
+  model.derivedAt = 0; // the minimum interval since the last pass has passed
+  model.version++; // something changed
+  const during = model.computed();
+  assert.equal(during, first, "the last finished table is served while the background pass runs");
+  for (let i = 0; i < 50 && model.derivedVersion !== model.version; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(model.derivedVersion, model.version, "the background pass finished");
+  const after = model.computed();
+  assert.notEqual(after, first);
+  for (const k of [K.ROOT, K.A, K.G]) assert.deepEqual({ ...after.get(k) }, want[k], `same numbers for ${k}`);
+});

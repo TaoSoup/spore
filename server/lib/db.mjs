@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS coins (
   created_at INTEGER, created_slot INTEGER, created_probe INTEGER NOT NULL DEFAULT 0,
   shares TEXT, shares_at INTEGER NOT NULL DEFAULT 0,
   refreshed_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
-  fee_paid TEXT
+  fee_paid TEXT, pool_vquote TEXT
 );
 CREATE INDEX IF NOT EXISTS coins_quote ON coins(quote_mint);
 CREATE INDEX IF NOT EXISTS coins_depth ON coins(depth);
@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
   tier TEXT NOT NULL DEFAULT 'partner', created_at INTEGER NOT NULL, revoked_at INTEGER, last_used_at INTEGER,
   requests INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS agents (
+  root_mint TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'dry' CHECK (status IN ('dry', 'paused')),
+  profile_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  last_run_at INTEGER, next_run_at INTEGER, runs INTEGER NOT NULL DEFAULT 0, proposals INTEGER NOT NULL DEFAULT 0,
+  last_score INTEGER, last_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS agent_proposals (
+  id TEXT PRIMARY KEY, root_mint TEXT NOT NULL, created_at INTEGER NOT NULL,
+  name TEXT NOT NULL, symbol TEXT NOT NULL, description TEXT NOT NULL, image_file TEXT,
+  score INTEGER NOT NULL, reason TEXT NOT NULL, sim_json TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'rejected')), rejected_reason TEXT,
+  source TEXT NOT NULL DEFAULT 'fallback', runners_json TEXT, metadata_uri TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_proposals_root ON agent_proposals(root_mint, created_at);
+CREATE INDEX IF NOT EXISTS agent_proposals_created ON agent_proposals(created_at);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -87,6 +102,9 @@ export class Db {
     // v2: the launch fee a verified spawn paid. Guarded by the column's absence rather than the
     // version alone, since a fresh database already has it from the CREATE TABLE above.
     if (current < 2 && !this.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "fee_paid")) this.db.exec("ALTER TABLE coins ADD COLUMN fee_paid TEXT");
+    // A migrated coin's pool `virtual_quote_reserves` (signed i128 as decimal TEXT), part of its pool price
+    // (pricing.mjs poolPriceQuote). Guarded by the column's absence alone, so it needs no version bump.
+    if (!this.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "pool_vquote")) this.db.exec("ALTER TABLE coins ADD COLUMN pool_vquote TEXT");
     // v3: `coins.updated_at` moves from seconds to milliseconds (the map's delta-sync stamp,
     // DESIGN §11.5: `since=<ms>` returns the rows with `updated_at > since`) and `meta.attempts`
     // counts consecutive failed fetches so the retry backoff survives a restart.
@@ -94,7 +112,9 @@ export class Db {
       if (!this.db.prepare("PRAGMA table_info(meta)").all().some((c) => c.name === "attempts")) this.db.exec("ALTER TABLE meta ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
       this.db.exec("UPDATE coins SET updated_at = updated_at * 1000 WHERE updated_at > 0 AND updated_at < 100000000000");
     }
-    // `api_keys` (partner API keys, DESIGN §12) is a new table only, so CREATE IF NOT EXISTS above is its migration.
+    // `api_keys` (partner API keys, DESIGN §12) and `agents` / `agent_proposals` (root agents,
+    // DESIGN §13; statements in lib/agents/registry.mjs) are new tables only, so CREATE IF NOT
+    // EXISTS above is their migration.
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -111,13 +131,13 @@ export class Db {
         name = COALESCE(excluded.name, name), symbol = COALESCE(excluded.symbol, symbol), uri = COALESCE(excluded.uri, uri), onchain_at = MAX(excluded.onchain_at, onchain_at)`),
       mintsAll: p("SELECT * FROM mints"),
       coinUpsert: p(`INSERT INTO coins (mint, curve, depth, quote_mint, creator, tracked, vtr, vqr, rtr, rqr, supply, ivqr, complete, migrated, mayhem, holder_reward, creator_fee_bps,
-          pool, pool_base_vault, pool_quote_vault, pool_base, pool_quote, created_at, created_slot, created_probe, shares, shares_at, refreshed_at, updated_at, fee_paid)
+          pool, pool_base_vault, pool_quote_vault, pool_base, pool_quote, pool_vquote, created_at, created_slot, created_probe, shares, shares_at, refreshed_at, updated_at, fee_paid)
         VALUES (@mint, @curve, @depth, @quoteMint, @creator, @tracked, @vtr, @vqr, @rtr, @rqr, @supply, @ivqr, @complete, @migrated, @mayhem, @holderReward, @creatorFeeBps,
-          @pool, @poolBaseVault, @poolQuoteVault, @poolBase, @poolQuote, @createdAt, @createdSlot, @createdProbe, @shares, @sharesAt, @refreshedAt, @updatedAt, @feePaid)
+          @pool, @poolBaseVault, @poolQuoteVault, @poolBase, @poolQuote, @poolVirtualQuote, @createdAt, @createdSlot, @createdProbe, @shares, @sharesAt, @refreshedAt, @updatedAt, @feePaid)
         ON CONFLICT(mint) DO UPDATE SET curve = excluded.curve, depth = excluded.depth, quote_mint = excluded.quote_mint, creator = excluded.creator, tracked = MAX(excluded.tracked, tracked),
           vtr = excluded.vtr, vqr = excluded.vqr, rtr = excluded.rtr, rqr = excluded.rqr, supply = excluded.supply, ivqr = excluded.ivqr,
           complete = excluded.complete, migrated = excluded.migrated, mayhem = excluded.mayhem, holder_reward = excluded.holder_reward, creator_fee_bps = excluded.creator_fee_bps,
-          pool = excluded.pool, pool_base_vault = excluded.pool_base_vault, pool_quote_vault = excluded.pool_quote_vault, pool_base = excluded.pool_base, pool_quote = excluded.pool_quote,
+          pool = excluded.pool, pool_base_vault = excluded.pool_base_vault, pool_quote_vault = excluded.pool_quote_vault, pool_base = excluded.pool_base, pool_quote = excluded.pool_quote, pool_vquote = excluded.pool_vquote,
           created_at = COALESCE(excluded.created_at, created_at), created_slot = COALESCE(excluded.created_slot, created_slot), created_probe = MAX(excluded.created_probe, created_probe),
           shares = COALESCE(excluded.shares, shares), shares_at = MAX(excluded.shares_at, shares_at), refreshed_at = excluded.refreshed_at, updated_at = excluded.updated_at,
           fee_paid = COALESCE(excluded.fee_paid, fee_paid)`),
@@ -177,7 +197,7 @@ export class Db {
       mint: c.mint, curve: c.curve, depth: c.depth, quoteMint: c.quoteMint ?? null, creator: c.creator, tracked: c.tracked ? 1 : 0,
       vtr: c.virtualTokenReserves, vqr: c.virtualQuoteReserves, rtr: c.realTokenReserves, rqr: c.realQuoteReserves, supply: c.tokenTotalSupply, ivqr: c.initialVirtualQuoteReserves ?? "0",
       complete: c.complete ? 1 : 0, migrated: c.migrated ? 1 : 0, mayhem: c.mayhem ? 1 : 0, holderReward: c.holderReward ? 1 : 0, creatorFeeBps: c.creatorFeeBps ?? 0,
-      pool: c.pool ?? null, poolBaseVault: c.poolBaseVault ?? null, poolQuoteVault: c.poolQuoteVault ?? null, poolBase: c.poolBase ?? null, poolQuote: c.poolQuote ?? null,
+      pool: c.pool ?? null, poolBaseVault: c.poolBaseVault ?? null, poolQuoteVault: c.poolQuoteVault ?? null, poolBase: c.poolBase ?? null, poolQuote: c.poolQuote ?? null, poolVirtualQuote: c.poolVirtualQuote ?? null,
       createdAt: c.createdAt ?? null, createdSlot: c.createdSlot ?? null, createdProbe: c.createdProbe ? 1 : 0, shares: c.shares ? JSON.stringify(c.shares) : null, sharesAt: c.sharesAt ?? 0,
       refreshedAt: c.refreshedAt ?? 0, updatedAt: c.updatedAt ?? Date.now(), feePaid: c.feePaid ?? null,
     });
@@ -189,7 +209,7 @@ export class Db {
       mint: r.mint, curve: r.curve, depth: r.depth, quoteMint: r.quote_mint, creator: r.creator, tracked: !!r.tracked,
       virtualTokenReserves: r.vtr, virtualQuoteReserves: r.vqr, realTokenReserves: r.rtr, realQuoteReserves: r.rqr, tokenTotalSupply: r.supply, initialVirtualQuoteReserves: r.ivqr,
       complete: !!r.complete, migrated: !!r.migrated, mayhem: !!r.mayhem, holderReward: !!r.holder_reward, creatorFeeBps: r.creator_fee_bps,
-      pool: r.pool, poolBaseVault: r.pool_base_vault, poolQuoteVault: r.pool_quote_vault, poolBase: r.pool_base, poolQuote: r.pool_quote,
+      pool: r.pool, poolBaseVault: r.pool_base_vault, poolQuoteVault: r.pool_quote_vault, poolBase: r.pool_base, poolQuote: r.pool_quote, poolVirtualQuote: r.pool_vquote ?? null,
       createdAt: r.created_at, createdSlot: r.created_slot, createdProbe: !!r.created_probe, shares: r.shares ? JSON.parse(r.shares) : null, sharesAt: r.shares_at,
       refreshedAt: r.refreshed_at, updatedAt: r.updated_at, feePaid: r.fee_paid ?? null,
     }));

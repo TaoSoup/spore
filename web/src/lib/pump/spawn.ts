@@ -80,13 +80,15 @@ export async function buildFeeSplitTx(conn: Connection, authority: PublicKey, mi
 
 /// Launches a coin through Spore. `parentMint` null = a root coin quoted in SOL (the launch tab's
 /// default); a pump coin = a child quoted in that coin. Both carry the same split and launch fee.
-export async function buildSpawnTx(conn: Connection, creator: PublicKey, parentMint: PublicKey | null, form: SpawnForm, shares: Share[], launchFee: LaunchFee = null): Promise<SpawnBuild> {
+/// `seed`: a root's agent wallet gets a little SOL from the creator inside the same signature (DESIGN
+/// §13.1): the gas it needs to claim its first fees, since it is born with nothing.
+export async function buildSpawnTx(conn: Connection, creator: PublicKey, parentMint: PublicKey | null, form: SpawnForm, shares: Share[], launchFee: LaunchFee = null, seed: LaunchFee = null): Promise<SpawnBuild> {
   if (!form.name.trim() || form.name.length > 32) throw new Error("Name: 1–32 characters");
   if (!/^[A-Za-z0-9]{1,13}$/.test(form.symbol)) throw new Error("Ticker: 1–13 letters or digits");
   if (!/^https:\/\//.test(form.uri)) throw new Error("Metadata URI must be https");
   if (form.creatorFeeBps !== undefined && (!Number.isInteger(form.creatorFeeBps) || form.creatorFeeBps < 0 || form.creatorFeeBps > 300)) throw new Error("Creator fee: 0–300 bps");
   const mint = Keypair.generate();
-  const fee = launchFee && launchFee.lamports > 0n ? [SystemProgram.transfer({ fromPubkey: creator, toPubkey: launchFee.to, lamports: launchFee.lamports })] : [];
+  const fee = [launchFee, seed].filter((f): f is NonNullable<LaunchFee> => !!f && f.lamports > 0n).map((f) => SystemProgram.transfer({ fromPubkey: creator, toPubkey: f.to, lamports: f.lamports }));
   const cfg = (quoteMint: PublicKey, quoteTokenProgram: PublicKey) => Promise.all([
     PUMP_SDK.createFeeSharingConfig({ creator, mint: mint.publicKey, pool: null }),
     PUMP_SDK.updateFeeSharesV2({ authority: creator, mint: mint.publicKey, currentShareholders: [creator], newShareholders: shares.map((s) => ({ address: s.address, shareBps: s.shareBps })), quoteMint, quoteTokenProgram, bondingCurveComplete: false }),

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { copyText } from "../../lib/hooks";
+import SlidingPill from "../ui/SlidingPill";
 
 export type Lang = "json" | "bash" | "js" | "html" | "text";
 
@@ -67,12 +68,12 @@ export function CopyButton({ text, label = "Copy", className = "" }: { text: str
   };
   return (
     <button type="button" className={`docs-copy ${state} ${className}`} onClick={onClick} aria-live="polite">
-      {state === "done" ? (
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
-      ) : (
-        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M10.5 3.2V3a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.3" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
-      )}
-      <span>{state === "done" ? "Copied" : state === "fail" ? "Press ⌘C" : label}</span>
+      {/* both glyphs are always there; CSS morphs the copy icon into the check */}
+      <span className="docs-copy-ic" aria-hidden="true">
+        <svg className="ic-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8.5" height="8.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M10.5 3.2V3a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.3" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+        <svg className="ic-check" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" pathLength={1} /></svg>
+      </span>
+      <span key={state} className="docs-copy-t">{state === "done" ? "Copied" : state === "fail" ? "Press ⌘C" : label}</span>
     </button>
   );
 }
@@ -83,7 +84,7 @@ export function CodeBlock({ code, lang = "text", title, caption, tall = false, w
   return (
     <figure className="docs-code">
       <div className="docs-code-bar">
-        <span className="docs-code-lang">{title ?? LANG_LABEL[lang]}</span>
+        <span className="docs-code-lang"><i className={`docs-code-dot ${lang}`} aria-hidden="true" />{title ?? LANG_LABEL[lang]}</span>
         <span className="docs-code-actions">{actions}<CopyButton text={code} /></span>
       </div>
       <pre className={[tall && "tall", wrap && "wrap"].filter(Boolean).join(" ") || undefined} tabIndex={0}><code>{highlight(code, lang)}</code></pre>
@@ -118,6 +119,7 @@ export function CodeTabs({ tabs, tall = false, label, actions, value, onChange }
     <figure className="docs-code">
       <div className="docs-code-bar">
         <div className="docs-tabs" role="tablist" aria-label={label}>
+          <SlidingPill items="button" />
           {tabs.map((t, i) => (
             <button key={t.id} ref={(el) => { refs.current[i] = el; }} type="button" role="tab" id={`${base}-t-${t.id}`} aria-selected={t.id === cur.id} aria-controls={`${base}-p`} tabIndex={t.id === cur.id ? 0 : -1} onClick={() => setActive(t.id)} onKeyDown={(e) => onKey(e, i)}>{t.label}</button>
           ))}

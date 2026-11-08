@@ -10,6 +10,7 @@ import { buildFeeSplitTx, sendAndConfirm } from "../lib/pump";
 import { policyShares } from "../lib/flow";
 import SplitPreview from "./SplitPreview";
 import { Ext } from "./Bits";
+import { CHILD_SPLIT_YOU } from "../lib/copy";
 
 export default function FeeSplitAction({ coin, onDone }: { coin: Coin; onDone: () => void }) {
   const { connection } = useConnection();
@@ -45,12 +46,12 @@ export default function FeeSplitAction({ coin, onDone }: { coin: Coin; onDone: (
   };
 
   return (
-    <section className="card pad">
-      <span className="eyebrow">Your coin</span>
+    <section className="card pad fee-lock">
+      <span className="card-label">Your coin</span>
       <h3>Lock the fee split</h3>
-      <p className="muted">This coin has no fee-sharing config yet, so all creator fees stay with you and the coin is not listed as a Spore launch. Locking the split writes the creator/Spore shares on-chain, paid in the parent coin. It is set once; the admin is revoked, so it can never change.</p>
+      <p className="muted">This coin has no fee-sharing config yet, so all creator fees stay with you and the coin is not listed as a Spore launch. Locking writes the split on-chain: {CHILD_SPLIT_YOU}. It is set once; the admin is revoked, so it can never change.</p>
       {elig?.shares.length ? <SplitPreview shares={elig.shares} you={me} parentCreator={elig.parentCreator} grandparentCreator={elig.grandparentCreator} platform={elig.platform} parentSymbol={parent.symbol} grandparentSymbol={coin.ancestors[1]?.symbol ?? null} /> : <p className="muted">Computing the split…</p>}
-      <button className="btn accent" type="button" disabled={state.busy || !elig?.shares.length} onClick={lock}>{state.busy ? "Waiting for your wallet…" : "Lock fee split"}</button>
+      <button className="btn soft" type="button" disabled={state.busy || !elig?.shares.length} onClick={lock}>{state.busy ? "Waiting for your wallet…" : "Lock fee split"}</button>
       {state.sig && <p className="hint">Locked. <Ext href={solscanTx(state.sig)}>View transaction ↗</Ext></p>}
       {state.error && <p className="error">{state.error}</p>}
     </section>

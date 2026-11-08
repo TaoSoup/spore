@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import SporeCanvas from "../components/SporeCanvas";
 import { CodeBlock, CodeTabs, CopyButton } from "../components/docs/CodeBlock";
@@ -7,6 +7,10 @@ import SnippetGenerator from "../components/docs/SnippetGenerator";
 import StreamConsole from "../components/docs/StreamConsole";
 import { EX, MUSHROOM_MINT, SPORE_MINT } from "../components/docs/examples";
 import { API_ORIGIN, json } from "../components/docs/util";
+import { useActiveSection, useReadProgress } from "../components/docs/useActiveSection";
+import { ApiIllus } from "../components/docs/illus/StoryIllus";
+import SlidingPill from "../components/ui/SlidingPill";
+import Reveal from "../components/ui/Reveal";
 import "../components/docs.css";
 
 const BASE = `${API_ORIGIN}/v1`;
@@ -26,22 +30,10 @@ const TOC = [
 ] as const;
 const ENDPOINTS = [["ep-family", "/coin/:mint/family"], ["ep-tree", "/tree/:mint"], ["ep-map", "/map"], ["ep-heat", "/heat"]] as const;
 
-/// Highlights the section being read. The line sits a third of the way down the viewport, so a
-/// short section still lights up before the next one takes over.
-function useActiveSection(ids: readonly string[]) {
-  const [active, setActive] = useState(ids[0]);
-  useEffect(() => {
-    const els = ids.map((id) => document.getElementById(id)).filter((x): x is HTMLElement => !!x);
-    if (!els.length || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver((entries) => {
-      const hit = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-      if (hit) setActive(hit.target.id);
-    }, { rootMargin: "-30% 0px -65% 0px" });
-    els.forEach((el) => io.observe(el));
-    return () => io.disconnect();
-  }, [ids]);
-  return active;
-}
+/// A section heading: the serif numeral, then the title as a link to itself.
+const Head = ({ id, hid, n, children }: { id: string; hid: string; n: string; children: ReactNode }) => (
+  <h2 id={hid} className="docs-h2"><i className="numeral" aria-hidden="true">{n}</i><a href={`#${id}`}>{children}</a></h2>
+);
 
 const QUICK_CURL = `# The family of $SPORE: root, parent, ancestors, top children, locked value
 curl ${BASE}/coin/${SPORE_MINT}/family
@@ -148,6 +140,9 @@ const STREAM_EVENTS: { type: string; when: string; shape: string }[] = [
 export default function ApiDocs() {
   useEffect(() => { document.title = "API & embeds · Spore"; return () => { document.title = "Spore"; }; }, []);
   const active = useActiveSection(TOC.map(([id]) => id));
+  const activeEp = useActiveSection(ENDPOINTS.map(([id]) => id));
+  const bar = useRef<HTMLElement>(null);
+  useReadProgress(bar, ".docs-main");
   const c = EX.counts;
   return (
     <>
@@ -156,24 +151,33 @@ export default function ApiDocs() {
         <aside className="docs-toc" aria-label="On this page">
           <span className="docs-toc-title">API v1</span>
           <nav>
+            <i ref={bar} className="story-nav-progress" aria-hidden="true" />
+            <SlidingPill items="a" />
             {TOC.map(([id, label]) => (
               <a key={id} href={`#${id}`} className={active === id ? "on" : undefined} aria-current={active === id ? "location" : undefined}>{label}</a>
             ))}
           </nav>
-          <div className="docs-toc-sub">
-            {ENDPOINTS.map(([id, p]) => <a key={id} href={`#${id}`} className="mono">{p}</a>)}
+          <div className="docs-toc-sub" aria-label="Endpoints">
+            <span className="label">Endpoints</span>
+            {ENDPOINTS.map(([id, p]) => <a key={id} href={`#${id}`} className={active === "endpoints" && activeEp === id ? "on" : undefined}><b>GET</b><span className="mono">{p}</span></a>)}
+            <a href="#ep-stream" className={active === "stream" ? "on" : undefined}><b>SSE</b><span className="mono">/stream</span></a>
           </div>
         </aside>
 
         <div className="docs-main">
           <header className="page-head docs-hero">
+            <div className="docs-hero-top">
+            <div className="docs-hero-text">
             <span className="eyebrow">Developers · API v1</span>
-            <h1>The family tree, <em>as an API</em>.</h1>
+            <h1>The family tree, as an <em>API</em>.</h1>
             <p className="lead">Every pump.fun coin quoted in another pump.fun coin, its parents, its children and the liquidity they lock, live. Read-only JSON, a live event stream and two drop-in widgets for trading terminals and coin pages.</p>
             <div className="docs-hero-actions">
               <a className="btn accent" href="#quick-start">Quick start</a>
               <a className="btn" href="/v1/openapi.json" target="_blank" rel="noreferrer">OpenAPI spec ↗</a>
               <a className="btn ghost" href={MAIL}>Request a partner key</a>
+            </div>
+            </div>
+            <figure className="docs-hero-art" aria-hidden="true"><ApiIllus /></figure>
             </div>
             <div className="docs-facts">
               <div className="docs-fact base"><span>Base URL</span><b className="mono">{BASE}</b><CopyButton text={BASE} /></div>
@@ -183,8 +187,8 @@ export default function ApiDocs() {
             </div>
           </header>
 
-          <section id="overview" className="docs-section" aria-labelledby="overview-h">
-            <h2 id="overview-h"><a href="#overview">Overview</a></h2>
+          <Reveal as="section" id="overview" className="docs-section" aria-labelledby="overview-h">
+            <Head id="overview" hid="overview-h" n="01">Overview</Head>
             <div className="prose">
               <p>pump.fun's <code>create_v2</code> lets a coin be quoted in another pump.fun coin instead of SOL. Spore indexes that whole custom-pair ecosystem straight from the chain: every root that has a child, and every coin below it, about {n(Math.round(EX.stream.stats.coins / 1000) * 1000)} coins in {n(Math.round(c.roots / 100) * 100)} trees today. It is the data behind the <Link to="/map">map</Link> and every coin page on this site. <Link to="/how">How it works</Link> explains the mechanics.</p>
             </div>
@@ -202,10 +206,10 @@ export default function ApiDocs() {
               <li><b>Errors</b> are <code>{"{ \"error\": \"…\" }"}</code> with the status: 400 malformed input, 401 bad key, 404 not a pump.fun mint (or no such route), 405 anything but GET, 429 over the limit and 503 while an on-chain lookup is unavailable, both with <code className="nw">Retry-After</code>.</li>
               <li><b>Read-only.</b> Only <code>GET</code> (plus <code>HEAD</code> and <code>OPTIONS</code>). No endpoint signs, sends or accepts a transaction, and none ever will.</li>
             </ul>
-          </section>
+          </Reveal>
 
-          <section id="quick-start" className="docs-section" aria-labelledby="qs-h">
-            <h2 id="qs-h"><a href="#quick-start">Quick start</a></h2>
+          <Reveal as="section" id="quick-start" className="docs-section" aria-labelledby="qs-h">
+            <Head id="quick-start" hid="qs-h" n="02">Quick start</Head>
             <p className="docs-intro">No sign-up: the public tier needs no key. These use <Link to={`/c/${SPORE_MINT}`}>$SPORE</Link>, a live root with children on the map.</p>
             <CodeTabs label="Quick start examples" tabs={[
               { id: "curl", label: "curl", lang: "bash", code: QUICK_CURL },
@@ -213,10 +217,10 @@ export default function ApiDocs() {
               { id: "sse", label: "Stream", lang: "js", code: QUICK_SSE },
               { id: "node", label: "Node + key", lang: "js", code: QUICK_NODE },
             ]} />
-          </section>
+          </Reveal>
 
-          <section id="endpoints" className="docs-section" aria-labelledby="ep-h">
-            <h2 id="ep-h"><a href="#endpoints">Endpoints</a></h2>
+          <Reveal as="section" id="endpoints" className="docs-section" aria-labelledby="ep-h">
+            <Head id="endpoints" hid="ep-h" n="03">Endpoints</Head>
             <p className="docs-intro">All under <code>{BASE}</code>. Examples are real responses recorded from the index; <b>Run live</b> calls the same route from this page on the public tier.</p>
 
             <EndpointCard id="ep-family" path="/v1/coin/:mint/family"
@@ -259,10 +263,10 @@ export default function ApiDocs() {
               request={`curl ${BASE}/heat`}
               examples={[{ id: "heat", label: "heat", value: EX.heat, caption: <>{c.heatShown} of {n(c.heatMints)} mints shown.</> }]}
               live={() => "/v1/heat"} />
-          </section>
+          </Reveal>
 
-          <section id="stream" className="docs-section" aria-labelledby="stream-h">
-            <h2 id="stream-h"><a href="#stream">Live stream</a></h2>
+          <Reveal as="section" id="stream" className="docs-section" aria-labelledby="stream-h">
+            <Head id="stream" hid="stream-h" n="04">Live stream</Head>
             <div className="docs-endpoint card" id="ep-stream">
               <header className="docs-endpoint-head">
                 <h3><span className="docs-method">GET</span><code className="docs-path"><PathText path="/v1/stream" /></code></h3>
@@ -295,10 +299,10 @@ export default function ApiDocs() {
                 <StreamConsole />
               </div>
             </div>
-          </section>
+          </Reveal>
 
-          <section id="embeds" className="docs-section" aria-labelledby="embeds-h">
-            <h2 id="embeds-h"><a href="#embeds">Embeds</a></h2>
+          <Reveal as="section" id="embeds" className="docs-section" aria-labelledby="embeds-h">
+            <Head id="embeds" hid="embeds-h" n="05">Embeds</Head>
             <div className="prose">
               <p>Two widgets, one iframe each, no script and no key. They draw with the same engine as the <Link to="/map">Spore map</Link>, without the site around them, and fit any frame from 320 × 240 up. They never navigate your page: <b>Launch under on Spore ↗</b> and <b>Powered by Spore</b> open sporepad.com in a new tab.</p>
             </div>
@@ -313,10 +317,10 @@ export default function ApiDocs() {
               { name: "focus", in: "query", type: "string (base58)", desc: "Map only: the coin to open on." },
             ]} />
             <p className="hint docs-embed-note">Framing is allowed from any site on <code>/embed/*</code> only; every other Spore page refuses to be framed. If you sandbox the frame, keep <code>allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox</code> so the widget can load its data and open Spore in a new tab.</p>
-          </section>
+          </Reveal>
 
-          <section id="keys" className="docs-section" aria-labelledby="keys-h">
-            <h2 id="keys-h"><a href="#keys">Keys &amp; limits</a></h2>
+          <Reveal as="section" id="keys" className="docs-section" aria-labelledby="keys-h">
+            <Head id="keys" hid="keys-h" n="06">Keys &amp; limits</Head>
             <div className="docs-table-wrap">
               <table className="table docs-tiers">
                 <thead><tr><th scope="col"><span className="docs-sr">Limit</span></th><th scope="col">Public</th><th scope="col">Partner</th></tr></thead>
@@ -350,10 +354,10 @@ export default function ApiDocs() {
                 <a className="btn" href={X_URL} target="_blank" rel="noreferrer">DM @Sporemap ↗</a>
               </div>
             </div>
-          </section>
+          </Reveal>
 
-          <section id="terms" className="docs-section" aria-labelledby="terms-h">
-            <h2 id="terms-h"><a href="#terms">Attribution &amp; terms</a></h2>
+          <Reveal as="section" id="terms" className="docs-section" aria-labelledby="terms-h">
+            <Head id="terms" hid="terms-h" n="07">Attribution &amp; terms</Head>
             <ul className="docs-terms">
               <li><b>Credit the data.</b> Wherever Spore data appears, show <b>"Data by Spore"</b> with a link to <a href="https://sporepad.com" target="_blank" rel="noreferrer">sporepad.com</a> (or to the coin's <code>links.spore</code>). The embeds already carry it.</li>
               <li><b>Free.</b> The public tier needs no sign-up; partner keys are free on request.</li>
@@ -361,17 +365,17 @@ export default function ApiDocs() {
               <li><b>Be gentle.</b> Cache, use <code>since=</code> and the stream rather than tight polling. A key that keeps ignoring its limits can be revoked.</li>
             </ul>
             <CodeBlock code={ATTRIBUTION} lang="html" title="Attribution link" />
-          </section>
+          </Reveal>
 
-          <section id="openapi" className="docs-section" aria-labelledby="openapi-h">
-            <h2 id="openapi-h"><a href="#openapi">OpenAPI</a></h2>
+          <Reveal as="section" id="openapi" className="docs-section" aria-labelledby="openapi-h">
+            <Head id="openapi" hid="openapi-h" n="08">OpenAPI</Head>
             <p className="docs-intro">Every <code>/v1</code> route with its parameters, schemas and examples, as an OpenAPI 3.1 document: the six paths above, the response schemas (<code>Family</code>, <code>Tree</code>, <code>MapFull</code>, <code>MapDelta</code>, <code>Heat</code>, the stream events…) and both ways to send a key. Import it into Postman or Insomnia, or generate a typed client.</p>
             <CodeBlock lang="bash" title="Shell" code={`curl ${BASE}/openapi.json -o spore-openapi.json\n\n# a typed TypeScript client, for example\nnpx @openapitools/openapi-generator-cli generate \\\n  -i ${BASE}/openapi.json -g typescript-fetch -o ./spore-client`} />
             <div className="docs-foot">
               <a className="btn" href="/v1/openapi.json" target="_blank" rel="noreferrer">Open openapi.json ↗</a>
               <Link className="btn ghost" to="/map">See the data on the map</Link>
             </div>
-          </section>
+          </Reveal>
         </div>
       </div>
     </>

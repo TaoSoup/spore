@@ -1,11 +1,11 @@
-/* Coin page, trade widget, price chart, breadcrumb and stat extras. Uses the brand tokens from
-   styles.css (--accent, --violet, --teal, --bg, --text, --muted, --card, --line, --radius) and
-   adds only the classes these components introduce; the shared ones (.card, .seg, .btn, .chip,
-   .quote, .stat …) are restyled in place through a more specific selector, never redefined. */
+/* Coin page (coin lane, redesign 2026-10-20): header, stats, chart, creator fees, activity, details,
+   trade widget, phone bar and sheet. It loads after styles.css and overrides that file's "coin page",
+   "chart" and "trade widget" blocks, using the redesign tokens only. Kept for other owners:
+   .delta (Stat renders it) and the .confirm* class names (launch's useClaimFlow uses them). */
 
-/* ---------- change pill (price tile, chart legend, mobile bar) */
-.delta { display: inline-flex; align-items: baseline; gap: 4px; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; vertical-align: middle; border: 1px solid var(--line-soft); color: var(--muted); background: rgba(0,0,0,.25); }
-.delta small { font-weight: 400; font-size: 10px; opacity: .75; }
+/* ---------- change pill (header, chart legend, phone bar, Stat) */
+.delta { display: inline-flex; align-items: baseline; gap: 5px; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; vertical-align: middle; white-space: nowrap; border: 1px solid var(--line-soft); color: var(--muted); background: rgba(0,0,0,.25); font-variant-numeric: tabular-nums; }
+.delta small { font-weight: 400; font-size: 11px; color: inherit; opacity: .85; }
 .delta.up { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); background: var(--good-soft); }
 .delta.down { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: var(--bad-soft); }
 .stat > span .delta { margin-left: 8px; }
@@ -13,35 +13,331 @@
 /* ---------- breadcrumb with coin images */
 .crumbs .crumb { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 4px; }
 .crumbs .crumb.quote { padding-left: 8px; }
-.crumbs .crumb .logo { width: 18px; height: 18px; border-radius: 50%; font-size: 9px; flex: none; }
+.crumbs .crumb .logo { width: 18px; height: 18px; border-radius: 50%; font-size: 11px; flex: none; }
 .crumbs .crumb.self { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--line-2); }
-.crumb-sol { width: 8px; height: 8px; border-radius: 50%; margin-right: 2px; background: linear-gradient(135deg, #9945ff, #14f195); display: inline-block; }
+.crumbs > .crumb-seg:first-child .crumb { padding-left: 4px; }
+.crumbs.priced { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.crumbs.priced .crumb.quote { padding: 2px 9px 2px 7px; border-radius: 999px; background: var(--glass); box-shadow: inset 0 0 0 1px var(--line-soft); color: var(--ink-2); font-size: 12px; }
+.crumb-sol { width: 8px; height: 8px; border-radius: 50%; margin-right: 2px; background: linear-gradient(135deg, #9945ff, #14f195); display: inline-block; flex: none; }
 
-/* ---------- header: copyable addresses */
+/* ---------- copy buttons (details) */
 .addr-row { display: inline-flex; align-items: center; gap: 4px; }
-.copy { display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--faint); transition: color .15s, background .15s; }
-.copy svg { width: 13px; height: 13px; }
+.copy { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); transition: color .15s, background .15s; }
 .copy:hover { color: var(--accent); background: var(--accent-soft); }
-.coin-meta .links a + a { margin-left: 0; }
+@media (pointer: coarse) { .copy { width: 40px; height: 40px; } }
+
+/* ---------- page layout: main column + a sticky trade panel (desktop) */
+.coin-page { gap: var(--s4); }
+.coin-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 360px); gap: var(--s5); align-items: start; }
+.coin-main { display: grid; gap: 20px; min-width: 0; }
+.coin-side { display: grid; gap: var(--s3); position: sticky; top: calc(var(--nav-h) + 16px); align-self: start; }
+@media (max-height: 720px) { .coin-side { position: static; } }
+.zero { color: var(--faint); }
+.coin-lock:empty, .coin-about:empty { display: none; }
+.card-label { margin: 0; font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+/* ---------- "New to Spore?" strip (first visit from a shared link) */
+.new-strip { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 4px 4px 4px 14px; border-radius: 999px; border: 1px solid rgba(var(--violet-rgb), .35); background: linear-gradient(90deg, var(--violet-soft), rgba(var(--accent-rgb), .05) 70%, transparent); font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.4; }
+.new-strip p { flex: 1; min-width: 0; }
+.new-strip b { color: var(--ink); font-weight: 600; }
+.new-strip a { color: var(--accent); font-weight: 500; white-space: nowrap; }
+.new-strip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--violet); flex: none; }
+.new-strip-x { width: 32px; height: 32px; flex: none; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; }
+.new-strip-x:hover { color: var(--ink); background: var(--glass-2); }
+@media (pointer: coarse) { .new-strip-x { width: 44px; height: 44px; margin: -2px 0; } }
+
+/* ---------- header: identity left, price right */
+.coin-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "logo id price" "logo addr act"; column-gap: 20px; row-gap: 8px; align-items: start; }
+.coin-head .coin-logo { grid-area: logo; width: 64px; height: 64px; border-radius: 18px; object-fit: cover; box-shadow: 0 0 0 1px var(--line-2), 0 14px 34px -14px rgba(var(--accent-rgb), .45); }
+.coin-id { grid-area: id; display: grid; gap: 7px; min-width: 0; }
+.coin-title { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; min-width: 0; }
+.coin-title h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-wrap: nowrap; }
+.coin-title .ticker { font-size: 15px; color: var(--muted); flex: none; }
+.coin-title .depth { flex: none; }
+.coin-tags { display: contents; }
+.sk-head .sk-id { grid-area: id; }
+.coin-lineage { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; min-width: 0; }
+.coin-status { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; }
+.chip.neutral { color: var(--ink-2); border-color: var(--line-soft); background: var(--glass); }
+.spore-mark { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); font-weight: 500; color: var(--accent); white-space: nowrap; }
+.spore-mark.pending { color: var(--warn); }
+.agent-anchor, .agent-anchor:hover { text-decoration: none; }
+.agent-anchor .chip { cursor: pointer; }
+.coin-addr { grid-area: addr; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; min-width: 0; }
+.ca-pill { display: inline-flex; align-items: center; gap: 8px; height: var(--h-sm); padding: 0 12px 0 4px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--surface-sunken); color: var(--ink); font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: -.01em; transition: border-color var(--dur-1), background var(--dur-1); }
+.ca-pill .ca-k { display: grid; place-items: center; height: 24px; padding: 0 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; letter-spacing: .08em; }
+.ca-pill svg { color: var(--muted); flex: none; }
+.ca-pill:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), .06); }
+@media (pointer: coarse) { .ca-pill { height: var(--tap); padding-left: 6px; } .family-strip { min-height: 32px; } }
+.ca-pill:hover svg { color: var(--accent); }
+.coin-links { display: inline-flex; gap: 4px 12px; flex-wrap: wrap; font-size: var(--fs-xs); }
+.coin-links a { color: var(--ink-2); white-space: nowrap; }
+.coin-links a:hover { color: var(--accent); }
+
+.coin-price { grid-area: price; display: grid; justify-items: end; gap: 3px; text-align: right; min-width: 0; }
+.price-row { display: flex; align-items: center; gap: 6px; }
+.price-now { padding: 0 4px; margin: 0 -4px; border-radius: 8px; font-size: var(--num-xl); font-weight: 600; letter-spacing: -0.03em; line-height: 1.05; color: var(--ink); font-variant-numeric: tabular-nums slashed-zero; white-space: nowrap; }
+.price-sub { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.price-sub .delta { margin-left: 0; }
+.d-short { display: none; }
+.price-mc { font-size: var(--fs-sm); color: var(--muted); white-space: nowrap; }
+.last-trade { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-2); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+a.last-trade:hover { color: var(--ink); text-decoration: none; }
+.last-trade i { width: 7px; height: 7px; border-radius: 50%; background: var(--buy); flex: none; }
+.last-trade.sell i { background: var(--sell); }
+.last-trade.none { color: var(--faint); }
+/* A price move: one 700 ms flash (≤ 1 per 600 ms) and a static arrow for 2 s that survives reduced motion. */
+.tick-up { animation: tick-up 700ms var(--ease-out); }
+.tick-down { animation: tick-down 700ms var(--ease-out); }
+@keyframes tick-up { from { color: var(--good); background: rgba(94,227,154,.14); } to { color: var(--ink); background: transparent; } }
+@keyframes tick-down { from { color: var(--bad); background: rgba(255,107,122,.14); } to { color: var(--ink); background: transparent; } }
+.tick-arrow { font-size: 9px; line-height: 1; }
+.tick-arrow.up { color: var(--good); } .tick-arrow.down { color: var(--bad); }
+.coin-actions { grid-area: act; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+/* share menu */
+.share { position: relative; }
+.share-btn { gap: 6px; }
+.share-btn .caret { font-size: 11px; color: var(--muted); }
+.share-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: var(--z-pop); width: 220px; display: grid; gap: 2px; padding: 6px; border-radius: 14px; background: var(--bg-2); border: 1px solid var(--line-2); box-shadow: var(--shadow-pop); text-align: left; animation: share-in .16s var(--ease) both; }
+@keyframes share-in { from { opacity: 0; transform: translateY(-4px); } }
+.share-pop [role="menuitem"] { display: grid; gap: 1px; min-width: 0; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); text-align: left; text-decoration: none; }
+.share-pop [role="menuitem"]:hover, .share-pop [role="menuitem"]:focus-visible { background: var(--glass-2); text-decoration: none; outline-offset: -2px; }
+.share-pop b { font-size: var(--fs-sm); font-weight: 500; }
+.share-pop small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* intro sentence + description */
+.coin-about { display: grid; gap: 6px; max-width: 76ch; }
+.coin-intro { font-size: 15px; line-height: 1.55; color: var(--ink-2); }
+.coin-intro b { color: var(--ink); font-weight: 600; }
+.intro-coin { color: var(--accent); font-weight: 500; }
+.coin-desc { display: flex; align-items: flex-end; gap: 8px; }
+.coin-desc p { flex: 1; min-width: 0; font-size: var(--fs-sm); line-height: 1.5; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.coin-desc.open p { display: block; -webkit-line-clamp: unset; white-space: pre-line; }
+.coin-desc .linkish { flex: none; font-size: var(--fs-xs); color: var(--accent); }
+
+/* family strip */
+.family-strip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 4px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--glass); color: var(--ink-2); font-size: var(--fs-xs); white-space: nowrap; transition: border-color var(--dur-1), color var(--dur-1); }
+button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
+.family-strip b { color: var(--ink); font-weight: 600; }
+.family-strip .faces { display: inline-flex; }
+.family-strip .faces .logo { width: 24px; height: 24px; border-radius: 50%; margin-left: -8px; box-shadow: 0 0 0 2px var(--bg-0); font-size: 11px; }
+.family-strip .faces .logo:first-child { margin-left: 0; }
+.family-strip.lineage { height: auto; padding: 0; border: 0; background: none; gap: 12px; }
+.family-strip.lineage a { color: var(--accent); }
+
+/* ---------- stats: four tiles */
+.coin-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.coin-stats .stat { padding: 16px 18px 14px; gap: 5px; }
+.coin-stats .stat > span:not(.stat-icon) { padding-right: 0; }
+.coin-stats .stat b { font-family: var(--mono); font-weight: 500; font-size: clamp(20px, 1.9vw, var(--num-lg)); letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
+.coin-stats .stat.hero b { font-size: clamp(22px, 2.1vw, var(--num-lg)); }
+.coin-stats .stat small { display: grid; gap: 6px; white-space: normal; color: var(--muted); }
+.coin-stats .stat .progress { margin-top: 2px; }
+/* a root's dominance on the map (DominanceLine, inline): one line tucked under the stats */
+.coin-dom { margin-top: -8px; padding: 0 4px; }
+.coin-dom-map { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+.coin-dom-map:hover { text-decoration: underline; }
+.bs-bar { display: flex; gap: 2px; height: 4px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.06); }
+.bs-bar i { display: block; min-width: 2px; }
+.bs-bar .b { background: var(--buy); } .bs-bar .s { background: var(--sell); }
+
+/* ---------- price chart */
+.chart { padding: 14px 16px 10px; display: grid; gap: 8px; }
+.chart .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chart-legend { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.chart-legend .delta { margin-left: 0; align-self: center; }
+.chart-k { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.chart-v { font-size: var(--num-md); font-weight: 500; letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
+.chart-when { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.chart-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.chart-stage { position: relative; }
+.chart-box { height: 300px; width: 100%; }
+.chart.is-thin .chart-box { height: 0; visibility: hidden; }
+.ohlc { position: absolute; top: 4px; left: 4px; z-index: 3; pointer-events: none; display: flex; gap: 4px 10px; flex-wrap: wrap; max-width: calc(100% - 70px); padding: 3px 8px; border-radius: 8px; background: rgba(7,16,11,.85); border: 1px solid var(--line-soft); font-size: 11px; color: var(--ink-2); }
+.ohlc i { font-style: normal; color: var(--muted); margin-right: 3px; }
+.ohlc em { font-style: normal; }
+.chart-overlay { position: absolute; inset: 0; display: grid; }
+.chart-overlay .empty { align-content: center; }
+.chart-sk { height: 100% !important; }
+.chart-empty { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; min-height: 96px; padding: 14px 16px; border-radius: var(--radius); border: 1px dashed var(--line-2); background: var(--surface-sunken); }
+.chart-empty b { font-size: var(--fs-base); font-weight: 500; color: var(--ink-2); }
+.chart-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.chart-foot::before { content: none; }
+
+/* ---------- money row: creator fees + the agent */
+.coin-money { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); align-items: stretch; }
+.coin-fees, .coin-money > #agent { display: grid; min-width: 0; }
+.coin-money > #agent:empty { display: none; }
+/* An empty fee card stays short instead of stretching to the agent card. */
+.coin-fees:has(.is-quiet) { align-self: start; }
+@media (min-width: 1180px) {
+  .coin-money { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .coin-money.solo .coin-fees, .coin-money:has(> #agent:empty) .coin-fees { grid-column: 1 / -1; }
+}
+
+/* creator fees card */
+/* .card.fees: brand.css styles a bare .fees (the /fees page) with a 32 px gap. */
+.card.fees { padding: 18px 20px; display: grid; gap: 12px; align-content: start; }
+.card.fees.is-quiet { gap: 10px; padding-bottom: 16px; }
+.fees .fees-head { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.fees .fees-head .card-label { flex: 1; min-width: 0; }
+.fees-refresh { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; }
+.fees-refresh:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.fees-refresh:disabled { opacity: .45; cursor: progress; }
+@media (pointer: coarse) { .fees-refresh { width: 40px; height: 40px; } }
+.fees-quiet { font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.5; }
+.fees-total { display: grid; gap: 2px; }
+.fees-total b { font-size: var(--num-lg); font-weight: 500; line-height: 1.1; letter-spacing: -0.02em; color: var(--accent); overflow-wrap: anywhere; font-variant-numeric: tabular-nums slashed-zero; }
+.fees-total span { font-size: var(--fs-xs); }
+.split-bar { background: var(--surface-sunken); }
+.fees-rows { list-style: none; margin: 0 -8px; padding: 0; display: grid; gap: 2px; }
+.fees-rows li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 10px; border: 1px solid transparent; }
+.fees-rows .dot { width: 10px; height: 10px; border-radius: 50%; }
+.fees-who { display: grid; gap: 1px; min-width: 0; }
+.fees-rows .split-role { font-size: var(--fs-sm); font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fees-rows .split-role a { color: inherit; }
+.fees-rows .split-role a:hover { color: var(--accent); }
+.fees-rows .tone-agent .split-role { color: var(--agent-2); }
+.fees-sub { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fees-sub .addr { font-size: 11px; }
+.fees-rows .fees-amt { display: grid; justify-items: end; line-height: 1.2; font-size: var(--fs-sm); font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+.fees-rows .fees-amt small { font-size: 11px; font-weight: 400; color: var(--muted); }
+/* The connected wallet's own row: the one number the visitor came for. */
+.fees-rows li.tone-you { background: var(--accent-soft); border-color: var(--line-2); }
+.fees-rows li.tone-you .split-role { color: var(--accent); font-weight: 600; }
+.fees-rows li.tone-you .fees-sub { color: var(--ink-2); }
+.fees-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--fs-xs); color: var(--ink-2); }
+.fees-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.fees-legend .dot { width: 8px; height: 8px; border-radius: 50%; }
+.fees-legend b { font-weight: 500; color: var(--ink); }
+.fees-legend .tone-agent { color: var(--agent-2); }
+.fees-policy { font-size: var(--fs-xs); line-height: 1.5; color: var(--muted); }
+.fees-where summary { cursor: pointer; font-size: var(--fs-xs); color: var(--muted); width: fit-content; }
+.fees-where summary:hover { color: var(--ink); }
+.fees-where[open] summary { margin-bottom: 6px; }
+.fees-parts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+.fees-parts i { font-style: normal; color: var(--muted); margin-right: 4px; }
+.fees .btn.block { width: 100%; }
+/* Lime budget: the page's filled lime belongs to Buy, so the claim's connect button is the soft look. */
+.fees-connect .wallet-adapter-button-trigger { width: 100%; justify-content: center; background: rgba(var(--accent-rgb), .08) !important; color: var(--accent) !important; border: 1px solid rgba(var(--accent-rgb), .28) !important; box-shadow: none !important; }
+.fees-connect .wallet-adapter-button-trigger:hover { background: var(--accent) !important; color: var(--accent-ink) !important; }
+.fees-foot { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.fees .confirm-rows span.accent { font-weight: 600; }
+
+/* ---------- activity card: Trades | Children | Family tree */
+.activity { padding: 0 18px 16px; }
+.act-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 -18px 12px; padding: 0 18px; border-bottom: 1px solid var(--line-soft); }
+.act-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.act-tabs::-webkit-scrollbar { display: none; }
+.act-tabs [role="tab"] { position: relative; display: inline-flex; align-items: center; gap: 7px; height: 48px; padding: 0 12px; border: 0; background: transparent; color: var(--muted); font-size: var(--fs-base); font-weight: 500; white-space: nowrap; transition: color var(--dur-1); }
+.act-tabs [role="tab"]:hover { color: var(--ink); }
+.act-tabs [role="tab"][aria-selected="true"] { color: var(--ink); }
+.act-tabs [role="tab"][aria-selected="true"]::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); }
+.act-tabs [role="tab"]:focus-visible { outline-offset: -4px; }
+.act-count { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--glass-2); color: var(--ink-2); font-size: 11px; font-weight: 500; }
+.act-tabs [aria-selected="true"] .act-count { background: var(--accent-soft); color: var(--accent); }
+.pulse-once { animation: count-pulse 1s var(--ease-out) 1; }
+@keyframes count-pulse { 0% { transform: scale(1.3); background: var(--accent); color: var(--accent-ink); } 100% { transform: none; } }
+.act-aside { display: flex; align-items: center; gap: 10px; flex: none; }
+.act-aside .more { font-size: var(--fs-sm); color: var(--accent); }
+.act-note { font-size: var(--fs-xs); margin-bottom: 10px; }
+.act-note .more { color: var(--accent); white-space: nowrap; }
+/* the family tree's "size" label is 10px in bubblemap.css (frozen); nothing on this page goes under 11px */
+.act-tree .bm-size-label { font-size: var(--fs-2xs); }
+.tape-foot { display: flex; align-items: center; justify-content: center; gap: 8px 14px; flex-wrap: wrap; margin-top: 12px; font-size: var(--fs-xs); }
+
+/* trades tape */
+.tape-table { display: grid; margin: 0 -8px; }
+.tape-row { display: grid; grid-template-columns: 88px 52px minmax(0, 1.1fr) minmax(0, 1fr) 96px 76px 84px; gap: 10px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); border-radius: 8px; font-size: var(--fs-xs); transition: background var(--dur-1); }
+.tape-row:last-child { border-bottom: 0; }
+.tape-row:not(.head):hover { background: var(--glass); }
+.tape-row.head { padding-top: 0; border-radius: 0; border-bottom-color: var(--line); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.tape-row .t a { display: flex; align-items: baseline; gap: 6px; line-height: 1.2; color: var(--ink-2); white-space: nowrap; }
+.tape-row .t a:hover { color: var(--accent); text-decoration: none; }
+.tape-row .t small { font-size: 11px; color: var(--muted); }
+.side-chip { height: 20px; padding: 0 7px; font-size: 11px; }
+.side-chip.buy { color: var(--buy); border-color: rgba(var(--buy-rgb), .4); background: rgba(var(--buy-rgb), .1); }
+.side-chip.sell { color: var(--sell); border-color: rgba(var(--sell-rgb), .4); background: rgba(var(--sell-rgb), .1); }
+.tape-row .amt { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tape-row.buy .amt { color: var(--buy); }
+.tape-row.sell .amt { color: var(--sell); }
+.tape-row .for { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tape-row .px { color: var(--ink-2); white-space: nowrap; }
+.tape-row .val, .tape-row .who { text-align: right; white-space: nowrap; }
+.tape-row .who a { color: var(--muted); }
+.tape-row .who a:hover { color: var(--accent); }
+
+/* children rows */
+.kids-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.kids-head p { flex: 1 1 320px; font-size: var(--fs-sm); line-height: 1.5; max-width: 60ch; }
+.kids-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.kids { display: grid; margin: 0 -8px; }
+.kid-row { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) 84px 84px 84px 44px 36px; gap: 12px; align-items: center; min-height: 56px; padding: 8px; border-bottom: 1px solid var(--line-soft); border-radius: 12px; transition: background var(--dur-1); }
+.kid-row:last-child { border-bottom: 0; }
+.kid-row:not(.head):hover, .kid-row:focus-within { background: var(--glass); }
+.kid-row.head { min-height: 0; padding: 0 8px 6px; border-radius: 0; border-bottom-color: var(--line); font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.kid-row .logo { width: 32px; height: 32px; border-radius: 10px; }
+.kid-name { display: grid; gap: 2px; min-width: 0; }
+.kid-link { color: var(--ink); font-size: var(--fs-base); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kid-link::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.kid-link:hover { text-decoration: none; color: var(--accent); }
+.kid-link:focus-visible { outline: none; }
+.kid-row:has(.kid-link:focus-visible) { box-shadow: 0 0 0 2px var(--accent); }
+.kid-sub { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+.kid-row .agent-chip, .kid-row .launch-cta, .kid-row .term { position: relative; z-index: 1; }
+.kid-row .num { text-align: right; font-size: var(--fs-sm); white-space: nowrap; }
+.kid-row .launch-cta { justify-self: end; }
+.chip.chip-sm { height: 18px; padding: 0 6px; font-size: 11px; }
+
+/* ---------- about & details (folded on phones) */
+.coin-details { padding: 0 20px; }
+.coin-details > summary { display: flex; align-items: center; gap: 12px; min-height: 52px; cursor: pointer; list-style: none; }
+.coin-details > summary::-webkit-details-marker { display: none; }
+.coin-details > summary .muted { margin-left: auto; font-size: var(--fs-xs); }
+.coin-details > summary::after { content: "▾"; color: var(--muted); font-size: 12px; transition: transform var(--dur-2) var(--ease); }
+.coin-details[open] > summary::after { transform: rotate(180deg); }
+.coin-details[open] { padding-bottom: 12px; }
+.details-desc { margin-bottom: 8px; max-width: 76ch; font-size: var(--fs-sm); line-height: 1.55; color: var(--ink-2); white-space: pre-line; overflow-wrap: anywhere; }
+.coin-details .kv { grid-template-columns: 120px minmax(0, 1fr) 120px minmax(0, 1fr); column-gap: 16px; }
+.coin-details .kv dt:nth-last-of-type(2), .coin-details .kv dd:nth-last-of-type(2) { border-bottom: 0; }
+@media (max-width: 1180px) { .coin-details .kv { grid-template-columns: 120px minmax(0, 1fr); } .coin-details .kv dt:nth-last-of-type(2), .coin-details .kv dd:nth-last-of-type(2) { border-bottom: 1px solid var(--line-soft); } }
 
 /* ---------- trade widget */
-.trade .trade-field .bal { display: inline-flex; align-items: center; gap: 6px; border: 0; padding: 2px 6px; margin: -2px -6px; border-radius: 999px; background: transparent; font-family: var(--mono); font-size: 11px; color: var(--muted); transition: color .15s, background .15s; }
+.trade { padding: 16px 18px; display: grid; gap: 12px; }
+/* Only one filled lime per view: the active tab is a tint, the submit button is the fill. */
+.trade-tabs button.on.buy { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--line-2); }
+.trade-tabs button.on.sell { background: var(--violet-soft); color: var(--violet-2); box-shadow: inset 0 0 0 1px rgba(var(--violet-rgb), .4); }
+.trade-tabs button.on:focus-visible { outline-color: var(--accent); }
+.route-chips { display: grid; gap: 6px; }
+.route-chips ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.route-chips li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.route-chips li > i { font-style: normal; font-size: 12px; color: var(--muted); }
+.rchip { display: inline-flex; align-items: center; gap: 5px; height: 26px; max-width: 150px; padding: 0 9px 0 4px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--glass); font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rchip.self { color: var(--accent); border-color: var(--line-2); background: var(--accent-soft); }
+.rchip .logo { width: 18px; height: 18px; border-radius: 50%; font-size: 11px; flex: none; }
+.rchip .crumb-sol { margin-left: 5px; }
+.route-note { font-size: var(--fs-xs); line-height: 1.45; color: var(--muted); }
+.quote-line { font-size: var(--fs-xs); line-height: 1.45; color: var(--muted); }
+.trade .trade-field .bal { display: inline-flex; align-items: center; gap: 6px; border: 0; padding: 2px 6px; margin: -2px -6px; border-radius: 999px; background: transparent; font-family: var(--mono); font-size: 12px; color: var(--muted); transition: color .15s, background .15s; }
 .trade .trade-field .bal i { width: 10px; height: 10px; border-radius: 3px; border: 1px solid currentColor; opacity: .6; }
-.trade .trade-field .bal em { font-style: normal; color: var(--faint); }
+.trade .trade-field .bal em { font-style: normal; color: var(--muted); }
 .trade .trade-field .bal:hover { color: var(--accent); background: var(--accent-soft); }
+.trade .amount .input { font-size: 18px; }
 .trade .amount .input:disabled { opacity: .5; }
-.trade .amount-usd { position: absolute; left: 14px; bottom: -16px; font-size: 11px; color: var(--faint); }
+.trade .amount-usd { position: absolute; left: 14px; bottom: -18px; font-size: 11px; color: var(--muted); }
 .trade .amount:has(.amount-usd) { margin-bottom: 14px; }
+.trade .quick > button { height: 30px; font-size: 12px; }
 .trade .quick > button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .trade.sell .quick > button:hover:not(:disabled), .trade.sell .quick > button[aria-pressed="true"] { border-color: var(--violet); color: var(--violet-2); background: var(--violet-soft); }
-.slip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11px; }
+.slip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-xs); }
 .slip .seg { margin-left: auto; }
 .slip-custom { position: relative; display: inline-flex; align-items: center; }
-.slip-custom .input { width: 74px; height: 28px; padding: 0 26px 0 10px; font-size: 12px; border-radius: 999px; }
+.slip-custom .input { width: 78px; height: 30px; padding: 0 26px 0 10px; font-size: 16px; border-radius: 999px; }
 .slip-custom em { position: absolute; right: 10px; font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .trade .quote { position: relative; transition: border-color .3s; }
 .trade .quote.stale { border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
-.trade .quote-empty, .trade .quote-err { display: flex; gap: 8px; align-items: center; font-size: 12px; line-height: 1.5; }
+.trade .quote-empty, .trade .quote-err { display: flex; gap: 8px; align-items: center; font-size: var(--fs-xs); line-height: 1.5; }
 .trade .quote-err { justify-content: flex-start; overflow-wrap: anywhere; }
 .trade .quote > div.quote-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; row-gap: 0; padding-bottom: 8px; margin-bottom: 2px; border-bottom: 1px solid var(--line-soft); }
 .trade .quote-main > span { grid-column: 1 / -1; }
@@ -49,8 +345,6 @@
 .trade .quote-usd { font-size: 11px; text-align: right; }
 .trade .quote-main b small, .trade .quote b small { font-family: var(--mono); font-size: 11px; font-weight: 400; }
 .trade .quote span small { font-size: 11px; }
-.trade .quote b.route { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
-.trade .quote b.route i { font-style: normal; color: var(--faint); margin: 0 4px; }
 .trade .quote b.warn { color: var(--warn); } .trade .quote b.bad { color: var(--bad); }
 .trade .quote-age { padding-top: 6px; border-top: 1px solid var(--line-soft); font-family: var(--mono); font-size: 11px; }
 .trade .quote-age .linkish { font-family: var(--mono); font-size: 11px; color: var(--accent); }
@@ -61,12 +355,24 @@
 .trade .trade-block { align-items: flex-start; flex-direction: column; }
 .trade .trade-block code { font-family: var(--mono); font-size: 12px; }
 .trade .btn.lg.block { width: 100%; }
+.trade-go { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .trade .wallet-adapter-button-trigger { width: 100%; justify-content: center; height: 48px !important; font-size: 15px !important; }
 .trade .hint { margin-top: -4px; }
+.position { display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid var(--line-soft); font-size: var(--fs-sm); color: var(--ink-2); }
+.position b { color: var(--ink); font-weight: 500; }
+.position-act { display: inline-flex; gap: 12px; }
+.position-act .linkish { font-size: var(--fs-xs); color: var(--violet-2); }
+.position-act .linkish:hover { color: var(--ink); text-decoration: underline; }
+.trade-foot { display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.4; color: var(--muted); }
+.trade-foot svg { flex: none; color: var(--accent); }
+@media (pointer: coarse) { .trade .quick > button, .trade-tabs button { min-height: 40px; } .trade .slip .seg button { min-height: 36px; } }
+/* Inline links on touch screens: at least 24 px tall. */
+@media (pointer: coarse) { .tape-row .t a, .tape-row .who a, .coin-links a, a.last-trade, .intro-coin { display: inline-flex; align-items: center; min-height: 24px; } }
 
-/* confirm sheet: a small centred dialog on desktop, bottom-anchored on phones */
-.confirm-backdrop { position: fixed; inset: 0; z-index: var(--z-overlay); display: grid; place-items: center; padding: 16px; background: rgba(4,10,6,.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); animation: fade .18s var(--ease); }
+/* confirm dialog: a small centred dialog on desktop, bottom-anchored on phones */
+.confirm-backdrop { position: fixed; inset: 0; z-index: var(--z-overlay); display: grid; place-items: center; padding: 16px; background: rgba(4,10,6,.72); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade .18s var(--ease); }
 .confirm { width: min(440px, 100%); display: grid; gap: 14px; padding: 20px 22px; border-radius: var(--radius-xl); background: color-mix(in srgb, var(--bg-1) 96%, transparent); border: 1px solid var(--line-2); box-shadow: 0 40px 80px -30px rgba(0,0,0,.95), var(--glow); animation: rise .22s var(--ease); }
+.confirm:focus { outline: none; }
 .confirm-head { display: flex; align-items: center; gap: 10px; }
 .confirm-head b { flex: 1; font-size: 15px; }
 .confirm-rows { display: grid; gap: 8px; font-size: 13px; }
@@ -77,110 +383,130 @@
 .confirm-rows b.warn { color: var(--warn); } .confirm-rows b.bad { color: var(--bad); }
 .confirm-rows b.route { font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere; }
 .confirm-actions { display: grid; grid-template-columns: auto 1fr; gap: 8px; }
-.sheet-close { width: 30px; height: 30px; border: 0; border-radius: 999px; background: var(--glass-2); color: var(--muted); font-size: 18px; line-height: 1; display: grid; place-items: center; flex: none; }
+.sheet-close { width: 32px; height: 32px; border: 0; border-radius: 999px; background: var(--glass-2); color: var(--muted); font-size: 18px; line-height: 1; display: grid; place-items: center; flex: none; }
 .sheet-close:hover { color: var(--ink); background: var(--glass-3); }
+@media (pointer: coarse) { .sheet-close { width: 44px; height: 44px; } }
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(12px); } }
 @media (max-width: 560px) { .confirm-backdrop { align-items: end; padding: 0; } .confirm { width: 100%; border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: max(20px, env(safe-area-inset-bottom)); } }
 
-/* mobile: sticky bar + bottom sheet */
+/* phone: sticky bar + bottom sheet */
 .trade-bar { display: none; }
 .trade-sheet-backdrop { display: none; }
+.trade-sheet-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding-top: 6px; }
+.trade-sheet-head > div { display: grid; gap: 1px; min-width: 0; }
+.trade-sheet-head b { font-size: 16px; }
+.trade-sheet-head span { font-size: 12px; }
+.trade-sheet-head .sheet-close { width: 44px; height: 44px; }
+
+/* ---------- phone and tablet (≤ 980 px): one column in reading order, the trade panel in a sheet */
 @media (max-width: 980px) {
-  .coin-page.has-bar { padding-bottom: 72px; }
-  .trade-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-nav); display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 10px var(--gutter) max(10px, env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg-0) 86%, transparent); backdrop-filter: blur(20px) saturate(150%); -webkit-backdrop-filter: blur(20px) saturate(150%); border-top: 1px solid var(--line); }
+  .coin-page.has-bar { padding-bottom: 76px; }
+  .coin-grid { display: flex; flex-direction: column; align-items: stretch; gap: var(--s4); }
+  .coin-main, .coin-side, .coin-money { display: contents; }
+  /* Flex items default to min-width: auto; a wide table or tab row must scroll inside its card, not widen it. */
+  .coin-grid > *, .coin-main > *, .coin-money > * { min-width: 0; }
+  .coin-head, .coin-about { order: 1; }
+  .coin-stats, .coin-dom { order: 2; }
+  .coin-chart { order: 3; }
+  .coin-activity { order: 4; }
+  .coin-fees, .coin-lock { order: 5; }
+  .coin-money > #agent { order: 6; }
+  .coin-details { order: 7; }
+  .sk-side { display: none !important; }
+
+  /* Opaque on purpose: a translucent fixed bar under the animated .route lets page text read through
+     in Chrome even at 97 % (and blur behind a solid bar would only cost frames on scroll). */
+  .trade-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-bar); display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px var(--gutter) max(8px, env(safe-area-inset-bottom)); background: linear-gradient(180deg, var(--bg-1), var(--bg-0)); box-shadow: 0 -20px 36px -20px rgba(0,0,0,.85); border-top: 1px solid var(--line); }
   .trade-bar::before { content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 1px; background: linear-gradient(90deg, transparent, rgba(182,255,92,.45) 30%, rgba(176,140,255,.3) 70%, transparent); }
+  .bar-progress { position: absolute; left: 0; right: 0; top: -1px; height: 2px; background: var(--accent); transform-origin: left center; z-index: 1; box-shadow: 0 0 8px rgba(var(--accent-rgb), .6); }
   .trade-bar-price { display: grid; gap: 1px; min-width: 0; }
-  .trade-bar-price b { font-size: 17px; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .trade-bar-price .delta { margin-left: 0; }
-  .trade-bar .btn { height: 42px; padding: 0 22px; }
+  .trade-bar-price .bar-price { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 6px; justify-self: start; }
+  .bar-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+  .bar-sub .delta { margin-left: 0; padding: 0 6px; font-size: 11px; }
+  .trade-bar .btn { height: 44px; min-height: 44px; padding: 0 18px; }
   /* --z-overlay keeps toasts (--z-toast) readable above the sheet and the confirm dialog. */
-  .trade-sheet-backdrop { display: grid; align-items: end; position: fixed; inset: 0; z-index: var(--z-overlay); background: rgba(4,10,6,.7); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); animation: fade .18s var(--ease); }
+  .trade-sheet-backdrop { display: grid; align-items: end; position: fixed; inset: 0; z-index: var(--z-overlay); background: rgba(4,10,6,.7); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade .18s var(--ease); }
   .trade-sheet { max-height: calc(100dvh - 24px); overflow: auto; overscroll-behavior: contain; animation: rise .25s var(--ease); -webkit-overflow-scrolling: touch; }
-  .trade-sheet .trade { border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: max(20px, env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg-1) 97%, transparent); }
+  .trade-sheet:focus { outline: none; }
+  .trade-sheet .trade { border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: max(18px, env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg-1) 97%, transparent); }
   .trade-sheet .trade::before { display: none; }
   .trade-sheet .trade::after { content: ""; position: absolute; top: 8px; left: 50%; width: 40px; height: 4px; border-radius: 2px; background: var(--line-2); transform: translateX(-50%); }
 }
-.trade-sheet-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding-top: 6px; }
-.trade-sheet-head > div { display: grid; gap: 1px; min-width: 0; }
-.trade-sheet-head b { font-size: 15px; }
-.trade-sheet-head span { font-size: 12px; }
+@media (max-width: 1180px) and (min-width: 981px) { .coin-head { column-gap: 16px; } .coin-title h1 { font-size: 24px; } }
 
-/* ---------- price chart */
-.chart .chart-head { align-items: center; }
-.chart-legend { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.chart-legend .delta { margin-left: 0; }
-.ohlc { font-size: 11px; color: var(--ink-2); display: inline-flex; gap: 6px; flex-wrap: wrap; }
-.ohlc i { font-style: normal; color: var(--faint); margin-right: 1px; }
-.ohlc em { font-style: normal; }
-.chart-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.chart-stage { position: relative; }
-.chart-box { height: 320px; width: 100%; }
-.chart.empty-state .chart-box { visibility: hidden; height: 240px; }
-.chart-overlay { position: absolute; inset: 0; display: grid; }
-.chart-overlay .empty { align-content: center; }
-.chart-sk { height: 100% !important; }
-.chart-foot { font-family: var(--mono); font-size: 11px; display: flex; gap: 8px; align-items: center; }
-.chart-foot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--good); box-shadow: 0 0 8px var(--good); }
-/* Phones: open/high/low only while a finger is on the chart; close + volume otherwise. */
-@media (max-width: 640px) { .chart-box { height: 260px; } .chart .chart-head { align-items: flex-start; flex-direction: column; } .ohlc { font-size: 10px; } .ohlc:not(.hovering) .ohl { display: none; } }
+/* phones (≤ 640 px): the header stacks — identity, price, CA, two actions */
+@media (max-width: 640px) {
+  .new-strip { border-radius: 14px; align-items: flex-start; padding: 8px 4px 8px 12px; }
+  .new-strip-dot { margin-top: 6px; }
+  /* ≤ 260 px: the name sits beside the logo, every other row spans the width. */
+  .coin-head { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo title" "tags tags" "price price" "addr addr" "act act"; column-gap: 12px; row-gap: 6px; }
+  .coin-lineage { gap: 6px 8px; }
+  .family-strip .fam-tree, .family-strip .faces { display: none; }
+  .family-strip { padding-left: 10px; }
+  /* The Logo sizes itself inline (64); phones want 48. */
+  .coin-head .coin-logo { width: 48px !important; height: 48px !important; border-radius: 14px; font-size: 18px !important; }
+  .coin-id { display: contents; }
+  .sk-head .sk-id { grid-area: title; }
+  .coin-title { grid-area: title; align-self: center; gap: 2px 8px; flex-wrap: wrap; }
+  .coin-tags { grid-area: tags; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+  .coin-tags > .coin-lineage, .coin-tags > .coin-status { display: contents; }
+  .coin-title h1 { font-size: 22px; max-width: 100%; }
+  .coin-title .ticker { font-size: 13px; }
+  .coin-price { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; text-align: left; }
+  .price-sub { display: contents; }
+  .price-now { font-size: 30px; }
+  .mc-sol, .lt-who, .d-long { display: none; }
+  .d-short { display: inline-flex; }
+  .coin-addr { gap: 6px 12px; }
+  .coin-links .solscan-link { display: none; }
+  .coin-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .coin-actions .share, .coin-actions .share-btn { width: 100%; }
+  .coin-actions .btn { height: 40px; width: 100%; justify-content: center; }
+  .coin-actions .share-pop { left: 0; right: auto; }
+  .coin-intro { font-size: 14px; }
 
-/* ---------- trades tape */
-.tape .section-head { align-items: center; }
-.tape-ctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.tape-table { display: grid; margin: 0 -8px; }
-.tape .tape-row { display: grid; grid-template-columns: 74px 50px minmax(0, 1.1fr) minmax(0, 1.1fr) 92px 80px 74px; gap: 10px; align-items: center; padding: 7px 8px; border-bottom: 1px solid var(--line-soft); border-radius: 8px; font-size: 12px; transition: background .15s; }
-.tape .tape-row:last-child { border-bottom: 0; }
-.tape .tape-row:hover { background: var(--glass); }
-.tape .tape-row.head { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--line); border-radius: 0; padding-top: 0; }
-.tape .tape-row.head:hover { background: transparent; }
-.tape .tape-row .t { display: grid; gap: 0; line-height: 1.2; }
-.tape .tape-row .t small { font-size: 10px; color: var(--faint); }
-.tape .tape-row .amt { font-weight: 500; }
-.tape .tape-row.buy .amt { color: var(--good); }
-.tape .tape-row.sell .amt { color: var(--bad); }
-.tape .tape-row .val, .tape .tape-row .who { text-align: right; }
-.tape .tape-row .who:hover { color: var(--accent); }
-.tape .tape-row.fresh { animation: tape-in 1.6s ease-out; }
-@keyframes tape-in { 0% { background: rgba(var(--accent-rgb), .22); transform: translateX(-4px); } 30% { background: rgba(var(--accent-rgb), .14); transform: none; } 100% { background: transparent; } }
-.tape .tape-row.sell.fresh { animation-name: tape-in-sell; }
-@keyframes tape-in-sell { 0% { background: rgba(255,107,122,.2); transform: translateX(-4px); } 30% { background: rgba(255,107,122,.12); transform: none; } 100% { background: transparent; } }
-.tape-foot { font-size: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
-/* Phones: time · side · amount · price · value; the quote leg and the trader move to the tooltip/link. */
-@media (max-width: 760px) {
-  .tape { padding: 16px 14px; }
-  .tape-table { margin: 0 -6px; }
-  .tape .tape-row { grid-template-columns: 34px 40px minmax(0, 1fr) 72px 60px; gap: 6px; padding: 7px 6px; font-size: 11px; }
-  .tape .tape-row > :nth-child(4), .tape .tape-row .who { display: none; }
-  .tape .tape-row .t small { display: none; }
-  .tape .tape-row .chip { height: 20px; padding: 0 6px; font-size: 10px; }
-  .tape .tape-row .amt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .coin-stats { grid-template-columns: 1fr 1fr; }
+  .coin-stats .stat { padding: 14px; }
+  .coin-stats .stat b, .coin-stats .stat.hero b { font-size: 22px; }
+
+  .chart { padding: 12px 12px 8px; }
+  .chart .chart-head { align-items: flex-start; }
+  .chart-ctl { gap: 6px; }
+  .chart-ctl .seg button { padding: 0 8px; }
+  .chart-box { height: 240px; }
+
+  .activity { padding: 0 12px 12px; }
+  .act-head { margin: 0 -12px 10px; padding: 0 6px; }
+  .act-tabs [role="tab"] { padding: 0 10px; font-size: 13px; }
+  .act-aside .more { display: none; }
+  .act-aside .live { font-size: 0; gap: 0; padding-right: 6px; }
+  .tape-table { margin: 0 -4px; }
+  .tape-row { grid-template-columns: 40px 44px minmax(0, 1fr) auto; grid-template-areas: "t s a v" "t s p w"; gap: 0 8px; padding: 7px 4px; }
+  .tape-row .t { grid-area: t; } .tape-row .side { grid-area: s; } .tape-row .amt { grid-area: a; } .tape-row .val { grid-area: v; }
+  .tape-row .px { grid-area: p; font-size: 12px; color: var(--muted); }
+  .tape-row .who { grid-area: w; display: block; font-size: 12px; }
+  .tape-row .for, .tape-row .t small { display: none; }
+  .tape-row.head { grid-template-areas: "t s a v"; }
+  .tape-row.head .px, .tape-row.head .who { display: none; }
+  .tape-row .amt, .tape-row .val { font-size: 13px; }
+
+  .kids-head p { flex-basis: 100%; }
+  .kids { margin: 0 -4px; }
+  .kid-row { grid-template-columns: 32px minmax(0, 1fr) 70px 64px 40px; gap: 10px; padding: 8px 4px; }
+  .kid-row .locked, .kid-row .age { display: none; }
+
+  .fees { padding: 16px; }
+  .coin-details { padding: 0 16px; }
+  .coin-details .kv { grid-template-columns: 110px minmax(0, 1fr); }
+}
+@media (max-width: 360px) {
+  .coin-links { gap: 4px 10px; }
+  .kid-row { grid-template-columns: 32px minmax(0, 1fr) 64px 40px; }
+  .kid-row .vol { display: none; }
+  .trade-bar .btn { padding: 0 14px; }
 }
 
-/* ---------- creator fees card: pending total, each shareholder's cut, permissionless claim */
-.fees .fees-head { display: flex; align-items: center; gap: 8px; }
-.fees .fees-head .eyebrow { flex: 1; min-width: 0; }
-.fees .fees-head .linkish { font-size: 14px; line-height: 1; color: var(--faint); }
-.fees .fees-head .linkish:hover:not(:disabled) { color: var(--accent); }
-.fees .fees-head .linkish:disabled { opacity: .4; cursor: progress; }
-.fees-total { display: grid; gap: 3px; }
-.fees-total b { font-size: 24px; line-height: 1.1; letter-spacing: -0.02em; overflow-wrap: anywhere; }
-.fees-total b.accent { text-shadow: 0 0 18px rgba(182,255,92,.3); }
-.fees-total span { font-size: 12px; }
-.fees-rows { list-style: none; margin: 0 -8px; padding: 0; display: grid; gap: 2px; font-size: 13px; }
-.fees-rows li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; transition: background .15s; }
-.fees-rows li .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--violet); }
-.fees-rows li .dot.platform { background: var(--faint); }
-.fees-rows li .dot.you { background: var(--accent); box-shadow: 0 0 8px rgba(182,255,92,.6); }
-/* The connected wallet's own row: it is the one number the visitor came for. */
-.fees-rows li.you { background: var(--accent-soft); border-color: var(--line-2); }
-.fees-rows li.you .split-role { color: var(--accent); font-weight: 600; }
-.fees-rows .fees-amt { display: grid; justify-items: end; gap: 0; line-height: 1.15; font-weight: 600; text-align: right; }
-.fees-rows .fees-amt small { font-size: 10px; font-weight: 400; color: var(--muted); }
-.fees-parts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.fees-parts i { font-style: normal; color: var(--faint); margin-right: 4px; }
-.fees .btn.block { width: 100%; }
-.fees .wallet-adapter-button-trigger { width: 100%; justify-content: center; }
-.fees-foot { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11px; }
-.fees .confirm-rows span.accent { font-weight: 600; }
-@media (max-width: 420px) { .fees-rows li { grid-template-columns: 10px minmax(0, 1fr) auto; } .fees-rows li .addr { display: none; } }
+/* ---------- lock the fee split (a child's creator, no config yet) */
+.fee-lock .btn { justify-self: start; }
+.fee-lock h3 { font-size: var(--fs-md); }

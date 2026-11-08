@@ -25,12 +25,15 @@ export function Delta({ ratio, label, title }: { ratio: number | null | undefine
   return <span className={`delta ${tone}`} title={title}>{signedPct(ratio)}{label && <small>{label}</small>}</span>;
 }
 
-/// A stat tile: label above, number below, optional footnote and corner glyph. `hero` enlarges
-/// and tints the number for the one figure a strip is about; `delta` adds a change pill next to
-/// the label (the price tile's 24h move).
-export function Stat({ label, value, sub, hero = false, loading = false, tone = "", icon, delta, deltaLabel, deltaTitle }: { label: string; value: ReactNode; sub?: ReactNode; hero?: boolean; loading?: boolean; tone?: "" | "accent" | "violet"; icon?: GlyphName; delta?: number | null; deltaLabel?: string; deltaTitle?: string }) {
+/// A stat tile (bento-ready): label above, number below, optional footnote and corner glyph.
+/// `hero` enlarges and tints the number for the one figure a strip is about (`xl` sets it at
+/// --num-2xl, once per section); `spark` is a slot drawn behind the lower half of the tile (a
+/// sparkline SVG or canvas sized 100 % × 100 %); `delta` adds a change pill next to the label (the
+/// price tile's 24h move). `className` lets a bento place the tile (grid-area, span).
+export function Stat({ label, value, sub, hero = false, xl = false, loading = false, tone = "", icon, delta, deltaLabel, deltaTitle, spark, className = "" }: { label: ReactNode; value: ReactNode; sub?: ReactNode; hero?: boolean; xl?: boolean; loading?: boolean; tone?: "" | "accent" | "violet"; icon?: GlyphName; delta?: number | null; deltaLabel?: string; deltaTitle?: string; spark?: ReactNode; className?: string }) {
   return (
-    <div className={`stat ${hero ? "hero" : ""} ${tone}`}>
+    <div className={`stat ${hero ? "hero" : ""} ${xl ? "xl" : ""} ${tone} ${className}`.replace(/\s+/g, " ").trim()}>
+      {spark && <span className="stat-spark" aria-hidden="true">{spark}</span>}
       {icon && <span className="stat-icon"><Glyph name={icon} /></span>}
       <span>{label}{delta != null && <Delta ratio={delta} label={deltaLabel} title={deltaTitle} />}</span>
       {loading ? <Skeleton w="60%" h={hero ? 30 : 24} /> : <b>{value}</b>}
@@ -38,4 +41,5 @@ export function Stat({ label, value, sub, hero = false, loading = false, tone = 
     </div>
   );
 }
+/// The row of stat tiles: one panel, tiles separated by hairlines (2-up on phones).
 export const StatStrip = ({ children, className = "" }: { children: ReactNode; className?: string }) => <div className={`stats ${className}`}>{children}</div>;

@@ -11,7 +11,7 @@ pump.fun lets a new coin be quoted in *any* pump.fun coin instead of SOL. Spore 
 
 | Path | What |
 |---|---|
-| `server/` | Node (ESM, `node:sqlite`) indexer + JSON API + SSE + static web host. Indexes every pump.fun custom pair (backfill + live `logsSubscribe`), prices chains, verifies launches, publishes token metadata, serves the built web app. |
+| `server/` | Node (ESM, `node:sqlite`) indexer + JSON API + SSE + static web host. Indexes every pump.fun custom pair (backfill + live `logsSubscribe`), prices chains, verifies launches, publishes token metadata, serves the built web app and renders each coin's share card (`/api/card/<mint>.png`), the picture a `/c/<mint>` or `/map?focus=<mint>` link unfurls into on X, Telegram and Discord. |
 | `web/` | Vite + React + TypeScript app: Explore, live ecosystem map (d3-force in a Web Worker, IndexedDB cache, delta sync), Launch flow (pre-flight simulation, resume/recovery), coin pages with trading, Fees & rules. `web/src/lib/pump` builds the pump.fun transactions. |
 | `deploy/` | env template, PM2 / systemd units, reverse-proxy examples, published metadata files. |
 | `tools/` | screenshot, brand and metadata-publishing tools. |

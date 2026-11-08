@@ -115,18 +115,24 @@ GET  /api/tree/:mint?depth=3               → TreeNode                         
 GET  /api/candles/:mint?res=60             → { candles: { t: number; o: number; h: number; l: number; c: number; v: number }[]; priceKey: "usd"|"quote" }
                                              `&scope=all`: any tracked coin whatever the listing mode (404 "unknown mint" / "not tracked"); without it, unchanged
 GET  /api/map/heat                         → Heat                                          every tracked coin with a trade in 24 h whatever the mode, t1h desc then v24 desc; max-age 15 + ETag (§11.5 Activity)
+GET  /api/map/dominance?mode=locked|mcap   → { mode; total: number; families: { mint; symbol; value; share; coins }[] }  every all-scope map family whatever the mode, biggest first; `&mint=<top>` narrows `families` to that row ([] for a non-top); 30 s cache + ETag (§11.5 Dominance)
 GET  /api/search?q=                        → { coins: Coin[] }                              name/symbol prefix or exact mint, max 20
 GET  /api/eligibility/:mint                → Eligibility                                   can :mint be a parent right now (depth, mayhem, pending migration, exists) + the split preview for the connected user (`?creator=<pubkey>` merges duplicates)
 GET  /api/events                           → SSE: `event: coin|trade|stats`, `data: <json>`; heartbeat comment every 15 s
 GET  /api/img?u=<https url>                → cached image proxy (allowlist: ipfs.io, *.pinata.cloud, *.pump.fun, arweave.net, *.arweave.net, cf-ipfs.com, *.ipfs.*; max 4 MB; 24 h cache; 404 otherwise). Coin.image already points here.
+GET  /card/:mint.png (= /api/card/:mint.png) → image/png 1200×630: the coin’s share card (`server/lib/card.mjs`). The picture (the right ~60 %) is the coin’s family drawn as the live map: up to 72 bubbles (the shared coin, its chain to the family top — a coin, or a listed asset such as $PUMP drawn as its icon and never priced —, its biggest children, then the family largest first), each the cached logo clipped to a disc in the map’s depth colour (dashed for the shared coin’s ancestors, a cap dot on graduated coins, the beacon ring on Spore launches), sized by market cap, linked parent → child inside the family’s soft hull on the dot-grid ground, laid out by arithmetic alone so the same family always draws the same picture (the shared coin is drawn at 30 px or more with its eight largest children beside it; when a big family would shrink under that, members are dropped smallest first and counted in "+N more"; the svg's 800 KB budget never costs a member: each distinct logo is embedded once, and past the budget the smallest bubbles' logos are shed, never the shared coin's or the top's); the top is titled "$ROOT · 198 coins · 4.3% of the map · +127 more" and the shared coin is ringed lime and labelled "$TICKER" (+ the "1ST" pill) on the least crowded side, never over a neighbour's logo while any spot is free, and floated outside the family's blob on a hairline leader when none is. The slim HUD on the left states the facts in the og:description’s words and numbers (`server/lib/format.mjs`): status chips, the ticker (set smaller rather than cut, and smaller again so a firstborn's "1ST" pill stays beside it; the pill moves to the lineage line only when no size fits both), the name, the lineage ("↳ under $PARENT · under $ROOT"; two long tickers step the line to 22 px, then to "↳ under $PARENT · $ROOT"), MCAP · AGE · LOCKED BY CHILDREN (hidden under a cent) · CHILDREN / DESCENDANTS, the family block and the wordmark; a ticker or name the font cannot draw in full falls through to the name, then the short mint, and nothing is set under 22 px but the chips and the subline, so the card reads at 500 px wide. Server-rendered: the svg is rasterized on the image worker thread (`server/lib/img-worker.mjs`, the thread `/api/img` thumbnails use; resvg + the Geist TTFs vendored in `server/lib/fonts`, OFL, `server/lib/card-fonts.mjs`), never on the event loop; numbers from `server/lib/format.mjs`, the web's vocabulary, shared with the og:description. Per-mint LRU ≤ 200 entries, 60 s TTL (5 s for a card drawn with the placeholder, so the next crawler gets the logo; such a card is also sent with `max-age=5` instead of the usual `max-age=60, stale-while-revalidate=300`, so the edge never pins a lettered disc), strong ETag → 304. At most `CARD_MAX_INFLIGHT` (8) cards rasterize at once (the slot wraps only the drawing, never a logo wait); past that the route answers `302 → /og.png` with `Cache-Control: no-store` and `Retry-After: 2` and the refused card is drawn in the background (a backlog of ≤ `CARD_BACKLOG_MAX` mints), so a scan of fresh mints buys no extra drawing while the next real crawler finds the card in the LRU. The shared coin's and the top's logo not on disk yet is made the way `/api/img` makes it (`ImageCache.get` + `thumb`, waited for ≤ 1.5 s; the cache's negative memory of a dead upstream holds, `warm`'s skip list does not), else a letter avatar and the 5 s TTL; a member's missing logo is a letter avatar now and `warm`ed (≤ 24 per render, each url once a minute) for the next card. A ticker or name the font cannot draw in full (CJK, emoji, a mixed script such as "日本CAT") is never shown cut: the ticker falls through to the name, then to the short mint set as an address, and a half-drawable name line is left out. An untracked coin (looked up for its page, nothing spawned under it) renders as a plain root. 400 malformed; 404 unknown after one live lookup, which draws on the `api` rate limit (the picture itself on `img`); `?v=<minute>` is the cache-buster the OG tags carry.
 POST /api/upload                           → { metadataUri } (pump.fun IPFS; body {name, symbol, description, image: dataURL, twitter, telegram, website}; copy the validation from ~/tldpad/app/server/index.mjs)
 POST /api/rpc                              → allow-listed JSON-RPC proxy (getLatestBlockhash, sendTransaction, simulateTransaction, getSignatureStatuses, getBalance, getAccountInfo, getMultipleAccounts, getTokenAccountBalance, getTokenAccountsByOwner, getTokenSupply, getMinimumBalanceForRentExemption, getTransaction, getSlot, getBlockHeight, getBlockTime, getEpochInfo, isBlockhashValid, getRecentPrioritizationFees, getFeeForMessage, getHealth, getVersion, getAddressLookupTable, getProgramAccounts is NOT allowed)
 ```
 Errors: `{ error: string }` with 4xx/5xx. Unknown mint → 404. Everything is CORS-same-origin in production (static build served by the server).
 
+**Link unfurls (OG injection, `server/lib/og.mjs`).** Crawlers (X, Telegram, Discord) read the server's HTML, never the SPA's client-side meta changes. `GET /c/:mint` and `GET /map?focus=<mint>` (base58, 32–44 chars) serve `index.html` with the block between `<!-- og:start -->` and `<!-- og:end -->` in `web/index.html` replaced per coin: `og:url` absolute (canonical: `/c/<mint>`, or `/map?focus=<mint>` for a map link; other query parameters dropped), `og:title` "$KID under $PARENT · Spore" (a family top: "$ROOT · Spore"; a depth-0 coin paired with a listed asset: "$KID quoted in $PUMP · Spore"), one-line `og:description` in the words of the web's share texts (name · "mcap $12.4K" · a top's "1,352 coins under it" or a child's "12 children" + "14 descendants" / "no children yet" · "$5.2K locked" · "first child of $PARENT" · a top's "41% of the Spore map" or a member's "$PUMP family holds 4.3% of the map" · the lineage "$PUMP › $CAT › $KID" from depth 2; unknown parts left out), `og:image` = `<publicUrl>/api/card/<mint>.png?v=<floor(now / 60 000)>` with type, width, height and alt ("Family map of $KID on Spore: <description>"), the lineage named with `tickerOf` from `chain` (so "$🎃" stays a ticker in the text), `twitter:card summary_large_image` and the twitter title / description / image / alt; every value HTML-attribute-escaped. Every other path, an unknown mint, and HTML without the markers keep the static block (`/og.png`); the inline script of `index.html` fills in only path-absolute fallbacks, so the injected absolute tags survive crawlers that run scripts. The card data (`cardData(model, mint)`) is the same record the card is drawn from and both format numbers with `server/lib/format.mjs`, so the title, the description and the picture never disagree.
+
 ## 8. Web app
 
 Routes: `/` Home (hero, live spawn feed via SSE, top roots, stats strip), `/explore` (root leaderboard with sort tabs + search), `/c/:mint` Coin (header with image/name/ticker/parent chain breadcrumbs, price/mcap/locked/progress, tree viz centered on this coin, children grid, trade widget, "Spawn under this coin" CTA, fee shares, creator links), `/spawn?parent=<mint>` Spawn (parent picker with search + eligibility, form name/ticker/image/description/socials, optional first buy in SOL, split preview, step-by-step progress, success screen with share links), `/how` (how it works, fees, depth limits, risks).
+
+**Share cards (owner 2026-10-23).** A pasted `/c/<mint>` or `/map?focus=<mint>` link unfurls on X, Telegram and Discord as that coin's own 1200×630 card (`GET /api/card/<mint>.png`, §7) instead of the site's generic `/og.png`, so the post text only has to say the sentence the picture cannot. Every X intent on the site builds its text with `web/src/lib/map/share.ts`: one pure builder, `coinShareText`, over a flat fact record ({ self, parent, root, firstborn, children, descendants, lockedUsd, mcapUsd, dominance }); the map's side panel (`shareText`: parent and family top from the node set, "1st" from the firstborn set, the family's dominance for a top), the coin page's Share menu (`coinPageShareText` from the server's coin view, which has no firstborn set, so never "first child") and the launch success screen (`launchShareText`) adapt their records to it, so every surface says the same thing about the same coin. The shapes: a child "$KID, first child under $PARENT in the $ROOT family — 12 children, $5.2K locked. Live family tree:" (the family clause only when the parent is not the top; a leaf with nothing locked shows its mcap), a top "$PUMP family on Spore — 1,352 coins under it, $120K locked, 41% of all locked value on the map. Live family tree:", a launch "I just launched $KID under $PARENT on Spore — every buy routes through $PARENT. Family tree:". Rules: ≤ 200 characters (`SHARE_MAX`; a long name is clipped, then the family clause and the numbers are dropped in that order, never a cut mid-sentence), unknown parts are left out (never "—", "null" or a 0), no hashtags, no emoji, the link follows the text (it is the `url` of the intent, never pasted into the text). Tests: `web/test/share.test.mts`.
 
 `lib/pump/` (owned by the transaction library, imported by pages):
 ```ts
@@ -180,14 +186,14 @@ The Map page is the one surface that shows the **whole pump.fun custom-pair ecos
 **Web contract**
 - Map page defaults to **everything** (`limit=all`); the roots control becomes all · top 200 · top 60 (URL-synced, `all` default on desktop; phones default to top 200 with "all" available, documented in the UI).
 - Performance budget at 20 k nodes (headless Chrome, software raster, 1440×900): ≤ 16 ms per frame while settled, ≤ 33 ms while the layout settles, first paint of the bubbles within 2 s of the data arriving. How is an implementation choice (force simulation in a Web Worker with transferred Float32Array positions, or per-root `d3.pack` plus a cluster-level force) and must be written in a comment at the top of BubbleMap.tsx. Sprites cached, offscreen culling, labels only when zoomed in (cap 120 visible), hull glows only for the 60 largest clusters, no per-frame allocation in the draw loop.
-- Live: `pair` inserts the child (and its root when absent) with the pulse animation and a local relaxation only (never a full restart); `mapdelta` tweens radius/values; `stats` updates the panel counters; the LIVE dot reflects the stream status. Pan/zoom/hover/click/search/`?focus=` keep working at full size; Esc clears.
+- Live: `pair` inserts the child (and its root when absent) with the pulse animation, placed by a deterministic rule and never relaxed (Map v3 below; until 2026-10-20 a local relaxation); `mapdelta` tweens radius/values; `stats` updates the panel counters; the LIVE dot reflects the stream status. Pan/zoom/hover/click/search/`?focus=` keep working at full size; Esc clears.
 - Verified by a CDP script in web/test (frame timings at full load, console errors = 0, screenshots at 1440 and 390, a synthetic `pair` event inserted through the EventSource mock or a real one observed).
 
 **Owner feedback 2026-10-19 (must be met):** "opening the map lags a lot; does it re-request everything each time? Only the new ones should be added; and coin names and logos are sometimes missing."
 
 **Delta sync + client cache (no full reload on every open)**
 - Every coin row carries `updated_at` (ms); `GET /api/map?scope=all&limit=all&since=<ms>` returns only nodes with `updated_at > since` (each with its `parentMint`; the client already has the rest), plus `removed: []` (reserved), `generatedAt` and `total`. Without `since` the full tree comes back. Both variants ≤ 300 ms to build, cached 10 s.
-- The web client persists the full node set **and the layout positions** in IndexedDB (key: node mint; store `generatedAt`), renders from the cache immediately on open (bubbles painted < 500 ms after navigation on a warm cache), then asks `since=<generatedAt>` and merges: new nodes are placed next to their parent and relaxed locally, changed values tween, nothing restarts. A cold cache does one full load. The cache survives reloads and republishes; a schema `v` bump clears it.
+- The web client persists the full node set **and the layout positions** in IndexedDB (key: node mint; store `generatedAt`), renders from the cache immediately on open (bubbles painted < 500 ms after navigation on a warm cache), then asks `since=<generatedAt>` and merges: new nodes are placed next to their parent (Map v3: by the deterministic rule, no relaxation; a cache missing up to 64 coins places them the same way, more settle among the pinned rest), changed values tween, nothing restarts. A cold cache does one full load. The cache survives reloads and republishes; a schema `v` bump clears it.
 - Live `pair` / `mapdelta` events patch the same cache, so the next open is already current.
 
 **Metadata coverage (names and logos must show)**
@@ -217,6 +223,21 @@ The Map page is the one surface that shows the **whole pump.fun custom-pair ecos
 - The client runs a full re-sync (no `since=`) when its last full load is older than 15 min. This bounds the USD drift of warm caches, because `since=` carries only the coins whose own row changed.
 - Logo thumbnails are downsampled on the client (square, 64–256 px, LRU by pixel budget).
 - A server without the heat sidecar or `scope=all` (404) degrades: the Hot rail, the "Traded 1h" filter and the sparkline are hidden.
+
+**Map v3 — a live simulation you can drag (owner 2026-10-20: "the map as it was when we first opened the site, how it dragged, was better"; the rigid family drag, its liquid flow and the earlier no-motion build are withdrawn)**
+- Layout: d3-force in the worker (`web/src/components/map/layout.worker.ts`) with the first launch's forces: links to the parent (distance r + r + 20 for depth ≤ 1, + 12 deeper, strength 0.7), a short-range charge (−max(30, 3.5 r), reach 140, θ 1.1), collision (r + 6, strength 0.9) and a pull toward the family's centre (0.25 for a family top / depth-0 root, 0.06 for everything else); family tops also keep every member outside their disc. It runs for a cold open without cached positions, an explicit relayout (the size-mode or focus change) and every drag, and sleeps (posts nothing) once alpha falls under 0.01. A live `pair`, a `mapdelta`, a hover or a zoom never re-heats anything. While it runs the page interpolates between the last two worker frames, redraws every frame and re-measures the hulls, anchors and titles from the worker positions, so they travel with the bubbles; once it rests the positions go to the cache.
+- A live pair is appended in place (links, cluster, draw order: `store.addLinks / addToClusters / insertOrder`) and placed by one deterministic rule (`lib/map/place.ts`: rings around the parent at r_parent + r_child + gap, outward from the family's top, the first spot clear of the family's other bubbles); its spot goes to the cache ~2 s later. Up to 64 newcomers per data change take this path; more at once (a wider roots limit, a cache missing many coins) settle among the rest, which stays pinned. `mapdelta` tweens radii in place and re-sorts only the changed nodes (one memmove each; a full sort past 400).
+- Drag (as at the first launch): pressing a bubble ≥ 3 px and moving past 4 px grabs that bubble; at overview a tree's title (or, for a mouse, its hull) grabs the tree's root, so a family can still be dragged from far out. The grabbed bubble follows the pointer exactly (the page sets its position and posts `{t: "drag", i, x, y, phase: "start" | "move" | "end"}`); the worker reheats on start (alphaTarget 0.25, alpha ≥ 0.3) and keeps ticking while the pointer is down, the bubble is pinned at the pointer on every move, so its children trail behind it on their links, the neighbours flow out of the way and the map breathes; on release alphaTarget goes back to 0, the bubble is unpinned and the layout cools to rest in ~1.3 s. A drag never moves a family's centre: a dropped root glides back toward home (part of the way, as at the first launch: its own children trail and hold it). Below 4 px it is a click.
+- Speed: one tick of the whole 17 k-node forest costs ~60 ms (charge ~33 ms + collision ~24 ms), far too slow to follow a pointer, so a drag on a resting layout reheats a local simulation: the same forces on copies of the grabbed bubble's family and every family whose disc comes within 420 world units + that family's radius of it, with the families in a 260-unit ring beyond pinned as obstacles, one tick per display frame (~60 Hz, d3's own rate) and the alpha decay applied per frame of wall time (0.04), so a large region whose tick takes longer still rests in ~1.3 s. As the bubble is carried further out, the families near its new spot join (velocities kept). A drag while a cold settle or a relayout is running joins that full simulation instead.
+- Pan and zoom are a pure camera transform. The render loop draws only when something changed (`draw.ts invalidate()`) or animates: flights, the settle interpolation, grow-in and pulse rings and leftover sprite builds follow at the display rate; trade fx, radius tweens, link dots, beacon breathing and the selection ring alone are redrawn every ~33 ms (at overview zoom some ripple is nearly always alive with the live stream); a static map draws nothing.
+- Logos are fetched as blobs and decoded + downsampled into ImageBitmaps off the main thread (the <img> + canvas path stays as the fallback), so a zoom into a cluster no longer pays a 50–60 ms synchronous decode.
+- Budget, restated: the frame budget is measured as animation-frame intervals and long tasks (`web/test/map-perf.mts`: no long task and no frame over 50 ms during a gesture, a flight, a trade burst or a drag; a static map under 35 draws/s; nothing moves on a settled map, after a synthetic pair or after a drag's settle), with draw() ms as the secondary number. Under headless software raster the canvas commit, not the script, bounds the frame (p50 ~20 ms at 1440×900); on the GPU the map runs at the display rate.
+
+**Dominance (owner 2026-10-20: "the market share of a pair given the sum of the pair value, so you can see which pairs have the biggest dominance outside of the size of the cells")**
+- A family (a top: a SOL root or a listed asset such as $PUMP, plus every coin under it on the map) has a value in each size mode: the weight its top bubble is drawn by (`lib/map/sizing.ts` familyWeights: Σ valueOf over the family, the leaf slice of market cap included in "locked"). Its **dominance** is that value over the sum for every family on the map, so the number and the bubble always agree and the shares of a mode add up to 100 %. A coin alone on the map is a family of one. A family with nothing priced (value 0: ~100 tokenized-stock tops have no USD price) reads "—", not "0 %". Format: one decimal below 10 %, whole numbers from there, "<0.1%" for a sliver (`sharePct`).
+- Web (`lib/map/dominance.ts`): the map page computes both modes' tables from the whole node set (all roots, whatever the roots limit draws) in one family pass, ~3 ms at 17 k coins, at most once a second while the stream patches; never per frame.
+- Surfaces: (1) the cluster title gets the share in the current size mode after its text ("$PUMP · 1,352 · 41%"), drawn only where that strip is free once every title has its place, so a tag never costs a title (or a forced label) its place: the set of titles is exactly the one without tags (node labels, placed after, keep clear of the tags), and a step of zoom shows the tags a crowded overview drops; phones tag only the families of 1 % and more; the hovered (or selected) tree's title always shows its tag, and that strip is kept together with its title, before any other title is placed, so no title lands under it. (2) The hovered tree's tooltip: "dominance 41% locked · 29% mcap" with a thin bar; the side panel of a selected coin: its family, size and rank ("$PUMP family · 1,352 coins · #1 of 2,004") and "Dominance: 41% of all locked value · 29% of market cap" with a bar of the share in the current mode. (3) A Dominance rail tab next to New/Hot/Growing/Spore: the 20 largest families for the size mode, each with a bar and its %; a row flies to the whole family and selects its top (the cluster click's flight; a family outside the drawn roots widens to everything first). (4) The coin page of a family top (depth 0): one line under the stats, "Dominance: 10% of all locked value · <0.1% of market cap · on the map →", from `GET /api/map/dominance` (`server/lib/dominance.mjs`, the same rule over the cached all-scope forest, 30 s per mode; the web test checks that both give the same numbers for the same tree). A root that hangs under a listed asset is a member of that family, not a top, and shows no line.
+- Measured 2026-10-20 (full dataset, 17 k coins, 2 004 families): shares add up to 1 (page and server), the 10 largest families by share are the 10 largest top bubbles in the same order, page vs server within 0.01 percentage points on the top 20 when both are fresh (up to ~0.2 points while the server's 30 s table lags the live page), and map-perf / map-interact unchanged (titles at fit 40 with 10 of the 10 largest at 1440, 12 with 6 at 390; idle, gesture, burst and flow frame times as before).
 
 **Owner commitment (2026-10-19):** the platform's 50 % share of creator fees is used to buy the Spore coin ($SPORE, to be launched by the owner) and lock it; the site says so on Home, Fees, How, Launch and the footer. X account: https://x.com/Sporemap (footer link).
 
@@ -302,3 +323,207 @@ GET /v1/openapi.json → OpenAPI 3.1 of every /v1 route, schemas and examples
 ### 12.5 Docs
 
 Web page `/docs/api` (footer link "API", linked from /how): what the data is, quick start (curl, JS fetch, SSE) with real mints such as $SPORE `HfzNFxar7oggDCHnK2ekkygDsLNuCGh3dXdRQS3wJTJY`, every endpoint with params and an example response, tiers and limits, how to get a key (X @Sporemap, team@sporepad.com), the embed section (live preview iframe, snippet generator with theme toggle), attribution terms ("Data by Spore" + link required; free tier; partner keys on request) and a link to `/v1/openapi.json`.
+
+## 13. Root agents (owner 2026-10-19) — phase 0: dry run
+
+Every root coin can get its own agent: it learns what the coin is about, proposes new coins under it on that theme and, in a later phase, funds further launches with the creator fees its coins earn. **Phase 0 (this contract) is a dry run only:** agents produce real proposals and build and **simulate** the exact launch transactions, but nothing is ever signed or sent and no agent holds a private key. The code makes sending impossible, not just unused: `lib/agents/` has no keypair type, no signing call and no send path (a test scans it), every chain call goes through a read-only client that refuses anything but `getAccountInfo`, `getMultipleAccounts`, `getBalance`, `getMinimumBalanceForRentExemption` and `simulateTransaction`, and the agent's wallet and the coin's mint are placeholder program-derived addresses (off the ed25519 curve, so no private key can exist for them). Later phases (agent wallets, signing, spending fees) are specified separately and are not part of this contract.
+
+Code: `server/lib/agents/` (`registry.mjs` storage + API views, `profile.mjs`, `llm.mjs`, `scorer.mjs`, `designer.mjs`, `blocklist.mjs`, `logo.mjs`, `simulate.mjs`, `runner.mjs`), `server/scripts/agents.mjs` (admin CLI), tests `server/test/agents-*.test.mjs`.
+
+**Storage** (sqlite, the server's file; new tables only, created by `lib/db.mjs` like `api_keys`):
+- `agents (root_mint PK, status 'dry'|'paused', profile_json, created_at, updated_at, last_run_at, next_run_at, runs, proposals, last_score, last_reason)`
+- `agent_proposals (id PK /* 16 hex */, root_mint, created_at, name, symbol, description, image_file, score, reason, sim_json, status 'proposed'|'rejected', rejected_reason, source 'model'|'fallback', runners_json, metadata_uri)`; times are unix seconds. A proposal is `rejected` when its simulation failed (or could not run), with the reason.
+
+**Profile ("purpose")**, built once per agent (rebuilt with the CLI) from the root's name, ticker, description, socials and its children's names: `{ summary ≤ 280, themes: 3-8 short keywords, tone, avoid[], palette: 2-3 hex, source: "model"|"fallback", builtAt }`. The fallback extracts keywords (description phrases and name ×3, ticker ×2, description words weighted by position, words that at least two children share), never a stop word, nationality, person, brand or blocked word, and picks a tone family (organic / technical / gritty / playful) and its palette (hue-shifted per root) from the root's own words first. A model answer is validated field by field; it counts as `model` only when its summary and themes are valid.
+
+**Language model**: a pluggable provider configured only by env: `LLM_URL` (a `/chat/completions` endpoint in the common JSON chat format), `LLM_KEY_FILE` (the key is read from this file, never from the environment, and never logged or echoed), `LLM_MODEL`. Unset or failing (three failures in a row pause it for 10 min), every step uses its deterministic fallback, so the whole pipeline works without a key; every profile and proposal records `source`.
+
+**Momentum scorer** (no model), per root: trades in the last hour (35 points), buy share of those (10, from 30 % to 70 % buys, needs ≥ 5 trades), 24 h USD volume (25), 24 h trades (10), existing children (15), time since its last proposal (5: none inside the cooldown, full after a day or when it never proposed); counts on a log scale against a busy reference (200 trades/h, $250 K, 2 000 trades, 300 children). Inputs from `lib/activity.mjs`. Only depth-0, non-mayhem coins can be launched under (otherwise score 0, never proposes). Gates, in order: score ≥ `AGENT_MIN_SCORE` (40), one proposal per root per `AGENT_COOLDOWN_MIN` (60), at most `AGENT_MAX_PER_HOUR` (12) proposals across all agents in the last hour. The score comes with a reason, e.g. `momentum 71/100: 106 children, 28 trades/1h (32% buys), 841 trades and $52.8K volume in 24 h, never proposed`.
+
+**Designer**: 6 candidates per run (the model's first six valid ideas, topped up by the generator: theme + noun of the tone family, portmanteaus, rhymes on the root ticker that land on a common word, `Lil X` / `Xkin` / `Xling`), then filters: name 1-32 plain text, ticker 2-10 `A-Z0-9`, description 1-280, no links or markup; no real person or brand (`blocklist.mjs`; a single-word term matches a whole word, a multi-word term its squashed form, a ticker a 4+ letter term at either end), no slur or vulgar word (stored only as truncated sha256 digests, matched per word and, for long entries, per substring, after folding case, accents and leetspeak); not a ticker of one of the root's children, of the 2 000 biggest coins by market cap or of the agent's own last 50 proposals, not a child's exact name, not a near-duplicate of the root's ticker (equal, the root ± two characters, or one edit away for a ticker of ≤ 4 letters, two otherwise). When no candidate survives, up to two more rounds of six fallback ideas. Rubric: theme fit 45 %, brevity 25 %, uniqueness against the known tickers 30 %. The winner is the proposal; the other survivors are `runnersUp`; refused ones are kept with their reason in the record (not in the API).
+
+**Logo**: 512×512 PNG drawn from the profile palette with a seeded motif (spores, rings, rays, hexagon or blob) and the ticker's letters as strokes from a built-in A-Z/0-9 font (tickers over five characters wrap onto two rows), rasterised by `@resvg/resvg-wasm` (no native module, no system fonts). Stored as `DATA_DIR/agents/<id>.png`, served at `/api/agents/img/<id>.png` (only files a stored proposal names; `public, max-age=31536000, immutable`).
+
+**Simulated launch**: the exact transaction the web's `buildSpawnTx` builds for a child of the root: compute budget, the launch fee (`LAUNCH_FEE_SOL`, when > 0), `create_v2` quoted in the root (pump-quote accounts from the SDK's `resolveQuoteMint`), the sharing config vault's quote token account, `create_fee_sharing_config` and `update_fee_shares_v2` with Spore's split (`SPLIT_BPS`) where the agent's placeholder wallet is the creator, compiled v0 over Spore's lookup table; the metadata URI is the content address our metadata host would give this exact JSON and logo (computed, never published). Under a migrated root it does not fit one transaction, so, like the web, it is two: create (≈ 884-891 B) then sweep + vault account + config + split (≈ 871 B). The first is simulated (`sigVerify: false`, `replaceRecentBlockhash`) in a variant where the public probe wallet `dBs75Gf7RXQMAsMLuTLYdH2fHV1ac9zgCEh6zC7TxXs` pays the fee and lends the placeholder 0.1 SOL in a prepended transfer; the second needs the first landed, so its rent (sharing config 1 024 B + vault account) is computed. `sim_json = { ok, bytes /* the real first transaction */, unitsConsumed, err, estCostSol /* rent + launch fee + network fees of both */, txs, feeTxBytes, agent, mint, payer, simulatedAt, costBasis }`. Measured 2026-10-19 under the six seed roots: ok, 884-891 B, 145-205 k CU, ≈ 0.0148 SOL each (launch fee 0).
+
+**Runner**: in-process, started when `AGENTS=dry`; every `AGENT_TICK_SEC` (300) it announces proposals other processes wrote, then evaluates each due agent in turn (`next_run_at`; paused agents never), strictly one run at a time; the indexer never waits on it, and its reads and simulations use the api RPC lane. `AGENTS=off` (the default) starts nothing; the read API still serves what is stored. `/api/health.agents` reports its counters.
+
+**Admin CLI** (no HTTP admin endpoint): `node server/scripts/agents.mjs enable <rootMint> | pause <rootMint> | rebuild-profile <rootMint> | run-once <rootMint> [--gated] | list | seed`, on `DATA_DIR/spore.sqlite` (`--data` overrides; refuses a missing file), same environment as the server. `enable` refuses a coin that is not an indexed depth-0, non-mayhem root and builds the profile; `run-once` is the same dry run as the loop and skips the gates unless `--gated` (the reason says what the gates would have done); the running server announces a CLI proposal on its event stream within one tick. `seed` enables the owner's six roots: $SPORE `HfzNFxar7oggDCHnK2ekkygDsLNuCGh3dXdRQS3wJTJY`, $GTA `BsbsB3WLq7vbY5En3MBCAsTrcwaCxNKY2Mp5pGuLpump`, $NTRNDM `NTRNDMqQSiwEC2jJs3wJiZS6bpGYQJtMNQJgiX3WyV6`, $simulator `8hnMfF4XL717GVwzDmvqjJvULozKW6w7BhHFABjvHje4`, $DOPE `33jENUQnjoitkMFpvNJcSHyLAHFWJuHwT6E3E8CNpump`, $VEIL `HgTGdc29D5bDMrDvsCLnorxz899VyDj7ZN7FPa6vpump`.
+
+**API** (read-only, public; JSON; `max-age=10` + ETag on /api, the /v1 cache headers on /v1):
+```ts
+type AgentProfile = { summary: string; themes: string[]; tone: string; avoid: string[]; palette: string[]; source: "model" | "fallback"; builtAt: number };
+type Proposal = { id: string; createdAt: number; name: string; symbol: string; description: string;
+  image: string | null;  /* /api: "/api/agents/img/<id>.png" (same origin); /v1: "https://sporepad.com/api/agents/img/<id>.png" (PUBLIC_URL) */
+  score: number /* the root's momentum when proposed */; reason: string;
+  sim: { ok: boolean; bytes: number | null; unitsConsumed: number | null; estCostSol: number | null; err: string | null };
+  source: "model" | "fallback"; runnersUp: { name: string; symbol: string }[];
+  status: "proposed" | "rejected"; rejectedReason: string | null };
+type Agent = { root: CoinRef; status: "dry" | "paused"; profile: AgentProfile | null;
+  stats: { runs: number; proposals: number; lastRunAt: number | null; nextRunAt: number | null /* null while paused */; score: number /* live */; scoreReason: string };
+  latest: Proposal | null };
+
+GET /api/agents            → { mode: "off" | "dry", agents: Agent[] }   running agents first, then by live score
+GET /api/agents/:root      → { agent: Agent, proposals: Proposal[] }   newest first, ≤ 50; 400 malformed, 404 "no agent for this coin"
+GET /api/agents/img/:id.png → the logo (image/png, immutable, CORP cross-origin); 404 for anything a proposal does not name
+SSE /api/events            → event: agent, data: { root, proposal: Proposal }
+GET /v1/agents, /v1/agents/:root → the same bodies with absolute image URLs (root images and logos); documented in /v1/openapi.json
+/v1/stream?types=agent     → the same event with absolute images (opt-in type; not in the default set)
+```
+
+**Configuration**: `AGENTS` (`off` | `dry`, default `off`), `AGENT_TICK_SEC` (300), `AGENT_MIN_SCORE` (40), `AGENT_COOLDOWN_MIN` (60), `AGENT_MAX_PER_HOUR` (12), `AGENT_PROBE` (the funded public wallet used as fee payer in simulations), `LLM_URL`, `LLM_KEY_FILE`, `LLM_MODEL`. Setting `LLM_KEY` itself is refused at boot (put the key in a file).
+
+### 13.1 Live agents (owner decisions, 2026-10-19)
+
+The dry run (§13) proposes and simulates. A live agent does the same and then launches, with these rules:
+
+- **Own wallet.** Every agent has one real Solana keypair, created by `scripts/agent-vault.mjs new <root>` and kept
+  encrypted at rest (`DATA_DIR/agents/wallets/<root>.json`, AES-256-GCM under the 32-byte key in
+  `AGENT_VAULT_KEY_FILE`, mode 600; `lib/agents-live/vault.mjs`). The vault key and the wallets directory are backed up
+  separately. The platform wallet is never an agent's payer; a keyless placeholder is never shown as an address.
+- **Starting budget.** An agent runs only while its wallet is worth at least `AGENT_START_USD` (default $5, SOL + USDC
+  at the indexer's SOL price; `budget.mjs canStart`). Every launch must leave `reserveSol` (0.005) behind and cover the
+  simulated cost plus a margin (`canLaunch`). After the seed, money comes only from the creator fees its coins earn.
+- **Models.** Only Claude or GPT (`models.mjs`: Sonnet 5.5 default, Opus 5.5, GPT-5.5, GPT-5.4 mini). Calls go through
+  NanoGPT's accountless x402 rail paid per request in USDC from the agent's wallet (`pay.mjs`): quote → one partially
+  signed TransferChecked of exactly the quoted USDC, fee paid by NanoGPT's facilitator → replay with `X-PAYMENT`. Each
+  model has a per-call cap (≤ $0.08); the pocket must hold the cap before a quote is asked. No API key anywhere.
+- **USDC pocket.** Fees arrive in SOL; when the pocket is under `aiFloorUsd` ($0.25) the agent swaps SOL → USDC through
+  Jupiter to `aiTargetUsd` ($1) (`swap.mjs`: ≤ 1 % impact, agent-paid single-signer unsigned transaction calling the
+  Jupiter program, simulated balance deltas checked, ledger before send). One top-up is $0.20–$5.
+- **What the model does.** Name, ticker and logo, nothing else. The logo is an SVG the model draws, reduced to a strict
+  vector subset (no scripts, links, images, external references; `ailogo.mjs`) and rasterised to 512×512 with resvg;
+  a rejected SVG falls back to the template logo. The description is a fixed template naming the root.
+- **Root split (the site's one fee rule).** A ROOT coin's creator fee (pump: 0.95 % of volume on the AMM, 0.30 % on the
+  curve) is split creator 0.25 % / Spore 0.50 % / the root's agent wallet 0.20 % = **2632 / 5263 / 2105 bps**
+  (`pricing.mjs ROOT_SPLIT_BPS`, pinned in `web/src/lib/policy.ts ROOT_SPLIT`). The agent wallet must therefore exist
+  before the launch: `POST /api/agents/prepare {creator, model}` makes it (`vault.prepare`, file `pending-<id>`), the
+  launch form puts its address in the split, and `POST /api/spawned {mint, sig, agent:{id, model}}` binds it to the
+  mint (`vault.bind`) and enables the agent with the model the creator picked. Children keep creator 50 / Spore 50
+  (an agent-launched child's creator is the agent wallet, so the agent also earns from its own coins). The launch
+  also sends the agent wallet **0.01 SOL** from the creator inside the same signature (`AGENT_SEED_LAMPORTS`): an agent
+  is born with nothing and needs that gas to claim its first root fees; from then on it lives on what it earns.
+- **Model choice.** The creator picks the agent's model at launch (`AGENT_MODELS`, Claude or GPT only); it is stored
+  on the agent (`agents.model`) and used for every paid call.
+- **Cadence.** Live agents do not wait for momentum: every 5 minutes, for as long as the wallet can pay a launch
+  (`canLaunch`), the agent launches one child under its root — a sensible name and ticker, a meme on that coin,
+  nothing else. The dry run's momentum score stays visible on the agent page but gates nothing in live mode.
+- **Launch.** `launch.mjs`: the dry run's `buildLaunch` with the agent's wallet as creator/payer and a fresh mint keypair,
+  metadata published on our host first, simulated with a real blockhash, budget-gated, ledger-recorded, then signed
+  (agent + mint) and sent; split set in the same transaction (or a second one when too large).
+- **Fees.** `claim.mjs` reads the coin's buckets (curve, vault, pool) and claims permissionlessly when the agent's own
+  share is ≥ 0.002 SOL (token-quoted coins: a share worth ≥ $0.05 at the indexer's price); one transaction pays every
+  shareholder. The agent claims its ROOT first (its SOL income), then its children, one claim per pass, before any
+  sleep gate.
+- **Payout (owner 2026-10-19: automatic).** `payout.mjs`: every pass, after claims, an agent sends whatever exceeds its
+  working balance (`AGENT_KEEP_SOL`, default 0.1 SOL, plus the reserve) and all idle USDC on the keyed rail to
+  `AGENT_PAYOUT_ADDRESS` (the owner's Solana wallet) in one simulated, ledgered transaction. Unset = agents keep
+  everything. Spore's own platform share is a separate wallet and a separate decision (Bitcoin via Relay, pending).
+- **No outside input.** Agents read only the indexer and the chain. There is no chat, no holder orders, no API that
+  tells an agent what to launch. Humans can pause an agent (`AGENTS=off` stops all).
+- **Ledger.** `DATA_DIR/agents/ledger.jsonl` gets one line before and after every payment, swap, claim and launch
+  (public identifiers only). Every pending line without a landed line is reconciled from the chain by signature.
+- **Sending.** `tx.mjs` is the only module that sends: preflight on, confirm by signature until `lastValidBlockHeight`,
+  result is landed / failed / expired, never silence.
+- **Phases.** `AGENTS=dry` (now): propose + simulate. `AGENTS=live`: everything above, each agent enabled one at a time
+  by the owner funding its wallet. Fund-moving modules (pay, swap, claim, launch) get a second review before `live`.
+
+### 13.2 Agents on the site (owner 2026-10-19: "integrate the agents completely, down to the coin page")
+
+The beta "Agents" page goes; agents become part of the site. Every ROOT launched on Spore has an agent
+(§13.1), and the site shows what that agent does with the money it earns: its wallet, every coin it
+launched, every fee claim, every payout to the owner and every model call, each on-chain action with
+its transaction. The data comes from three places the server already has: the registry (`agents`,
+`agent_launches`, `agent_proposals`), the ledger (`DATA_DIR/agents/ledger.jsonl`) and the wallet's
+balances. Nothing new is written for the site; the API only reads.
+
+**Who is public.** An agent is served when its root is a Spore launch (`model.isOurCoin`) or when the
+owner runs it (status `dry`/`live`); a paused agent of a foreign root is never served anywhere (the
+five 2026-10-19 seeds: $GTA, $NTRNDM, $simulator, $DOPE, $VEIL). `isPublicAgent` in `registry.mjs` is
+the one rule; `/api/agents/:root` answers 404 for a hidden agent and `/api/agents/coin/:mint` answers
+`role: null`. Running agents come first, then by momentum.
+
+**Ledger reader** (`lib/agents-live/ledger.mjs`, `AgentLedger`): tails the ledger incrementally by byte
+offset (a `stat` at most once a second per process, then only the new bytes; a partial trailing line
+waits for its newline; a shrunken file is read again from the start), keeps the parsed lines per root
+in memory (≤ 50 000 per root), counts and skips malformed lines, and folds the lines of one action into
+one item: a launch is `pending → sent → step_landed → landed` across its one or two transactions (a
+step-2 failure leaves it `step_landed`, "fee split owed", until a `split` item lands); claims, payouts
+and swaps group by their signature; a keyed model call is one line; an x402 payment groups by its
+`paymentId`. Statuses are folded to `pending | sent | step_landed | landed | failed | expired |
+uncertain` for on-chain actions and `done | failed | refused` for model calls. A signature is shown
+only when it is base58 (older x402 lines carry base64: `signature: null`, no link). `/api/health
+.agents.ledger` reports `{ bytes, lines, bad, roots }`.
+
+**Wallets and balances.** The address is `agents.wallet`, else the vault's wallet for the root (the
+$SPORE agent was bound before the column existed; `registry.walletAddress`, cached per root). Balances:
+under `AGENTS=live` the orchestrator's last budget read for the root; otherwise `budget.mjs readBudget`
+on the api RPC lane, cached 60 s per address (`createAgentBalances` in `api.mjs`); a request waits at
+most 1.5 s for a read and serves nulls until the numbers arrive; a failed read keeps the last value
+and is not retried before the ttl. `wallet` is null while the agent has no wallet; never a placeholder.
+
+**Status.** The registry row stays `dry` while it runs; the site shows `live` for a running agent when
+the server runs live agents (`AGENTS=live`), `dry` in the dry run, `paused` when paused.
+
+**API** (read-only; `max-age=10` + ETag on `/api`, the /v1 cache headers on `/v1`; `/v1` bodies carry
+absolute image URLs: root, launched coins, logos):
+```ts
+type AgentWallet = { address: string; sol: number | null; usdc: number | null; usd: number | null; updatedAt: number | null };
+type AgentTotals = { launches: number; launchSol: number; claimsSol: number; claimsUsd: number /* every claim at today's prices */;
+  aiUsd: number; aiCalls: number; payoutsSol: number; payoutsUsdc: number; lastActivityAt: number | null };
+type LaunchedCoin = { mint: string; name: string | null; symbol: string | null; image: string | null; createdAt: number;
+  signature: string | null; why: string | null; logoSource: "image" | "model" | "template" | null };
+type ActivityItem = { at: number; kind: "launch" | "claim" | "payout" | "ai" | "swap" | "split";
+  status: "pending" | "sent" | "step_landed" | "landed" | "failed" | "expired" | "uncertain" | "done" | "refused";
+  title: string /* "Launched $RUMORMILL", "Claimed 0.0549 SOL from $SPREAD", "Claimed 24,000 $SPORE from $CPUFF",
+                   "Paid 0.12 SOL + 1.20 USDC to the owner", "Thought with Claude Sonnet 5.5 ($0.013)", "Drew a logo ($0.008)",
+                   "Swapped 0.02 SOL for ≈ 1.00 USDC", "Finished the fee split of $X", "Launched $X (fee split owed)" */;
+  amountSol: number | null; amountUsdc: number | null; usd: number | null; mint: string | null; symbol: string | null;
+  signature: string | null /* base58 only */; explorer: string | null /* https://solscan.io/tx/<signature> */ };
+type AgentView = Agent /* §13: root, status "dry" | "live" | "paused", profile, stats, latest */ & {
+  model: string; modelLabel: string /* e.g. "anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5" */;
+  wallet: AgentWallet | null; totals: AgentTotals; launched: LaunchedCoin[] /* newest first, ≤ 12 */; activity: ActivityItem[] /* newest first, ≤ 8 */ };
+type AgentSummary = { address: string | null; status: AgentView["status"]; wallet: AgentWallet | null; totals: AgentTotals; model: string; modelLabel: string };
+
+GET /api/agents            → { mode: "off" | "dry" | "live", agents: AgentView[] }   public agents, running first, then by momentum
+GET /api/agents/:root      → { agent: AgentView, proposals: Proposal[] /* ≤ 50 */, activity: ActivityItem[] /* newest first, ≤ 200 */, launched: LaunchedCoin[] /* all */ }
+                             400 malformed, 404 "no agent for this coin" (also for a hidden one)
+GET /api/agents/coin/:mint → { role: "root" | "child" | null, root: CoinRef | null, agent: AgentSummary | null,
+                               launch: { signature, at, why, logoSource, proposalId } | null }   "root": the mint has a public agent;
+                             "child": a public agent launched it (`agent_launches`); null otherwise — 200, never 404; 400 malformed
+GET /v1/agents, /v1/agents/:root, /v1/agents/coin/:mint → the same bodies with absolute images (documented in /v1/openapi.json)
+SSE /api/events            → event: agent (unchanged: { root, proposal })
+```
+Human titles use the coin tickers from the index (`model.nameOf`), else the ledger's own symbol, else a
+short mint; token-quoted claims name the quote (`Claimed 24,000 $SPORE from $CPUFF`) and are valued at
+the quote's current USD price; SOL at the indexer's SOL price. `totals.launches` is the larger of the
+registry's count (it also knows coins adopted from the index) and the ledger's landed launches.
+
+### 13.3 Owner briefs (owner 2026-10-20: "the $HUMAN agent launches the world's famous people")
+
+A brief is a standing instruction the owner gives one root's agent. Stored in
+`DATA_DIR/agents/briefs.json` (`{ "<rootMint>": { text, mode: "people" | "free", setAt } }`, mode 600,
+atomic writes), set only with `server/scripts/agent-brief.mjs set <root> "<text>" | --file <path|-> [--mode people]
+| get <root> | clear <root> | list` (`DATA_DIR` / `--data`); text ≤ 1 200 characters of plain text, no
+links or markup. The runner re-reads the file whenever it changes (stat per run), so a brief applies on
+the agent's next run without a restart. Code: `lib/agents/brief.mjs`, `lib/agents/people.mjs`.
+
+- **Prompt**: the brief goes first, as the governing instruction ("THE OWNER'S BRIEF — follow it exactly;
+  it overrides the themes"); the system line says so too.
+- **Filters** for a briefed root: the biggest-coins ticker filter and the near-the-root's-ticker filter
+  do not apply (the owner allows any ticker); a child's ticker or name, a duplicate in the batch and the
+  agent's own recent proposals are still refused. Rubric: uniqueness neutral, fit = the rank the model
+  (or the fallback list) gave the idea.
+- **Mode `people`**: each coin is one famous real person — name = full name ("Elon Musk"), ticker = the
+  name they go by (`ELON`), description = one punchy line on why this human matters, the hype line about
+  the person. The prompt lists every person already under the root (`takenPeople`, ≤ 400) and forbids
+  slurs, sexual content, claims about private lives, implying endorsement, private individuals and
+  minors. Real names pass the people filter; brands stay out of the name and ticker; people known for
+  atrocities, terrorism or serial/sexual crimes never pass (`PEOPLE_NEVER`); a person already launched or
+  proposed under the root is refused by ticker, name and person key (first + last name, initials and
+  suffixes dropped). Fallback: ~350 famous people in fame order with a seeded jitter, minus the ones
+  taken. Logo: the image model is asked for "a bold meme-style caricature portrait of <name>, head and
+  shoulders, flat vivid colours, no text, no logo"; a refusal falls back to the SVG/template path. The
+  metadata description ends with the purpose line and "Unofficial fan tribute, not affiliated with or
+  endorsed by <name>."
+- **API**: `Agent.brief` = `{ mode, setAt }` or null (the text stays on the server).

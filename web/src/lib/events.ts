@@ -2,11 +2,12 @@
 // when the last one leaves. Reconnects with exponential backoff; a tab coming back from the
 // background resets the backoff so the feed is live again immediately.
 import { useEffect, useRef, useState } from "react";
-import { api, type Coin, type MapDeltaEvent, type PairEvent, type Stats, type Trade } from "./api";
+import { api, type AgentEvent, type Coin, type MapDeltaEvent, type PairEvent, type Stats, type Trade } from "./api";
 
 /// `pair` and `mapdelta` are the map's live feed (DESIGN §11.5): every new custom pair on pump.fun and
-/// the numbers that moved, whatever the listing mode. `coin` keeps its ours-only meaning.
-export type Handlers = { coin?: (c: Coin) => void; trade?: (t: Trade) => void; stats?: (s: Stats) => void; pair?: (p: PairEvent) => void; mapdelta?: (d: MapDeltaEvent) => void };
+/// the numbers that moved, whatever the listing mode. `coin` keeps its ours-only meaning. `agent` is a
+/// root agent's new (dry-run) proposal (§13).
+export type Handlers = { coin?: (c: Coin) => void; trade?: (t: Trade) => void; stats?: (s: Stats) => void; pair?: (p: PairEvent) => void; mapdelta?: (d: MapDeltaEvent) => void; agent?: (a: AgentEvent) => void };
 export type StreamStatus = "idle" | "connecting" | "live" | "reconnecting";
 
 const subs = new Set<Handlers>();
@@ -46,6 +47,7 @@ function open() {
   es.addEventListener("stats", (ev) => { const s = parse<Stats>(ev as MessageEvent); if (s) dispatch("stats", s); });
   es.addEventListener("pair", (ev) => { const p = parse<PairEvent>(ev as MessageEvent); if (p?.coin?.mint) dispatch("pair", p); });
   es.addEventListener("mapdelta", (ev) => { const d = parse<MapDeltaEvent>(ev as MessageEvent); if (d && Array.isArray(d.updated)) dispatch("mapdelta", d); });
+  es.addEventListener("agent", (ev) => { const a = parse<AgentEvent>(ev as MessageEvent); if (a?.root && a.proposal) dispatch("agent", a); });
   es.onerror = () => {
     es.close();
     if (source !== es) return;
@@ -83,7 +85,7 @@ export function useEvents(handlers: Handlers, enabled = true) {
   ref.current = handlers;
   useEffect(() => {
     if (!enabled) return;
-    return subscribe({ coin: (c) => ref.current.coin?.(c), trade: (t) => ref.current.trade?.(t), stats: (s) => ref.current.stats?.(s), pair: (p) => ref.current.pair?.(p), mapdelta: (d) => ref.current.mapdelta?.(d) });
+    return subscribe({ coin: (c) => ref.current.coin?.(c), trade: (t) => ref.current.trade?.(t), stats: (s) => ref.current.stats?.(s), pair: (p) => ref.current.pair?.(p), mapdelta: (d) => ref.current.mapdelta?.(d), agent: (a) => ref.current.agent?.(a) });
   }, [enabled]);
 }
 

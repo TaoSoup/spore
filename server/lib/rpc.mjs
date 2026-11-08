@@ -202,6 +202,24 @@ export class Rpc {
     this.log.info?.(`rpc: getProgramAccountsV2 done: ${pages} pages, ${out.length} matches, ${Math.round((Date.now() - t0) / 1000)} s`);
     return out;
   }
+  /**
+   * Streams every account of `program` matching `filters` to `onAccount(pubkey, data)` page by page
+   * (getProgramAccountsV2, 10 000 per page), never holding the whole set: a walk of all ~10 M pump curves
+   * with a `dataSlice` of a few bytes is ~3 200 pages and a few minutes, and would be gigabytes as one
+   * array. Returns `{ pages, accounts }`.
+   */
+  async scanProgramAccounts(program, { filters = [], dataSlice = null, commitment = "confirmed" } = {}, onAccount) {
+    const cfg = { encoding: "base64", commitment, filters, ...(dataSlice ? { dataSlice } : {}), limit: 10_000 };
+    let paginationKey = null, pages = 0, accounts = 0;
+    const t0 = Date.now();
+    do {
+      const r = await this.call("getProgramAccountsV2", [program, { ...cfg, ...(paginationKey ? { paginationKey } : {}) }], { timeoutMs: 120_000 });
+      for (const x of r.accounts ?? []) { accounts++; onAccount(x.pubkey, Buffer.from(x.account.data[0], "base64")); }
+      paginationKey = r.paginationKey ?? null;
+      if (++pages % 500 === 0) this.log.info?.(`rpc: scan page ${pages}, ${accounts} accounts, ${Math.round((Date.now() - t0) / 1000)} s`);
+    } while (paginationKey);
+    return { pages, accounts };
+  }
   /** Parsed token accounts of `owner` under `programId`: `[{pubkey, mint, amount, tokenProgram}]`. */
   async getTokenAccountsByOwner(owner, programId, { commitment = "confirmed" } = {}) {
     const r = await this.call("getTokenAccountsByOwner", [owner, { programId }, { encoding: "jsonParsed", commitment }]);

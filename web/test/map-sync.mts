@@ -1,3 +1,6 @@
+// map3 (2026-10-21): /map now renders the Three.js map by default; this script measures the classic
+// Canvas renderer, so every /map URL it loads carries renderer=classic (Chrome keeps --disable-gpu, which
+// would also force the classic fallback). The WebGL renderer has its own scripts: map3-qa/perf/shots.
 // End-to-end check of the map's delta sync, client cache and live patching (DESIGN §11.5) against
 // test/map-mock-api.mts, which serves the exact wire shapes and a real SSE stream. Through CDP (no
 // puppeteer): cold load = one full request and a filled cache; touched nodes come back through
@@ -52,7 +55,7 @@ try {
   const mapRequests = () => evalJs<{ url: string; ms: number }[]>(`performance.getEntriesByType("resource").filter((e) => /\\/api\\/map(\\?|$)/.test(e.name)).map((e) => ({ url: e.name.replace(/^.*\\/api\\/map/, "/api/map"), ms: Math.round(e.duration) }))`);
 
   // ---- cold: one full request, bubbles, cache filled
-  await send("Page.navigate", { url: `${BASE}/map?roots=all` }, S);
+  await send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic` }, S);
   await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0)", 60_000, "first paint");
   await waitFor("__sporeMap.settled()", 120_000, "settle");
   const reqs1 = await mapRequests();

@@ -3,8 +3,8 @@
 //  2. camera (camera.ts): a van Wijk flight, follow or auto-fit step; d3-zoom is synced when it moved;
 //  3. dotted ground, then tree hulls (one neutral tint padded around the member centres, fading out
 //     between k = 0.6 and 1.6; the active tree a touch stronger with a faint lime rim, plus a hairline
-//     circle at any zoom). During a drag the store carries the tree's hull and anchors along (a whole
-//     tree is translated, a reshaped one re-measured before the frame), so they travel with the bubbles;
+//     circle at any zoom). While the simulation is awake (a drag, a settle) the hulls and anchors are
+//     re-measured from the worker frames (store.refreshHulls), so they travel with the bubbles;
 //  4. links batched per colour and family size: families over 200 / 800 members draw lighter, thinner
 //     links (the largest in one neutral tint) and drop the short ones when zoomed out (dimmed ones
 //     apart); a hub (> 60 children) strokes its spokes once with a radial gradient that fades them in
@@ -27,25 +27,35 @@
 //     subtle ring in its depth colour (batched per colour). Under a highlight each group runs twice:
 //     dimmed non-matches, then matches;
 //  7. Spore beacons (lime ring + breathing halo, never smaller than 4 px), cluster titles at overview
-//     zoom (two-tone cached bitmaps, culled on an estimated width before they are built), then node
-//     labels biggest first (cached per node, fading in by size), all overlap-culled against one rect
-//     buffer. A tree's title names its top until the top is big enough to carry its own label; from
-//     then on both show.
+//     zoom (two-tone cached bitmaps, culled on an estimated width before they are built; on /map each
+//     then gets its family's dominance tag after its text where that strip is free), then node labels
+//     biggest first (cached per node, fading in by size), all overlap-culled against one rect buffer. A tree's title names its top until the
+//     top is big enough to carry its own label; from then on both show.
 // Colours used per frame come from precomputed rgba tables; scratch buffers are module-level.
 import { easeCubicOut, select, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3";
 import { DEBUG_HOOKS } from "../../lib/map/debug";
 import { imageFor } from "../../lib/map/images";
 import type { SizeMode } from "../../lib/map/types";
 import { stepCamera, type Flight } from "./camera";
-import { drawFx, makeFx, type Fx } from "./fx";
+import { drawFx, fxDrawn, makeFx, type Fx } from "./fx";
 import { COLORS, F_ANC, F_FOCUS, F_MATCH, F_MIG, F_OURS, HULL, MapStore, type Cluster } from "./store";
-import { GLOW, MAX_SPRITE_R, MONO, SB_ANC, SB_MIG, bucketR, drawCap, gridPattern, labelOf, letterKey, letterSprite, makeSprites, renderBody, renderLabel, sharedSprite, titleSprite, type SpriteSet } from "./sprites";
+import { GLOW, MAX_SPRITE_R, MONO, SB_ANC, SB_MIG, TITLE_TAG_PAD, bucketR, drawCap, gridPattern, labelOf, letterKey, letterSprite, makeSprites, renderBody, renderLabel, sharedSprite, titleSprite, titleTagSprite, type SpriteSet } from "./sprites";
 
 export { centerOn, fitFor } from "./camera";
 
 export const GROW_MS = 700, PULSE_MS = 1_800, TWEEN_MS = 600;
+/// What the last frame found still moving (State.anim): MOTION = something changes every frame (a
+/// flight, the settle interpolation, grow-in/pulse rings, sprite builds left over the budget) and the
+/// next frame follows at once; AMBIENT = only decorations animate (trade ripples and comets, radius
+/// tweens, link dots, beacon breathing, the selection ring) and a frame every ~33 ms is enough: with a
+/// live stream some ripple is nearly always alive at overview zoom, and 30 fps keeps that from costing
+/// a full frame rate. Neither set: the picture is static and nothing is drawn until invalidate()
+/// (BubbleMap: camera, hover, data, drag…).
+export const ANIM_MOTION = 1, ANIM_AMBIENT = 2;
+/// Marks the picture stale and wakes the render loop (no-op while a frame is already pending).
+export const invalidate = (s: State) => { s.dirty = true; if (s.wake) s.wake(); };
 /// Every bubble at least this big on screen gets its ticker (DESIGN §11.5), at most MAX_LABELS of them.
-export const LABEL_R = 9, MAX_LABELS = 160, IMG_R = 9, SPECK_R = 2.5, SMALL_R = 7;
+export const LABEL_R = 9, MAX_LABELS = 160, IMG_R = 6, SPECK_R = 2.5, SMALL_R = 5;   // (2026-10-21) logos from 6 px like family tops: the coin page tree showed grey discs for 7-9 px children ("where logos")
 /// A family top is drawn as a sprite with its logo (or letter) from this screen radius on.
 export const TOP_LOGO_R = 6;
 /// Cluster titles show while the tree is at most this big on screen (radius, px).
@@ -76,17 +86,24 @@ export const DOTS_PER_FAMILY = 48, HOT_DOTS = 36;
 /// a family with one giant root is not wrapped in a blob as wide as that root.
 const HULL_PAD_CAP = 12, HULL_PAD = 10;
 const BUILD_MAX = 12, BUILD_GESTURE = 2, BUILD_MS = 4;
-const RECTS = MAX_LABELS + MAX_TITLES;
+/// Overlap rects per frame: labels, titles and their dominance tags.
+const RECTS = MAX_LABELS + MAX_TITLES * 2;
 
 /// Where an unloaded/loaded logo comes from; typed loosely so it works with either loader signature.
 const imgFor = imageFor as unknown as (src: string | null | undefined, wantPx?: number) => CanvasImageSource | null;
 
 export type Perf = {
   frames: number; settling: Float32Array; settled: Float32Array; si: number; di: number; sn: number; dn: number; max: number; labels: number; drawn: number; firstPaintAt: number; dataAt: number; mountedAt: number;
-  /// cluster titles drawn last frame and their cluster indices; active fx slots; sprites built; Spore beacons drawn
-  titles: number; titleIdx: Int32Array; fx: number; built: number; beacons: number;
+  /// cluster titles drawn last frame and their cluster indices (titleTagged: 1 = that title drew its tag);
+  /// active fx slots; sprites built; Spore beacons drawn
+  titles: number; titleIdx: Int32Array; titleTagged: Uint8Array; fx: number; built: number; beacons: number;
+  /// the last data effect's cost on the main thread (ms) and the largest so far (BubbleMap)
+  dataMs: number; dataMaxMs: number;
+  /// (debug hooks only; 0 otherwise) last frame's non-top coins at sr ≥ IMG_R with an image: how many, how many had their
+  /// logo loaded, how many drew it (web/test/map3-flat.mts coin-page check)
+  logoWant: number; logoLoaded: number; logoDrawn: number;
 };
-export const makePerf = (): Perf => ({ frames: 0, settling: new Float32Array(900), settled: new Float32Array(900), si: 0, di: 0, sn: 0, dn: 0, max: 0, labels: 0, drawn: 0, firstPaintAt: 0, dataAt: 0, mountedAt: performance.now(), titles: 0, titleIdx: new Int32Array(64), fx: 0, built: 0, beacons: 0 });
+export const makePerf = (): Perf => ({ frames: 0, settling: new Float32Array(900), settled: new Float32Array(900), si: 0, di: 0, sn: 0, dn: 0, max: 0, labels: 0, drawn: 0, firstPaintAt: 0, dataAt: 0, mountedAt: performance.now(), titles: 0, titleIdx: new Int32Array(64), titleTagged: new Uint8Array(64), fx: 0, built: 0, beacons: 0, dataMs: 0, dataMaxMs: 0, logoWant: 0, logoLoaded: 0, logoDrawn: 0 });
 
 export type Inset = { left?: number; top?: number; bottom?: number; right?: number } | undefined;
 export type State = {
@@ -107,6 +124,9 @@ export type State = {
   fx: Fx;
   /// camera internals: the reusable flight record, and "s.t jumped, sync d3 on the next frame"
   flightRec?: Flight; camJump?: boolean;
+  /// dirty-flag rendering: the picture changed since the last draw (invalidate), what the last draw
+  /// found animating (ANIM_* bits), and the render loop's wake-up (set by BubbleMap)
+  dirty: boolean; anim: number; wake: (() => void) | null;
 };
 
 export function makeState(init: { mode: SizeMode; focus: string | undefined; inset: Inset; static: boolean }): State {
@@ -115,6 +135,7 @@ export function makeState(init: { mode: SizeMode; focus: string | undefined; ins
     hover: -1, pinned: -1, selected: -1, focusIdx: -1, follow: null, raf: 0, visible: true, autoFit: true, focus: init.focus, static: init.static, inset: init.inset,
     onSelect: undefined, tweenUntil: 0, hullTick: 0, labelRects: new Float32Array(RECTS * 4), perf: makePerf(), hPx: 600, hasAnc: false,
     flight: null, lastFrameAt: 0, zoomingUntil: 0, hoverCluster: -1, highlight: false, fx: makeFx(),
+    dirty: true, anim: 0, wake: null,
   };
 }
 
@@ -127,8 +148,11 @@ function ensureState(s: State) {
   if (a.zoomingUntil === undefined) a.zoomingUntil = 0;
   if (a.hoverCluster === undefined) a.hoverCluster = -1;
   if (a.highlight === undefined) a.highlight = false;
+  if (a.dirty === undefined) { a.dirty = true; a.anim = 0; a.wake = null; }
   const p = s.perf as Partial<Perf>;
   if (!p.titleIdx) { p.titleIdx = new Int32Array(64); p.titles = 0; p.fx = 0; p.built = 0; p.beacons = 0; }
+  if (!p.titleTagged) p.titleTagged = new Uint8Array(64);
+  if (p.dataMs === undefined) { p.dataMs = 0; p.dataMaxMs = 0; }
   if (s.labelRects.length < RECTS * 4) s.labelRects = new Float32Array(RECTS * 4);
 }
 
@@ -178,7 +202,9 @@ const letterFont = (px: number) => { let f = fontCache.get(px); if (!f) { f = `6
 // ---- per-frame scratch (module level: a frame allocates nothing per node)
 let K = 1, TX = 0, TY = 0, W = 0, H = 0, NOW = 0, DPR = 1, STILL = false;
 let HOV = -1, SEL = -1, DIMMING = false, HL = false;
-let curAlpha = 1, drawnN = 0;
+let curAlpha = 1, drawnN = 0, logoWant = 0, logoLoaded = 0, logoDrawn = 0;
+/// animation bits of the frame being drawn (State.anim at the end)
+let ANIM = 0;
 let builds = 0, buildLimit = BUILD_MAX, buildT0 = 0, buildOver = false;
 const nulls = (len: number): (Path2D | null)[] => Array.from({ length: len }, () => null);
 const linkPaths = nulls(16), dotPaths = nulls(12), litDots = nulls(12), speckPaths = nulls(16), smallPaths = nulls(16), haloPaths = nulls(16);
@@ -270,23 +296,28 @@ function ringPush(ring: Int32Array, w: number, i: number, evict: (j: number) => 
 }
 
 export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElement | null, now: number) {
-  if (!s.fx) ensureState(s);
+  if (!s.fx || s.dirty === undefined) ensureState(s);
   const st = s.store, n = st.n, { w, h, dpr } = s;
   const settling = !st.settled;
   const { x, y, r, order, flags, color, parent, born } = st;
+  ANIM = 0;
+  s.dirty = false;
   // ---- positions: interpolate between the last two worker frames; radii: tween toward their targets
   if (settling) {
     const u = Math.min(1, (now - st.tickAt) / st.tickDt);
     const { px, py, nx, ny } = st;
     for (let i = 0; i < n; i++) { x[i] = px[i] + (nx[i] - px[i]) * u; y[i] = py[i] + (ny[i] - py[i]) * u; }
+    ANIM |= ANIM_MOTION;
   }
   if (s.tweenUntil) {
     const { rT, r0, rt0 } = st;
-    if (now < s.tweenUntil) { for (let i = 0; i < n; i++) { if (!rt0[i]) continue; const u = (now - rt0[i]) / TWEEN_MS; if (u >= 1) { r[i] = rT[i]; rt0[i] = 0; } else r[i] = r0[i] + (rT[i] - r0[i]) * easeCubicOut(Math.max(0, u)); } }
-    else { for (let i = 0; i < n; i++) { r[i] = rT[i]; rt0[i] = 0; } s.tweenUntil = 0; st.rebuildOrder(); }
+    // (the draw order already follows the target radii: the data effect re-sorted the changed nodes)
+    if (now < s.tweenUntil) { for (let i = 0; i < n; i++) { if (!rt0[i]) continue; const u = (now - rt0[i]) / TWEEN_MS; if (u >= 1) { r[i] = rT[i]; rt0[i] = 0; } else r[i] = r0[i] + (rT[i] - r0[i]) * easeCubicOut(Math.max(0, u)); } ANIM |= ANIM_AMBIENT; }
+    else { for (let i = 0; i < n; i++) { r[i] = rT[i]; rt0[i] = 0; } s.tweenUntil = 0; }
   }
   // ---- camera: flight, follow or auto-fit (camera.ts); d3-zoom learns the new transform
   if (stepCamera(s, now) && s.zoom) s.zoom.transform(selectCanvas(ctx.canvas), s.t);
+  if (s.flight || s.follow || s.autoFit) ANIM |= ANIM_MOTION;
 
   const t = s.t, k = t.k, tx = t.x, ty = t.y;
   K = k; TX = tx; TY = ty; W = w; H = h; NOW = now; DPR = dpr; STILL = s.static;
@@ -303,7 +334,6 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
 
   const hov = s.pinned >= 0 ? s.pinned : s.hover >= 0 ? s.hover : s.selected;
   // A drag shows the family as it is: nothing lit, nothing dimmed (the grabbed bubble keeps its ring).
-  // The store carries the dragged tree's hull and anchors along (store.translateDrag / measureDrag).
   const dragging = st.dragging;
   const dimming = hov >= 0 && !dragging;
   const hl = !!s.highlight;
@@ -424,6 +454,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
       let dp = dotPaths[dk]; if (!dp) { dp = new Path2D(); dotPaths[dk] = dp; }
       dp.moveTo(px + 1.6, py); dp.arc(px, py, 1.6, 0, TAU);
     }
+    ANIM |= ANIM_AMBIENT;
   }
   for (let pk = 0; pk < 16; pk++) { const p = linkPaths[pk]; if (p) { ctx.lineWidth = pk < 12 ? LINK_W[pk >> 2] : LINK_DIM_W; ctx.strokeStyle = LINK_STYLE[pk]; ctx.stroke(p); } }
   for (let sl = 0; sl < hubN; sl++) {
@@ -441,12 +472,13 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
 
   // ---- trade fx: ripples, flashes and comets under the bubbles
   s.perf.fx = drawFx(ctx, s.fx, st, s.sprites, k, tx, ty, w, h, now, s.static);
+  if (fxDrawn() > 0 && !s.static) ANIM |= ANIM_AMBIENT;
 
   // ---- bubbles: everything but the family tops, then the tops, each smallest first so big bubbles
   // and their labels sit on top; the hovered / selected / focused ones last. Under a highlight the
   // dimmed non-matches go first and the matches over them (two globalAlpha levels per frame).
   curAlpha = 1; ctx.globalAlpha = 1;
-  drawnN = 0; beaconN = 0; specN = 0; ringN = 0; ringKeys = 0;
+  drawnN = 0; beaconN = 0; specN = 0; ringN = 0; ringKeys = 0; logoWant = 0; logoLoaded = 0; logoDrawn = 0;
   for (let q = 0; q < 16; q++) speckPaths[q] = null;
   const ts = st.topStart <= n ? st.topStart : n;
   if (hl) { bubblePass(ctx, s, 1, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 1, ts, n); fillSpecks(ctx); bubblePass(ctx, s, 2, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 2, ts, n); fillSpecks(ctx); }
@@ -459,9 +491,11 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   specN = 0;
   if (curAlpha !== 1) { ctx.globalAlpha = 1; curAlpha = 1; }
   s.perf.drawn = drawnN;
+  if (DEBUG_HOOKS) { s.perf.logoWant = logoWant; s.perf.logoLoaded = logoLoaded; s.perf.logoDrawn = logoDrawn; }
 
   // ---- Spore beacons: a lime ring and a breathing halo around every visible Spore launch
   if (beaconN) {
+    if (!s.static) ANIM |= ANIM_AMBIENT;
     const breathe = s.static ? 0 : 2 * Math.sin(now / 600);
     let ring: Path2D | null = null, halo: Path2D | null = null, dim: Path2D | null = null;
     for (let q = 0; q < beaconN; q++) {
@@ -511,6 +545,11 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   pathN = 0;
   s.perf.labels = labelsN;
   s.perf.built = builds;
+  // sprites or labels were left for the next frame (budget), or a bubble is still growing in
+  if (buildOver) ANIM |= ANIM_MOTION;
+  // the selection ring turns slowly
+  if ((SEL >= 0 || s.focusIdx >= 0) && !s.static) ANIM |= ANIM_AMBIENT;
+  s.anim = ANIM;
 
   // tooltip follows its node (or the hovered tree's title) while the layout is still moving
   const tipNode = s.pinned >= 0 ? s.pinned : s.hover;
@@ -541,6 +580,7 @@ function litLinks(ctx: CanvasRenderingContext2D, s: State, hov: number, speed: n
   const k = K, tx = TX, ty = TY, now = NOW, w = W, h = H, sl = lseed.length || 1;
   for (let q = 0; q < 12; q++) litDots[q] = null;
   const dot = (ci: number, x0: number, y0: number, x1: number, y1: number, seed: number, d: number, nd: number) => {
+    ANIM |= ANIM_AMBIENT;
     const prog = 1 - ((now * speed + seed + d / nd) % 1); // 1 → 0 = child → parent
     const fade = Math.sin(prog * Math.PI);
     const key = ci * 3 + (fade < 0.35 ? 0 : fade < 0.75 ? 1 : 2);
@@ -643,6 +683,7 @@ function bubblePass(ctx: CanvasRenderingContext2D, s: State, which: 0 | 1 | 2, f
     const fl = flags[i];
     if (which !== 0 && ((fl & F_MATCH) !== 0) !== (which === 2)) continue;
     const g = growOf(born[i], now, STILL);
+    if (g < 1) ANIM |= ANIM_MOTION;
     if (g <= 0) continue;
     let sr = r[i] * k * g;
     const ours = (fl & F_OURS) !== 0;
@@ -658,6 +699,7 @@ function bubblePass(ctx: CanvasRenderingContext2D, s: State, which: 0 | 1 | 2, f
     // pulse ring for a freshly spawned child
     if (pulse[i]) {
       if (now - pulse[i] < PULSE_MS && !STILL) {
+        ANIM |= ANIM_MOTION;
         const u = (now - pulse[i]) / PULSE_MS;
         if (curAlpha !== 1) { ctx.globalAlpha = 1; curAlpha = 1; }
         ctx.strokeStyle = ca(COLOR_A[color[i]], (1 - u) * 0.9); ctx.lineWidth = 2 * (1 - u) + 0.5;
@@ -701,7 +743,8 @@ function bubblePass(ctx: CanvasRenderingContext2D, s: State, which: 0 | 1 | 2, f
     }
     const d = st.data[i];
     const img = sr >= (isTop ? TOP_LOGO_R : IMG_R) && d.image ? imgFor(d.image, Math.ceil(2 * sr * DPR)) : null;
-    if (ri > MAX_SPRITE_R) { drawBig(ctx, s, i, sx, sy, sr, img, bits); continue; }
+    if (DEBUG_HOOKS && !isTop && sr >= IMG_R && d.image) { logoWant++; if (img) logoLoaded++; }
+    if (ri > MAX_SPRITE_R) { if (DEBUG_HOOKS && img && !isTop) logoDrawn++; drawBig(ctx, s, i, sx, sy, sr, img, bits); continue; }
     let sp: HTMLCanvasElement | null = null, spR = ri;
     if (img) {
       const cur = st.spr[i];
@@ -711,6 +754,7 @@ function bubblePass(ctx: CanvasRenderingContext2D, s: State, which: 0 | 1 | 2, f
         if (!st.sprImg[i]) st.sprRingW = ringPush(st.sprRing, st.sprRingW, i, (j) => { if (st.sprImg[j]) { st.spr[j] = null; st.sprImg[j] = null; } });
         st.spr[i] = sp; st.sprRi[i] = ri; st.sprImg[i] = img; st.sprGen[i] = gen[i]; st.sprBits[i] = bits;
       } else if (cur && st.sprImg[i] && st.sprGen[i] === gen[i]) { sp = cur; spR = st.sprRi[i]; } // this coin's last logo (any size or thumbnail), scaled: no letter flash
+      if (DEBUG_HOOKS && sp && !isTop && sr >= IMG_R) logoDrawn++;
     }
     if (!sp) {
       const code = st.letterCode(i);
@@ -794,6 +838,11 @@ const titleWidth = (text: string, compact: boolean) => {
   let w = 10; for (let q = 0; q < end; q++) w += text.charCodeAt(q) >= 0x2e80 ? (compact ? 12 : 13) : compact ? 7.2 : 7.7;
   return Math.ceil(w);
 };
+/// Width estimate of a title tag's bitmap (sprites.titleTagSprite), for culling before it is built.
+const tagWidth = (tag: string, compact: boolean) => Math.ceil((tag.length + (compact ? 1 : 3)) * (compact ? 6.8 : 7.4)) + TITLE_TAG_PAD + 5;
+/// Titles placed this frame, for the tag pass: cluster, screen x where the title's bitmap ends, its
+/// anchor y, alpha and whether it is the active tree's (module scratch: nothing is allocated per frame).
+const placedCi = new Int32Array(64), placedEnd = new Float32Array(64), placedY = new Float32Array(64), placedA = new Float32Array(64), placedAct = new Uint8Array(64);
 
 const overlaps = (rects: Float32Array, x0: number, y0: number, x1: number, y1: number) => {
   for (let q = 0; q < rectN; q++) { const o = q * 4; if (rects[o] < x1 && rects[o + 2] > x0 && rects[o + 1] < y1 && rects[o + 3] > y0) return true; }
@@ -877,15 +926,53 @@ function titlePass(ctx: CanvasRenderingContext2D, s: State, hc: number): number 
       if (active) c.tspA = sp; else c.tsp = sp;
     }
     reserve(rects, ax - sp.width / 2 + 4, y0, ax + sp.width / 2 - 4, y1);
+    // The active tree's tag always shows (tag pass below), so its strip is kept now, with the title:
+    // a title placed after this one must not land under it.
+    if (active) {
+      const tag = (compact ? c.tagC : c.tag) ?? "";
+      if (tag) { const tw = c.tagSpA && c.tagText === tag && c.tagSpC === compact ? c.tagSpA.width : tagWidth(tag, compact), end = ax + sp.width / 2; reserve(rects, end - 4, y0, end - 5 - TITLE_TAG_PAD + tw - 4, y1); }
+    }
     const alpha = a * (active ? 1 : 0.9) * (HL ? 0.6 : 1);
     ctx.globalAlpha = alpha;
     ctx.drawImage(sp, Math.round(ax - sp.width / 2), Math.round(ay - sp.height));
     ctx.globalAlpha = 1;
+    if (shown < placedCi.length) { placedCi[shown] = ci; placedEnd[shown] = ax + sp.width / 2; placedY[shown] = ay; placedA[shown] = alpha; placedAct[shown] = active ? 1 : 0; }
+    perf.titleTagged[shown] = 0;
     perf.titleIdx[shown++] = ci;
     if (a > 0.5 && rootR < LABEL_R && suppN < suppList.length) { supp[c.root] = 1; suppList[suppN++] = c.root; }
   };
   if (hc >= 0) one(hc, true);
   for (let q = 0; q < order.length && shown < maxT; q++) { const ci = order[q]; if (ci !== hc) one(ci, false); }
+  // Tags (/map: the family's dominance, BubbleMap titleTags): once every title has its place, each one
+  // gets its tag right after its text where that strip is free, so a tag never costs a title (or a
+  // forced label) its place: a crowded overview shows fewer tags, a step of zoom shows them. The
+  // active tree's tag always shows. Reserved, so the node labels after this keep clear of them.
+  const rects = s.labelRects;
+  for (let q = 0; q < shown && q < placedCi.length; q++) {
+    const c = cl[placedCi[q]];
+    const tag = (compact ? c.tagC : c.tag) ?? "";
+    if (!tag) continue;
+    const active = placedAct[q] === 1;
+    if (c.tagText !== tag || c.tagSpC !== compact) { c.tagSp = null; c.tagSpA = null; c.tagText = tag; c.tagSpC = compact; }
+    let tp = active ? c.tagSpA : c.tagSp;
+    const tw = tp ? tp.width : tagWidth(tag, compact);
+    // the title bitmap's text ends 5 px before its right edge; the tag's starts TITLE_TAG_PAD into its own
+    const left = placedEnd[q] - 5 - TITLE_TAG_PAD, y1 = placedY[q] - 1, y0 = placedY[q] - TITLE_H + 2;
+    const x0 = placedEnd[q] - 4, x1 = left + tw - 4;
+    if (x0 > W) continue;
+    if (!active && overlaps(rects, x0, y0, x1, y1)) continue;
+    if (!tp) {
+      if (!active && !canBuild()) continue;
+      tp = titleTagSprite(s.sprites, tag, active, compact);
+      if (!active) spend();
+      if (active) c.tagSpA = tp; else c.tagSp = tp;
+    }
+    reserve(rects, x0, y0, left + tp.width - 4, y1);
+    ctx.globalAlpha = placedA[q];
+    ctx.drawImage(tp, Math.round(left), Math.round(placedY[q] - tp.height));
+    ctx.globalAlpha = 1;
+    perf.titleTagged[q] = 1;
+  }
   return shown;
 }
 

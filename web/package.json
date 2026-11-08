@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "test": "tsx --test test/*.test.mts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
@@ -25,6 +26,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.4",
+    "three": "0.169.0",
     "vite-plugin-node-polyfills": "^0.28.0"
   },
   "devDependencies": {

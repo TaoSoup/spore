@@ -11,4 +11,7 @@ export default defineConfig({
   // /v1 is the read-only partner API (DESIGN §12); /embed/* are pages of this app, served by Vite itself.
   server: { port: 5174, proxy: { "/api": API, "/v1": API, "^/m/": API } },
   build: { target: "es2022", sourcemap: false, chunkSizeWarningLimit: 1500 },
+  // map3 (src/components/map3): pre-bundle three and the postprocessing addons, so the first /map visit in dev does not
+  // discover them mid-session and force a full reload (spec 4.15).
+  optimizeDeps: { include: ["three", "three/addons/postprocessing/EffectComposer.js", "three/addons/postprocessing/RenderPass.js", "three/addons/postprocessing/UnrealBloomPass.js", "three/addons/postprocessing/OutputPass.js", "three/addons/postprocessing/Pass.js"] },
 });

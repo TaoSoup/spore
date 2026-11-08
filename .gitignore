@@ -14,3 +14,6 @@ logs/
 *.pem
 *.key
 *keypair*.json
+
+# map3 QA screenshots: regenerate with web/test/map3-shots.mts (the JSON results stay)
+web/test/shots-map3*/*.png

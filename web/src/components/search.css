@@ -1,0 +1,66 @@
+/* Search (lists lane, v3 2026-10-24). Overrides the frozen styles.css "search" block.
+   The dropdown paints above whatever follows the box: a focused search lifts itself to --z-pop, and
+   the list is opaque raised glass (no blur), so stats or cards below never read through it. Each result
+   shows its lineage as depth lines (one hairline per ancestor, a node in its own depth colour) and its
+   logo in its own colour. */
+.search { position: relative; }
+.search:focus-within { position: relative; z-index: var(--z-pop); }
+.search .input { padding-left: 40px; padding-right: 36px; }
+/* z-index 1: an input with backdrop-filter (home .arrive-search) is its own stacking context and would paint over the icon */
+.search .search-icon { z-index: 1; transition: color var(--dur-2); }
+.search:focus-within .search-icon { color: var(--accent); }
+.search.md .input { height: var(--h-lg); font-size: var(--fs-md); padding-left: 44px; border-radius: var(--radius); border-color: var(--line-2); background: var(--surface-sunken); }
+.search.md .search-icon { left: 15px; width: 17px; height: 17px; }
+.search.lg .input { height: 56px; font-size: var(--fs-md); padding-left: 48px; }
+/* 16px on phones so iOS does not zoom on focus, whatever the size */
+@media (max-width: 760px), (pointer: coarse) { .search .input { font-size: var(--fs-md); } }
+
+.search-pop { position: absolute; z-index: var(--z-pop); top: calc(100% + 8px); left: 0; right: 0; max-height: min(460px, 62vh); overflow: auto; overscroll-behavior: contain; padding: 6px;
+  background: linear-gradient(180deg, #0d1c13, #08130c); border: 1px solid var(--line-2); border-radius: var(--radius-lg); box-shadow: var(--edge), var(--shadow-pop), 0 0 0 1px rgba(0,0,0,.4);
+  -webkit-backdrop-filter: none; backdrop-filter: none; animation: search-in var(--dur-3) var(--ease-expo); transform-origin: top center; }
+@keyframes search-in { from { opacity: 0; transform: translateY(-6px) scale(.985); } }
+
+/* two lines, 54px: depth | logo | name · $TICKER · badges | market cap  /  lineage · age · mint | 24h volume */
+.search-row { position: relative; display: grid; grid-template-columns: auto 32px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 10px; row-gap: 2px; align-items: center; min-height: 54px; padding: 7px 12px 7px 8px; border-radius: var(--radius); cursor: pointer;
+  transition: background var(--dur-1); }
+.search-row > .sr-depth { grid-column: 1; grid-row: 1 / span 2; }
+.search-row > .logo { grid-column: 2; grid-row: 1 / span 2; }
+.search-row > .sr-l1 { grid-column: 3; grid-row: 1; }
+.search-row > .sr-mc { grid-column: 4; grid-row: 1; }
+.search-row > .sr-l2 { grid-column: 3; grid-row: 2; }
+.search-row > .sr-vol { grid-column: 4; grid-row: 2; }
+.search-row.active { background: linear-gradient(90deg, rgba(var(--tint), .12), rgba(255,255,255,.035) 60%); box-shadow: inset 0 0 0 1px rgba(var(--tint), .26); }
+.search-row.active .logo.ring { box-shadow: 0 0 0 2px rgba(var(--tint), .5), 0 0 22px -2px rgba(var(--tint), .7); }
+.search-row.official { background: linear-gradient(90deg, rgba(var(--accent-rgb), .08), transparent 70%); }
+.search-row.official.active { background: linear-gradient(90deg, rgba(var(--accent-rgb), .14), var(--glass-2) 70%); }
+.search-row .logo.ring { box-shadow: 0 0 0 1.5px rgba(var(--tint), .3), 0 0 14px -4px rgba(var(--tint), .5); }
+
+/* depth lines: hairlines for the ancestors (root lime, child teal), then the coin's own node */
+.sr-depth { display: inline-flex; align-items: center; gap: 4px; align-self: stretch; min-width: 8px; }
+.sr-depth i { width: 1px; align-self: stretch; margin: 4px 0; border-radius: 1px; background: linear-gradient(180deg, transparent, var(--c, var(--accent)) 30%, var(--c, var(--accent)) 70%, transparent); opacity: .7; }
+.sr-depth i.l0 { --c: var(--accent); }
+.sr-depth i.l1 { --c: var(--teal); }
+.sr-depth i.l2 { --c: var(--violet); }
+.sr-depth b { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--accent); box-shadow: 0 0 8px rgba(var(--accent-rgb), .8); }
+.sr-depth.d1 b { background: var(--teal); box-shadow: 0 0 8px rgba(var(--teal-rgb), .8); }
+.sr-depth.d2 b, .sr-depth.d3 b { background: var(--violet); box-shadow: 0 0 8px rgba(var(--violet-rgb), .8); }
+
+.sr-l1 { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.sr-name { flex: 0 1 auto; min-width: 4ch; font-size: var(--fs-base); font-weight: 600; letter-spacing: -0.01em; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-sym { flex: 0 1 auto; min-width: 0; font: 400 var(--fs-xs)/1 var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-l1 .chip { flex: none; height: 20px; padding: 0 7px; }
+.sr-chip svg { margin-right: 4px; }
+.sr-spore { color: var(--accent); border-color: var(--line-2); background: transparent; }
+.sr-pf { color: var(--muted); border-color: var(--line-soft); background: transparent; }
+.sr-mc { justify-self: end; font: 500 var(--fs-sm)/1 var(--mono); font-variant-numeric: tabular-nums slashed-zero; color: var(--ink); white-space: nowrap; }
+.sr-l2 { min-width: 0; font: 400 var(--fs-2xs)/16px var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sr-mint.dup { color: var(--ink-2); }
+.sr-vol { justify-self: end; font: 400 var(--fs-2xs)/16px var(--mono); color: var(--muted); white-space: nowrap; }
+.search-note { padding: 14px 12px; font-size: var(--fs-sm); color: var(--muted); }
+/* the keys, as a quiet mono footer (fine pointers only) */
+.search-keys { position: sticky; bottom: -6px; display: flex; gap: 14px; justify-content: flex-end; margin: 4px -6px -6px; padding: 8px 14px; border-top: 1px solid var(--line-soft); background: #08130c;
+  font: 400 var(--fs-2xs)/1 var(--mono); color: var(--faint); }
+.search-keys span { display: inline-flex; align-items: center; gap: 4px; }
+.search-keys kbd { min-width: 18px; height: 18px; padding: 0 4px; display: inline-grid; place-items: center; border-radius: 5px; border: 1px solid var(--line-soft); background: var(--glass); font: 500 var(--fs-2xs)/1 var(--mono); color: var(--muted); }
+@media (pointer: coarse), (max-width: 560px) { .search-keys { display: none; } }
+@media (max-width: 480px) { .sr-pf { display: none; } .search-row { padding: 7px 8px 7px 6px; column-gap: 9px; } }

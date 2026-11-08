@@ -1,0 +1,163 @@
+/* map3.css: the Three.js map renderer's DOM layers (labels, leaders, tooltip, status), map3 spec section 9.
+   Imported by ThreeMap.tsx only, so it ships in the lazy map3 chunk. That CSS stays applied after the
+   person leaves /map, so EVERY selector is scoped under .m3 (the ThreeMap root: "bm bm-full m3"); the only
+   other prefix is html[data-motion="paused"] .m3. Never :root, html/body, button, kbd, .mono or ids here.
+   Ported 1:1 from the prototype's tokens.css (labels + tooltip); HUD, legend, stats, home, search, loading,
+   scrim and annotation styles are dropped (the app's chrome replaces them). Renames: --x -> --m3-x,
+   #tip -> .m3-tip, label class .live -> .lv (the app has a global .live). Fonts: Geist / Geist Mono from
+   the site (index.html loads them), weights 400/500/600 only, no Inter feature settings. */
+
+/* ---------- tokens (prototype values) ---------- */
+.m3 {
+  /* ground and vignette */
+  --m3-bg: #0b0e0d; --m3-vig-c: #0e1211; --m3-vig-e: #070908;
+  /* ink; faint is never body text: only '$', '·', ticks, circles */
+  --m3-ink: #e7ece9; --m3-ink-2: #b5bdb9; --m3-muted: #7e8783; --m3-faint: #59615d;
+  /* heat */
+  --m3-live: var(--accent); --m3-cool: #5ab0d6; --m3-quiet: #7c83a8; --m3-cold: #535b58; --m3-core: #c4ff74;
+  --m3-live-tint: rgba(182,255,92,.10); --m3-cool-tint: rgba(90,176,214,.12); --m3-quiet-tint: rgba(124,131,168,.14); --m3-cold-tint: rgba(255,255,255,.05);
+  /* lines */
+  --m3-line: rgba(255,255,255,.06); --m3-line-2: rgba(255,255,255,.08); --m3-leader: rgba(231,236,233,.28);
+  /* panels */
+  --m3-panel: rgba(11,14,13,.72); --m3-tip: rgba(17,21,20,.96); --m3-tip-shadow: 0 8px 24px rgba(0,0,0,.5);
+  --m3-halo: rgba(11,14,13,.92); --m3-bad: var(--bad);
+  /* fonts: the site's Geist / Geist Mono */
+  --m3-sans: var(--sans); --m3-mono: var(--mono);
+  /* motion */
+  --m3-ease-out: cubic-bezier(.22,1,.36,1);
+  --m3-t-xs: 120ms; --m3-t-s: 160ms; --m3-t-m: 240ms; --m3-t-l: 400ms;
+  --m3-t-lab-in: 140ms; --m3-t-lab-out: 100ms; --m3-t-dim-in: 160ms; --m3-t-dim-out: 240ms;
+  /* radii */
+  --m3-r-panel: 8px; --m3-r-chip: 4px;
+}
+
+/* ---------- root (the spec's .bm.m3, written .m3.bm so every selector starts with .m3): graphite ground over the classic .bm gradient ---------- */
+.m3.bm {
+  background: var(--m3-bg); color: var(--m3-ink); font-family: var(--m3-sans);
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+}
+
+/* numbers and secondary lines in mono */
+.m3 .lb .s, .m3 .lb.gen, .m3 .lb.cap, .m3 .lb.ann .a2, .m3 .lb.evt .ev, .m3 .tp-v, .m3 .tp-chip, .m3 .tp-foot {
+  font-family: var(--m3-mono); font-variant-numeric: tabular-nums;
+}
+
+/* ---------- layers (one .m3-layer per engine; the React lane creates it, the engine fills it) ---------- */
+.m3 .m3-layer { position: absolute; inset: 0; transition: opacity var(--m3-t-s) var(--m3-ease-out); }
+.m3 .m3-layer.pending { visibility: hidden; }
+.m3 .m3-layer.out { opacity: 0; pointer-events: none; }
+.m3 .m3-stage { position: absolute; inset: 0; z-index: 0; touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+.m3 .m3-canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none; }
+.m3 .m3-leaders { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.m3 .m3-labels { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: hidden; contain: strict; }
+.m3 .m3-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: 6; font: 400 12px var(--m3-mono); color: var(--m3-muted); pointer-events: none; }
+
+/* ---------- map labels: halo (stroke painted under the fill), never a sticker, never a text-shadow ---------- */
+.m3 .lb {
+  position: absolute; left: 0; top: 0; white-space: nowrap; will-change: transform, opacity;
+  color: var(--m3-ink); paint-order: stroke fill; -webkit-text-stroke: 2.5px var(--m3-halo);
+  opacity: 0; visibility: hidden;
+  transition: opacity var(--m3-t-lab-out) var(--m3-ease-out), visibility 0s linear var(--m3-t-lab-out);
+}
+.m3 .lb.on { opacity: calc(var(--o, 1) * var(--m3-fdim, 1)); visibility: visible; transition: opacity var(--m3-t-lab-in) var(--m3-ease-out), visibility 0s; }
+.m3 .lb.on.dim { opacity: calc(var(--o, 1) * .35 * var(--m3-fdim, 1)); transition: opacity var(--m3-t-dim-in) var(--m3-ease-out), visibility 0s; }
+/* the pinned name (focus lane): the focused / selected coin, never dimmed; --m3-fdim (engine/focus.js, 1 -> 0.6 during the
+   focus pulse) fades every other label */
+.m3 .lb.on.m3-pin { opacity: 1; z-index: 1; }
+.m3 .lb.pin .t { font-weight: 600; font-size: 15px; line-height: 18px; letter-spacing: -0.005em; color: var(--m3-ink); -webkit-text-stroke-width: 3.5px; }
+.m3 .lb.pin .s { color: var(--m3-ink-2); }
+.m3.look-galaxy .lb.pin .t { color: #eaffd6; }
+.m3 .lb.al-l { text-align: left; } .m3 .lb.al-c { text-align: center; } .m3 .lb.al-r { text-align: right; }
+.m3 .lb .d { font-weight: inherit; color: inherit; opacity: .48; }
+.m3 .lb .sep { color: var(--m3-faint); }
+.m3 .lb .s { display: none; font-weight: 400; font-size: 10px; line-height: 12px; color: var(--m3-muted); -webkit-text-stroke-width: 2.5px; }
+.m3 .lb.st .s { display: block; }
+
+/* planets: tier A (top 10) = 600 13/16 ink + mono stats; tier B (11-24) = 500 11/14 ink-2; phone 12/15.
+   Sizes, weights and letter-spacing match the engine's measuring table (labels.js F), do not change them alone. */
+.m3 .lb.pl.tA .t { font-weight: 600; font-size: 13px; line-height: 16px; letter-spacing: -0.005em; color: var(--m3-ink); -webkit-text-stroke-width: 3px; }
+.m3 .lb.pl.tB .t { font-weight: 500; font-size: 11px; line-height: 14px; color: var(--m3-ink-2); }
+.m3 .lb.pl.tP .t { font-weight: 600; font-size: 12px; line-height: 15px; letter-spacing: -0.005em; color: var(--m3-ink); -webkit-text-stroke-width: 3px; }
+/* children: 500 11/14 ink-2, traded-recently (.lv) in ink; second line = mono mcap */
+.m3 .lb.kid .t { font-weight: 500; font-size: 11px; line-height: 14px; color: var(--m3-ink-2); }
+.m3 .lb.kid.lv .t { color: var(--m3-ink); }
+/* event labels: a birth ('new') or a whale trade ('+$12k'); the event word in mono, ink-2.
+   (map3 port) the prototype's font shorthand is spelled out so the mono group's tabular-nums survives it */
+.m3 .lb.evt .t { color: var(--m3-ink); }
+.m3 .lb.evt .ev { font-style: normal; font-weight: 500; font-size: 10px; line-height: normal; font-family: var(--m3-mono); color: var(--m3-ink-2); letter-spacing: .02em; }
+/* a name printed inside its own disc: no halo (the disc is the ground) */
+.m3 .lb.kid.in .t, .m3 .lb.kid.in .s { -webkit-text-stroke-width: 0; }
+.m3 .lb.kid.in .t { color: var(--m3-ink-2); }
+.m3 .lb.kid.in.lv .t { color: var(--m3-ink); }
+/* generation tags, dust caption, callouts ("Largest family", "Most active in the last hour") */
+.m3 .lb.gen { font-weight: 500; font-size: 10px; line-height: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--m3-muted); -webkit-text-stroke-width: 2px; }
+.m3 .lb.cap { font-weight: 400; font-size: 10px; line-height: 12px; color: var(--m3-muted); -webkit-text-stroke-width: 2px; }
+.m3 .lb.ann .a1 { font-weight: 500; font-size: 11px; line-height: 14px; color: var(--m3-ink-2); }
+.m3 .lb.ann .a2 { font-weight: 400; font-size: 10px; line-height: 12px; color: var(--m3-muted); -webkit-text-stroke-width: 2px; }
+
+/* ---------- tooltip: the only shadow in the map. Container px; the engine translates it.
+   z 5 sits above .bm-controls / .bm-size (z 3). Every tooltip text is at least 11 px. ---------- */
+.m3 .m3-tip {
+  position: absolute; z-index: 5; left: 0; top: 0; box-sizing: border-box; min-width: 216px; max-width: 248px; padding: 10px 12px;
+  background: var(--m3-tip); border: 1px solid var(--m3-line-2); border-radius: var(--m3-r-panel); box-shadow: var(--m3-tip-shadow);
+  pointer-events: none; opacity: 0; visibility: hidden;
+  transition: opacity var(--m3-t-xs) var(--m3-ease-out), visibility 0s linear var(--m3-t-xs);
+}
+.m3 .m3-tip.on { opacity: 1; visibility: visible; transition: opacity var(--m3-t-xs) var(--m3-ease-out) 60ms, visibility 0s; }
+.m3 .tp-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.m3 .tp-logo {
+  position: relative; flex: none; width: 20px; height: 20px; box-sizing: border-box; border-radius: 50%; overflow: hidden;
+  background: #1c201f; border: 1px solid rgba(255,255,255,.08); display: grid; place-items: center;
+  font: 600 11px/1 var(--m3-sans); color: #9aa39f;   /* monogram fallback; (map3 port) 10 -> 11 px */
+}
+.m3 .tp-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.m3 .tp-sym { flex: 1; min-width: 0; font-weight: 600; font-size: 13px; line-height: 16px; color: var(--m3-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m3 .tp-sym .d { color: var(--m3-muted); font-weight: 500; }
+/* (map3 port) 10/12 -> 11/14 with 1px vertical padding: same 16 px chip height, larger text */
+.m3 .tp-chip { flex: none; font-weight: 500; font-size: 11px; line-height: 14px; padding: 1px 6px; border-radius: var(--m3-r-chip); white-space: nowrap; }
+.m3 .tp-chip.c0 { color: var(--m3-live); background: var(--m3-live-tint); }
+.m3 .tp-chip.c1 { color: var(--m3-cool); background: var(--m3-cool-tint); }
+.m3 .tp-chip.c2 { color: var(--m3-quiet); background: var(--m3-quiet-tint); }
+.m3 .tp-chip.c3 { color: var(--m3-muted); background: var(--m3-cold-tint); }
+.m3 .tp-rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; align-items: baseline; }
+.m3 .tp-k { font-weight: 400; font-size: 11px; line-height: 16px; color: var(--m3-muted); white-space: nowrap; }
+/* (map3 port) values wrap (balanced) instead of ending in an ellipsis; a single unbreakable word still ends in an
+   ellipsis. (final fix) the Family row is back to the prototype's one line ("1,481 coins · 37%"). */
+.m3 .tp-v { font-weight: 400; font-size: 11px; line-height: 16px; color: var(--m3-ink); text-align: right; white-space: normal; text-wrap: balance; overflow: hidden; text-overflow: ellipsis; }
+.m3 .tp-v .d { color: var(--m3-muted); }
+.m3 .tp-v.mint { font-size: 11px; color: var(--m3-muted); white-space: nowrap; }   /* (map3 port) 10 -> 11 px */
+.m3 .tp-foot { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--m3-line); font-weight: 400; font-size: 11px; line-height: 14px; color: var(--m3-muted); }   /* (map3 port) 10/12 -> 11/14 */
+/* phone dock actions: "Open family" / "Select" and close */
+.m3 .tp-act { display: flex; gap: 8px; margin-top: 10px; }
+.m3 .tp-act button { height: 32px; border-radius: 6px; border: 1px solid var(--m3-line-2); background: rgba(255,255,255,.04); color: var(--m3-ink); font: 500 12px/30px var(--m3-sans); cursor: pointer; }
+.m3 .tp-open { flex: 1; }
+.m3 .tp-x { width: 40px; color: var(--m3-ink-2) !important; font-size: 16px !important; }
+
+/* ---------- phone: the docked card ----------
+   (map3 port) keyed on .dock, not on a viewport media query: the engine sets .dock exactly when ITS container is
+   <= 700 px wide (S.phone()), and the transform it then leaves unset must never meet an undocked card. Same rules as
+   the spec's @media (max-width: 700px) block; --m3-dock-bottom (inset.bottom + 8) is set on .m3-tip by the engine. */
+.m3 .m3-tip.dock { left: 12px; right: 12px; top: auto; bottom: var(--m3-dock-bottom, 64px); min-width: 0; max-width: none; transform: none !important; }
+.m3 .m3-tip.dock.on { pointer-events: auto; }
+/* (final fix) the docked card spans the width and would sit over the +/- column: the zoom buttons step aside while
+   it is up (pinch still zooms; the size toggle below the card stays). */
+.m3:has(.m3-tip.dock.on) .bm-controls { opacity: 0; visibility: hidden; pointer-events: none; }
+
+/* ---------- reduced motion: the OS preference and the site's "pause animations" toggle ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .m3 { --m3-t-lab-in: 100ms; --m3-t-lab-out: 80ms; --m3-t-dim-in: 100ms; --m3-t-dim-out: 120ms; --m3-t-s: 100ms; --m3-t-m: 120ms; --m3-t-l: 120ms; }
+  .m3 .m3-tip.on { transition-delay: 0s; }
+}
+html[data-motion="paused"] .m3 { --m3-t-lab-in: 100ms; --m3-t-lab-out: 80ms; --m3-t-dim-in: 100ms; --m3-t-dim-out: 120ms; --m3-t-s: 100ms; --m3-t-m: 120ms; --m3-t-l: 120ms; }
+html[data-motion="paused"] .m3 .m3-tip.on { transition-delay: 0s; }
+
+/* ---------- galaxy look (the default since 2026-10-21; ?look=flat keeps every rule above unchanged) ----------
+   Only .m3.look-galaxy-prefixed rules here: the ThreeMap root carries look-galaxy | look-flat (Map.tsx reads ?look once).
+   Heat tokens follow the engine's GAL palette (lime / teal / violet / grey); gen tags read in teal mono 600 (labels.js
+   measures them with the same weight under the galaxy); the dust caption in a mossy grey. */
+.m3.look-galaxy { --m3-bg: #07100b; --m3-vig-c: #0a1710; --m3-vig-e: #050c08; --m3-live: #b6ff5c; --m3-cool: #5ce0c8; --m3-quiet: #7f68c4; --m3-cold: #4a4466; }
+.m3.look-galaxy .lb.gen { color: #5ce0c8; font: 600 10px/12px var(--m3-mono); letter-spacing: .08em; }
+.m3.look-galaxy .lb.cap { color: #8ea596; }
+
+/* (fixer 2026-10-21) galaxy titles: the "N · share%" second line reads at a glance (ref: light grey-green, not muted) */
+.m3.look-galaxy .lb.pl .s { color: #c9d3cc; }

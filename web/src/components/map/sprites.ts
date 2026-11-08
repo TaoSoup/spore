@@ -155,6 +155,28 @@ export function titleSprite(set: SpriteSet, clusterId: string, text: string, act
   return c;
 }
 
+/// The tail a title carries on /map: the family's dominance, ' · 23%' in 12 px/600 pale lime (' 23%' in
+/// 11 px when compact), outlined like the title. Drawn right after the title's text by draw.ts, only
+/// where it fits, so it never costs a title its place. Shared by text (a few dozen distinct strings).
+/// `TITLE_TAG_PAD`: the transparent margin left of the text (the outline's room).
+export const TITLE_TAG_PAD = 2;
+export function titleTagSprite(set: SpriteSet, tag: string, active: boolean, compact: boolean): HTMLCanvasElement {
+  const key = `tag|${active ? 1 : 0}${compact ? 1 : 0}|${tag}`;
+  let c = set.title.get(key);
+  if (c) return c;
+  trim(set.title, LABEL_CAP);
+  const text = compact ? ` ${tag}` : ` · ${tag}`;
+  const font = `600 ${compact ? 11 : 12}px ${MONO}`;
+  const p = probe(); p.font = font;
+  const w = Math.ceil(p.measureText(text).width) + TITLE_TAG_PAD + 5, h = 20;
+  c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d")!;
+  g.textBaseline = "middle"; g.textAlign = "left"; g.lineJoin = "round"; g.lineWidth = 4; g.strokeStyle = BG; g.font = font;
+  g.strokeText(text, TITLE_TAG_PAD, h / 2 + 0.5); g.fillStyle = active ? COLORS[0] : "#d4ecb4"; g.fillText(text, TITLE_TAG_PAD, h / 2 + 0.5);
+  set.title.set(key, c);
+  return c;
+}
+
 const patterns = new Map<number, CanvasPattern>();
 
 /// The dotted world grid as a repeating tile: one fill per frame instead of a few hundred fillRects.

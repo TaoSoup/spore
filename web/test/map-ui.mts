@@ -19,6 +19,14 @@
 //   SPORE_TMP=<dir> node --import tsx test/map-ui.mts --url http://127.0.0.1:5254 --shots <dir>/shots
 //   # or against a production build: vite build --outDir <dir>/dist && API_PORT=8795 vite preview --outDir <dir>/dist --port 5254
 //   SPORE_TMP=<dir> node --import tsx test/map-ui.mts --url http://127.0.0.1:5254 --prod --shots <dir>/shots
+//
+// --renderer three|classic (map3, 2026-10-21; default three): /map renders the Three.js map by default.
+//   three:   Chrome runs on the GPU (--use-angle=metal --ignore-gpu-blocklist, no --disable-gpu) and the page
+//            must report __sporeMapPage.renderer() === "three"; under it (g) expects ?roots to stay unset on a
+//            phone deep link (map3 draws every root on every device). No other check depends on the classic
+//            geometry; any check skipped under three is listed in the result's `skippedUnderThree`.
+//   classic: every /map URL gets renderer=classic and Chrome keeps --disable-gpu (today's baseline).
+// After every load the renderer is asserted (`renderers` in the result).
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,21 +38,31 @@ const BASE = opt("--url", "http://127.0.0.1:5254").replace(/\/$/, "");
 const SHOTS = opt("--shots", join(process.env.SPORE_TMP ?? tmpdir(), "spore-map-ui-shots"));
 /// --prod: the URL serves a production build (vite preview), whose debug hooks need ?debug on every load.
 const PROD = args.includes("--prod");
-const u = (path: string) => (PROD ? `${path}${path.includes("?") ? "&" : "?"}debug` : path);
+const RENDERER = opt("--renderer", "three");
+if (RENDERER !== "three" && RENDERER !== "classic") throw new Error(`--renderer must be three or classic, not ${RENDERER}`);
+/// classic: every /map URL carries renderer=classic
+const withRenderer = (path: string) => (RENDERER === "classic" && /^\/map(\?|#|$)/.test(path) ? `${path}${path.includes("?") ? "&" : "?"}renderer=classic` : path);
+const u = (path: string) => { const p = withRenderer(path); return PROD ? `${p}${p.includes("?") ? "&" : "?"}debug` : p; };
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const port = 9222 + Math.floor(Math.random() * 500);
 const profile = mkdtempSync(join(process.env.SPORE_TMP ?? tmpdir(), "spore-ui-"));
 mkdirSync(SHOTS, { recursive: true });
-const chrome = spawn(CHROME, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--hide-scrollbars", "--disable-extensions", "--disable-background-timer-throttling", "--disable-renderer-backgrounding", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, "--window-size=1440,900", "about:blank"], { stdio: "ignore" });
+const GPU_FLAGS = RENDERER === "three" ? ["--use-angle=metal", "--ignore-gpu-blocklist"] : ["--disable-gpu"];
+const chrome = spawn(CHROME, ["--headless=new", "--no-first-run", "--no-default-browser-check", ...GPU_FLAGS, "--hide-scrollbars", "--disable-extensions", "--disable-background-timer-throttling", "--disable-renderer-backgrounding", `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, "--window-size=1440,900", "about:blank"], { stdio: "ignore" });
 
 type Msg = { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string; result?: unknown; error?: { message: string } };
 type Rect = { x: number; y: number; w: number; h: number };
 const errors: string[] = [];
 const netErrors: string[] = [];
-const result: Record<string, unknown> = { url: BASE };
+const result: Record<string, unknown> = { url: BASE, renderer: RENDERER };
 const fails: string[] = [];
 const check = (cond: boolean, msg: string) => { if (!cond) fails.push(msg); return cond; };
+/// renderer() after every load (a pre-map3 build has no renderer(): it reads as classic)
+const renderers: string[] = [];
+const skippedUnderThree: string[] = [];
+result.renderers = renderers;
+result.skippedUnderThree = skippedUnderThree;
 
 // What the page should agree with, read straight from the API (through the dev server's proxy).
 type Row = { mint: string; parentMint: string | null; depth: number; symbol: string | null; name: string | null; lockedUsd: number | null; mcapUsd: number | null; children: number; ours?: boolean };
@@ -55,7 +73,7 @@ async function loadTruth(): Promise<Row[]> {
   for (const r of j.roots) walk(r, null);
   return out;
 }
-const kidCmp = (a: Row, b: Row) => (b.lockedUsd ?? 0) - (a.lockedUsd ?? 0) || (b.mcapUsd ?? 0) - (a.mcapUsd ?? 0) || (a.mint < b.mint ? -1 : a.mint > b.mint ? 1 : 0);
+const kidCmp = (a: Row, b: Row) => (b.mcapUsd ?? 0) - (a.mcapUsd ?? 0) || (b.lockedUsd ?? 0) - (a.lockedUsd ?? 0) || (a.mint < b.mint ? -1 : a.mint > b.mint ? 1 : 0);
 const overlap = (a: Rect, b: Rect) => a.w > 0 && a.h > 0 && b.w > 0 && b.h > 0 && a.x < b.x + b.w - 0.5 && b.x < a.x + a.w - 0.5 && a.y < b.y + b.h - 0.5 && b.y < a.y + a.h - 0.5;
 
 try {
@@ -95,7 +113,12 @@ try {
   const KEYS: Record<string, [string, number]> = { ArrowUp: ["ArrowUp", 38], ArrowDown: ["ArrowDown", 40], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39], "0": ["Digit0", 48], Escape: ["Escape", 27] };
   const key = async (k: string) => { const [code, vk] = KEYS[k]; const text = k.length === 1 ? k : undefined; await send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", key: k, code, windowsVirtualKeyCode: vk, text }, S); await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: vk }, S); };
   const param = (name: string) => evalJs<string | null>(`new URLSearchParams(location.search).get(${JSON.stringify(name)})`);
-  const go = async (path: string) => { await send("Page.navigate", { url: `${BASE}${u(path)}` }, S); await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 120_000, `map on ${path}`); };
+  const assertRenderer = async (where: string) => {
+    const r = await evalJs<string>(`(window.__sporeMapPage && typeof __sporeMapPage.renderer === "function" ? __sporeMapPage.renderer() : "classic")`);
+    renderers.push(`${where}: ${r}`);
+    check(r === RENDERER, `renderer() is ${r} after ${where}, expected ${RENDERER}`);
+  };
+  const go = async (path: string) => { await send("Page.navigate", { url: `${BASE}${u(path)}` }, S); await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 120_000, `map on ${path}`); await assertRenderer(path); };
   const settle = async () => { await waitFor("window.__sporeMap && __sporeMap.settled() && !__sporeMap.flying()", 120_000, "layout + camera to settle").catch(() => { /* a live stream keeps nudging; the checks below tolerate it */ }); await sleep(400); };
   const spa = (path: string) => evalJs(`(history.pushState({}, "", ${JSON.stringify(u(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
   const overlaps = async (label: string) => {
@@ -186,9 +209,9 @@ try {
   await send("Fetch.enable", { patterns: [{ urlPattern: "*/api/coin/*" }, { urlPattern: "*/api/candles/*" }] }, S);
   await spa(`/map?focus=${NTRNDM.mint}`);
   await waitFor(`/^notrandom/.test(document.querySelector(".map-side")?.getAttribute("aria-label") ?? "") && !document.querySelector(".map-side .map-side-stats .sk") && !!document.querySelector(".map-side .map-spark-none, .map-side .map-spark")`, 20_000, "side panel numbers").catch(() => fails.push("(c) side panel did not finish loading"));
-  const side = await evalJs<{ locked: string; children: string; spark: boolean; dash: boolean }>(`(() => { const st = [...document.querySelectorAll(".map-side .map-side-stats > div")]; const val = (label) => { const d = st.find((x) => x.querySelector("em").textContent.startsWith(label)); return d ? d.querySelector("strong").textContent : ""; }; return { locked: val("locked"), children: val("children"), spark: !!document.querySelector(".map-side .map-spark"), dash: !!document.querySelector(".map-side .map-spark-none") }; })()`);
+  const side = await evalJs<{ mcap: string; children: string; spark: boolean; dash: boolean }>(`(() => { const st = [...document.querySelectorAll(".map-side .map-side-stats > div")]; const val = (label) => { const d = st.find((x) => x.querySelector("em").textContent.startsWith(label)); return d ? d.querySelector("strong").textContent : ""; }; return { mcap: val("mcap"), children: val("children"), spark: !!document.querySelector(".map-side .map-spark"), dash: !!document.querySelector(".map-side .map-spark-none") }; })()`);
   const nodeNow = await evalJs<{ lockedUsd: number; children: number }>(`__sporeMap.node(${JSON.stringify(NTRNDM.mint)})`);
-  check(side.locked !== "$0" && side.locked !== "—" && side.locked.startsWith("$"), `(c) locked shows ${side.locked}`);
+  check(side.mcap !== "—" && side.mcap.startsWith("$"), `(c) mcap shows ${side.mcap}`);
   check(side.children.startsWith(nodeNow.children.toLocaleString("en-US")), `(c) children shows "${side.children}", node has ${nodeNow.children}`);
   check(side.dash && !side.spark, "(c) no candles must read as '—' without a sparkline");
   check(coinHits > 0 && coinLight === coinHits, `(c) /api/coin requests ${coinHits}, light ${coinLight}`);
@@ -207,7 +230,7 @@ try {
   // (e) keyboard walk
   await evalJs(`(document.activeElement && document.activeElement.blur && document.activeElement.blur(), true)`);
   const kids = truth.filter((r) => r.parentMint === NTRNDM.mint).sort(kidCmp);
-  const live0 = await evalJs<string>(`document.querySelector(".map-sr").textContent`);
+  const live0 = await evalJs<string>(`document.querySelector("div.map-sr").textContent`);
   // Key events are logged in the page so a lost keystroke is visible in the report.
   await evalJs(`(window.__k = [], document.addEventListener("keydown", (e) => window.__k.push(e.key + " " + (e.defaultPrevented ? "handled" : "-") + " " + (document.activeElement && document.activeElement.tagName)), true), true)`);
   await sleep(200);
@@ -215,7 +238,7 @@ try {
   await sleep(150);
   result.eFirst = await evalJs(`({ keys: window.__k.slice(), url: location.search.slice(0, 60), selected: __sporeMap.selected ? __sporeMap.selected() : null, active: document.activeElement && document.activeElement.tagName })`);
   await waitFor(`new URLSearchParams(location.search).get("focus") === ${JSON.stringify(kids[0].mint)}`, 2000, "↓ to the largest child").catch(() => fails.push(`(e) ↓ did not select the largest child ${kids[0].symbol}`));
-  const live1 = await evalJs<string>(`document.querySelector(".map-sr").textContent`);
+  const live1 = await evalJs<string>(`document.querySelector("div.map-sr").textContent`);
   check(live1 !== live0 && live1.length > 0, `(e) aria-live did not change (${live0} → ${live1})`);
   await key("ArrowRight");
   const kidsLive = await evalJs<string[]>(`__sporeMap.children(${JSON.stringify(NTRNDM.mint)})`);
@@ -248,16 +271,15 @@ try {
   await clickSel(".map-hl-chip.clear");
   await sleep(200);
   check((await param("hl")) === null, "(d) clear did not remove ?hl");
-  const mcapBtn = await evalJs<boolean>(`(() => { const b = [...document.querySelectorAll(".bm-size button")].find((x) => x.textContent.trim() === "mcap"); if (!b) return false; b.click(); return true; })()`);
-  check(mcapBtn, "(d) no mcap size button");
-  await sleep(300);
-  check((await param("size")) === "mcap", "(d) the size control did not write ?size=mcap");
+  const sizeUi = await evalJs<{ buttons: number; size: string | null }>(`({ buttons: document.querySelectorAll(".bm-size button").length, size: new URLSearchParams(location.search).get("size") })`);
+  check(sizeUi.buttons === 0 && sizeUi.size === null, `(d) the map has no size control and no ?size (families are sized by market cap only): ${JSON.stringify(sizeUi)}`);
   await evalJs("window.__oldDoc = true");
   await send("Page.reload", {}, S);
   await waitFor("window.__oldDoc === undefined", 30_000, "the reloaded document"); // the old document answers until the new one commits
-  await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage && document.querySelector('.bm-size button'))", 60_000, "map after reload");
-  const sizeReload = await evalJs<{ param: string | null; pressed: string | null }>(`({ param: new URLSearchParams(location.search).get("size"), pressed: ([...document.querySelectorAll(".bm-size button")].find((x) => x.getAttribute("aria-pressed") === "true") || {}).textContent || null })`);
-  check(sizeReload.param === "mcap" && sizeReload.pressed?.trim() === "mcap", `(d) ?size=mcap after reload: ${JSON.stringify(sizeReload)}`);
+  await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 60_000, "map after reload");
+  await assertRenderer("(d) reload");
+  const sizeReload = await evalJs<{ param: string | null; buttons: number }>(`({ param: new URLSearchParams(location.search).get("size"), buttons: document.querySelectorAll(".bm-size button").length })`);
+  check(sizeReload.param === null && sizeReload.buttons === 0, `(d) no size control after a reload: ${JSON.stringify(sizeReload)}`);
   result.d = { chip, expectOurs, hlAfter, sizeReload };
   await spa("/map");
   await settle();
@@ -282,6 +304,11 @@ try {
   // (h) the coin page link
   await viewport(1440, 900);
   await spa(`/c/${NTRNDM.mint}`);
+  // the link sits on the activity section's tree tab (the coin page opens on another tab since the 2026-10 redesign)
+  await waitFor(`!!document.querySelector(".act, .coin-activity, main")`, 20_000, "the coin page").catch(() => null);
+  await waitFor(`!!document.getElementById("act-tab-tree")`, 20_000, "the activity tabs").catch(() => null);
+  await evalJs(`(() => { const b = document.getElementById("act-tab-tree"); if (b) b.click(); return !!b; })()`);
+  await sleep(300);
   const href = await waitFor(`(() => { const a = [...document.querySelectorAll("a")].find((x) => /whole ecosystem/.test(x.textContent)); return a ? a.getAttribute("href") : null; })()`, 20_000, "coin page link").catch(() => null);
   check(href === `/map?focus=${NTRNDM.mint}`, `(h) whole ecosystem link is ${href}`);
   result.h = href;
@@ -309,6 +336,7 @@ try {
   await send("Fetch.enable", { patterns: [{ urlPattern: "*/api/map/heat*" }] }, S);
   await send("Page.navigate", { url: `${BASE}${u(`/map?focus=${hot[0].mint}`)}` }, S);
   await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 60_000, "map with heat");
+  await assertRenderer("(k) heat load");
   const k = await waitFor(`(() => { const tab = [...document.querySelectorAll(".map-rail-tabs button")].some((b) => b.textContent === "Hot"); const chip = document.querySelector('.map-hl-chip[data-key="active"] b'); const line = document.querySelector(".map-heatline")?.textContent ?? ""; const side = document.querySelector(".map-side-heat")?.textContent ?? ""; return tab && chip && /trades\\/min/.test(line) && /42 trades 1h/.test(side) ? { tab, chip: chip.textContent, line, side } : null; })()`, 15_000, "heat-driven UI").catch(() => null) as { chip: string } | null;
   check(!!k, "(k) heat did not light the Hot tab / Traded 1h chip / trades-per-minute line / side panel heat line");
   // ≥ 3: the live trade stream keeps adding rows to the index between polls.
@@ -334,7 +362,7 @@ try {
     await clickSel(".map-pop-close");
     await sleep(200);
   }
-  // a deep link to a top-200 root keeps roots at 200 (the widen race)
+  // a deep link to a top-200 root keeps roots at 200 (the widen race); under three it leaves ?roots unset
   await go(`/map?focus=${GTA.mint}`);
   await waitFor(`!!document.querySelector(".map-sheet")`, 15_000, "sheet").catch(() => fails.push("(g) no sheet for a selected coin"));
   await settle();
@@ -343,7 +371,8 @@ try {
     const sheet = document.querySelector(".map-sheet").getBoundingClientRect(), ov = document.querySelector(".map-overlay").getBoundingClientRect();
     return { roots: new URLSearchParams(location.search).get("roots"), peek: document.querySelector(".map-sheet").classList.contains("peek"), acts, sheetTop: sheet.top, overlayBottom: ov.bottom, pt: __sporeMap.screenOf(${JSON.stringify(GTA.mint)}), overflowX: document.documentElement.scrollWidth > innerWidth };
   })()`);
-  check(g.roots === null || g.roots === "200", `(g) deep link widened roots to ${g.roots}`);
+  if (RENDERER === "three") check(g.roots === null, `(g) deep link under three set ?roots=${g.roots} (map3 draws every root: it must stay unset)`);
+  else check(g.roots === null || g.roots === "200", `(g) deep link widened roots to ${g.roots}`);
   check(g.peek, "(g) the sheet did not open in peek");
   check(g.acts.length >= 2 && g.acts.every((r) => r.x >= 0 && r.y >= 0 && r.x + r.w <= 390 && r.y + r.h <= 844), `(g) peek actions not fully on screen: ${JSON.stringify(g.acts)}`);
   check(!!g.pt && g.pt.y > g.overlayBottom && g.pt.y < g.sheetTop, `(g) selected bubble at y=${g.pt?.y} is not between the overlay (${g.overlayBottom}) and the sheet (${g.sheetTop})`);

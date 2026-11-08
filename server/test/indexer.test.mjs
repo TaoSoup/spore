@@ -58,3 +58,62 @@ test("fetchCoin remembers a negative verdict for a minute and runs on the lane i
   assert.deepEqual(calls, { main: 1, api: 1 });
   db.close();
 });
+
+// ---- coins quoted in a listed asset (USDC, PUMP, MON, …): depth 0 on chain, drawn under the asset's bubble
+import { readFileSync } from "node:fs";
+import { PublicKey } from "../lib/sdk.mjs";
+import { base } from "./helpers/tree.mjs";
+const fixtureAccounts = JSON.parse(readFileSync(new URL("./fixtures/accounts.json", import.meta.url), "utf8")).accounts;
+
+test("a depth-0 CreateEvent quoted in a listed asset joins the tree under the asset and goes out as a pair; a SOL-quoted root is ignored", async () => {
+  const db = new Db(":memory:");
+  const model = new Model(db, { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", log: quiet });
+  model.load();
+  const events = [];
+  const { rpc } = fakeRpc();
+  const indexer = new Indexer({ rpc, model, meta: null, hub: { emit: (ev, data) => events.push([ev, data]) }, log: quiet, opts: { backfill: false } });
+  const ASSET = K.S;
+  indexer.onCreate({ ...createEventFor(K.X), depth: 0, quoteMint: ASSET }, 7);
+  await new Promise((r) => setTimeout(r, 30)); // the enrich step (mint info, shares) settles on the fake rpc
+  const c = model.get(K.X);
+  assert.ok(c && c.tracked, "tracked"); assert.equal(c.depth, 0); assert.equal(c.quoteMint, ASSET); assert.equal(c.createdSlot, 7);
+  assert.deepEqual((model.assetFamilies().get(ASSET) ?? []).map((k) => k.mint), [K.X], "the asset is a family top with this coin under it");
+  const pair = events.find(([ev]) => ev === "pair");
+  assert.ok(pair, "a pair event went out");
+  assert.equal(pair[1].coin.mint, K.X); assert.equal(pair[1].coin.parentMint, ASSET);
+  assert.equal(pair[1].parent.mint, ASSET); assert.equal(pair[1].parent.asset, true); assert.equal(pair[1].parent.parentMint, null);
+  indexer.onCreate({ ...createEventFor(K.U), depth: 0, quoteMint: null }, 8);
+  assert.ok(!model.get(K.U), "a SOL-quoted root is only ever a parent");
+  db.close();
+});
+
+test("the backfill walks the program once a month for every curve quoted in a listed asset (depth 0 with a quote mint) and resolves them into the asset's family", async () => {
+  const db = new Db(":memory:");
+  const model = new Model(db, { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", log: quiet });
+  model.load();
+  const ASSET = K.S, CURVE_B = fixtureAccounts.curve.pubkey;
+  // One coin quoted in the asset is already in the tree (its child's ancestor walk found it): the asset is a family top.
+  model.upsertCoin({ mint: K.A, curve: K.G, depth: 0, quoteMint: ASSET, creator: "CR", tracked: true, virtualQuoteReserves: "1", realQuoteReserves: "0", ...base });
+  // The fixture curve, re-stamped as a depth-0 curve quoted in the asset.
+  const raw = Buffer.from(fixtureAccounts.curve.data, "base64"); raw[141] = 0; new PublicKey(ASSET).toBuffer().copy(raw, 83);
+  const scans = [];
+  const rpc = {
+    concurrency: 1, snapshot: () => ({}),
+    scanProgramAccounts: async (program, cfg, onAccount) => { scans.push(cfg); onAccount(CURVE_B, raw.subarray(32, 142)); return { pages: 1, accounts: 1 }; },
+    getTokenAccountsByOwner: async (owner, programId) => (owner === CURVE_B ? [{ pubkey: "ta", mint: K.B, amount: "1", tokenProgram: programId }] : []),
+    getMultipleAccounts: async (keys) => keys.map((k) => (k === CURVE_B ? { owner: fixtureAccounts.curve.owner, lamports: 1, data: raw, executable: false } : null)),
+  };
+  const indexer = new Indexer({ rpc, model, meta: null, hub: null, log: quiet, opts: { backfill: true, createdAtProbe: false } });
+  await indexer.runBackfill();
+  assert.equal(scans.length, 1, "one walk of the program");
+  assert.deepEqual(scans[0].dataSlice, { offset: 32, length: 110 }); assert.equal(scans[0].filters[0].memcmp.offset, 0);
+  const b = model.get(K.B);
+  assert.ok(b && b.tracked, "the staged curve became a coin"); assert.equal(b.depth, 0); assert.equal(b.quoteMint, ASSET); assert.equal(b.curve, CURVE_B);
+  assert.deepEqual((model.assetFamilies().get(ASSET) ?? []).map((k) => k.mint).sort(), [K.A, K.B].sort());
+  assert.ok(db.backfillGet("scanned:assets", 0) > 0, "walk time recorded");
+  assert.ok(Buffer.from(db.backfillCurve(CURVE_B).data, "base64").length >= 142, "the staged slice was replaced by the full account");
+  await indexer.runBackfill();
+  assert.equal(scans.length, 1, "walked within the month: not again");
+  assert.equal(await indexer.scanAssetQuotes(), 0, "deduped by the same key");
+  db.close();
+});

@@ -4,7 +4,7 @@
 // tokens back to SOL through the same multi-hop route the site uses. Dry by default: nothing is sent
 // without --send. Run from web/:
 //   node --import ./test/cjs-sdk-hook.mjs --import tsx tools/treasury.mts list
-//   node --import ./test/cjs-sdk-hook.mjs --import tsx tools/treasury.mts claim [--min 0.001] [--send]
+//   node --import ./test/cjs-sdk-hook.mjs --import tsx tools/treasury.mts claim [--min 0.001] [--skip <mint,…>] [--send]
 //   node --import ./test/cjs-sdk-hook.mjs --import tsx tools/treasury.mts sell <mint> [--amount <tokens>] [--send]
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -17,6 +17,8 @@ import bs58 from "bs58";
 const [cmd = "list", ...rest] = process.argv.slice(2);
 const arg = (k: string, d?: string) => { const i = rest.indexOf(`--${k}`); return i >= 0 ? rest[i + 1] : d; };
 const send = rest.includes("--send");
+// --skip <mint[,mint…]> leaves those coins untouched (listed, never claimed).
+const SKIP = new Set((arg("skip") ?? "").split(",").map((m) => m.trim()).filter(Boolean));
 const conn = new Connection(process.env.RPC_URL ?? "https://api.mainnet-beta.solana.com", "confirmed");
 const online = new OnlinePumpSdk(conn);
 const wallet = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(process.env.WALLET ?? `${homedir()}/.config/solana/spore-dev.json`, "utf8"))));
@@ -62,7 +64,9 @@ async function pending(): Promise<Pending[]> {
     };
     const migrated = isBondingCurveMigrated(curve);
     const vault = await bal(vaultPda);
-    const ammVault = migrated ? await bal(ammPda) : 0n;
+    // The pool's creator fee sits in the AMM vault's quote token account even for SOL (wrapped), never in its lamports.
+    const ammBal = async () => { const ata = getAssociatedTokenAddressSync(sol ? NATIVE_MINT : quoteMint, ammPda, true, quoteProgram); return BigInt((await conn.getTokenAccountBalance(ata).catch(() => ({ value: { amount: "0" } }))).value.amount); };
+    const ammVault = migrated ? await ammBal() : 0n;
     const ourBps = config.shareholders.find((s) => s.address.equals(PLATFORM))!.shareBps;
     out.push({ mint, sharing: address, config, quoteMint, quoteProgram, decimals, migrated, bucket: BigInt(curve.creatorFee.toString()), vault, ammVault, ourBps });
     await sleep(250);
@@ -95,6 +99,7 @@ if (cmd === "list" || cmd === "claim") {
     const unit = r.quoteMint.equals(NATIVE_MINT) ? "SOL" : r.quoteMint.toBase58().slice(0, 6) + "…";
     console.log(`\n${r.mint.toBase58()} ${r.migrated ? "pool" : "curve"} quote ${unit} share ${r.ourBps / 100}% | curve bucket ${fmt(r.bucket, r.decimals)} · vault ${fmt(r.vault, r.decimals)} · amm ${fmt(r.ammVault, r.decimals)} → ours ≈ ${fmt(ours, r.decimals)} ${unit}`);
     if (cmd !== "claim") continue;
+    if (SKIP.has(r.mint.toBase58())) { console.log("  --skip, left alone"); continue; }
     if (Number(total) / 10 ** r.decimals < minQuote) { console.log("  below --min, skipped"); continue; }
     const ixs: TransactionInstruction[] = [];
     if (r.bucket > 0n) ixs.push(await PUMP_SDK.sweepCreatorFeeInstruction({ payer: PAYER, mint: r.mint, creator: r.sharing, quoteMint: r.quoteMint, quoteTokenProgram: r.quoteProgram }));

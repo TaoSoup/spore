@@ -1,0 +1,14 @@
+/* Illustration kit motion (components/illus/base.tsx). Transform, opacity and stroke-dashoffset only;
+   the global reduced-motion and html[data-motion="paused"] rules in styles.css stop every animation,
+   which leaves each drawing on its resting frame. */
+.illus { display: block; overflow: visible; }
+.illus-mote { stroke-dashoffset: 40; animation: illus-travel 3.2s cubic-bezier(.45,0,.25,1) infinite; }
+@keyframes illus-travel { from { stroke-dashoffset: 100; opacity: 0; } 8% { opacity: 1; } 88% { opacity: 1; } to { stroke-dashoffset: 0; opacity: 0; } }
+.illus-pending { animation: illus-dash 2.4s linear infinite; }
+@keyframes illus-dash { to { stroke-dashoffset: -16; } }
+.illus-twinkle { animation: illus-twinkle 4.2s ease-in-out infinite alternate; }
+@keyframes illus-twinkle { from { opacity: .15; } to { opacity: .9; } }
+.illus-node.is-pulse .illus-halo { animation: illus-breathe 4.8s ease-in-out infinite alternate; }
+@keyframes illus-breathe { from { transform: scale(.88); opacity: .7; } to { transform: scale(1.08); opacity: 1; } }
+.illus-ring.is-spin { animation: illus-spin 60s linear infinite; }
+@keyframes illus-spin { to { transform: rotate(360deg); } }

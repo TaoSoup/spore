@@ -3,6 +3,7 @@ import { api, ApiError } from "../../lib/api";
 import { useDebounced } from "../../lib/hooks";
 import { Logo, DepthBadge } from "../Bits";
 import { CodeBlock } from "./CodeBlock";
+import SlidingPill from "../ui/SlidingPill";
 import { API_ORIGIN, attr, mintIn } from "./util";
 import { SPORE_MINT } from "./examples";
 
@@ -75,6 +76,7 @@ export default function SnippetGenerator() {
           <div className="docs-gen-row">
             <span className="docs-gen-label" id="gen-widget">Widget</span>
             <div className="seg lg" role="group" aria-labelledby="gen-widget">
+              <SlidingPill />
               <button type="button" aria-pressed={widget === "tree"} onClick={() => setWidget("tree")}>Family tree</button>
               <button type="button" aria-pressed={widget === "map"} onClick={() => setWidget("map")}>Ecosystem map</button>
             </div>
@@ -95,6 +97,7 @@ export default function SnippetGenerator() {
           <div className="docs-gen-row wrap">
             <span className="docs-gen-label" id="gen-theme">Theme</span>
             <div className="seg" role="group" aria-labelledby="gen-theme">
+              <SlidingPill />
               <button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>dark</button>
               <button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>light</button>
             </div>
@@ -103,6 +106,7 @@ export default function SnippetGenerator() {
           <div className="docs-gen-row wrap">
             <span className="docs-gen-label" id="gen-size">Size</span>
             <div className="seg" role="group" aria-labelledby="gen-size">
+              <SlidingPill />
               {PRESETS.map((x) => <button key={x.id} type="button" aria-pressed={preset === x.id} onClick={() => setPreset(x.id)} title={`${x.w ? `${x.w}px` : "100%"} × ${x.h}px`}>{x.label}</button>)}
             </div>
             <span className="docs-gen-dim mono">{p.w ? `${p.w}` : "100%"} × {p.h}</span>

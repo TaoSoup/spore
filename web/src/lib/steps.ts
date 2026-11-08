@@ -35,6 +35,11 @@ export function stepper(labels: [string, string][], report: Report) {
   return { set, note, fail, steps };
 }
 
+/// Launch steps that run before the wallet opens: a failure in one of them cannot have signed or
+/// sent anything, so the page can promise that (and keep the form) instead of pointing at a link.
+export const PRE_SIGN_STEPS: readonly string[] = ["agent", "upload", "build", "preflight"];
+export const failedBeforeSigning = (steps: Step[]) => { const f = steps.find((s) => s.state === "fail"); return !f || PRE_SIGN_STEPS.includes(f.key); };
+
 const fmtSol = (lamports: number) => `${(lamports / 1e9).toLocaleString("en-US", { maximumFractionDigits: 4 })} SOL`;
 
 /// Wallet and program errors are verbose; the step line shows a short, human cause. Pump's own
@@ -45,6 +50,8 @@ export function friendlyError(e: unknown): string {
   const name = (e as { name?: string })?.name || "";
   const logs = e instanceof SimulationError ? e.logs.join("\n") : "";
   const text = `${raw}\n${logs}`;
+  // POST /api/agents/prepare answers 503 when the server has no agent wallet vault (flow.ts tags it).
+  if (/agent wallets are not configured/i.test(raw) || name === "AgentWalletError") return "Spore could not create your coin's agent wallet right now.";
   if (/user rejected|rejected the request|cancel|declined/i.test(raw) || name === "WalletSignTransactionError" || name === "WalletSendTransactionError" && /reject/i.test(raw)) return "You cancelled in the wallet. Nothing was sent.";
   const short = text.match(/insufficient lamports (\d+), need (\d+)/i);
   if (short) return `Not enough SOL: the wallet is short by ${fmtSol(Number(short[2]) - Number(short[1]))}. Top up and try again.`;
@@ -60,6 +67,13 @@ export function friendlyError(e: unknown): string {
   if (name === "UnconfirmedError") return raw;
   if (/too large|1232|encoding overruns/i.test(raw)) return "The transaction is too large for one signature.";
   if (/API is unreachable|API is down|Failed to fetch|NetworkError/i.test(raw)) return "Spore's API did not answer. Check your connection and try again.";
+  // Spore's own per-connection limits (uploads, agent wallets) say how long to wait.
+  const limited = raw.match(/rate limited \(([^:)]*)[^)]*\).*?try again in (\d+)\s*s/i);
+  if (limited) {
+    const s = Number(limited[2]);
+    const wait = s >= 90 ? `about ${Math.ceil(s / 60)} minutes` : `${s} second${s === 1 ? "" : "s"}`;
+    return /upload/i.test(limited[1]) ? `Spore limits how often one connection can launch. Try again in ${wait}.` : `Spore is busy answering this connection. Try again in ${wait}.`;
+  }
   if (/429|too many requests/i.test(raw)) return "The network is rate-limiting requests. Wait a few seconds and try again.";
   const clean = raw.replace(/^Simulation failed:\s*/i, "").replace(/\s*\([0-9]{4}\)$/, (m) => m);
   return clean.length > 160 ? `${clean.slice(0, 160)}…` : clean;

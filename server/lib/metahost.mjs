@@ -27,7 +27,7 @@ export const WRANGLER = "wrangler@3.99.0";
 /** Published file names: hex sha256 plus one of the four image types or json. Anything else is not ours. */
 export const META_NAME_RE = /^[a-f0-9]{64}\.(png|jpg|gif|webp|json)$/;
 export const META_TYPES = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webp: "image/webp", json: "application/json" };
-export const DEFAULT_QUOTA = { ipPerDay: 20, bytesPerDay: 256 * 1024 * 1024, deploysPerDay: 200 };
+export const DEFAULT_QUOTA = { ipPerDay: 500, bytesPerDay: 256 * 1024 * 1024, deploysPerDay: 200 };
 export const DEFAULT_GC_MS = 24 * 3600_000;
 const DAY_MS = 24 * 3600_000;
 
@@ -123,10 +123,12 @@ export class MetaHost {
    * Write, then publish; resolves once a deploy that includes these files has finished. The quota
    * is checked before anything is written and charged for what was actually new on disk.
    */
-  async publish(input, { ip = "?" } = {}) {
-    this.quota.check(ip, input.imageBytes?.length ?? 0);
+  async publish(input, { ip = "?", quota = true } = {}) {
+    // Root agents (DESIGN §13.1) publish from inside the server, not from an IP: `quota: false`
+    // skips the per-IP daily limit meant for human uploads (their cadence is bounded by their wallets).
+    if (quota) this.quota.check(ip, input.imageBytes?.length ?? 0);
     const r = this.write(input, { ip });
-    this.quota.charge(ip, r.bytes);
+    if (quota) this.quota.charge(ip, r.bytes);
     await this.deploy();
     return r;
   }

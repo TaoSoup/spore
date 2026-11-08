@@ -15,10 +15,11 @@ import { api, ApiError, errorMessage, type CoinRef, type MapCoin } from "../../l
 import { useEvents } from "../../lib/events";
 import { applyDelta, applyPair, fromMapCoin, remove, upsert, type NodeSet } from "../../lib/map/nodes";
 import type { BubbleNode } from "../../lib/map/types";
-import { count, usd } from "../../lib/format";
+import { count, usdCard } from "../../lib/format";
 import BubbleMap, { flattenTree, type BubbleMapHandle } from "../../components/BubbleMap";
 import { nameOf, sym } from "../../components/Bits";
-import { EmbedFrame, EmbedState, HeadTitle, LaunchCta, Out, SelectionCard, canLaunchUnder, compactBox, coinUrl, isMintLike, launchUrl, mapUrl, useActive, useBox, useEmbedParams, useEscape, useMaxDepth } from "./common";
+import SlidingPill from "../../components/ui/SlidingPill";
+import { EmbedFrame, EmbedLoading, EmbedState, HeadTitle, LaunchCta, Out, SelectionCard, canLaunchUnder, compactBox, coinUrl, isMintLike, launchUrl, mapUrl, useActive, useBox, useEmbedParams, useEscape, useMaxDepth } from "./common";
 
 type V1Tree = { root?: CoinRef; nodes?: (MapCoin & { parentMint?: string | null })[]; total?: number };
 type Loaded = { nodes: BubbleNode[]; source: "v1" | "api"; at: number };
@@ -200,7 +201,7 @@ export default function EmbedTree() {
   const head = (
     <>
       <HeadTitle label="Family tree" node={headNode} loading={valid && !loaded && !missing && !error} />
-      {loaded && root && <p className="embed-meta"><b>{count(total)}</b> coin{total === 1 ? "" : "s"}{root.lockedUsd != null && root.lockedUsd > 0 && <> · <b>{usd(root.lockedUsd)}</b> locked</>}</p>}
+      {loaded && root && <p className="embed-meta"><b>{count(total)}</b> coin{total === 1 ? "" : "s"}{root.lockedUsd != null && root.lockedUsd > 0 && <> · <b>{usdCard(root.lockedUsd)}</b> locked</>}</p>}
       <div className="embed-head-acts">
         {headNode && <LaunchCta node={headNode} maxDepth={maxDepth} compact={tiny} />}
       </div>
@@ -221,12 +222,13 @@ export default function EmbedTree() {
         : missing ? (missing.coin
           ? <EmbedState title={`No family yet for ${sym(missing.coin)}`} hint="Nothing trades under this coin on pump.fun yet. A coin launched under it would be the first branch of its tree." action={<Out href={launchUrl(missing.coin.mint)} className="embed-btn accent">Launch the first one <span aria-hidden="true">↗</span></Out>} />
           : <EmbedState tone="bad" title="Not a pump.fun coin" hint="Spore draws family trees of pump.fun coins. This mint is not one." />)
-        : !loaded ? <div className="embed-loading" aria-label="Loading the family tree"><i /><i /><i /></div>
+        : !loaded ? <EmbedLoading label="Loading the family tree" />
         : <>
             <BubbleMap ref={map} nodes={shown} focus={focusNode ? mint : undefined} select={selected} onSelect={onSelect} height="100%" mode={params.size}
               className="bm-full embed-map" inset={inset} fresh={fresh.current} live={active} hideLegend={compact} />
             {hasTree && (
               <div className="embed-view seg" role="group" aria-label="What to draw">
+                <SlidingPill items="button" />
                 <button type="button" aria-pressed={view === "branch"} onClick={() => setView("branch")} title={`${sym(focusNode)}, its ancestors and everything below it`}>branch</button>
                 <button type="button" aria-pressed={view === "tree"} onClick={() => setView("tree")} title={siblings > 0 ? `The whole family from ${sym(root)}: ${count(total)} coins, ${count(siblings)} sibling${siblings === 1 ? "" : "s"} of ${sym(focusNode)}` : `The whole family from ${sym(root)}`}>whole tree <b>{count(total)}</b></button>
               </div>

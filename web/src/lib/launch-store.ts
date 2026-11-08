@@ -21,6 +21,8 @@ export type PendingLaunch = {
   splitSig: string | null;
   step: PendingStep;
   createdAt: number;
+  /// A root's agent wallet (prepared by the server for this launch); null / absent for a child.
+  agent?: { id: string; address: string; model: string } | null;
 };
 
 const KEY = "spore:launch:pending";

@@ -5,29 +5,40 @@ import type { MapCoin, MapDeltaEntry, MapNode, MapResponse, PairEvent } from "..
 import type { BubbleNode, RootsLimit } from "./types";
 
 export type NodeSet = Map<string, BubbleNode>;
+/// The sizing fields the server adds to a map node (an asset top's flag, the liquidity cap); an older
+/// server or fixture without them reads as "not an asset, uncapped".
+type SizeFields = { asset?: boolean; mcapCapUsd?: number | null };
+const capOf = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 
-export const fromMapCoin = (c: MapCoin, parentMint: string | null): BubbleNode => ({
-  mint: c.mint, parentMint, depth: c.depth, name: c.name ?? null, symbol: c.symbol ?? null, image: c.image ?? null,
-  mcapUsd: c.mcapUsd ?? null, lockedUsd: c.lockedUsd ?? null, children: c.children ?? 0, descendants: c.descendants ?? 0, migrated: !!c.migrated,
-  ours: !!c.ours, createdAt: c.createdAt ?? null, updatedAt: c.updatedAt,
-});
+export const fromMapCoin = (c: MapCoin, parentMint: string | null): BubbleNode => {
+  const s = c as MapCoin & SizeFields;
+  const n: BubbleNode = {
+    mint: c.mint, parentMint, depth: c.depth, name: c.name ?? null, symbol: c.symbol ?? null, image: c.image ?? null,
+    mcapUsd: c.mcapUsd ?? null, lockedUsd: c.lockedUsd ?? null, children: c.children ?? 0, descendants: c.descendants ?? 0, migrated: !!c.migrated,
+    ours: !!c.ours, createdAt: c.createdAt ?? null, updatedAt: c.updatedAt, mcapCapUsd: capOf(s.mcapCapUsd),
+  };
+  if (s.asset === true) n.asset = true;
+  return n;
+};
 
 /// Both wire shapes (§11.5) flattened to one list. A tree node's parent is the node above it; a flat
-/// entry carries `parentMint` itself (a depth-0 entry without one is a root).
-export function normalise(res: MapResponse): { nodes: BubbleNode[]; removed: string[]; generatedAt: number | null; tree: boolean } {
+/// entry carries `parentMint` itself (a depth-0 entry without one is a root). `indexed` is the server's count of every
+/// coin the map stands for, drawn or not (DESIGN-FAMILY-ALL §4); null when the body has none.
+export function normalise(res: MapResponse): { nodes: BubbleNode[]; removed: string[]; generatedAt: number | null; tree: boolean; indexed: number | null } {
   const out: BubbleNode[] = [];
   const walk = (n: MapNode, parentMint: string | null) => { out.push(fromMapCoin(n.coin, parentMint)); for (const k of n.children ?? []) walk(k, n.coin.mint); };
   if (Array.isArray(res.roots)) for (const r of res.roots) walk(r, null);
   const flat = Array.isArray(res.nodes) ? res.nodes : Array.isArray(res.updated) ? res.updated : [];
   for (const c of flat) out.push(fromMapCoin(c, c.parentMint ?? (c.depth === 0 ? null : null)));
   const generatedAt = typeof res.generatedAt === "number" && Number.isFinite(res.generatedAt) ? res.generatedAt : null;
-  return { nodes: out, removed: Array.isArray(res.removed) ? res.removed.filter((m) => typeof m === "string") : [], generatedAt, tree: Array.isArray(res.roots) };
+  const indexed = typeof res.indexed === "number" && Number.isFinite(res.indexed) && res.indexed >= 0 ? res.indexed : null;
+  return { nodes: out, removed: Array.isArray(res.removed) ? res.removed.filter((m) => typeof m === "string") : [], generatedAt, tree: Array.isArray(res.roots), indexed };
 }
 
 const sameNode = (a: BubbleNode, b: BubbleNode) =>
   a.parentMint === b.parentMint && a.depth === b.depth && a.name === b.name && a.symbol === b.symbol && a.image === b.image &&
   a.mcapUsd === b.mcapUsd && a.lockedUsd === b.lockedUsd && a.children === b.children && (a.descendants ?? 0) === (b.descendants ?? 0) &&
-  a.migrated === b.migrated && !!a.ours === !!b.ours;
+  a.migrated === b.migrated && !!a.ours === !!b.ours && !!a.asset === !!b.asset && (a.mcapCapUsd ?? null) === (b.mcapCapUsd ?? null);
 
 /// Upserts into `set`, keeping the object identity of unchanged nodes (BubbleMap diffs by reference)
 /// and the cached position of a changed one. Returns the records that changed (what to persist).
@@ -53,6 +64,9 @@ export function applyDelta(set: NodeSet, entries: MapDeltaEntry[]): BubbleNode[]
     const cur = set.get(e.mint);
     if (!cur) continue;
     const next: BubbleNode = { ...cur, mcapUsd: e.mcapUsd ?? cur.mcapUsd, lockedUsd: e.lockedUsd ?? cur.lockedUsd, children: e.children ?? cur.children, descendants: e.descendants ?? cur.descendants, migrated: e.migrated ?? cur.migrated };
+    // the server sends mcapCapUsd on every delta row (null = no longer capped); an older server omits it
+    const cap = (e as MapDeltaEntry & SizeFields).mcapCapUsd;
+    if (cap !== undefined) next.mcapCapUsd = capOf(cap);
     if (e.name !== undefined && e.name !== null) next.name = e.name;
     if (e.symbol !== undefined && e.symbol !== null) next.symbol = e.symbol;
     if (e.image !== undefined && e.image !== null) next.image = e.image;

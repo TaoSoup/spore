@@ -10,10 +10,15 @@
 // the bytes, and the least-busy gateway is asked first so six workers spread over the rotation.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, statSync, createReadStream, unlinkSync, readdirSync, renameSync, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { META_NAME_RE, META_TYPES } from "./metahost.mjs";
 import { HostGuard, guardedFetch, pinnedFetch } from "./net.mjs";
 import { sniffImage } from "./validate.mjs";
+import { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, renderThumb, runOp } from "./img-worker.mjs";
+
+export { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, renderThumb };
 
 export const META_TTL_S = 7 * 24 * 3600;      // a resolved JSON with an image is re-read this often (IPFS content never changes)
 export const META_NOIMAGE_TTL_S = 24 * 3600;  // resolved, but no usable image: looked at again daily
@@ -422,30 +427,141 @@ export class MetaFetcher {
 }
 
 export const IMAGE_CACHE_MAX_BYTES = 512 * 1024 * 1024;
+/** Thumbnails have their own budget: ~8 KB each, so 128 MB holds every logo the map can ask for from far. */
+export const THUMB_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+/** A thumbnail is served by its own age: the original may be evicted (or dead upstream) meanwhile. */
+export const THUMB_TTL_MS = 7 * 24 * 3600 * 1000;
+/** GET /api/logo-sheet answers within this many ms of the request start with whatever thumbnails landed. */
+export const SHEET_BUDGET_MS = 400;
+/** ... unless NOTHING landed by then (a cold family): then it waits up to this long for the first thumbnails. */
+export const SHEET_WAIT_MS = 1500;
+/** ImageCache.warm: a pass stops after this long (the next scheduled pass continues), and a url that failed is not fetched again before WARM_RETRY_MS. */
+export const WARM_MAX_MS = 20 * 60_000;
+export const WARM_RETRY_MS = 6 * 3600_000;
+export const SHEET_CELL = 64;
+const THUMB_NAME_RE = /\.w\d+\.png$/;
 
 /**
- * Disk-backed image cache behind GET /api/img. Files are keyed by the sha256 of the URL. The cache
- * holds at most `maxBytes` (oldest files evicted first), so a flood of distinct allowed URLs can
- * fill the budget but never the disk.
+ * The thread image work runs on (lib/img-worker.mjs): one worker, jobs answered in order, buffers
+ * handed over rather than copied, respawned when it dies (the jobs in flight fail once, as transient).
+ * `{ inline: true }` runs the same functions on the calling thread, which tests use and the cache
+ * falls back to when a worker cannot be spawned or keeps crashing. Without it every thumbnail render
+ * (8-80 ms), sheet composition (50-120 ms) and share card (35-110 ms) would block the event loop,
+ * i.e. SSE and the indexer.
+ */
+export class ImgWork {
+  constructor({ inline = false, log = console } = {}) {
+    this.inline = inline; this.log = log; this.worker = null; this.pending = new Map(); this.seq = 0; this.closed = false;
+    this.stats = { jobs: 0, failed: 0, restarts: 0, inline: inline ? 1 : 0 };
+  }
+  #spawn() {
+    try {
+      // a worker refuses most process-level node flags (the test runner alone passes a dozen), so only the warning switches carry over
+      const execArgv = process.execArgv.filter((a) => /^(--disable-warning=|--no-warnings)/.test(a));
+      const w = new Worker(new URL("./img-worker.mjs", import.meta.url), { workerData: { role: "img" }, execArgv });
+      w.on("message", (m) => this.#onMessage(m));
+      w.on("error", (e) => this.#gone(e));
+      w.on("exit", (code) => this.#gone(new Error(`image worker exited (${code})`)));
+      w.unref(); // idle, it never keeps the process alive; ref'd while jobs wait
+      this.worker = w;
+      return w;
+    } catch (e) {
+      this.log.warn?.(`img work: cannot start a worker thread (${e.message}); rendering inline`);
+      this.inline = true; this.stats.inline = 1;
+      return null;
+    }
+  }
+  #gone(err) {
+    const w = this.worker;
+    if (!w) return;
+    this.worker = null;
+    if (!this.closed) { this.stats.restarts++; this.log.warn?.(`img work: ${err.message}; ${this.pending.size} jobs dropped, worker restarts on the next job`); }
+    if (this.stats.restarts > 5 && !this.inline) { this.inline = true; this.stats.inline = 1; this.log.warn?.("img work: worker keeps dying, rendering inline from now on"); }
+    for (const p of this.pending.values()) { const e = new Error(`image worker failed: ${err.message}`); e.transient = true; p.reject(e); }
+    this.pending.clear();
+  }
+  #onMessage(m) {
+    const p = this.pending.get(m.id);
+    if (!p) return;
+    this.pending.delete(m.id);
+    if (!this.pending.size) this.worker?.unref();
+    if (m.ok) p.resolve({ bytes: m.bytes ? Buffer.from(m.bytes.buffer, m.bytes.byteOffset, m.bytes.byteLength) : null, type: m.type, failed: m.failed ?? [] });
+    else { this.stats.failed++; p.reject(new Error(m.error)); }
+  }
+  async #run(msg, transfer) {
+    this.stats.jobs++;
+    if (!this.inline && !this.closed) {
+      const w = this.worker ?? this.#spawn();
+      if (w) return new Promise((resolve, reject) => {
+        const id = ++this.seq;
+        this.pending.set(id, { resolve, reject });
+        w.ref();
+        try { w.postMessage({ id, ...msg }, transfer); } catch (e) { this.pending.delete(id); if (!this.pending.size) w.unref(); reject(e); }
+      });
+    }
+    try { const r = await runOp(msg); return { bytes: r.bytes ?? null, type: r.type, failed: r.failed ?? [] }; }
+    catch (e) { this.stats.failed++; throw e; }
+  }
+  /** PNG bytes of the w x w thumbnail of `bytes` (sniffed `type`), or null when it cannot be drawn. */
+  async thumb({ bytes, type, w }) {
+    const u8 = own(bytes);
+    const r = await this.#run({ op: "thumb", bytes: u8, type, w }, [u8.buffer]);
+    return r.bytes;
+  }
+  /** `{ bytes, type, failed }`: the sheet of `cells` (PNG thumbnails or null), see composeSheet in img-worker.mjs. */
+  async sheet({ cells, cols = SHEET_COLS, cell = SHEET_CELL, format = "webp" }) {
+    const owned = cells.map((c) => (c ? own(c) : null));
+    return this.#run({ op: "sheet", cells: owned, cols, cell, format }, owned.filter(Boolean).map((u) => u.buffer));
+  }
+  /** PNG bytes of a share card's svg (lib/card.mjs), rasterized off the loop like a thumbnail (renderCardSvg in img-worker.mjs). */
+  async card({ svg }) {
+    const r = await this.#run({ op: "card", svg: String(svg) }, []);
+    return r.bytes;
+  }
+  /** Ends the worker; later jobs run inline (the shutdown path may still serve a request or two). */
+  close() {
+    this.closed = true;
+    const w = this.worker;
+    this.#gone(new Error("closed"));
+    w?.terminate().catch(() => {});
+  }
+}
+/** A Uint8Array over its own ArrayBuffer (a copy when `bytes` shares one, e.g. Node's buffer pool), so it can be transferred. */
+function own(bytes) { const u8 = new Uint8Array(bytes.byteLength); u8.set(bytes); return u8; }
+
+/**
+ * Disk-backed image cache behind GET /api/img and GET /api/logo-sheet. Originals are keyed by the
+ * sha256 of the URL and hold at most `maxBytes` (oldest files evicted first), so a flood of distinct
+ * allowed URLs can fill the budget but never the disk. Thumbnails (<sha>.w<w>.png) live beside them
+ * under their own budget and TTL: a warm thumbnail is served without the original, which may be
+ * long evicted or dead upstream.
  */
 export class ImageCache {
-  constructor(dir, { log = console, fetchImpl = pinnedFetch, concurrency = 3, pacer, maxBytes = IMAGE_CACHE_MAX_BYTES } = {}) {
-    this.dir = dir; this.log = log; this.maxBytes = maxBytes;
+  constructor(dir, { log = console, fetchImpl = pinnedFetch, concurrency = 3, pacer, maxBytes = IMAGE_CACHE_MAX_BYTES, thumbMaxBytes = THUMB_CACHE_MAX_BYTES, work = null } = {}) {
+    this.dir = dir; this.log = log; this.maxBytes = maxBytes; this.thumbMaxBytes = thumbMaxBytes;
     this.pacer = pacer ?? new HostPacer({ fetchImpl });
+    this.work = work ?? new ImgWork({ log });
     mkdirSync(dir, { recursive: true });
-    this.inFlight = new Map(); this.negative = new Map();
+    this.inFlight = new Map(); this.negative = new Map(); this.warmFailed = new Map();
     this.concurrency = concurrency; this.active = 0; this.waiters = [];
-    this.stats = { hits: 0, misses: 0, failed: 0, evicted: 0, bytes: 0 };
-    this.stats.bytes = this.#measure();
+    this.stats = { hits: 0, misses: 0, failed: 0, evicted: 0, bytes: 0, thumbs: 0, thumbHits: 0, thumbFailed: 0, thumbBytes: 0, thumbsEvicted: 0, sheets: 0, sheetCells: 0, sheetPending: 0, sheetDead: 0, sheetMs: 0 };
+    this.thumbInFlight = new Map(); this.thumbChain = Promise.resolve(); this.thumbNo = new Map();
+    this.#measure();
   }
   #paths(url) { const key = createHash("sha256").update(url).digest("hex"); return { file: join(this.dir, key), sidecar: join(this.dir, `${key}.json`) }; }
-  #measure() { let n = 0; for (const name of readdirSync(this.dir)) { try { n += statSync(join(this.dir, name)).size; } catch { /* vanished */ } } return n; }
-  /** Oldest files out until the cache is back under 90% of its budget; the sidecar goes with its image. */
+  /** Where the w px thumbnail of `url` lives (whether or not it exists). */
+  thumbPath(url, w) { return `${this.#paths(url).file}.w${w}.png`; }
+  #measure() {
+    let bytes = 0, thumbBytes = 0;
+    for (const name of readdirSync(this.dir)) { try { const size = statSync(join(this.dir, name)).size; if (THUMB_NAME_RE.test(name)) thumbBytes += size; else bytes += size; } catch { /* vanished */ } }
+    this.stats.bytes = bytes; this.stats.thumbBytes = thumbBytes;
+  }
+  /** Oldest originals out until the cache is back under 90% of its budget; the sidecar goes with its image, the thumbnails stay. */
   #evict() {
     if (this.stats.bytes <= this.maxBytes) return;
     const files = [];
     for (const name of readdirSync(this.dir)) {
-      if (name.endsWith(".json") || name.includes(".tmp")) continue;
+      if (name.endsWith(".json") || name.includes(".tmp") || THUMB_NAME_RE.test(name)) continue;
       try { const st = statSync(join(this.dir, name)); files.push({ name, size: st.size, mtimeMs: st.mtimeMs }); } catch { /* vanished */ }
     }
     files.sort((a, b) => a.mtimeMs - b.mtimeMs);
@@ -456,6 +572,22 @@ export class ImageCache {
       this.stats.evicted++;
     }
     this.stats.bytes = Math.max(0, this.stats.bytes);
+  }
+  /** Oldest thumbnails out until they are back under 90% of their own budget. */
+  #evictThumbs() {
+    if (this.stats.thumbBytes <= this.thumbMaxBytes) return;
+    const files = [];
+    for (const name of readdirSync(this.dir)) {
+      if (!THUMB_NAME_RE.test(name)) continue;
+      try { const st = statSync(join(this.dir, name)); files.push({ name, size: st.size, mtimeMs: st.mtimeMs }); } catch { /* vanished */ }
+    }
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const target = this.thumbMaxBytes * 0.9;
+    for (const f of files) {
+      if (this.stats.thumbBytes <= target) break;
+      try { unlinkSync(join(this.dir, f.name)); this.stats.thumbBytes -= f.size; this.stats.thumbsEvicted++; } catch { /* already gone */ }
+    }
+    this.stats.thumbBytes = Math.max(0, this.stats.thumbBytes);
   }
 
   /** `{file, type}` for a cached-or-fetched image, or null (not allowed, too big, not an image, unreachable). */
@@ -506,11 +638,155 @@ export class ImageCache {
       return null;
     } finally { this.#leave(); }
   }
+  /** `{ file, type, thumb: w }` when the w px thumbnail of `url` is on disk and younger than THUMB_TTL_MS, else null (no original needed). */
+  thumbOnDisk(url, w) {
+    if (!url || !IMAGE_THUMB_SIZES.has(w)) return null;
+    const file = this.thumbPath(url, w);
+    try { if (Date.now() - statSync(file).mtimeMs < THUMB_TTL_MS) return { file, type: "image/png", thumb: w }; } catch { /* not made */ }
+    return null;
+  }
+  /** The bytes of the fresh w px PNG thumbnail of `url` on disk (thumbOnDisk), else null; never fetches or renders (the social card reads logos this way; `warm` makes a missing one). */
+  thumbBytes(url, w) {
+    const hit = this.thumbOnDisk(url, w);
+    if (!hit) return null;
+    try { const bytes = readFileSync(hit.file); this.stats.thumbHits++; return bytes; } catch { return null; }
+  }
+  /** Known not to yield a w px thumbnail right now: no url, a download that failed within NEGATIVE_TTL_MS, or a render that failed within the day. */
+  isDead(url, w = SHEET_CELL) {
+    if (!url) return true;
+    const now = Date.now();
+    return (this.negative.get(url) ?? 0) > now || (this.thumbNo.get(`${w}:${url}`) ?? 0) > now;
+  }
+
+  /**
+   * `{file, type, thumb: w}` for a w x w PNG thumbnail of `hit` (an image get() returned), cached on disk as
+   * <sha>.w<w>.png beside the original; a thumbnail already on disk is served by its own age (thumbOnDisk);
+   * null when it cannot be made (a decode failure, an animated webp): serve the original then. Renders run on
+   * the image worker one at a time (setImmediate between them), so a burst of logos never stalls the loop.
+   */
+  async thumb(url, hit, w) {
+    const warm = this.thumbOnDisk(url, w);
+    if (warm) { this.stats.thumbHits++; return warm; }
+    if (!hit || !IMAGE_THUMB_SIZES.has(w) || !THUMB_TYPES.has(hit.type)) return null;
+    const out = this.thumbPath(url, w), key = `${w}:${url}`;
+    if ((this.thumbNo.get(key) ?? 0) > Date.now()) return null;
+    if (this.thumbInFlight.has(key)) return this.thumbInFlight.get(key);
+    const job = this.thumbChain.then(async () => {
+      try {
+        const png = await this.work.thumb({ bytes: readFileSync(hit.file), type: hit.type, w });
+        if (!png) throw new Error("not drawable");
+        const tmp = `${out}.${process.pid}.tmp`;
+        writeFileSync(tmp, png); renameSync(tmp, out);
+        this.stats.thumbBytes += png.length; this.stats.thumbs++;
+        this.#evictThumbs();
+        return { file: out, type: "image/png", thumb: w };
+      } catch (e) {
+        this.stats.thumbFailed++;
+        // a worker crash is not the image's fault: the next request renders again
+        if (!e?.transient) this.thumbNo.set(key, Date.now() + IMAGE_TTL_MS);
+        if (this.thumbNo.size > 5_000) for (const [k, t] of this.thumbNo) if (t < Date.now()) this.thumbNo.delete(k);
+        return null;
+      } finally { await new Promise((r) => setImmediate(r)); }
+    });
+    this.thumbChain = job.catch(() => null);
+    const p = job.finally(() => this.thumbInFlight.delete(key));
+    this.thumbInFlight.set(key, p);
+    return p;
+  }
+
+  /**
+   * Pre-warm (map logos from far, owner 2026-10-21): makes sure each url has its w-px thumbnail on disk (a
+   * fresh one costs a stat; otherwise the original is fetched through get() and drawn through thumb(), webp
+   * included), at most concurrency urls at a time. Returns { n, ok, failed }.
+   */
+  async warm(urls, w = 64, concurrency = 4, { maxMs = WARM_MAX_MS } = {}) {
+    const list = [...new Set(urls ?? [])].filter((u) => typeof u === "string" && u);
+    const t0 = Date.now(), now = () => Date.now();
+    let next = 0, ok = 0, failed = 0, skipped = 0, stopped = false;
+    const worker = async () => {
+      while (next < list.length) {
+        if (now() - t0 > maxMs) { stopped = true; break; }
+        const u = list[next++];
+        try {
+          if (this.thumbOnDisk(u, w)) { this.stats.thumbHits++; ok++; continue; }
+          // (repair 2026-10-22) a url that failed in an earlier pass (or is dead right now) is not fetched again before
+          // WARM_RETRY_MS: a pass over every image (model.warmImageUrls all) would otherwise spend its time on the
+          // ~3,600 dead upstreams every 30 minutes
+          if ((this.warmFailed.get(u) ?? 0) > now() || this.isDead(u, w)) { skipped++; failed++; continue; }
+          const hit = await this.get(u); const t = hit ? await this.thumb(u, hit, w) : null;
+          if (t) ok++; else { failed++; this.warmFailed.set(u, now() + WARM_RETRY_MS); }
+        } catch { failed++; this.warmFailed.set(u, now() + WARM_RETRY_MS); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), list.length) }, worker));
+    if (this.warmFailed.size > 20_000) for (const [k, t] of this.warmFailed) if (t < now()) this.warmFailed.delete(k);
+    return { n: list.length, ok, failed, skipped, stopped, ms: now() - t0 };
+  }
+
+  /**
+   * One logo sheet (GET /api/logo-sheet) for `urls` (raw image URLs, null for a mint without one): cell i is
+   * the w px thumbnail of urls[i], SHEET_COLS cells per row, as `{ bytes, type, present, dead, pending }`
+   * with `present`/`dead` one byte per cell. A thumbnail on disk is read at once; a dead url (isDead, or
+   * one the proxy will not fetch) is marked dead; for the rest the usual get() -> thumb() jobs start and the
+   * sheet waits for them at most `budgetMs` from the call (`waitMs` when nothing at all landed by then): whatever landed is present, the others are
+   * pending (neither bit) and keep running, so the client's next ask finds them on disk. Composition runs
+   * on the image worker; a thumbnail file that will not decode is dropped and re-made next time.
+   */
+  async sheet(urls, w = SHEET_CELL, { budgetMs = SHEET_BUDGET_MS, waitMs = SHEET_WAIT_MS, format = "webp" } = {}) {
+    const t0 = Date.now(), n = urls.length;
+    if (n < 1 || n > SHEET_MAX_CELLS) throw new Error(`sheet: 1 to ${SHEET_MAX_CELLS} cells`);
+    const present = new Uint8Array(n), dead = new Uint8Array(n), files = new Array(n).fill(null);
+    const started = [], jobs = new Map(); // url -> { settled, value }
+    for (let i = 0; i < n; i++) {
+      const url = typeof urls[i] === "string" && urls[i] ? urls[i] : null;
+      if (!url) { dead[i] = 1; continue; }
+      const warm = this.thumbOnDisk(url, w);
+      if (warm) { files[i] = warm.file; present[i] = 1; this.stats.thumbHits++; continue; }
+      if (this.isDead(url, w)) { dead[i] = 1; continue; }
+      let job = jobs.get(url);
+      if (!job) {
+        job = { settled: false, value: null };
+        job.promise = this.get(url).then((hit) => (hit ? this.thumb(url, hit, w) : null)).catch(() => null).then((v) => { job.settled = true; job.value = v; });
+        jobs.set(url, job);
+      }
+      started.push({ i, job });
+    }
+    if (started.length) {
+      const all = Promise.all([...jobs.values()].map((j) => j.promise));
+      const waitUntil = async (ms) => {
+        let timer = null;
+        const budget = new Promise((r) => { timer = setTimeout(r, Math.max(0, ms - (Date.now() - t0))); timer.unref?.(); });
+        await Promise.race([all, budget]);
+        clearTimeout(timer);
+      };
+      await waitUntil(budgetMs);
+      // (repair 2026-10-22) a sheet with NOTHING to show at the budget (no warm cell, no download landed: the first zoom
+      // into a cold family) keeps waiting up to waitMs for the first thumbnails instead of answering all-pending at the
+      // budget, which only cost the client a round trip and its re-ask delay
+      const landed = () => present.some((v) => v) || started.some(({ job }) => job.settled && job.value);
+      if (waitMs > budgetMs && !landed() && started.some(({ job }) => !job.settled)) await waitUntil(waitMs);
+      for (const { i, job } of started) {
+        if (!job.settled) continue;
+        if (job.value) { files[i] = job.value.file; present[i] = 1; } else dead[i] = 1;
+      }
+    }
+    const cells = await Promise.all(files.map(async (f, i) => { if (!f) return null; try { return await readFile(f); } catch { present[i] = 0; return null; } }));
+    const r = await this.work.sheet({ cells, cols: SHEET_COLS, cell: w, format });
+    for (const i of r.failed) { present[i] = 0; try { const size = statSync(files[i]).size; unlinkSync(files[i]); this.stats.thumbBytes -= size; } catch { /* already gone */ } }
+    let pending = 0, deadN = 0;
+    for (let i = 0; i < n; i++) { if (dead[i]) deadN++; else if (!present[i]) pending++; }
+    this.stats.sheets++; this.stats.sheetCells += n; this.stats.sheetPending += pending; this.stats.sheetDead += deadN; this.stats.sheetMs += Date.now() - t0;
+    return { bytes: r.bytes, type: r.type, present, dead, pending };
+  }
+
   async #enter() { if (this.active < this.concurrency) { this.active++; return; } await new Promise((r) => this.waiters.push(r)); this.active++; }
   #leave() { this.active--; const n = this.waiters.shift(); if (n) n(); }
 
   /**
-   * Express handler: `GET /api/img?u=<https url>`; 404 for anything the proxy will not serve.
+   * Express handler: `GET /api/img?u=<https url>[&w=64|128|256]`; 404 for anything the proxy will not serve. With a
+   * known `w` the answer is a w x w PNG thumbnail (header x-img-thumb: w) when one can be made, else the original;
+   * any other `w` is ignored (the original). A thumbnail on disk is served before the original is even looked at
+   * (no download for a warm logo whose original was evicted or died upstream).
    * With `known(url)` the proxy fetches only URLs the API itself handed out (the `image` of an
    * indexed coin, or a file on our own metadata host): the allowlist says which hosts may be
    * contacted, `known` says on whose behalf, so a stranger cannot use the cache as a mirror.
@@ -519,26 +795,78 @@ export class ImageCache {
     return async (req, res) => {
       const url = typeof req.query.u === "string" ? req.query.u : "";
       if (known && url && !known(url) && !localMetaFile(url)) { res.setHeader("cache-control", "no-store"); return res.status(404).json({ error: "image not available" }); }
-      const hit = await this.get(url);
-      if (!hit) { res.setHeader("cache-control", "no-store"); return res.status(404).json({ error: "image not available" }); }
+      const w = Number(typeof req.query.w === "string" ? req.query.w : NaN);
+      let hit = IMAGE_THUMB_SIZES.has(w) ? this.thumbOnDisk(url, w) : null;
+      if (hit) this.stats.thumbHits++;
+      else {
+        hit = await this.get(url);
+        if (!hit) { res.setHeader("cache-control", "no-store"); return res.status(404).json({ error: "image not available" }); }
+        if (IMAGE_THUMB_SIZES.has(w)) { const t = await this.thumb(url, hit, w).catch(() => null); if (t) hit = t; }
+      }
+      if (hit.thumb) res.setHeader("x-img-thumb", String(w));
       res.setHeader("content-type", hit.type);
-      res.setHeader("cache-control", "public, max-age=86400, immutable");
+      // a thumbnail is cached 7 days by the browser; the original keeps its day
+      res.setHeader("cache-control", hit.thumb ? "public, max-age=604800, immutable" : "public, max-age=86400, immutable");
       res.setHeader("x-content-type-options", "nosniff");
       createReadStream(hit.file).on("error", () => res.destroy()).pipe(res);
     };
   }
 
-  /** Drops files older than twice the TTL and re-measures the cache; called from the boot timer a few times a day. */
+  /**
+   * Express handler: `GET /api/logo-sheet?w=64&m=<mint>,<mint>,...[&f=webp|png]`, one image of the 64 px
+   * thumbnails of up to 256 mints' logos, 16 per row, with bitmaps of which cells are present / dead in
+   * the headers (x-sheet, x-sheet-dead: hex, byte j bit b = cell 8j+b; a cell in neither is pending).
+   * `imageOf(mint)` maps a mint to its raw image URL (null when it has none), `isMint` validates each.
+   */
+  sheetHandler({ imageOf, isMint = () => true } = {}) {
+    const bad = (res, error) => { res.setHeader("cache-control", "no-store"); return res.status(400).json({ error }); };
+    return async (req, res) => {
+      const w = Number(typeof req.query.w === "string" ? req.query.w : NaN);
+      if (w !== SHEET_CELL) return bad(res, `w must be ${SHEET_CELL}`);
+      if (typeof req.query.m !== "string" || !req.query.m) return bad(res, "m is required");
+      const mints = req.query.m.split(",");
+      if (mints.length > SHEET_MAX_CELLS) return bad(res, `m takes 1 to ${SHEET_MAX_CELLS} mints`);
+      for (const m of mints) if (!isMint(m)) return bad(res, "invalid mint");
+      const f = req.query.f == null ? "webp" : req.query.f;
+      if (f !== "webp" && f !== "png") return bad(res, "f must be webp or png");
+      const urls = mints.map((m) => { try { return imageOf(m) ?? null; } catch { return null; } });
+      let r;
+      try { r = await this.sheet(urls, w, { format: f }); }
+      catch (e) { this.log.warn?.(`logo sheet failed: ${e?.message ?? e}`); res.setHeader("cache-control", "no-store"); return res.status(500).json({ error: "sheet failed" }); }
+      res.setHeader("content-type", r.type);
+      res.setHeader("x-sheet", hexBits(r.present));
+      res.setHeader("x-sheet-dead", hexBits(r.dead));
+      res.setHeader("x-sheet-n", String(mints.length));
+      res.setHeader("x-sheet-cols", String(SHEET_COLS));
+      res.setHeader("x-sheet-cell", String(w));
+      res.setHeader("x-sheet-pending", String(r.pending));
+      res.setHeader("x-content-type-options", "nosniff");
+      res.setHeader("cache-control", r.pending ? "no-store" : "private, max-age=600");
+      res.setHeader("access-control-expose-headers", "x-sheet, x-sheet-dead, x-sheet-n, x-sheet-pending");
+      res.setHeader("content-length", String(r.bytes.length));
+      res.end(r.bytes);
+    };
+  }
+
+  /** Drops originals older than twice their TTL and thumbnails older than twice theirs, re-measures and evicts; a few times a day. */
   sweep() {
     let removed = 0;
     for (const name of readdirSync(this.dir)) {
       const p = join(this.dir, name);
-      try { if (Date.now() - statSync(p).mtimeMs > IMAGE_TTL_MS * 2) { unlinkSync(p); removed++; } } catch { /* vanished */ }
+      try { if (Date.now() - statSync(p).mtimeMs > (THUMB_NAME_RE.test(name) ? THUMB_TTL_MS : IMAGE_TTL_MS) * 2) { unlinkSync(p); removed++; } } catch { /* vanished */ }
     }
-    this.stats.bytes = this.#measure();
+    this.#measure();
     this.#evict();
+    this.#evictThumbs();
     return removed;
   }
+}
+
+/** Hex bitmap of a 0/1 byte-per-cell array: ceil(n/8) bytes, byte j bit b (1 << b) = cell 8j+b. */
+export function hexBits(cells) {
+  const out = Buffer.alloc(Math.ceil(cells.length / 8));
+  for (let i = 0; i < cells.length; i++) if (cells[i]) out[i >> 3] |= 1 << (i & 7);
+  return out.toString("hex");
 }
 
 export const imageProxyUrl = (image) => (image ? `/api/img?u=${encodeURIComponent(image)}` : null);

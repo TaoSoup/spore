@@ -10,6 +10,18 @@ import { useThrottled } from "./util";
 
 const NEW_KEYS: HlKey[] = ["new1h", "new24h"];
 
+/// One 12-unit glyph per key, drawn in the site's illustration language (nodes, rings, filaments): what the
+/// key lights up, so the chips read at a glance. currentColor, hairline strokes; decorative (the label says it).
+const GLYPH: Record<HlKey, ReactNode> = {
+  ours: <><circle cx="6" cy="6" r="4.4" fill="none" stroke="currentColor" strokeWidth="1" opacity=".55" /><circle cx="6" cy="6" r="2" fill="currentColor" /></>,
+  new1h: <><circle cx="6" cy="9.4" r="1.7" fill="currentColor" /><path d="M6 7.6V4.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" /><circle cx="6" cy="3.2" r="1.25" fill="none" stroke="currentColor" strokeWidth="1" /></>,
+  new24h: <><circle cx="6" cy="9.6" r="1.6" fill="currentColor" /><path d="M6 8V3.4M6 6.2 3 3.6M6 5.2 9 2.6" stroke="currentColor" strokeWidth="1.05" strokeLinecap="round" /><circle cx="3" cy="3.4" r=".95" fill="currentColor" /><circle cx="9" cy="2.4" r=".95" fill="currentColor" /></>,
+  grad: <><circle cx="6" cy="6" r="4.4" fill="none" stroke="currentColor" strokeWidth="1" opacity=".45" /><circle cx="9.1" cy="2.9" r="1.5" fill="currentColor" /><circle cx="6" cy="6" r="1.6" fill="currentColor" opacity=".7" /></>,
+  min1k: <><path d="M2.5 10V8M6 10V5.5M9.5 10V2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></>,
+  active: <><path d="M1.5 6.5h2l1.4-3.5 2.2 6 1.4-2.5h2" fill="none" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" strokeLinejoin="round" /></>,
+  since: <><circle cx="6" cy="6" r="4.3" fill="none" stroke="currentColor" strokeWidth="1" strokeDasharray="2 1.6" opacity=".7" /><path d="M6 3.6V6l1.7 1.1" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" /></>,
+};
+
 /// The predicate for BubbleMap and the per-key counts for the chips. The context's clock ticks once a
 /// minute (only the "new" keys read it); `active` follows the heat index; `since` the previous visit.
 /// Base counts recompute at most every 2 s as the nodes change; the `active` count walks only the heat rows.
@@ -52,10 +64,10 @@ export default function Highlights({ keys, onKeys, counts, seenAt, heatOn, child
       <div className="map-hl-chips" role="group" aria-label="Highlight coins">
         {visible.map((k) => (
           <button type="button" key={k} className="map-hl-chip" data-key={k} aria-pressed={on.has(k)} onClick={() => toggle(k)} title={`${on.has(k) ? "Stop highlighting" : "Highlight"}: ${HL_LABEL[k]}`}>
-            {HL_LABEL[k]}<b>{count(counts[k])}</b>
+            <svg className="map-hl-glyph" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">{GLYPH[k]}</svg>{HL_LABEL[k]}<b>{count(counts[k])}</b>
           </button>
         ))}
-        {keys.length > 0 && <button type="button" className="map-hl-chip clear" onClick={() => onKeys([])} aria-label="Clear highlights">× clear</button>}
+        {keys.length > 0 && <button type="button" className="map-hl-chip clear" onClick={() => onKeys([])} aria-label="Clear highlights"><svg className="map-hl-glyph" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>clear</button>}
       </div>
       {children}
     </div>

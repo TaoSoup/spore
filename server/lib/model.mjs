@@ -5,16 +5,33 @@
 // consistent snapshot. Derived numbers are recomputed at most once per `version` bump, so a burst
 // of live trades costs one pass, not one per request.
 import { USDC_MINT, NATIVE_MINT, TOKEN_2022_PROGRAM_ID } from "./sdk.mjs";
-import { priceQuoteOf, chainPrices, progressOf, units } from "./pricing.mjs";
+import { priceQuoteOf, chainPrices, progressOf, units, mcapCapOf, liqQuoteOf } from "./pricing.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { Activity } from "./activity.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
+/**
+ * computed() walks every indexed coin (about 345k on mainnet, 1-3 s on the VPS) and every live trade bumps
+ * the version, so the map flush (every 3 s), refresh and stats used to re-run it back to back and starve the
+ * event loop (API answers took 2-9 s). On a large index a new pass starts at most every COMPUTED_MIN_MS and
+ * runs in the background in COMPUTED_SLICE_MS slices; callers get the last finished table meanwhile (they read
+ * it with ?. / ?? {}). Small indexes (tests, a fresh devnet) recompute synchronously.
+ */
+export const COMPUTED_MIN_MS = 5_000;
+export const COMPUTED_THROTTLE_MIN_COINS = 20_000;
+/** Longest stretch one slice of a background pass may hold the event loop. */
+export const COMPUTED_SLICE_MS = 12;
 const SOL_DECIMALS = 9;
 // `PublicKey.toBase58()` encodes on every call (bn.js); `decimalsOf` runs millions of times per
 // derived pass at 15k coins, so the SOL mint is compared as a string constant.
 const SOL_MINT = NATIVE_MINT.toBase58();
+/** The optional mcapCapUsd field: present only when the coin's mcap is capped by its liquidity. */
+const capField = (cap) => (cap != null ? { mcapCapUsd: cap } : {});
 const shortMint = (m) => `${m.slice(0, 4)}…${m.slice(-4)}`;
+/** A USD value of a family row: 4 significant digits, null when unknown. */
+const p4 = (x) => (x == null || !Number.isFinite(x) ? null : +x.toPrecision(4));
+/** A family row's raw sort key: the value, or -1 when unknown (mapAll's and assetDrawn's `?? -1`). */
+const sortKey = (x) => (x == null || !Number.isFinite(x) ? -1 : x);
 // A verified spawn (POST /api/spawned) stays "pending ours" this long while the indexer looks for
 // the fee-sharing config that proves it (DESIGN §11.1); a genuine split lands within seconds of the
 // create, so anything still unconfirmed after this is not ours and the flag drops.
@@ -25,6 +42,33 @@ export const PENDING_MAX = 500;
 // The whole-forest map (DESIGN §11.5) is rebuilt at most once per this window, and only when the
 // model version moved; the delta variant (`since=`) shares the window.
 export const MAP_CACHE_MS = 10_000;
+/** How many coins of a listed asset's family the full map draws (every coin with children or younger than a day, then the biggest by locked value); the rest stay in the index and in the family's counts. */
+export const ASSET_FAMILY_DRAW = 300;
+// Family snapshots (`/api/map/family/:mint`, DESIGN-FAMILY-ALL §4): every coin of one family, biggest
+// first, with mapRef's numbers. A snapshot is rebuilt like the map (version moved and MAP_CACHE_MS passed)
+// and stays readable by its `v` for FAMILY_SNAPSHOT_MS after its last read, so a client paging through it
+// sees one list. Held snapshots sit in two pools with an estimated byte budget each, least recently read
+// dropped first: the listed-asset families (PUMP, USDC, …: few, big, the ones a client pages through) and
+// every other family (a tracked coin's children: small, but any tracked mint can be asked for). A request
+// for a small family therefore never pushes out an asset family that a client is paging. A leaf is never held.
+export const FAMILY_SNAPSHOT_MS = 120_000;
+/** Estimated bytes the held snapshots of listed-asset families may take, and those of every other family. */
+export const FAMILY_ASSET_BYTES = 128 * 2 ** 20;
+export const FAMILY_COIN_BYTES = 16 * 2 ** 20;
+/**
+ * The estimate: a fixed cost per snapshot, per row (113 B/row measured on the local index's $PUMP, 50k
+ * rows), and per byte of a kept encoded page (its bytes plus its gzip and brotli, ≈ 0.5 each; the JSON text
+ * is dropped once encoded).
+ */
+export const FAMILY_SNAP_BYTES = 1_024;
+export const FAMILY_ROW_BYTES = 128;
+export const FAMILY_PAGE_COPIES = 2;
+/** Rows per family page by default, and the most one page may ask for. */
+export const FAMILY_PAGE = 5_000;
+export const FAMILY_PAGE_MAX = 10_000;
+/** Encoded pages kept per snapshot (one per distinct offset/limit asked), and their estimated bytes at most (oldest out first). */
+export const FAMILY_PAGES = 64;
+export const FAMILY_PAGE_BYTES = 32 * 2 ** 20;
 // The map's heat sidecar (`/api/map/heat`, DESIGN §11.5) is rebuilt at most once per this window:
 // it decays with the clock, not with model versions, so it has no version key.
 export const HEAT_CACHE_MS = 15_000;
@@ -38,8 +82,8 @@ const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
 
 export class Model {
-  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console } = {}) {
-    this.db = db; this.log = log; this.now = now;
+  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW } = {}) {
+    this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw;
     this.platformWallet = platformWallet; this.splitBps = splitBps;
     // The platform share a sharing config must carry to count as ours: the configured platform
     // slice (50% by default). Mere presence is not enough — anyone can write a config that names
@@ -55,9 +99,10 @@ export class Model {
     this.pools = new Map();         // pool address → mint (graduated coins; maps pump-amm events back)
     this.solUsd = null; this.solUsdAt = 0;
     this.quoteUsd = new Map();      // USD price of listed non-SOL quote mints we can price (PUMP, …)
+    this.quoteMcap = new Map();     // circulating USD market cap of a listed quote asset, where the price feed gives one (PUMP)
     this.global = null;             // decoded pump Global (plain)
     this.backfill = { done: false, total: 0, resolved: 0 };
-    this.version = 0; this.derivedVersion = -1; this.derived = new Map();
+    this.version = 0; this.derivedVersion = -1; this.derived = new Map(); this.derivedAt = 0; this.derivedMs = 0; this.computeSliceMinCoins = COMPUTED_THROTTLE_MIN_COINS;
     // `computed()` runs after every version bump (each live trade is one), so its per-coin inputs are
     // memoized: a coin object is never mutated once indexed (upsertCoin builds a new one), so its
     // quote price and the value it locks in its parent are cached by object identity; descendant
@@ -90,8 +135,10 @@ export class Model {
     for (const c of this.db.allCoins()) this.#index(c);
     this.solUsd = this.db.kvGet("solUsd"); this.solUsdAt = this.db.kvGet("solUsdAt", 0);
     this.quoteUsd = new Map(Object.entries(this.db.kvGet("quoteUsd", {})));
+    this.quoteMcap = new Map(Object.entries(this.db.kvGet("quoteMcap", {})));
     this.global = this.db.kvGet("global");
     this.pending = new Map(Object.entries(this.db.kvGet("oursPending", {})));
+    for (const [mint, url] of Object.entries(this.db.kvGet("assetIcons", {}) ?? {})) if (typeof url === "string" && url.startsWith("https://")) { this.assetIcons.set(mint, url); this.imageUrls.add(url); }
     const t0 = performance.now();
     const seeded = this.activity.seed(this.db.tradesWindow(Math.floor(this.now() / 1000) - this.activity.dayS));
     this.activity.seededMs = Math.round(performance.now() - t0);
@@ -149,7 +196,7 @@ export class Model {
     const c = {
       tracked: true, complete: false, migrated: false, mayhem: false, holderReward: false, creatorFeeBps: 0,
       virtualTokenReserves: "0", virtualQuoteReserves: "0", realTokenReserves: "0", realQuoteReserves: "0", tokenTotalSupply: "0", initialVirtualQuoteReserves: "0",
-      pool: null, poolBaseVault: null, poolQuoteVault: null, poolBase: null, poolQuote: null,
+      pool: null, poolBaseVault: null, poolQuoteVault: null, poolBase: null, poolQuote: null, poolVirtualQuote: null,
       createdAt: null, createdSlot: null, createdProbe: false, shares: null, sharesAt: 0, refreshedAt: 0, feePaid: null,
       ...prev, ...patch, updatedAt: prev?.updatedAt ?? 0,
     };
@@ -224,6 +271,12 @@ export class Model {
   }
   /** Has the API handed out this image URL (so the proxy may fetch it)? */
   knownImage(url) { return this.imageUrls.has(url); }
+  /**
+   * The raw image URL behind a mint's logo (the one ref()/view()/assetMapRef wrap with imageProxyUrl),
+   * or null: the metadata image when the coin's JSON has one, else a listed asset's stored icon.
+   * GET /api/logo-sheet resolves its mints through this, so a sheet cell is the same file /api/img serves.
+   */
+  imageOfMint(mint) { return this.metaFor({ mint })?.image ?? this.assetIcons.get(mint) ?? null; }
   /** Is a file of our metadata host (`<sha256>.<ext>`) the uri or image of any coin we know? */
   referencesMetaFile(name) {
     const tail = `/m/${name}`;
@@ -233,6 +286,53 @@ export class Model {
   }
   setSolUsd(v) { if (v > 0) { this.solUsd = v; this.solUsdAt = nowS(); this.db.kvSet("solUsd", v); this.db.kvSet("solUsdAt", this.solUsdAt); this.#bump(); } }
   setQuoteUsd(mint, v) { if (v > 0) { this.quoteUsd.set(mint, v); this.db.kvSet("quoteUsd", Object.fromEntries(this.quoteUsd)); this.#bump(); } }
+  /**
+   * A listed quote asset's circulating USD market cap, from the same CoinGecko call that prices it: what its
+   * map bubble shows as mcap (display only, the asset top still counts 0 in mcap sizing). Bumps only when it moved.
+   */
+  setQuoteMcap(mint, v) {
+    const n = Number(v);
+    if (!(n > 0) || !Number.isFinite(n) || this.quoteMcap.get(mint) === n) return false;
+    this.quoteMcap.set(mint, n); this.db.kvSet("quoteMcap", Object.fromEntries(this.quoteMcap)); this.#bump();
+    return true;
+  }
+  /** The stored circulating market cap of a listed quote asset, or null. */
+  quoteMcapOf(mint) { return this.quoteMcap.get(mint) ?? null; }
+  /** Many listed quote prices at once (the Jupiter refresh): one kvSet and one bump, only when a value moved. Returns how many changed. */
+  setQuoteUsdMany(obj) {
+    let n = 0;
+    for (const [mint, v0] of Object.entries(obj ?? {})) {
+      const v = Number(v0);
+      if (!(v > 0) || !Number.isFinite(v) || this.quoteUsd.get(mint) === v) continue;
+      this.quoteUsd.set(mint, v); n++;
+    }
+    if (n) { this.db.kvSet("quoteUsd", Object.fromEntries(this.quoteUsd)); this.#bump(); }
+    return n;
+  }
+  /**
+   * USD per 1 unit of a depth-0 coin's quote when that quote is "other" (neither SOL nor USDC): the
+   * listed price. A root whose quote is itself a coin we hold only happens on a cycle (the chain walk
+   * stops at a mint it already visited), which has no price.
+   */
+  #rootOtherUsd(root) {
+    const q = root.quoteMint;
+    if (q == null || this.coins.has(q)) return null;
+    return this.quoteUsd.get(q) ?? null;
+  }
+  /** USD per 1 unit of a coin's quote read from a computed() table (no chain walk): what liqUsd multiplies by. */
+  #quoteUsdIn(mint, d) {
+    if (mint == null || mint === SOL_MINT) return this.solUsd;
+    if (mint === USDC_MINT) return 1;
+    if (this.coins.has(mint)) return d.get(mint)?.priceUsd ?? null;
+    return this.quoteUsd.get(mint) ?? null;
+  }
+  /** mcapCapUsd of a coin (sizing by mcap, pricing.mjs LIQ_X): the capped value, or null when uncapped or the liquidity is unknown. */
+  mcapCapOf(c, mcapUsd, d = this.computed()) {
+    if (!(mcapUsd > 0)) return null;
+    const q = liqQuoteOf(c, this.quoteDecimals(c));
+    const qu = q != null ? this.#quoteUsdIn(c.quoteMint, d) : null;
+    return qu != null ? mcapCapOf(mcapUsd, q * qu) : null;
+  }
   /** USD per 1 unit of a quote mint: SOL price, 1 for USDC, a tracked pump coin's own price, a known listed quote, else null. */
   quoteUsdOf(mint) {
     if (mint == null || mint === SOL_MINT) return this.solUsd;
@@ -254,7 +354,7 @@ export class Model {
     const priceQuote = quoteOf(c);
     if (root.depth !== 0) return { priceQuote, priceSol: null, priceUsd: null };
     const kind = this.rootQuoteKind(root);
-    return { priceQuote, ...chainPrices(chain.map(quoteOf), kind, this.solUsd, kind === "other" ? this.quoteUsd.get(root.quoteMint) ?? null : null) };
+    return { priceQuote, ...chainPrices(chain.map(quoteOf), kind, this.solUsd, kind === "other" ? this.#rootOtherUsd(root) : null) };
   }
   setGlobal(g) { this.global = g; this.db.kvSet("global", g); this.#bump(); }
   setBackfill(b) { this.backfill = { ...this.backfill, ...b }; }
@@ -364,6 +464,46 @@ export class Model {
     this.assetCache = fam; this.assetVersion = this.version;
     return fam;
   }
+  /**
+   * The slice of each listed asset's family the full map draws (ASSET_FAMILY_DRAW): every coin that has
+   * children or is younger than a day, then the biggest by locked value, then by price. Tens of thousands
+   * of coins sit under PUMP or USDC alone and nearly all of them never traded; the family's bubble still
+   * counts them all (assetMapRef), the index and the search still know them.
+   */
+  assetDrawn() {
+    if (this.drawnVersion === this.version && this.drawnCache) return this.drawnCache;
+    const out = new Map(), d = this.computed(), cap = this.assetFamilyDraw, dayAgo = Math.floor(this.now() / 1000) - 86_400;
+    for (const [asset, kids] of this.assetFamilies()) {
+      const keep = new Set(), rest = [];
+      for (const k of kids) { if ((d.get(k.mint)?.children ?? 0) > 0 || (k.createdAt ?? 0) > dayAgo) keep.add(k.mint); else rest.push(k); }
+      if (keep.size < cap) {
+        rest.sort((a, b) => (d.get(b.mint)?.lockedUsd ?? -1) - (d.get(a.mint)?.lockedUsd ?? -1) || (d.get(b.mint)?.priceUsd ?? -1) - (d.get(a.mint)?.priceUsd ?? -1));
+        for (const k of rest) { if (keep.size >= cap) break; keep.add(k.mint); }
+      }
+      out.set(asset, keep);
+    }
+    this.drawnCache = out; this.drawnVersion = this.version;
+    return out;
+  }
+  // Logos of listed quote assets whose mint metadata has no image (USDC, WBTC, WETH, …): mint → the
+  // token's listed https icon (lib/asset-icons.mjs). The mint's own metadata image always wins
+  // (assetMapRef); every stored icon is registered with the image proxy (knownImage).
+  assetIcons = new Map();
+  /** Stores asset icons ({ mint: https URL } or a Map), persisted in kv "assetIcons". Returns how many changed. */
+  setAssetIcons(icons) {
+    let n = 0;
+    for (const [mint, url] of icons instanceof Map ? icons : Object.entries(icons ?? {})) {
+      if (typeof mint !== "string" || typeof url !== "string" || !url.startsWith("https://") || this.assetIcons.get(mint) === url) continue;
+      this.assetIcons.set(mint, url); this.imageUrls.add(url); n++;
+      // The asset node rides the next `since=` delta with a member (mapSince adds the asset of a changed member).
+      const member = this.assetFamilies().get(mint)?.[0];
+      if (member) this.#stamp(member.mint);
+    }
+    if (n) { this.db.kvSet("assetIcons", Object.fromEntries(this.assetIcons)); this.#bump(); }
+    return n;
+  }
+  /** The stored icon URL of a listed asset mint, or null. */
+  assetIconOf(mint) { return this.assetIcons.get(mint) ?? null; }
   /** The bubble of a listed quote asset: its name and logo from the mint metadata, the value its family has locked in it. */
   assetMapRef(mint) {
     const kids = this.assetFamilies().get(mint) ?? [];
@@ -378,11 +518,28 @@ export class Model {
     }
     const supply = this.mints.get(mint)?.supply;
     return {
-      mint, name, symbol, image: imageProxyUrl(this.metaFor({ mint })?.image), depth: 0, ours: false, oursPending: false, asset: true,
-      mcapUsd: quoteUsd != null && supply != null ? quoteUsd * units(supply, dec) : null,
+      mint, name, symbol, image: imageProxyUrl(this.metaFor({ mint })?.image ?? this.assetIcons.get(mint)), depth: 0, ours: false, oursPending: false, asset: true,
+      mcapUsd: this.quoteMcapOf(mint) ?? (quoteUsd != null && supply != null ? quoteUsd * units(supply, dec) : null),
       lockedUsd: quoteUsd != null ? units(locked, dec) * quoteUsd : null,
       children: kids.length, descendants, otherChildren: 0, migrated: false, createdAt: null, updatedAt,
     };
+  }
+  /**
+   * Raw logo URLs the map wants as thumbnails from far (ImageCache.warm), most wanted first: every family top (a root
+   * with a child, a listed asset top), the direct children of the bigFamilies largest families by descendants, and with
+   * `all` every other tracked coin's logo after them (the map draws a child's logo from 4.5 px, so a zoom into ANY family
+   * asks for its children; a cold family cost 2-5 s of sheet re-asks before this).
+   */
+  warmImageUrls(bigFamilies = 60, all = false) {
+    const out = new Set();
+    const add = (mint) => { const u = this.metaFor({ mint })?.image; if (u) out.add(u); };
+    const roots = this.allRoots(), d = this.computed();
+    for (const r of roots) add(r.mint);
+    for (const mint of this.assetFamilies().keys()) add(mint);
+    const big = roots.slice().sort((a, b) => (d.get(b.mint)?.descendants ?? 0) - (d.get(a.mint)?.descendants ?? 0)).slice(0, bigFamilies);
+    for (const r of big) for (const k of this.childrenOf(r.mint)) add(k.mint);
+    if (all) for (const c of this.tracked()) add(c.mint);
+    return [...out];
   }
   /** Every depth-0 coin with at least one child on pump.fun, regardless of the mode. */
   allRoots() { const d = this.computed(); return this.tracked().filter((c) => c.depth === 0 && (d.get(c.mint)?.children ?? 0) > 0); }
@@ -430,8 +587,38 @@ export class Model {
   /** Prices, locked value and descendant counts for every coin, recomputed when the version moved. */
   computed() {
     if (this.derivedVersion === this.version) return this.derived;
+    // Small index (tests, a fresh devnet) or the first pass after start: one synchronous pass.
+    if (this.derivedVersion < 0 || this.coins.size < this.computeSliceMinCoins) {
+      const gen = this.#computePass();
+      while (!gen.next().done);
+      return this.derived;
+    }
+    // Large index (about 345k coins on mainnet, 1-3 s per pass): refresh in the background in short slices
+    // so the event loop keeps answering requests, and serve the last table meanwhile (numbers a few seconds old).
+    this.#startSlicedPass();
+    return this.derived;
+  }
+  #computeJob = null;
+  #startSlicedPass() {
+    if (this.#computeJob || Date.now() - this.derivedAt < COMPUTED_MIN_MS) return;
+    const gen = this.#computePass();
+    this.#computeJob = gen;
+    const step = () => {
+      const until = performance.now() + COMPUTED_SLICE_MS;
+      let r;
+      try { do { r = gen.next(); } while (!r.done && performance.now() < until); }
+      catch (e) { this.#computeJob = null; this.log?.warn?.(`computed: ${e?.message ?? e}`); return; }
+      if (r.done) this.#computeJob = null; else setImmediate(step);
+    };
+    setImmediate(step);
+  }
+  /** One full pass as a generator: it yields every few hundred coins so a caller can spread it over ticks. */
+  *#computePass() {
+    const t0 = Date.now(), version = this.version, structVersion = this.structVersion;
     const d = new Map();
+    let n = 0;
     for (const c of this.coins.values()) {
+      if ((++n & 511) === 0) yield;
       let m = this.pqMemo.get(c);
       if (!m || m.dv !== this.decVersion) {
         const bd = this.decimalsOf(c.mint), qd = this.quoteDecimals(c);
@@ -441,51 +628,53 @@ export class Model {
       d.set(c.mint, { priceQuote: m.pq, priceSol: null, priceUsd: null, lockedQuote: 0n, lockedUsd: null, descendants: 0, children: 0 });
     }
     // Self first, then the ancestors as far as the model knows them (the walk `ancestors()` does,
-    // cycle-safe), into two scratch arrays reused for every coin.
+    // cycle-safe), into two scratch arrays reused for every coin. A coin indexed while a sliced pass ran
+    // has no row yet: its chain is skipped and priced by the next pass.
     const chain = [], steps = [];
-    for (const c of this.coins.values()) {
+    chains: for (const c of this.coins.values()) {
+      if ((++n & 511) === 0) yield;
       chain.length = 0; chain.push(c);
       for (let x = c; x.quoteMint && !inChain(chain, x.quoteMint);) { const p = this.coins.get(x.quoteMint); if (!p) break; chain.push(p); x = p; }
       const root = chain[chain.length - 1];
       // A chain that does not reach a depth-0 coin cannot be priced in SOL or USD yet (ancestor missing).
       if (root.depth !== 0) continue;
       steps.length = chain.length;
-      for (let k = 0; k < chain.length; k++) steps[k] = d.get(chain[k].mint).priceQuote;
+      for (let k = 0; k < chain.length; k++) { const row = d.get(chain[k].mint); if (!row) continue chains; steps[k] = row.priceQuote; }
       const kind = this.rootQuoteKind(root);
-      Object.assign(d.get(c.mint), chainPrices(steps, kind, this.solUsd, kind === "other" ? this.quoteUsd.get(root.quoteMint) ?? null : null));
+      Object.assign(d.get(c.mint), chainPrices(steps, kind, this.solUsd, kind === "other" ? this.#rootOtherUsd(root) : null));
     }
     // Locked quote = Σ children (raw units of the parent's token: realQuoteReserves on the curve, the
     // pool's quote vault after migration). Descendants = recursive child count, children = direct.
     for (const [parent, set] of this.children) {
+      if ((++n & 511) === 0) yield;
       const e = d.get(parent); if (!e) continue;
-      let locked = 0n, n = 0;
+      let locked = 0n, k = 0;
       for (const m of set) {
         const ch = this.coins.get(m); if (!ch || !ch.tracked) continue;
-        n++;
+        k++;
         let v = this.lockMemo.get(ch);
         if (v === undefined) { v = BigInt((ch.migrated ? ch.poolQuote : ch.realQuoteReserves) ?? 0); this.lockMemo.set(ch, v); }
         locked += v;
       }
-      e.children = n; e.lockedQuote = locked;
+      e.children = k; e.lockedQuote = locked;
       const parentCoin = this.coins.get(parent);
       e.lockedUsd = e.priceUsd != null && parentCoin ? units(locked, this.decimalsOf(parent)) * e.priceUsd : null;
     }
-    if (this.descVersion !== this.structVersion) {
+    if (this.descVersion !== structVersion) {
       const memo = new Map(); const visiting = new Set();
       const desc = (mint) => {
         if (memo.has(mint)) return memo.get(mint);
         if (visiting.has(mint)) return 0; // malformed data guard; depth strictly grows on chain
         visiting.add(mint);
-        let n = 0;
-        for (const m of this.children.get(mint) ?? []) { const ch = this.coins.get(m); if (ch && ch.tracked) n += 1 + desc(m); }
-        visiting.delete(mint); memo.set(mint, n); return n;
+        let c = 0;
+        for (const m of this.children.get(mint) ?? []) { const ch = this.coins.get(m); if (ch && ch.tracked) c += 1 + desc(m); }
+        visiting.delete(mint); memo.set(mint, c); return c;
       };
-      for (const c of this.coins.values()) desc(c.mint);
-      this.descCache = memo; this.descVersion = this.structVersion;
+      for (const c of this.coins.values()) { if ((++n & 511) === 0) yield; desc(c.mint); }
+      this.descCache = memo; this.descVersion = structVersion;
     }
     for (const [mint, e] of d) e.descendants = this.descCache.get(mint) ?? 0;
-    this.derived = d; this.derivedVersion = this.version;
-    return d;
+    this.derived = d; this.derivedVersion = version; this.derivedAt = Date.now(); this.derivedMs = this.derivedAt - t0;
   }
   /** 24 h volume/trade counts per mint (Map<mint, { trades, usd }>), live from the in-memory activity counters. */
   volumes() { return this.activity.volumes(); }
@@ -511,7 +700,9 @@ export class Model {
     const d = this.computed().get(c.mint) ?? {};
     const s = all ? this.scopedAll(c) : this.scoped(c);
     const supply = units(c.tokenTotalSupply, this.decimalsOf(c.mint));
-    return { ...this.ref(c), mcapUsd: d.priceUsd != null ? d.priceUsd * supply : null, lockedUsd: s.lockedUsd, children: s.children, descendants: s.descendants, otherChildren: s.otherChildren, migrated: c.migrated, createdAt: c.createdAt };
+    const mcapUsd = d.priceUsd != null ? d.priceUsd * supply : null;
+    const cap = this.mcapCapOf(c, mcapUsd);
+    return { ...this.ref(c), mcapUsd, ...capField(cap), lockedUsd: s.lockedUsd, children: s.children, descendants: s.descendants, otherChildren: s.otherChildren, migrated: c.migrated, createdAt: c.createdAt };
   }
 
   // ---------------------------------------------------------------- the whole-forest map (DESIGN §11.5)
@@ -524,7 +715,12 @@ export class Model {
     const solRoots = this.allRoots().filter((c) => !fam.has(c.quoteMint ?? ""));
     return [...solRoots, ...[...fam.keys()].map((mint) => ({ mint, asset: true, depth: -1 }))];
   }
-  mapChildren(mint, all) { return all ? this.childrenOf(mint) : this.visibleChildren(mint); }
+  /** A family's children on the map: all of them, except a listed asset's family, which is capped (assetDrawn). */
+  mapChildren(mint, all) {
+    if (!all) return this.visibleChildren(mint);
+    const kids = this.childrenOf(mint), drawn = this.assetDrawn().get(mint);
+    return drawn ? kids.filter((k) => drawn.has(k.mint)) : kids;
+  }
   /**
    * Every root and every descendant as `{ coin: mapRef, children }` nodes, no fan-out cap. Built
    * from `mapRef` only (no `view()`: no ancestor walk, no volume join), cached per model version
@@ -542,13 +738,19 @@ export class Model {
     const stat = (c) => (all ? this.scopedAll(c) : this.scoped(c));
     const cmp = (a, b) => (stat(b).lockedUsd ?? -1) - (stat(a).lockedUsd ?? -1) || (d.get(b.mint)?.priceUsd ?? -1) - (d.get(a.mint)?.priceUsd ?? -1);
     let total = 0;
-    const node = (c, left) => { total++; return { coin: c.asset ? this.assetMapRef(c.mint) : this.mapRef(c, all), children: left > 0 ? this.mapChildren(c.mint, all).sort(cmp).map((k) => node(k, left - 1)) : [] }; };
+    const seen = new Set(), nested = new Set(), fam = all ? this.assetFamilies() : null; // for `indexed` (#indexedFrom)
+    const node = (c, left, root = false) => {
+      total++; seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
+      return { coin: c.asset ? this.assetMapRef(c.mint) : this.mapRef(c, all), children: left > 0 ? this.mapChildren(c.mint, all).sort(cmp).map((k) => node(k, left - 1)) : [] };
+    };
     const rootLocked = new Map(this.mapRoots(all).map((r) => [r, (r.asset ? this.assetMapRef(r.mint).lockedUsd : stat(r).lockedUsd) ?? -1]));
-    const roots = [...rootLocked.keys()].sort((a, b) => rootLocked.get(b) - rootLocked.get(a)).map((r) => node(r, r.asset ? depth + 1 : depth));
+    const roots = [...rootLocked.keys()].sort((a, b) => rootLocked.get(b) - rootLocked.get(a)).map((r) => node(r, r.asset ? depth + 1 : depth, true));
     const body = { roots, scope: all ? "all" : this.mode, version: this.version, generatedAt, total };
     this.lastGeneratedAt = Math.max(this.lastGeneratedAt, generatedAt);
     this.mapCache = { key, all, version: this.version, at: generatedAt, body, total, prepared: null, buildMs: Math.round(performance.now() - t0) };
     this.totalCache = { all, version: this.version, total };
+    this.mapCache.indexed = this.#indexedFrom(seen.size, nested, all);
+    if (depth === this.mapDepth()) this.indexedCache = { all, version: this.version, n: this.mapCache.indexed };
     this.mapStats.builds++; this.mapStats.lastBuildMs = this.mapCache.buildMs; this.mapStats.maxBuildMs = Math.max(this.mapStats.maxBuildMs, this.mapCache.buildMs);
     return this.mapCache;
   }
@@ -566,7 +768,7 @@ export class Model {
   #onMap(c, all) {
     if (!c.tracked) return false;
     if (!all && !this.scope().inScope.has(c.mint)) return false;
-    if (c.depth === 0) return (all && !!c.quoteMint && c.quoteMint !== SOL_MINT) || this.mapChildren(c.mint, all).length > 0;
+    if (c.depth === 0) return (all && !!c.quoteMint && c.quoteMint !== SOL_MINT && (this.assetDrawn().get(c.quoteMint)?.has(c.mint) ?? false)) || this.mapChildren(c.mint, all).length > 0;
     if (c.depth > this.mapDepth()) return false;
     const anc = this.ancestors(c.mint);
     return anc.length > 0 && anc[anc.length - 1].depth === 0 && anc.every((a) => a.tracked && (all || this.scope().inScope.has(a.mint)));
@@ -593,13 +795,171 @@ export class Model {
     nodes.sort((a, b) => (b.lockedUsd ?? -1) - (a.lockedUsd ?? -1));
     const body = { nodes, removed: [], generatedAt, total: this.mapTotal(all), version: this.version };
     this.lastGeneratedAt = Math.max(this.lastGeneratedAt, generatedAt);
-    const entry = { key, version: this.version, at: generatedAt, body, prepared: null };
+    const entry = { key, version: this.version, at: generatedAt, body, prepared: null, indexed: this.mapIndexed(all) };
     this.mapSinceCache.set(key, entry);
     if (this.mapSinceCache.size > 64) this.mapSinceCache.delete(this.mapSinceCache.keys().next().value);
     return entry;
   }
 
-  view(c) {
+  /**
+   * Coins of listed-asset families the full map leaves undrawn (Σ assetFamilies − assetDrawn; 0 without
+   * `all`, which draws no asset family). Cached per version.
+   */
+  mapUndrawn(all = true) {
+    if (!all) return 0;
+    if (this.undrawnCache?.version === this.version) return this.undrawnCache.n;
+    const drawn = this.assetDrawn();
+    let n = 0;
+    for (const [asset, kids] of this.assetFamilies()) n += Math.max(0, kids.length - (drawn.get(asset)?.size ?? 0));
+    this.undrawnCache = { version: this.version, n };
+    return n;
+  }
+  undrawnCache = null;
+  /**
+   * `indexed` of the /api map bodies (DESIGN-FAMILY-ALL §4.5): every coin the full map stands for, each once.
+   * The drawn tree can hold a coin twice: a listed asset quoted in another listed asset ($baton in PUMP) is a
+   * drawn child of that asset and the top of its own family, with the same drawn subtree under both. A client
+   * keeps one node per mint, under the parent (nodes.ts upsert keeps a known parentMint), so that asset is no
+   * family top there and its undrawn coins get no ghost. `indexed` = distinct drawn mints + the undrawn coins
+   * of every asset family not drawn inside another one, which is the client's `familyTotal` at sync. `total`
+   * keeps counting nodes (the body and /v1 are unchanged). Cached per version (the default-depth tree).
+   */
+  mapIndexed(all = true) {
+    if (this.indexedCache?.version === this.version && this.indexedCache.all === all) return this.indexedCache.n;
+    const depth = this.mapDepth(), seen = new Set(), nested = new Set(), fam = all ? this.assetFamilies() : null;
+    const walk = (c, left, root) => {
+      seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
+      if (left > 0) for (const k of this.mapChildren(c.mint, all)) walk(k, left - 1, false);
+    };
+    for (const r of this.mapRoots(all)) walk(r, r.asset ? depth + 1 : depth, true);
+    const n = this.#indexedFrom(seen.size, nested, all);
+    this.indexedCache = { all, version: this.version, n };
+    return n;
+  }
+  indexedCache = null;
+  #indexedFrom(distinct, nested, all) {
+    if (!all) return distinct;
+    let n = distinct + this.mapUndrawn(true);
+    if (nested.size) { const drawn = this.assetDrawn(), fam = this.assetFamilies(); for (const a of nested) n -= Math.max(0, (fam.get(a)?.length ?? 0) - (drawn.get(a)?.size ?? 0)); }
+    return n;
+  }
+
+  // ---------------------------------------------------------------- family snapshots (DESIGN-FAMILY-ALL §4)
+  // Each pool is a Map `${mint}:${v}` → snapshot in least-recently-read order, with the estimated bytes it holds.
+  familyPools = {
+    asset: { snaps: new Map(), bytes: 0, budget: FAMILY_ASSET_BYTES },
+    coin: { snaps: new Map(), bytes: 0, budget: FAMILY_COIN_BYTES },
+  };
+  familyCurrent = new Map();  // mint → its newest held snapshot
+  familyStats = { builds: 0, lastBuildMs: null, maxBuildMs: 0, lastOwnMs: null, maxOwnMs: 0, evicted: 0 }; // own = without the shared computed() pass
+  /**
+   * The coins of one family: a listed asset's coins (assetFamilies, every one of them, drawn or not),
+   * else a tracked coin's tracked direct children (childrenOf, [] for a leaf), else null. Always the
+   * all-scope view (the map's), whatever the listing mode.
+   */
+  familyMembers(mint) {
+    const asset = this.assetFamilies().get(mint);
+    if (asset) return asset;
+    const c = this.coins.get(mint);
+    return c && c.tracked ? this.childrenOf(mint) : null;
+  }
+  /**
+   * A family's snapshot `{ mint, v, at, version, rows, pages, buildMs, ownMs, readAt, bytes, pool }`, or null when
+   * `mint` is neither a listed asset with coins nor a tracked coin. `v` (a snapshot's build time, ms) returns
+   * that snapshot while it is held; otherwise the current one, rebuilt only when the version moved and
+   * MAP_CACHE_MS passed (the build is synchronous, so concurrent requests share it). Rows are positional:
+   * `[mint, symbol, mcapUsd, lockedUsd, createdAt, migrated 0|1, children]`, mapRef(c, true)'s fields with
+   * USD to 4 significant digits, ordered by locked value, then price (raw, desc; -1 when unknown), then mint:
+   * mapAll's and assetDrawn's keys. `pages` is the HTTP layer's slot for encoded pages (familyPagePut).
+   * A leaf's snapshot (no rows, not an asset) is built per request and never held: nothing to page through.
+   */
+  familyEntry(mint, v = null) {
+    const now = this.now();
+    const pools = [this.familyPools.asset, this.familyPools.coin];
+    for (const pool of pools) for (const s of pool.snaps.values()) { if (now - s.readAt < FAMILY_SNAPSHOT_MS) break; this.#dropFamily(s); }
+    if (v != null) for (const pool of pools) { const held = pool.snaps.get(`${mint}:${v}`); if (held) return this.#readFamily(held, now); }
+    const cur = this.familyCurrent.get(mint);
+    if (cur && (cur.version === this.version || now - cur.at < MAP_CACHE_MS)) return this.#readFamily(cur, now);
+    const t0 = performance.now(); // buildMs includes the shared per-version passes (computed, assetFamilies) when this build pays them, like mapAll's
+    const members = this.familyMembers(mint);
+    if (!members) return null;
+    const d = this.computed(), n = members.length, t1 = performance.now();
+    const rows = new Array(n), locked = new Float64Array(n), price = new Float64Array(n), order = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = members[i], e = d.get(c.mint);
+      rows[i] = this.#familyRow(c, e);
+      locked[i] = sortKey(e?.lockedUsd); price[i] = sortKey(e?.priceUsd); order[i] = i;
+    }
+    order.sort((a, b) => locked[b] - locked[a] || price[b] - price[a] || (rows[a][0] < rows[b][0] ? -1 : rows[a][0] > rows[b][0] ? 1 : 0));
+    // v = the build time (ms), above every v of this family still held, so a clock step back never reuses one.
+    let at = now;
+    for (const pool of pools) for (const s of pool.snaps.values()) if (s.mint === mint && s.v >= at) at = s.v + 1;
+    const snap = { mint, v: at, at, version: this.version, rows: order.map((i) => rows[i]), pages: new Map(), pageBytes: 0, bytes: FAMILY_SNAP_BYTES + n * FAMILY_ROW_BYTES, buildMs: 0, ownMs: 0, readAt: now, pool: null };
+    snap.buildMs = Math.round(performance.now() - t0); snap.ownMs = Math.round(performance.now() - t1);
+    const asset = this.assetFamilies().has(mint);
+    if (n === 0 && !asset) { if (cur) this.familyCurrent.delete(mint); return snap; } // a leaf
+    const pool = asset ? this.familyPools.asset : this.familyPools.coin;
+    snap.pool = pool;
+    pool.snaps.set(`${mint}:${snap.v}`, snap); pool.bytes += snap.bytes;
+    this.familyCurrent.set(mint, snap);
+    this.#fitFamilies(pool, snap);
+    const st = this.familyStats;
+    st.builds++; st.lastBuildMs = snap.buildMs; st.maxBuildMs = Math.max(st.maxBuildMs, snap.buildMs); st.lastOwnMs = snap.ownMs; st.maxOwnMs = Math.max(st.maxOwnMs, snap.ownMs);
+    return snap;
+  }
+  /**
+   * Keeps an encoded page of `snap` under `key` (the HTTP layer's (offset, limit) cache): at most FAMILY_PAGES
+   * pages and FAMILY_PAGE_BYTES of them per snapshot, oldest out first; their bytes count in the snapshot's pool.
+   */
+  familyPagePut(snap, key, page) {
+    const w = (p) => p.bytes.length * FAMILY_PAGE_COPIES;
+    const old = snap.pages.get(key);
+    if (old) { snap.pages.delete(key); snap.pageBytes -= w(old); }
+    snap.pages.set(key, page); snap.pageBytes += w(page);
+    for (const [k, p] of snap.pages) {
+      if (p === page || (snap.pages.size <= FAMILY_PAGES && snap.pageBytes <= FAMILY_PAGE_BYTES)) break;
+      snap.pages.delete(k); snap.pageBytes -= w(p);
+    }
+    const bytes = FAMILY_SNAP_BYTES + snap.rows.length * FAMILY_ROW_BYTES + snap.pageBytes;
+    if (snap.pool) { snap.pool.bytes += bytes - snap.bytes; snap.bytes = bytes; this.#fitFamilies(snap.pool, snap); } else snap.bytes = bytes;
+    return page;
+  }
+  /** Held family snapshots per pool (count, estimated bytes, budget), for /api/health. */
+  familyHeld() {
+    const { asset, coin } = this.familyPools;
+    const one = (p) => ({ held: p.snaps.size, bytes: p.bytes, budget: p.budget });
+    return { held: asset.snaps.size + coin.snaps.size, bytes: asset.bytes + coin.bytes, asset: one(asset), coin: one(coin) };
+  }
+  /**
+   * One family row: mapRef(c, true)'s symbol, mcapUsd, lockedUsd, createdAt, migrated and children, read
+   * from the same sources (mints, computed()) without building the whole mapRef object, which cost ~3× more
+   * over a 50k-coin family. map-family.test.mjs holds every row equal to mapRef's fields.
+   */
+  #familyRow(c, e) {
+    const mcapUsd = e?.priceUsd != null ? e.priceUsd * units(c.tokenTotalSupply, this.decimalsOf(c.mint)) : null;
+    return [c.mint, this.mints.get(c.mint)?.symbol ?? null, p4(mcapUsd), p4(e?.lockedUsd ?? null), c.createdAt ?? null, c.migrated ? 1 : 0, e?.children ?? 0];
+  }
+  #readFamily(s, now) { const key = `${s.mint}:${s.v}`; s.readAt = now; s.pool.snaps.delete(key); s.pool.snaps.set(key, s); return s; }
+  #dropFamily(s) {
+    s.pool.snaps.delete(`${s.mint}:${s.v}`); s.pool.bytes -= s.bytes; s.pool = null;
+    if (this.familyCurrent.get(s.mint) === s) this.familyCurrent.delete(s.mint);
+  }
+  /** Drops the least recently read snapshots of `pool` until it fits its budget; `keep` (the one being served) stays. */
+  #fitFamilies(pool, keep) {
+    if (pool.bytes <= pool.budget) return;
+    for (const s of pool.snaps.values()) {
+      if (pool.bytes <= pool.budget) break;
+      if (s !== keep) { this.#dropFamily(s); this.familyStats.evicted++; }
+    }
+  }
+
+  /**
+   * The full coin view. `all`: children, descendants and locked value over every pump.fun child
+   * (scopedAll, what the map draws); without it the listing-mode scope (scoped), which in "ours"
+   * mode counts only Spore launches. The coin page, /api/tree, /api/search and the SSE "coin" event
+   * ask for `all`; /api/roots, /api/feed, /api/stats and `scope=ours` keep the listing scope.
+   */
+  view(c, { all = false } = {}) {
     const d = this.computed().get(c.mint) ?? {};
     const { name, symbol } = this.nameOf(c.mint);
     const meta = this.metaFor(c);
@@ -608,7 +968,7 @@ export class Model {
     const decimals = this.decimalsOf(c.mint);
     const supply = units(c.tokenTotalSupply, decimals);
     const mintInfo = this.mints.get(c.mint);
-    const s = this.scoped(c);
+    const s = all ? this.scopedAll(c) : this.scoped(c);
     return {
       mint: c.mint, name, symbol, image: imageProxyUrl(meta?.image), description: meta?.description ?? null,
       twitter: meta?.twitter ?? null, telegram: meta?.telegram ?? null, website: meta?.website ?? null,
@@ -618,6 +978,7 @@ export class Model {
       tokenProgram: mintInfo?.tokenProgram ?? TOKEN_2022_PROGRAM_ID.toBase58(), decimals, totalSupply: c.tokenTotalSupply,
       priceQuote: d.priceQuote ?? null, priceSol: d.priceSol ?? null, priceUsd: d.priceUsd ?? null,
       mcapSol: d.priceSol != null ? d.priceSol * supply : null, mcapUsd: d.priceUsd != null ? d.priceUsd * supply : null,
+      ...capField(this.mcapCapOf(c, d.priceUsd != null ? d.priceUsd * supply : null)),
       progress: progressOf(c, this.global?.initialRealTokenReserves),
       children: s.children, descendants: s.descendants, lockedQuote: s.lockedQuote.toString(), lockedUsd: s.lockedUsd, otherChildren: s.otherChildren,
       volume24hUsd: vol?.usd ?? 0, trades24h: vol?.trades ?? 0,

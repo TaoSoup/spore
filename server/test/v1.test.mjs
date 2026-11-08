@@ -126,7 +126,7 @@ test("map: full forest and since= delta, the /api shapes with absolute images; b
   const text = JSON.stringify(full.body);
   assert.ok(!text.includes('"image":"/api/img'), "no relative image left");
   assert.ok(text.includes(`"image":"${PUB}/api/img?u=`));
-  const apiMap = (await get(main, "/api/map?scope=all&limit=all")).body;
+  const { indexed: _indexed, ...apiMap } = (await get(main, "/api/map?scope=all&limit=all")).body; // `indexed` is /api only (DESIGN-FAMILY-ALL §4.5)
   assert.deepEqual(JSON.parse(JSON.stringify(apiMap).replaceAll('"image":"/api/img?', `"image":"${PUB}/api/img?`)), full.body, "same body as /api/map apart from the image base");
   assert.equal(full.headers.get("cache-control"), V1_CACHE);
   const delta = await get(main, "/v1/map?since=0");

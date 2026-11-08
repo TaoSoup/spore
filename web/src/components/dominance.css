@@ -1,0 +1,16 @@
+/* A family's dominance (DominanceLine): caption, "Dominance: 23% of all locked value · 12% of market cap",
+   and a thin bar of the share in view. Tokens from styles.css only. */
+.dom { display: grid; gap: 6px; min-width: 0; }
+.dom-label { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dom-label b { color: var(--ink-2); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.dom-line { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.dom-k { color: var(--ink-2); }
+.dom-part { white-space: nowrap; }
+.dom-line b { font-family: var(--mono); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dom-line b.cur { color: var(--accent); }
+.dom-sep { color: var(--faint); }
+.dom-bar { position: relative; height: 4px; border-radius: 2px; background: var(--glass-2); overflow: hidden; }
+.dom-bar i { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px rgba(var(--accent-rgb), .45); }
+.dom.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.dom.inline .dom-label { flex-basis: 100%; }
+.dom.inline .dom-bar { flex: none; width: 72px; }

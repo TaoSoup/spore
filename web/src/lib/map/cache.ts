@@ -10,7 +10,7 @@
 import type { BubbleNode } from "./types";
 
 /// Bump when the record shape changes: the upgrade handler drops every store, so an old cache is cleared.
-export const CACHE_V = 3; // 3: listed-asset families (PUMP, USDC, $baton…) sit above their coins — old caches hold those coins as separate roots
+export const CACHE_V = 4; // 4 (flat fix 2026-10-21): nodes carry `asset` and `mcapCapUsd`, which mcap sizing reads; 3: listed-asset families (PUMP, USDC, $baton…) sit above their coins — old caches hold those coins as separate roots
 /// Bump when bubble sizes or layout forces change enough that a settled layout no longer fits them.
 export const LAYOUT_V = 2; // 2: family tops weigh their whole family and members orbit outside them (2026-10-19)
 const DB_NAME = "spore-map";

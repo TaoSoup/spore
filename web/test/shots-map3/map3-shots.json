@@ -1,0 +1,356 @@
+{
+  "url": "http://127.0.0.1:5261",
+  "prod": true,
+  "ref": "/private/tmp/claude-501/-Users-metahuman/8b9f0123-db17-4735-be5c-50987e9a621c/scratchpad/mapThree/shots-final2",
+  "out": "/Users/metahuman/spore/web/test/shots-map3",
+  "gpu": "metal",
+  "startedAt": "2026-10-21T11:05:32.860Z",
+  "shots": [
+    "/Users/metahuman/spore/web/test/shots-map3/a-overview.png",
+    "/Users/metahuman/spore/web/test/shots-map3/b-pump-4x.png",
+    "/Users/metahuman/spore/web/test/shots-map3/e-kimchi.png",
+    "/Users/metahuman/spore/web/test/shots-map3/d-phone.png",
+    "/Users/metahuman/spore/web/test/shots-map3/h-phone-tooltip.png",
+    "/Users/metahuman/spore/web/test/shots-map3/f-hover.png",
+    "/Users/metahuman/spore/web/test/shots-map3/g-hover-child-4x.png",
+    "/Users/metahuman/spore/web/test/shots-map3/mid-drag-overview.png",
+    "/Users/metahuman/spore/web/test/shots-map3/mid-drag-4x.png"
+  ],
+  "metrics": {
+    "a-overview": {
+      "labels": {
+        "planetsLabelled": 32,
+        "kids": 0,
+        "gens": 0,
+        "caption": 1,
+        "annotations": 2,
+        "toasts": 0,
+        "leaders": 3,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655617
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": 0.00025,
+      "titles": 32,
+      "k": 1
+    },
+    "b-pump-4x": {
+      "labels": {
+        "planetsLabelled": 2,
+        "kids": 27,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 18,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655617
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 2,
+      "k": 4
+    },
+    "e-kimchi": {
+      "focusFamily": {
+        "x": 61.67509223217945,
+        "y": -26.669620731614682,
+        "k": 3.735135211232552,
+        "ms": 455
+      },
+      "labels": {
+        "planetsLabelled": 14,
+        "kids": 10,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 4,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655617
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 14,
+      "k": 3.054824995807251
+    },
+    "d-phone": {
+      "labels": {
+        "planetsLabelled": 8,
+        "kids": 0,
+        "gens": 0,
+        "caption": 0,
+        "annotations": 0,
+        "toasts": 0,
+        "leaders": 0,
+        "overlaps": 0,
+        "labelLabel": 0,
+        "labelChip": 0,
+        "labelHud": 0,
+        "draws": 5,
+        "frameDraws": 19,
+        "tris": 655817
+      },
+      "hdr": {
+        "hdrPx": 0,
+        "offenders": 0,
+        "ok": true,
+        "samples": []
+      },
+      "linkMaxPx": 1.2,
+      "lime": null,
+      "titles": 8,
+      "k": 1
+    },
+    "h-phone-tooltip": {
+      "hover": {
+        "i": 10077,
+        "sym": "Kimchi",
+        "sx": 190.1756288453608,
+        "sy": 474.0506731907042
+      },
+      "tip": {
+        "on": true,
+        "dock": true,
+        "text": "K$Kimchijust nowMarket cap$40.1M24h trades35,51624h volume$2.0MFamily 24h150,946 tradesFamily last tradejust nowLineagerootFamily1,120 coins · 25% of locked valueMintCSoc…pumpOpen family×"
+      }
+    },
+    "f-hover": {
+      "point": {
+        "x": 738.5125688900636,
+        "y": 510.5515861850318,
+        "r": 17
+      },
+      "hovered": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "P$PUMPfamily · just nowMarket cap$4.0B24h trades0Family 24h23,764 tradesFamily last tradejust nowLineagerootFamily1,481 coins · 37% of locked valueMintpump…9Dfnclick to open the family"
+      }
+    },
+    "g-hover-child-4x": {
+      "child": {
+        "mint": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+        "x": 768.468265301762,
+        "y": 421.26997084921345,
+        "r": 23.301190792763478
+      },
+      "hovered": "H4KUxsEgCp2yDpFvyDuGM5k6XevSKKrrKUxZ3Zr6nyJc",
+      "tip": {
+        "on": true,
+        "dock": false,
+        "text": "C$COCKROACH17h 10m agoMarket cap$556k24h trades224h volume$52Lineagegen 1 · child of $PUMPFamily1,481 coins · 37% of locked valueMintH4KU…nyJcclick to select"
+      }
+    },
+    "mid-drag-overview": {
+      "from": {
+        "x": 738.5125688900636,
+        "y": 510.5515861850318,
+        "r": 17
+      },
+      "by": [
+        240,
+        -110
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": true
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    },
+    "mid-drag-4x": {
+      "from": {
+        "x": 720,
+        "y": 481.5,
+        "r": 34.23560631396324
+      },
+      "by": [
+        260,
+        90
+      ],
+      "held": {
+        "node": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "root": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+        "n": 1,
+        "rigid": false
+      },
+      "rest": true,
+      "homePx": 0,
+      "focus": null
+    }
+  },
+  "logoWaitMs": {
+    "a-overview": 16977,
+    "b-pump-4x": 16994,
+    "e-kimchi": 1806,
+    "d-phone": 9394
+  },
+  "images": {
+    "ready": 114,
+    "failed": 0,
+    "inflight": 0,
+    "queued": 0,
+    "pixels": 4669440,
+    "budget": 24000000
+  },
+  "composites": {
+    "a-overview": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-a-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "b-pump-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-b-pump-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "e-kimchi": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-e-kimchi.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "d-phone": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-d-phone.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "h-phone-tooltip": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-h-phone-tooltip.png",
+      "natural": {
+        "a": [
+          780,
+          1688
+        ],
+        "b": [
+          780,
+          1688
+        ]
+      }
+    },
+    "f-hover": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-f-hover.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "g-hover-child-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-g-hover-child-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-overview": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-mid-drag-overview.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    },
+    "mid-drag-4x": {
+      "file": "/Users/metahuman/spore/web/test/shots-map3/compare-mid-drag-4x.png",
+      "natural": {
+        "a": [
+          1440,
+          900
+        ],
+        "b": [
+          1440,
+          900
+        ]
+      }
+    }
+  },
+  "consoleErrors": [],
+  "networkErrors": [],
+  "failures": [],
+  "ok": true
+}

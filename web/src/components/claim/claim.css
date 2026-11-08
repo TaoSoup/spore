@@ -1,0 +1,194 @@
+/* Claim page (redesign 2026-10-20). The old `Claim page` rules in styles.css and the shared
+   `.confirm*` dialog base in coin.css stay as they are; this file overrides by modifier. Tokens
+   introduced by the redesign are read with a fallback. */
+
+.claim-v2 .page-head h1 { font-size: var(--fs-2xl, clamp(32px, 4.8vw, 50px)); }
+.claim-v2 .page-head .lead { max-width: 62ch; }
+.claim-facts { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.claim-facts li { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line-soft); background: rgba(0,0,0,.24); font-size: var(--fs-xs, 12px); color: var(--ink-2); max-width: 100%; }
+.claim-facts li .mono { overflow-wrap: anywhere; }
+.claim-fact-k { font-family: var(--mono); font-size: var(--fs-2xs, 11px); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.claim-facts .claim-fact-note { border-color: transparent; background: none; padding-left: 4px; color: var(--muted); }
+
+.claim-v2 .claim-card { gap: 16px; padding: 22px; }
+.claim-h { margin: 0; font-size: var(--fs-lg, 19px); letter-spacing: -.01em; }
+.claim-v2 .claim-sub { margin: 4px 0 0; font-size: var(--fs-sm, 13px); color: var(--ink-2); }
+.claim-v2 .claim-totals b.zero { color: var(--faint); }
+.claim-v2 .claim-empty { justify-items: start; gap: 8px; padding: 18px; border-radius: var(--radius-lg); border: 1px dashed var(--line-2); background: rgba(0,0,0,.18); }
+.claim-v2 .claim-empty b { color: var(--ink); font-weight: 500; }
+.claim-v2 .claim-empty p { margin: 0; max-width: 60ch; }
+.claim-v2 .claim-empty .btn { margin-top: 4px; }
+.claim-error { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; padding: 12px 14px; border-radius: var(--radius); border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); background: var(--bad-soft); font-size: var(--fs-sm, 13px); color: var(--ink-2); }
+.claim-error b { color: var(--ink); font-weight: 500; }
+.claim-error details { grid-column: 1 / -1; font-size: var(--fs-xs, 12px); color: var(--muted); }
+.claim-error summary { cursor: pointer; }
+
+/* rows */
+.claim-v2 .claim-row { align-items: center; padding: 12px 8px; border-radius: var(--radius); transition: background var(--dur-1, 120ms); }
+.claim-v2 .claim-row:not(.claim-th):hover { background: rgba(255,255,255,.025); }
+.claim-v2 .claim-table.mine .claim-row { grid-template-columns: minmax(220px, 2fr) .8fr 1.2fr 1.2fr 150px; }
+.claim-v2 .claim-table.public .claim-row { grid-template-columns: minmax(200px, 1.6fr) minmax(220px, 2fr) 1.1fr 150px; }
+.claim-v2 .claim-th { padding-top: 0; padding-bottom: 8px; color: var(--muted); }
+.claim-v2 .claim-row.dim { opacity: 1; }
+.claim-v2 .claim-row.dim .claim-coin, .claim-v2 .claim-row.dim [data-label] { opacity: .7; }
+.claim-coin-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.claim-v2 .claim-coin small { display: block; margin-top: 2px; font-size: var(--fs-xs, 12px); color: var(--muted); }
+.claim-v2 .claim-row b.zero { color: var(--faint); font-weight: 500; }
+.claim-v2 .claim-row [data-label] small { color: var(--muted); }
+.claim-to { display: grid; gap: 6px; min-width: 0; justify-items: start; }
+.mini-split { display: flex; gap: 2px; width: 100%; max-width: 220px; height: 6px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.06); }
+.mini-split i { display: block; height: 100%; }
+.mini-split i.role-creator { background: var(--split-creator, var(--accent)); }
+.mini-split i.role-spore { background: var(--split-spore, rgba(198,217,201,.45)); }
+.mini-split i.role-agent { background: var(--split-agent, #ff9a3c); }
+.mini-split i.role-other { background: var(--split-other, var(--violet)); }
+.claim-recipients { font-size: var(--fs-xs, 12px); color: var(--ink-2); line-height: 1.45; }
+.claim-recipients .rcp.you { color: var(--accent); font-weight: 500; }
+.claim-recipients .rcp.agent { color: var(--agent-2, #ffb347); }
+.claim-recipients .sep { color: var(--faint); }
+.auto-claimed { height: 22px; }
+.auto-claimed .term { color: inherit; }
+.claim-v2 .claim-act .btn.sm { min-width: 96px; }
+@media (pointer: coarse) { .claim-v2 .claim-act .btn.sm { min-height: 40px; } }
+
+@media (max-width: 760px) {
+  .claim-v2 .claim-card { padding: 18px 16px; }
+  .claim-v2 .claim-table.mine .claim-row, .claim-v2 .claim-table.public .claim-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 14px 4px; border-radius: 0; }
+  .claim-v2 .claim-row > .claim-coin-cell { grid-column: 1 / -1; }
+  .claim-v2 .claim-row > [data-label] { grid-column: 1; }
+  .claim-v2 .claim-row > .claim-to { display: grid; }
+  .claim-v2 .claim-row > .claim-to::before { display: none; }
+  .claim-v2 .claim-act { grid-column: 2; grid-row: 2 / span 3; align-self: center; }
+  /* One sticky connect bar instead of a "connect a wallet" line in every row. */
+  .claim-v2 .claim-why.need-wallet { display: none; }
+  .claim-v2.no-wallet { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+
+/* phone connect bar */
+.claim-connect-bar { display: none; }
+@media (max-width: 760px) {
+  .claim-connect-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-bar, 45); display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; padding: 10px var(--gutter) calc(10px + env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--bg-1) 97%, transparent); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); border-top: 1px solid var(--line); }
+  /* a 16 px fade above the bar: the list dissolves into it instead of reading through it */
+  .claim-connect-bar::after { content: ""; position: absolute; left: 0; right: 0; bottom: calc(100% + 1px); height: 16px; pointer-events: none; background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--bg-1) 97%, transparent)); }
+  .claim-connect-bar > span { font-size: var(--fs-xs, 12px); color: var(--ink-2); min-width: 0; }
+  .claim-connect-bar .wallet-adapter-button { height: 44px; flex: none; padding: 0 16px; font-size: var(--fs-base, 14px); white-space: nowrap; }
+}
+@media (prefers-contrast: more) { .claim-connect-bar { background: var(--bg-1); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+
+/* confirm dialog modifiers (the .confirm* base lives in coin.css) */
+.claim-confirm .confirm-rows > .confirm-total { padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); }
+.claim-confirm .claim-share > span { display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 8px; align-items: center; color: var(--ink-2); }
+.claim-confirm .claim-share > span small { grid-column: 2; font-size: var(--fs-2xs, 11px); color: var(--muted); }
+.claim-confirm .claim-share .dot { width: 8px; height: 8px; border-radius: 50%; display: block; }
+.claim-confirm .dot.role-creator { background: var(--split-creator, var(--accent)); }
+.claim-confirm .dot.role-spore { background: var(--split-spore, rgba(198,217,201,.45)); }
+.claim-confirm .dot.role-agent { background: var(--split-agent, #ff9a3c); }
+.claim-confirm .dot.role-other { background: var(--split-other, var(--violet)); }
+.claim-confirm .claim-share.is-you > span, .claim-confirm .claim-share.is-you > b { color: var(--accent); }
+.claim-summary-line { margin: 0; font-size: var(--fs-sm, 13px); color: var(--ink); }
+.claim-summary-coins { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.claim-summary-coins li { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 4px; border-radius: 999px; border: 1px solid var(--line-soft); font-size: var(--fs-xs, 12px); color: var(--ink-2); }
+.claim-summary-coins li.muted { padding-left: 10px; }
+.claim-v2 .sheet-close, .claim-confirm .sheet-close, .claim-summary .sheet-close { min-width: 32px; min-height: 32px; }
+
+/* =====================================================================================
+   Elevation (2026-10-24): rows as instrument lines (mono amounts, recipients drawn as a tiny split
+   arc), section panels as glass with serif numerals, the connect drawing, the confirm dialog in glass.
+   ===================================================================================== */
+.container.claim-v2 { gap: var(--s6); }
+.claim-v2 .page-head { gap: 14px; padding-top: 8px; }
+.claim-v2 .page-head h1 { font-size: clamp(40px, 5.4vw, 76px); font-weight: 600; letter-spacing: var(--tracking-display); line-height: .98; }
+.claim-v2 .page-head .lead { max-width: 60ch; color: var(--ink-2); }
+.claim-v2 .claim-facts { flex-direction: column; align-items: flex-start; gap: 0; margin-top: 8px; border-top: 1px solid var(--rule); width: fit-content; max-width: 100%; }
+.claim-v2 .claim-facts li { min-height: 46px; padding: 8px 0; gap: 12px; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: none; font-size: var(--fs-sm); }
+.claim-v2 .claim-facts li .claim-fact-k { min-width: 150px; }
+.claim-v2 .claim-facts .claim-fact-note { padding: 10px 0 0; border: 0; min-height: 0; font-size: var(--fs-sm); }
+.mini-arc { flex: none; display: block; overflow: visible; }
+
+/* glass panels with a serif numeral */
+.claim-v2 .card.claim-card { padding: 26px 26px 18px; gap: 18px; border-radius: var(--radius-xl); background: var(--surface); -webkit-backdrop-filter: blur(var(--glass-blur)); backdrop-filter: blur(var(--glass-blur)); box-shadow: var(--edge), 0 34px 80px -46px rgba(0,0,0,.95); }
+.claim-v2 .claim-head { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 6px 16px; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
+.claim-v2 .claim-head::after { content: ""; position: absolute; left: 0; bottom: -1px; width: 64px; height: 1px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .75; }
+.claim-n { font-size: 40px; line-height: .9; min-width: 46px; }
+.claim-v2 .claim-h { font-size: var(--fs-xl); font-weight: 600; letter-spacing: var(--tracking-tight); }
+.claim-v2 .claim-totals { align-self: center; gap: 16px; }
+.claim-v2 .claim-totals > div { display: grid; justify-items: end; gap: 2px; }
+.claim-v2 .claim-totals b { font-size: var(--num-lg); font-weight: 500; letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
+.claim-v2 .claim-totals b.accent { color: var(--accent); text-shadow: 0 0 26px rgba(var(--accent-rgb), .35); }
+.claim-v2 .claim-quotes span { border-color: var(--line-soft); background: rgba(0,0,0,.24); }
+
+/* the connect state and the empty states */
+.claim-v2 .claim-connect { grid-template-columns: minmax(0, 1fr); padding: 6px 0 10px; }
+.claim-connect-art { width: min(100%, 300px); }
+.claim-connect-art .illus { width: 100%; height: auto; }
+.claim-v2 .claim-empty { border-style: solid; border-color: var(--line-soft); background: rgba(0,0,0,.2); box-shadow: var(--edge); }
+.claim-empty-art { width: 120px; height: auto; margin: -4px 0 2px -8px; }
+
+/* rows: instrument lines */
+.claim-v2 .claim-table { margin-top: -6px; }
+.claim-v2 .claim-row { position: relative; padding: 14px 10px; border-radius: 0; border-top: 1px solid var(--line-soft); transition: background var(--dur-2) var(--ease-out); }
+.claim-v2 .claim-row:not(.claim-th)::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--accent); opacity: 0; transform: scaleY(.4); transition: opacity var(--dur-2), transform var(--dur-3) var(--ease-out); }
+.claim-v2 .claim-row:not(.claim-th):hover { background: linear-gradient(90deg, rgba(var(--accent-rgb), .045), transparent 60%); }
+.claim-v2 .claim-row:not(.claim-th):hover::before { opacity: .8; transform: none; }
+.claim-v2 .claim-th { border-top: 0; padding-top: 4px; padding-bottom: 10px; color: var(--faint); }
+.claim-v2 .claim-th > :nth-child(n+3):not(:last-child) { text-align: right; }
+.claim-v2 .claim-row > [data-label="Waiting"], .claim-v2 .claim-row > [data-label="Your part"] { text-align: right; justify-self: end; }
+.claim-v2 .claim-row > [data-label] b { font-size: var(--fs-md); font-weight: 500; letter-spacing: -0.01em; font-variant-numeric: tabular-nums slashed-zero; }
+.claim-v2 .claim-row > [data-label] b.accent { color: var(--accent); }
+.claim-v2 .claim-coin .logo { transition: box-shadow var(--dur-2); }
+.claim-v2 .claim-coin b { font-weight: 500; }
+.claim-v2 .claim-to { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 12px; row-gap: 4px; }
+.claim-v2 .claim-to .auto-claimed { grid-column: 2; justify-self: start; }
+.claim-v2 .claim-share-cell { display: flex; align-items: center; gap: 10px; }
+.claim-v2 .claim-share-cell small { display: block; }
+.claim-v2 .claim-act { justify-self: end; }
+.claim-v2 .claim-why { font-family: var(--mono); font-size: var(--fs-2xs); letter-spacing: .04em; color: var(--faint); }
+@media (max-width: 760px) {
+  .claim-v2 .card.claim-card { padding: 20px 16px 12px; }
+  .claim-v2 .claim-head { grid-template-columns: auto minmax(0, 1fr); }
+  .claim-v2 .claim-head .claim-totals { grid-column: 1 / -1; justify-content: flex-start; }
+  .claim-v2 .claim-totals > div { justify-items: start; }
+  .claim-n { font-size: 32px; min-width: 38px; }
+  .claim-v2 .claim-h { font-size: var(--fs-lg); }
+  .claim-v2 .claim-row { padding: 14px 2px; }
+  .claim-v2 .claim-row > [data-label="Waiting"], .claim-v2 .claim-row > [data-label="Your part"] { text-align: left; justify-self: start; }
+  .claim-v2 .claim-facts li { flex-wrap: wrap; row-gap: 4px; }
+  .claim-v2 .claim-facts li .claim-fact-k { min-width: 0; }
+  .claim-v2 .claim-facts li .mono { flex-basis: 100%; padding-left: 42px; }
+}
+
+/* the confirm and summary dialogs: raised glass with a hairline and the payout's split arc */
+.confirm-backdrop:has(.claim-confirm, .claim-summary) { background: rgba(3,7,4,.66); -webkit-backdrop-filter: blur(10px) saturate(1.1); backdrop-filter: blur(10px) saturate(1.1); }
+.confirm.claim-confirm, .confirm.claim-summary { position: relative; gap: 16px; padding: 22px 24px; background: linear-gradient(180deg, rgba(22,42,29,.86), rgba(9,20,13,.9)); -webkit-backdrop-filter: blur(var(--glass-blur)); backdrop-filter: blur(var(--glass-blur)); border: 1px solid var(--line-soft); box-shadow: var(--edge), 0 0 0 1px rgba(var(--accent-rgb), .08), 0 40px 90px -30px rgba(0,0,0,.95), 0 0 80px -40px rgba(var(--accent-rgb), .5); }
+.confirm.claim-confirm::before, .confirm.claim-summary::before { content: ""; position: absolute; left: 24px; right: 24px; top: -1px; height: 1px; background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .6), transparent); }
+.claim-confirm .confirm-head, .claim-summary .confirm-head { padding-bottom: 14px; border-bottom: 1px solid var(--rule); }
+.claim-confirm .confirm-head b, .claim-summary .confirm-head b { font-size: var(--fs-md); font-weight: 600; letter-spacing: -0.01em; }
+.claim-confirm .confirm-rows { gap: 10px; }
+.claim-confirm .claim-total-k { display: inline-flex; align-items: center; gap: 10px; color: var(--ink-2); }
+.claim-confirm .confirm-total b { font-size: var(--num-md); }
+.claim-confirm .confirm-rows > div:not(.confirm-total) { padding: 2px 0; }
+.claim-confirm .confirm-rows > div:last-child { padding-top: 10px; border-top: 1px dotted rgba(255,255,255,.14); }
+@media (prefers-contrast: more) { .confirm.claim-confirm, .confirm.claim-summary { background: var(--bg-1); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+.claim-confirm .confirm-rows > .confirm-total { align-items: center; }
+
+/* wide screens: the editorial split (headline left; the sentence and the two split lines right) */
+@media (min-width: 1100px) {
+  .claim-v2 .page-head { grid-template-columns: minmax(0, 1fr) minmax(0, 560px); grid-template-areas: "eyebrow eyebrow" "title lead" "title facts"; column-gap: clamp(40px, 6vw, 96px); row-gap: 16px; align-items: start; }
+  .claim-v2 .page-head > .eyebrow { grid-area: eyebrow; }
+  .claim-v2 .page-head > h1 { grid-area: title; margin-top: -4px; }
+  .claim-v2 .page-head > .lead { grid-area: lead; max-width: none; padding-top: 6px; font-size: var(--fs-md); line-height: 1.6; }
+  .claim-v2 .page-head > .claim-facts { grid-area: facts; width: 100%; margin-top: 0; }
+  .claim-v2 .claim-facts li { display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 12px; row-gap: 2px; align-items: center; }
+  .claim-v2 .claim-facts li .mini-arc { grid-row: span 2; }
+  .claim-v2 .claim-facts li .mono { grid-column: 2; font-size: var(--fs-xs); color: var(--ink-2); }
+  .claim-v2 .claim-facts li .claim-fact-k { min-width: 0; }
+}
+/* the connect state: words and the button left, the drawing right */
+@media (min-width: 761px) {
+  .claim-v2 .claim-connect { grid-template-columns: minmax(0, 1fr) minmax(0, 320px); grid-template-areas: "text art" "btn art"; align-items: center; column-gap: 32px; }
+  .claim-v2 .claim-connect > .claim-connect-art { grid-area: art; width: 100%; }
+  .claim-v2 .claim-connect > p { grid-area: text; align-self: end; margin: 0; }
+  .claim-v2 .claim-connect > .wallet-adapter-dropdown, .claim-v2 .claim-connect > .wallet-adapter-button { grid-area: btn; align-self: start; justify-self: start; }
+}
+@media (min-width: 1100px) { .claim-v2 .claim-facts li.claim-fact-note { display: block; } }
+@media (min-width: 1100px) { .claim-v2 .page-head > .claim-facts { align-items: stretch; } }

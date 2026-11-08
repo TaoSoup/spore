@@ -10,10 +10,10 @@ import { useMapData } from "../../lib/map/use-map-data";
 import { useMapHeat } from "../../lib/map/heat";
 import { rootCmp } from "../../lib/map/nodes";
 import type { BubbleNode, RootsLimit } from "../../lib/map/types";
-import { count, usd } from "../../lib/format";
+import { count, usdCard } from "../../lib/format";
 import BubbleMap, { type BubbleMapHandle } from "../../components/BubbleMap";
 import { sym } from "../../components/Bits";
-import { EmbedFrame, EmbedState, HeadTitle, LaunchCta, Out, SelectionCard, compactBox, coinUrl, isMintLike, mapUrl, useActive, useBox, useEmbedParams, useEscape, useMaxDepth } from "./common";
+import { EmbedFrame, EmbedLoading, EmbedState, HeadTitle, LaunchCta, Out, SelectionCard, compactBox, coinUrl, isMintLike, mapUrl, useActive, useBox, useEmbedParams, useEscape, useMaxDepth } from "./common";
 
 /// Devices whose screen is at most this wide draw the top 200 roots by default (the /map page's phone rule).
 /// The screen, not the frame: a small iframe on a desktop draws everything as fast as the full page does.
@@ -69,7 +69,7 @@ export default function EmbedMap() {
   const head = (
     <>
       <HeadTitle label={tiny && sel ? "Map" : "Ecosystem map"} node={sel} />
-      {ready && !tiny && !sel && nodes.length > 0 && <p className="embed-meta"><b>{count(drawn.roots)}</b> trees · <b>{count(drawn.coins)}</b> coins{!compact && lockedTotal > 0 && <> · <b>{usd(lockedTotal)}</b> locked</>}</p>}
+      {ready && !tiny && !sel && nodes.length > 0 && <p className="embed-meta"><b>{count(drawn.roots)}</b> trees · <b>{count(drawn.coins)}</b> coins{!compact && lockedTotal > 0 && <> · <b>{usdCard(lockedTotal)}</b> locked</>}</p>}
       <div className="embed-head-acts">
         {sel ? <LaunchCta node={sel} maxDepth={maxDepth} compact={tiny} /> : <Out href={mapUrl(null)} className="embed-cta" title="The full map on Spore (opens in a new tab)">{tiny ? "Full map" : "Open the full map"} <span className="embed-arrow" aria-hidden="true">↗</span></Out>}
       </div>
@@ -78,7 +78,7 @@ export default function EmbedMap() {
 
   return (
     <EmbedFrame params={params} title={sel ? `Ecosystem map · ${sym(sel)} · Spore` : "Ecosystem map · Spore"} head={head} bodyRef={bodyRef}>
-      {!ready && !data.error ? <div className="embed-loading" aria-label="Loading the map"><i /><i /><i /></div>
+      {!ready && !data.error ? <EmbedLoading label="Loading the map" />
         : data.error && data.nodes.length === 0 ? <EmbedState tone="bad" title="The map could not load" hint={data.error} action={<button type="button" className="embed-btn" onClick={data.reload}>Retry</button>} />
         : nodes.length === 0 ? <EmbedState title="The map is empty" hint="It fills in as pairs appear on pump.fun." />
         : <>

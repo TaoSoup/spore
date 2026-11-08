@@ -24,7 +24,7 @@ console.warn = warn;
 export const BN = anchor.BN;
 
 export const {
-  PUMP_SDK, pumpIdl,
+  PUMP_SDK, OnlinePumpSdk, pumpIdl,
   PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, PUMP_FEE_PROGRAM_ID,
   GLOBAL_PDA, QUOTE_CONTROL_PDA,
   bondingCurvePda, canonicalPumpPoolPdaWithQuote, feeSharingConfigPda, creatorVaultPda, ammCreatorVaultPda,
@@ -35,7 +35,10 @@ export const {
 } = sdk;
 
 export const { PublicKey, VersionedTransaction } = web3;
-export const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT, getAssociatedTokenAddressSync } = splToken;
+// What the root agents' dry-run builder (lib/agents/simulate.mjs) compiles a launch with. No signer
+// type is re-exported here: nothing in the server can sign.
+export const { ComputeBudgetProgram, SystemProgram, TransactionMessage, AddressLookupTableAccount } = web3;
+export const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT, getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction } = splToken;
 export const METAPLEX_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
 export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 

@@ -19,6 +19,9 @@ import type { BubbleNode } from "./types";
 export type MapSource = "cache" | "network" | null;
 export type MapData = {
   nodes: BubbleNode[]; version: number; generatedAt: number | null; loading: boolean; syncing: boolean; error: string | null; source: MapSource; total: number;
+  /// The live set by mint (the same Map every version: readers that must notice a change key on `version`
+  /// or `nodes`); the page used to rebuild a 17 k Map on every live pair.
+  byMint: NodeSet;
   /// Mints that arrived live (pulse animation); cleared by BubbleMap once drawn.
   fresh: Set<string>;
   reload: () => void;
@@ -32,6 +35,9 @@ export type MapData = {
   fullAt: number | null;
   /// Pairs that arrived live in this session, newest first (≤ RECENT_CAP), a new array per version.
   recent: BubbleNode[];
+  /// The server's `indexed` from the last /api/map body that carried it (drawn coins + the listed assets' undrawn ones,
+  /// DESIGN-FAMILY-ALL §4); null before one arrived or from an older server.
+  indexed: number | null;
 };
 
 const RESYNC_MS = 120_000;
@@ -46,7 +52,8 @@ const LIVE_GRACE_MS = 60_000;
 /// True when the next sync must be a full one: never had a complete load, or the last one is stale.
 export const needsFull = (fullAt: number | null, now: number): boolean => fullAt == null || !Number.isFinite(fullAt) || now - fullAt > FULL_EVERY_MS;
 
-const coinToMap = (c: Coin): MapCoin => ({ mint: c.mint, parentMint: c.parent?.mint ?? null, depth: c.depth, name: c.name, symbol: c.symbol, image: c.image, mcapUsd: c.mcapUsd, lockedUsd: c.lockedUsd, children: c.children, descendants: c.descendants, migrated: c.migrated, ours: !!c.ours, createdAt: c.createdAt, updatedAt: c.updatedAt ? c.updatedAt * 1000 : undefined });
+// mcapCapUsd rides along (the coin view carries it only when the liquidity cap bites); fromMapCoin reads it.
+const coinToMap = (c: Coin): MapCoin => ({ mint: c.mint, parentMint: c.parent?.mint ?? null, depth: c.depth, name: c.name, symbol: c.symbol, image: c.image, mcapUsd: c.mcapUsd, lockedUsd: c.lockedUsd, children: c.children, descendants: c.descendants, migrated: c.migrated, ours: !!c.ours, createdAt: c.createdAt, updatedAt: c.updatedAt ? c.updatedAt * 1000 : undefined, mcapCapUsd: (c as Coin & { mcapCapUsd?: number | null }).mcapCapUsd ?? null } as MapCoin);
 
 export function useMapData({ stress = 0, enabled = true }: { stress?: number; enabled?: boolean } = {}): MapData {
   const set = useRef<NodeSet>(new Map());
@@ -67,6 +74,7 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
   const fullAtRef = useRef<number | null>(null);
   const [fullAt, setFullAt] = useState<number | null>(null);
   const [seenAt, setSeenAt] = useState<number | null>(null);
+  const [indexed, setIndexed] = useState<number | null>(null);
   const recentRef = useRef<BubbleNode[]>([]);
   /// mint → when it was inserted from the event stream (pruned past LIVE_GRACE_MS)
   const liveAt = useRef(new Map<string, number>());
@@ -120,6 +128,7 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
         changed = upsert(s, norm.nodes);
       }
       gen.current = norm.generatedAt ?? Date.now();
+      if (norm.indexed != null) setIndexed(norm.indexed);
       setError(null);
       setSource("network");
       setLoading(false);
@@ -210,5 +219,5 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const recent = useMemo(() => recentRef.current.slice(), [version]);
 
-  return { nodes, version, generatedAt: gen.current, loading, syncing, error, source, total: set.current.size, fresh: fresh.current, reload, persistPositions, cacheInfo, seenAt, fullAt, recent };
+  return { nodes, version, generatedAt: gen.current, loading, syncing, error, source, total: set.current.size, byMint: set.current, fresh: fresh.current, reload, persistPositions, cacheInfo, seenAt, fullAt, recent, indexed };
 }

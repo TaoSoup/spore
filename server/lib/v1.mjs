@@ -14,29 +14,30 @@
 import express from "express";
 import { v1Cors, RateLimiter, sendCachedJson, sendPrepared, prepareJson, prepareJsonText } from "./http.mjs";
 import { openApiDoc } from "./openapi.mjs";
+import { agentsBody, agentBody, agentCoinBody } from "./agents/registry.mjs";
 
 export const DEFAULT_PUBLIC_URL = "https://sporepad.com";
 export const V1_CACHE = "public, max-age=5, s-maxage=10";
 export const V1_DOC_CACHE = "public, max-age=300, s-maxage=3600";
 /** Stream event types a client may ask for; `heat` is derived here from each trade (the per-mint row of /v1/heat). */
-export const V1_STREAM_TYPES = ["pair", "trade", "heat", "stats", "mapdelta", "coin"];
+export const V1_STREAM_TYPES = ["pair", "trade", "heat", "stats", "mapdelta", "coin", "agent"];
 export const V1_DEFAULT_TYPES = ["pair", "trade", "heat", "stats"];
 /** Every route this module serves, in OpenAPI path syntax (the OpenAPI test checks each is documented). */
-export const V1_ROUTES = ["/v1/coin/{mint}/family", "/v1/tree/{mint}", "/v1/map", "/v1/heat", "/v1/stream", "/v1/openapi.json"];
+export const V1_ROUTES = ["/v1/coin/{mint}/family", "/v1/tree/{mint}", "/v1/map", "/v1/heat", "/v1/agents", "/v1/agents/coin/{mint}", "/v1/agents/{root}", "/v1/stream", "/v1/openapi.json"];
 export const V1_DEFAULTS = { publicPerMin: 60, partnerPerMin: 1200, publicStreams: 2, partnerStreams: 20, maxStreams: 2_000, heartbeatMs: 25_000, maxBuffered: 256 * 1024 };
 const FAMILY_TOP = 20;
 const FAMILY_CACHE_MS = 5_000;
 const TREE_CACHE_MS = 10_000;
 const TREE_MAX_NODES = 50_000;
 const DAY_S = 86_400;
-const HUB_EVENTS = new Set(["pair", "trade", "stats", "mapdelta", "coin"]);
+const HUB_EVENTS = new Set(["pair", "trade", "stats", "mapdelta", "coin", "agent"]);
 const byLocked = (a, b) => (b.lockedUsd ?? -1) - (a.lockedUsd ?? -1) || (b.mcapUsd ?? -1) - (a.mcapUsd ?? -1);
 
 /**
  * Builds the /v1 router plus the stream it owns. `isMint` comes from api.mjs (same validation as
  * /api); `apiRpc` is the api RPC lane, so a partner's unknown-mint lookups never touch the indexer's.
  */
-export function createV1({ model, indexer, apiRpc, hub, meta = null, apiKeys, isMint, publicUrl = DEFAULT_PUBLIC_URL, limits = {}, log = console, now = Date.now }) {
+export function createV1({ model, indexer, apiRpc, hub, meta = null, apiKeys, isMint, publicUrl = DEFAULT_PUBLIC_URL, limits = {}, log = console, now = Date.now, agents = null }) {
   const cfg = { ...V1_DEFAULTS, ...stripNullish(limits) };
   const base = String(publicUrl).replace(/\/+$/, "");
   const abs = (u) => (typeof u === "string" && u.startsWith("/") ? base + u : u ?? null);
@@ -208,6 +209,24 @@ export function createV1({ model, indexer, apiRpc, hub, meta = null, apiKeys, is
     entry.prepared ??= prepareJson(entry.body);
     sendPrepared(req, res, entry.prepared, { cacheControl: V1_CACHE });
   });
+  // Root agents (DESIGN §13, §13.2): the /api/agents bodies with absolute images (logos, root and
+  // launched-coin images). `viewOpts` (api.mjs) tails the ledger and reads the wallets the view needs.
+  const agentOpts = (roots = null) => (agents.viewOpts ? agents.viewOpts({ base, abs }, roots) : Promise.resolve({ model, registry: agents.registry, mode: agents.mode, cooldownMin: agents.cooldownMin, base, abs, now: nowS() }));
+  router.get("/agents", wrap(async (req, res) => { if (!agents) return res.status(404).json({ error: "not found" }); sendCachedJson(req, res, agentsBody(await agentOpts()), { cacheControl: V1_CACHE }); }));
+  router.get("/agents/coin/:mint", wrap(async (req, res) => {
+    if (!agents) return res.status(404).json({ error: "not found" });
+    const { mint } = req.params;
+    if (!isMint(mint)) return res.status(400).json({ error: "invalid mint" });
+    const o = await agentOpts([mint, agents.registry.launchOf?.(mint)?.root_mint].filter(Boolean));
+    sendCachedJson(req, res, agentCoinBody(mint, o), { cacheControl: V1_CACHE });
+  }));
+  router.get("/agents/:root", wrap(async (req, res) => {
+    if (!agents) return res.status(404).json({ error: "not found" });
+    if (!isMint(req.params.root)) return res.status(400).json({ error: "invalid mint" });
+    const body = agentBody(req.params.root, await agentOpts([req.params.root]));
+    if (!body) return res.status(404).json({ error: "no agent for this coin" });
+    sendCachedJson(req, res, body, { cacheControl: V1_CACHE });
+  }));
   router.get("/stream", (req, res) => stream.attach(req, res));
   router.get("/openapi.json", (req, res) => sendPrepared(req, res, docPrepared, { cacheControl: V1_DOC_CACHE }));
   router.use((_req, res) => res.status(404).json({ error: "not found", docs: `${base}/docs/api`, openapi: `${base}/v1/openapi.json` }));
@@ -282,7 +301,7 @@ export class V1Stream {
     const frames = new Map();
     // One encoded frame per (type, tree) per dispatch; `key` tells apart the per-tree mapdelta payloads.
     const frame = (type, build, key = type) => { let f = frames.get(key); if (f === undefined) { const d = build(); f = d == null ? null : `event: ${type}\ndata: ${JSON.stringify(d)}\n\n`; frames.set(key, f); } return f; };
-    const mintOf = event === "pair" ? data.coin?.mint : data.mint;
+    const mintOf = event === "pair" ? data.coin?.mint : event === "agent" ? data.root : data.mint;
     for (const cl of this.clients) {
       const root = cl.mint ? rootOf(cl.mint) : null;
       let f = null;
@@ -312,6 +331,7 @@ export class V1Stream {
     const ref = (r) => (r ? { ...r, image: this.abs(r.image) } : r);
     if (event === "pair") return { ...data, coin: ref(data.coin), parent: ref(data.parent) };
     if (event === "coin") return { ...data, image: this.abs(data.image), parent: ref(data.parent), root: ref(data.root), ancestors: (data.ancestors ?? []).map(ref) };
+    if (event === "agent") return { ...data, proposal: data.proposal ? { ...data.proposal, image: this.abs(data.proposal.image) } : data.proposal };
     return data;
   }
   #write(cl, frame) {

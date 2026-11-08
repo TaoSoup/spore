@@ -78,7 +78,7 @@ test("GET /api/map?scope=all&limit=all: every root and every descendant, no fan-
   assert.equal(gz.headers.get("content-encoding"), "gzip");
   assert.equal((await gz.json()).total, body.total, "fetch decodes the pre-compressed body");
   const entry = model.mapAll({ all: true });
-  assert.ok(entry.prepared.gz && gunzipSync(entry.prepared.gz).toString() === entry.prepared.text, "the gzip bytes are cached with the build");
+  assert.ok(entry.apiPrepared.gz && gunzipSync(entry.apiPrepared.gz).toString() === entry.apiPrepared.text, "the gzip bytes are cached with the build");
   // Top-n behaviour is intact: default fan-out 40 and limit=1.
   const top = await get("/api/map?scope=all&limit=1");
   assert.equal(top.body.roots.length, 1); assert.equal(top.body.roots[0].children.length, 40); assert.equal("version" in top.body, false);
@@ -91,7 +91,7 @@ test("since=<ms>: only nodes whose updatedAt moved, flat with parentMint; stamps
   const g = full.generatedAt;
   const delta = async (since) => { later(); const { body } = await get(`/api/map?scope=all&limit=all&since=${since}`); return body; };
   let d = await delta(g);
-  assert.deepEqual(d, { nodes: [], removed: [], generatedAt: clock, total: full.total, version: model.version }, "nothing changed yet");
+  assert.deepEqual(d, { nodes: [], removed: [], generatedAt: clock, total: full.total, version: model.version, indexed: full.total }, "nothing changed yet");
   // A refresh tick that re-reads an unchanged curve is not a change.
   model.upsertCoin({ mint: K.G, refreshedAt: 12345, realQuoteReserves: "7000000000000" });
   d = await delta(g);

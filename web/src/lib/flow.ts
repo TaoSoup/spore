@@ -12,7 +12,7 @@ import type { WalletContextState } from "@solana/wallet-adapter-react";
 import { bondingCurvePda } from "@pump-fun/pump-sdk";
 import { api, type Coin, type Eligibility, type UploadBody } from "./api";
 import { chainFor, chainForChild, chainForRoot } from "./chain";
-import { MAX_LAUNCH_FEE_LAMPORTS, PLATFORM_WALLET, PolicyError, SPLIT_BPS } from "./policy";
+import { AGENT_SEED_LAMPORTS, MAX_LAUNCH_FEE_LAMPORTS, PLATFORM_WALLET, PolicyError, ROOT_SPLIT, SPLIT_BPS, isAgentModel } from "./policy";
 import { splitShares, type Share } from "./pump/shares";
 import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, preflight, quoteSwap, sendAndConfirm, signatureState, type Chain, type LaunchFee, type Side } from "./pump";
 import { friendlyError, stepper, type Report } from "./steps";
@@ -31,8 +31,19 @@ export function drySigner(conn: Connection, w: TestWallet): Signer {
   return { publicKey: w.publicKey, dry: true, send: (tx, label) => drySend(conn, tx, label) };
 }
 
-/// `parent` null = a root coin quoted in SOL (the launch tab's default pool).
-export type SpawnInput = { parent: Coin | null; eligibility: Eligibility; form: UploadBody; creatorFeeBps?: number; firstBuyLamports: bigint; slippageBps: number };
+/// The agent wallet Spore's server prepared for a root launch (`api.agentPrepare`): its address goes
+/// into the fee split; `id` + `model` are reported with the signature so the server binds the wallet
+/// to the mint and starts the agent with the model the creator picked.
+export type PreparedAgent = { id: string; address: string; model: string };
+
+/// `parent` null = a root coin quoted in SOL (the launch tab's default pool); a root needs `agent`,
+/// or `prepareAgent`, which runs as the first step ("Create your coin's agent wallet · {model}")
+/// so a server that cannot make the wallet fails there, in words, before anything is signed.
+/// `onPreflight` hands the page the simulated spend (rent + fees + launch fee + agent gas).
+export type SpawnInput = {
+  parent: Coin | null; eligibility: Eligibility; form: UploadBody; creatorFeeBps?: number; firstBuyLamports: bigint; slippageBps: number; agent?: PreparedAgent | null;
+  prepareAgent?: () => Promise<PreparedAgent>; agentModelLabel?: string; onPreflight?: (spentLamports: bigint | null) => void;
+};
 export type SpawnResult = {
   sig: string; mint: string; depth: number; name: string; symbol: string; image: string | null;
   parent: { mint: string; symbol: string | null } | null;
@@ -44,7 +55,36 @@ export type SpawnResult = {
   dry: boolean;
   /// The record a retry of the fee split is rebuilt from (persisted in localStorage unless dry).
   pending: PendingLaunch;
+  /// A root's agent wallet, as prepared for this launch (the success screen introduces it).
+  agent?: PreparedAgent | null;
 };
+
+/// The launch's steps, in signing order, for the live step list and for the plan the page shows
+/// before anything runs ("What happens when you press launch"), so the two can never disagree.
+export function spawnPlan(o: { prepareAgent?: boolean; agentModelLabel?: string | null; launchFeeLamports?: bigint | null; seedLamports?: bigint | null; wantsBuy?: boolean }): [string, string][] {
+  const fee = o.launchFeeLamports && o.launchFeeLamports > 0n ? ` + ${fmtSol(o.launchFeeLamports)} launch fee` : "";
+  const seed = o.seedLamports && o.seedLamports > 0n ? ` + ${fmtSol(o.seedLamports)} agent gas` : "";
+  return [
+    ...(o.prepareAgent ? ([["agent", `Create your coin's agent wallet${o.agentModelLabel ? ` · ${o.agentModelLabel}` : ""}`]] as [string, string][]) : []),
+    ["upload", "Upload image and metadata"],
+    ["build", `Build the launch transaction · create + fee split${fee}${seed}`],
+    ["preflight", "Simulate it before you sign"],
+    ["sign", "Approve in your wallet"],
+    ["split", "Lock the fee split on-chain"],
+    ...(o.wantsBuy ? ([["quote", "Quote your first buy"], ["buy", "Buy from the new curve"]] as [string, string][]) : []),
+  ];
+}
+
+/// A prepare call the server could not serve (no wallet vault: 503) reads as one plain sentence
+/// (lib/steps friendlyError) instead of the API's wording.
+function agentWalletError(e: unknown): unknown {
+  const status = (e as { status?: number } | null)?.status;
+  const msg = e instanceof Error ? e.message : String(e);
+  if (status !== 503 && !/agent wallets are not configured/i.test(msg)) return e;
+  const err = new Error("agent wallets are not configured");
+  err.name = "AgentWalletError";
+  return err;
+}
 
 /// minAmountOut = quoted × (1 − bps/10 000), never below 1 so the program's "zero out" guard
 /// cannot trip on a dust quote.
@@ -68,7 +108,8 @@ export function launchFeeOf(e: Eligibility): LaunchFee {
 /// The fee split is derived here from the pinned policy (creator 50 / Spore 50); the server's copy
 /// must say the same, address for address and bps for bps, or the launch refuses to build. The
 /// server can therefore list, explain and preview the split, but never change where fees go.
-export function policyShares(creator: PublicKey, e: Pick<Eligibility, "shares" | "parentCreator" | "grandparentCreator">): Share[] {
+export function policyShares(creator: PublicKey, e: Pick<Eligibility, "shares" | "parentCreator" | "grandparentCreator" | "pool" | "agent">, agent: PreparedAgent | null = null, mode: "build" | "preview" = "build"): Share[] {
+  if (e.pool === "sol") return rootShares(creator, e, agent, mode);
   const pkOrNull = (s: string | null | undefined) => { try { return s ? new PublicKey(s) : null; } catch { return null; } };
   const expected = splitShares(creator, pkOrNull(e.parentCreator), pkOrNull(e.grandparentCreator), PLATFORM_WALLET, SPLIT_BPS);
   const key = (a: string, bps: number) => `${a}:${bps}`;
@@ -78,6 +119,32 @@ export function policyShares(creator: PublicKey, e: Pick<Eligibility, "shares" |
   if (!same) throw new PolicyError("The server's fee split differs from Spore's published policy (creator 50% / Spore 50%); refusing to build.");
   return expected;
 }
+
+/// A root's split (lib/policy.ts ROOT_SPLIT): creator / Spore / the root's agent wallet. The server
+/// states the same creator and platform shares and the agent's bps; the agent's address comes from
+/// the prepare step and must be a wallet of its own (never the platform, never the creator).
+export function rootShares(creator: PublicKey, e: Pick<Eligibility, "shares" | "agent">, agent: PreparedAgent | null, mode: "build" | "preview" = "build"): Share[] {
+  const you = creator.toBase58(), plat = PLATFORM_WALLET.toBase58();
+  const said = (addr: string) => (e.shares ?? []).find((s) => s.address === addr)?.bps;
+  // The platform launching its own root is one merged row (creator + platform); anyone else sees two.
+  const ok = you === plat
+    ? (e.shares ?? []).length === 1 && said(plat) === ROOT_SPLIT.creator + ROOT_SPLIT.platform
+    : (e.shares ?? []).length === 2 && said(you) === ROOT_SPLIT.creator && said(plat) === ROOT_SPLIT.platform;
+  if (!ok || e.agent?.bps !== ROOT_SPLIT.agent) {
+    throw new PolicyError("The server's root fee split differs from Spore's published policy (creator 0.25% / Spore 0.50% / agent 0.20% of the creator fee); refusing to build.");
+  }
+  // Before the launch prepared a wallet the page only previews the numbers; building needs the wallet.
+  if (!agent && mode === "preview") return you === plat ? [{ address: PLATFORM_WALLET, shareBps: ROOT_SPLIT.creator + ROOT_SPLIT.platform }] : [{ address: creator, shareBps: ROOT_SPLIT.creator }, { address: PLATFORM_WALLET, shareBps: ROOT_SPLIT.platform }];
+  if (!agent) throw new PolicyError("A root coin needs its agent wallet before it can launch; prepare it first.");
+  let agentKey: PublicKey;
+  try { agentKey = new PublicKey(agent.address); } catch { throw new PolicyError("The prepared agent wallet is not a valid address; refusing to build."); }
+  if (!PublicKey.isOnCurve(agentKey.toBytes())) throw new PolicyError("The prepared agent wallet is not a signing wallet; refusing to build.");
+  if (agent.address === plat || agent.address === you) throw new PolicyError("The prepared agent wallet must be its own wallet; refusing to build.");
+  if (!isAgentModel(agent.model)) throw new PolicyError("The agent's model is not one Spore offers; refusing to build.");
+  return you === plat
+    ? [{ address: PLATFORM_WALLET, shareBps: ROOT_SPLIT.creator + ROOT_SPLIT.platform }, { address: agentKey, shareBps: ROOT_SPLIT.agent }]
+    : [{ address: creator, shareBps: ROOT_SPLIT.creator }, { address: PLATFORM_WALLET, shareBps: ROOT_SPLIT.platform }, { address: agentKey, shareBps: ROOT_SPLIT.agent }];
+}
 export const plainShares = (shares: Share[]) => shares.map((s) => ({ address: s.address.toBase58(), bps: s.shareBps }));
 
 /// Fire-and-forget with one retry: the indexer lists the coin as ours right away (§11.1) and
@@ -85,9 +152,19 @@ export const plainShares = (shares: Share[]) => shares.map((s) => ({ address: s.
 /// `sig` is null for a launch the Resume card recovered from the chain without a signature: the
 /// server verifies every report against the transaction (§11.1), so such a launch is not reported;
 /// the indexer lists it once the fee-sharing config names the platform.
-function reportSpawned(mint: string, sig: string | null) {
+function reportSpawned(mint: string, sig: string | null, agent: PreparedAgent | null = null) {
   if (!sig) return;
-  api.spawned(mint, sig).catch(() => new Promise((r) => setTimeout(r, 1500)).then(() => api.spawned(mint, sig)).catch(() => { /* the indexer verifies on-chain anyway */ }));
+  const a = agent ? { id: agent.id, model: agent.model } : null;
+  // The server reads the transaction at "confirmed" and may lag the wallet by a few seconds (it
+  // answers 404 "retry in a few seconds"); a root's agent binding rides on this report, so it is
+  // retried several times over about half a minute. The chain reconciler on the server covers the
+  // rest: an agent wallet named in an indexed split is bound without any report.
+  const attempt = (n: number): Promise<unknown> => api.spawned(mint, sig, a).catch((e) => {
+    if (n >= 6) return;
+    const retryAfter = (e as { status?: number } | null)?.status === 404 ? 3500 : 2500;
+    return new Promise((r) => setTimeout(r, retryAfter)).then(() => attempt(n + 1));
+  });
+  void attempt(1);
 }
 
 /// True only when the wallet refused before anything could be broadcast: the user pressed Reject,
@@ -113,14 +190,19 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   const { parent, eligibility, form } = input;
   const wantsBuy = input.firstBuyLamports > 0n;
   const launchFee = launchFeeOf(eligibility);
-  const st = stepper([
-    ["upload", "Upload image and metadata"],
-    ["build", launchFee ? `Build the launch transaction · create + fee split + ${fmtSol(launchFee.lamports)} launch fee` : "Build the launch transaction · create + fee split"],
-    ["preflight", "Simulate it before you sign"],
-    ["sign", "Approve in your wallet"],
-    ["split", "Lock the fee split on-chain"],
-    ...(wantsBuy ? ([["quote", "Quote your first buy"], ["buy", "Buy from the new curve"]] as [string, string][]) : []),
-  ], report);
+  const rootAgent = !!(input.prepareAgent || input.agent);
+  const st = stepper(spawnPlan({ prepareAgent: !!input.prepareAgent, agentModelLabel: input.agentModelLabel, launchFeeLamports: launchFee?.lamports ?? null, seedLamports: rootAgent ? AGENT_SEED_LAMPORTS : null, wantsBuy }), report);
+
+  // 0. A root's agent wallet: the server makes the keypair, keeps the key, and the address goes into
+  // the fee split the wallet signs. Nothing is uploaded or signed until this answered.
+  let agent: PreparedAgent | null = input.agent ?? null;
+  if (input.prepareAgent) {
+    st.set("agent", "active", "asking Spore for a fresh wallet…");
+    try {
+      agent = await input.prepareAgent();
+      st.set("agent", "done", `wallet ${agent.address.slice(0, 4)}…${agent.address.slice(-4)}`);
+    } catch (e) { const err = agentWalletError(e); st.fail("agent", err); throw err; }
+  }
 
   // 1. Metadata. Dry runs never touch the host: the URI is a fixed https placeholder.
   st.set("upload", "active", "uploading the image…");
@@ -138,8 +220,10 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   st.set("build", "active", "resolving the pool and compiling…");
   let built: Awaited<ReturnType<typeof buildSpawnTx>>;
   try {
-    const shares = policyShares(creator, eligibility);
-    built = await buildSpawnTx(conn, creator, parent ? new PublicKey(parent.mint) : null, { name: form.name, symbol: form.symbol, uri, ...(input.creatorFeeBps ? { creatorFeeBps: input.creatorFeeBps } : {}) }, shares, launchFee);
+    const shares = policyShares(creator, eligibility, agent);
+    // A root's agent is born with nothing: the launch seeds its wallet with the gas for its first fee claims (lib/policy.ts AGENT_SEED_LAMPORTS).
+    const seed = agent ? { to: new PublicKey(agent.address), lamports: AGENT_SEED_LAMPORTS } : null;
+    built = await buildSpawnTx(conn, creator, parent ? new PublicKey(parent.mint) : null, { name: form.name, symbol: form.symbol, uri, ...(input.creatorFeeBps ? { creatorFeeBps: input.creatorFeeBps } : {}) }, shares, launchFee, seed);
     const bytes = built.tx.serialize().length;
     st.set("build", "done", `${bytes} bytes · depth ${built.depth} · mint ${built.mint.publicKey.toBase58().slice(0, 6)}…${built.feeTx ? " · fee split in a second transaction" : ""}`);
   } catch (e) { st.fail("build", e); throw e; }
@@ -151,6 +235,7 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   try {
     const pf = await preflight(conn, built.tx, creator);
     spent = pf.spent;
+    input.onPreflight?.(pf.spent);
     st.set("preflight", "done", `passes · ${fmtUnits(pf.unitsConsumed)}${pf.spent !== null ? ` · this signature spends ${fmtSol(pf.spent)}` : ""}`);
   } catch (e) { st.fail("preflight", e); throw e; }
 
@@ -163,8 +248,8 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   const pending: PendingLaunch = {
     v: 1, mint, sig: null, name: form.name, symbol: form.symbol, image: form.image || null,
     parentMint: parent?.mint ?? null, parentSymbol: parent?.symbol ?? null, depth: built.depth,
-    quoteMint: built.quoteMint.toBase58(), quoteTokenProgram: built.quoteTokenProgram.toBase58(), shares: plainShares(policyShares(creator, eligibility)),
-    splitIncluded: !built.feeTx, splitSig: null, step: "signing", createdAt: Date.now(),
+    quoteMint: built.quoteMint.toBase58(), quoteTokenProgram: built.quoteTokenProgram.toBase58(), shares: plainShares(policyShares(creator, eligibility, agent)),
+    splitIncluded: !built.feeTx, splitSig: null, step: "signing", createdAt: Date.now(), agent,
   };
   if (!dry) savePendingSafe(pending);
   st.set("sign", "active", dry ? "dry run · simulating instead of signing" : "approve the transaction in your wallet…");
@@ -187,12 +272,12 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
     if (pending.sig) st.note("sign", `${friendlyError(e)} · ${pending.sig.slice(0, 8)}…`, txHref(pending.sig, dry));
     throw e;
   }
-  if (!dry) reportSpawned(mint, sig);
+  if (!dry) reportSpawned(mint, sig, agent);
 
   const result: SpawnResult = {
     sig, mint, depth: built.depth, name: form.name, symbol: form.symbol, image: form.image || null,
     parent: parent ? { mint: parent.mint, symbol: parent.symbol } : null,
-    split: { done: !built.feeTx, sig: built.feeTx ? null : sig, error: null }, buy: null, buyError: null, spent, dry, pending,
+    split: { done: !built.feeTx, sig: built.feeTx ? null : sig, error: null }, buy: null, buyError: null, spent, dry, pending, agent,
   };
 
   // 5. Fee split. Deep chains need a second transaction; shallow ones carried it in the first. A
@@ -256,7 +341,11 @@ export async function finishFeeSplit(conn: Connection, signer: Signer, p: Pendin
   try {
     // Never from the stored record (it could be edited): the split is the pinned policy for the
     // wallet that signs, which must be the coin's creator (the program refuses anyone else).
-    const shares = splitShares(signer.publicKey, null, null, PLATFORM_WALLET, SPLIT_BPS);
+    // A root's record carries the agent wallet the launch was prepared with; its bps are the pinned
+    // policy's, so an edited record can at most point the agent slice elsewhere, never the rest.
+    const shares = p.agent
+      ? rootShares(signer.publicKey, { shares: [{ address: signer.publicKey.toBase58(), bps: ROOT_SPLIT.creator }, { address: PLATFORM_WALLET.toBase58(), bps: ROOT_SPLIT.platform }], agent: { bps: ROOT_SPLIT.agent, address: p.agent.address } }, p.agent)
+      : splitShares(signer.publicKey, null, null, PLATFORM_WALLET, SPLIT_BPS);
     tx = await buildFeeSplitTx(conn, signer.publicKey, new PublicKey(p.mint), new PublicKey(p.quoteMint), new PublicKey(p.quoteTokenProgram), shares, false);
     st.set("build", "done", `${tx.serialize().length} bytes · ${shares.length} shareholders`);
   } catch (e) { st.fail("build", e); throw e; }
@@ -293,7 +382,7 @@ export async function checkPending(conn: Connection, p: PendingLaunch): Promise<
     const stored = loadPending();
     const reported = stored?.mint === p.mint && (stored.step === "split-pending" || stored.step === "done");
     savePendingSafe(next);
-    if (!reported) reportSpawned(p.mint, p.sig);
+    if (!reported) reportSpawned(p.mint, p.sig, p.agent ?? null);
     return { status: "landed" as const, p: next };
   };
   if (p.sig) {

@@ -15,17 +15,29 @@ export function curvePriceQuote(c, baseDecimals, quoteDecimals) {
   return (vq / 10 ** quoteDecimals) / (vt / 10 ** baseDecimals);
 }
 
-/** Quote per 1 base token from a PumpSwap pool: quote vault / base vault, decimal-scaled. */
-export function poolPriceQuote(poolQuote, poolBase, baseDecimals, quoteDecimals) {
+/** A signed integer string (an i128 such as a pool's virtual quote reserves) as a BigInt; null, empty or malformed = 0. */
+const bigOr0 = (v) => { if (v == null || v === "") return 0n; try { return BigInt(v); } catch { return 0n; } };
+
+/**
+ * Quote per 1 base token from a PumpSwap pool: (quote vault + the pool's signed `virtual_quote_reserves`)
+ * / base vault, decimal-scaled. pump-amm prices a pool on that effective quote side (the SDK's
+ * chainCoinHop adds the same term), so a pool seeded with virtual quote is worth more than its vault
+ * alone. The sum is taken in BigInt and turned into a Number only for the ratio; a null or absent
+ * virtual quote counts as 0; an effective quote side <= 0 or an empty base vault has no price.
+ * Locked value and the LIQ_X liquidity cap keep reading the real vault (liqQuoteOf, model.computed()).
+ */
+export function poolPriceQuote(poolQuote, poolBase, baseDecimals, quoteDecimals, virtualQuote = null) {
   if (poolQuote == null || poolBase == null) return null;
   const base = Number(BigInt(poolBase));
   if (!(base > 0)) return null;
-  return (Number(BigInt(poolQuote)) / 10 ** quoteDecimals) / (base / 10 ** baseDecimals);
+  const eff = BigInt(poolQuote) + bigOr0(virtualQuote);
+  if (eff <= 0n) return null;
+  return (Number(eff) / 10 ** quoteDecimals) / (base / 10 ** baseDecimals);
 }
 
 /** The price source `create_v2` itself uses: the pool once migrated, the curve before. */
 export function priceQuoteOf(c, baseDecimals, quoteDecimals) {
-  return c.migrated ? poolPriceQuote(c.poolQuote, c.poolBase, baseDecimals, quoteDecimals) : curvePriceQuote(c, baseDecimals, quoteDecimals);
+  return c.migrated ? poolPriceQuote(c.poolQuote, c.poolBase, baseDecimals, quoteDecimals, c.poolVirtualQuote) : curvePriceQuote(c, baseDecimals, quoteDecimals);
 }
 
 /** Curve progress 0..1 = share of the initial real token reserves sold; 1 once complete. */
@@ -56,7 +68,49 @@ export function chainPrices(chain, rootQuote, solUsd, otherUsd = null) {
   return { priceSol: null, priceUsd: null };
 }
 
+/**
+ * Liquidity cap for sizing by market cap (owner 2026-10-21, "size by mcap"): a coin's mcap counts on
+ * the map for at most LIQ_X times the quote liquidity behind its price (the pool's quote vault once
+ * migrated, the curve's virtual quote reserves before), so a 1e9-supply coin with a dollar of
+ * liquidity cannot draw as a billion-dollar family.
+ */
+export const LIQ_X = 50;
+
+/** The capped mcap (LIQ_X x liqUsd, cents) when mcapUsd exceeds it; null when uncapped or unknown. */
+export function mcapCapOf(mcapUsd, liqUsd, x = LIQ_X) {
+  if (!(mcapUsd > 0) || liqUsd == null || !Number.isFinite(liqUsd) || liqUsd < 0) return null;
+  const cap = x * liqUsd;
+  return mcapUsd > cap ? Math.round(cap * 100) / 100 : null;
+}
+
+/** Quote units behind a coin's price: the pool's quote vault once migrated, the curve's virtual quote reserves before. */
+export function liqQuoteOf(c, quoteDecimals) {
+  const raw = c.migrated ? c.poolQuote : c.virtualQuoteReserves;
+  if (raw == null || quoteDecimals == null) return null;
+  return units(raw, quoteDecimals);
+}
+
 export const DEFAULT_SPLIT_BPS = [5000, 0, 0, 5000]; // creator / parent / grandparent / platform — two shareholders by default
+
+/**
+ * A ROOT coin's split (owner 2026-10-19, DESIGN §13.1): pump's creator fee (0.95 % of volume on the
+ * AMM, 0.30 % on the curve) goes creator 0.25 % / platform 0.50 % / the root's agent wallet 0.20 %,
+ * i.e. these bps of whatever accrues. The web pins the same numbers (web/src/lib/policy.ts).
+ */
+export const ROOT_SPLIT_BPS = Object.freeze({ creator: 2632, platform: 5263, agent: 2105 });
+
+/** The three shareholders of a root launch; `agent` null = the preview before a wallet was prepared. */
+export function rootShares({ creator, platform, agent = null }) {
+  if (agent) {
+    const shares = mergeShares([{ address: creator ?? "", bps: ROOT_SPLIT_BPS.creator }, { address: platform, bps: ROOT_SPLIT_BPS.platform }, { address: agent, bps: ROOT_SPLIT_BPS.agent }]);
+    if (shares.length !== 3) throw new Error("root split: creator, platform and agent must be three different wallets");
+    return shares;
+  }
+  // The preview before a wallet exists: the agent's slice is stated separately (API `agent.bps`),
+  // so these two do not sum to 10000 on purpose. The platform launching its own root merges.
+  if (creator && creator === platform) return [{ address: platform, bps: ROOT_SPLIT_BPS.creator + ROOT_SPLIT_BPS.platform }];
+  return [{ address: creator ?? "", bps: ROOT_SPLIT_BPS.creator }, { address: platform, bps: ROOT_SPLIT_BPS.platform }];
+}
 
 export function parseSplitBps(s) {
   const parts = String(s ?? "").split(",").map((x) => Number(x.trim()));

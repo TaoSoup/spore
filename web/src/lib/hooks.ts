@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Connection, PublicKey } from "@solana/web3.js";
 import { api, errorMessage, type Stats } from "./api";
-import { useEvents } from "./events";
+import { subscribe as subscribeEvents } from "./events";
 
 export type Async<T> = { data: T | null; error: string | null; loading: boolean; reload: () => void; setData: (f: (d: T | null) => T | null) => void };
 
@@ -44,19 +44,56 @@ export function useDebounced<T>(value: T, ms = 250): T {
   return v;
 }
 
-/// Global stats: polled every 30 s and pushed over SSE. Shared by the nav, Home and How pages.
-export function useStats(intervalMs = 30_000) {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = () => api.stats().then((s) => { if (alive) { setStats(s); setError(null); } }).catch((e) => { if (alive) setError(errorMessage(e)); });
-    tick();
-    const t = setInterval(tick, intervalMs);
-    return () => { alive = false; clearInterval(t); };
-  }, [intervalMs]);
-  useEvents({ stats: (s) => { setStats(s); setError(null); } });
-  return { stats, error };
+/* ---------- global stats: one module-level store shared by the nav, the footer and every page.
+   One fetch when the first subscriber mounts, a 60 s poll only while the tab is visible (a tab coming
+   back after a minute or more refetches at once), and SSE "stats" events update every subscriber. */
+type StatsState = { stats: Stats | null; error: string | null };
+const STATS_POLL_MS = 60_000;
+let statsState: StatsState = { stats: null, error: null };
+const statsSubs = new Set<() => void>();
+let statsTimer: ReturnType<typeof setInterval> | null = null;
+let statsSse: (() => void) | null = null;
+let statsAt = 0;
+let statsBusy = false;
+const setStats = (next: StatsState) => { statsState = next; statsSubs.forEach((f) => f()); };
+function fetchStats() {
+  if (statsBusy) return;
+  statsBusy = true;
+  api.stats()
+    .then((s) => { statsAt = Date.now(); setStats({ stats: s, error: null }); })
+    .catch((e) => setStats({ stats: statsState.stats, error: errorMessage(e) }))
+    .finally(() => { statsBusy = false; });
+}
+const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+function syncPoll() {
+  const want = statsSubs.size > 0 && visible();
+  if (want && !statsTimer) {
+    statsTimer = setInterval(fetchStats, STATS_POLL_MS);
+    if (statsAt && Date.now() - statsAt >= STATS_POLL_MS) fetchStats();
+  } else if (!want && statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+}
+function subscribeStats(f: () => void) {
+  statsSubs.add(f);
+  if (statsSubs.size === 1) {
+    fetchStats();
+    statsSse = subscribeEvents({ stats: (s) => { statsAt = Date.now(); setStats({ stats: s, error: null }); } });
+    document.addEventListener("visibilitychange", syncPoll);
+    syncPoll();
+  }
+  return () => {
+    statsSubs.delete(f);
+    if (statsSubs.size > 0) return;
+    statsSse?.(); statsSse = null;
+    document.removeEventListener("visibilitychange", syncPoll);
+    syncPoll();
+  };
+}
+const statsSnapshot = () => statsState;
+
+/// Global stats ({ stats, error }) from the shared store above. The argument is accepted for older
+/// callers and ignored: there is one poll for the whole app.
+export function useStats(_intervalMs?: number): StatsState {
+  return useSyncExternalStore(subscribeStats, statsSnapshot, statsSnapshot);
 }
 
 /// Persist a small per-browser preference (slippage, chart resolution). Storage may be blocked in

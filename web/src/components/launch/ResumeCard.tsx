@@ -33,6 +33,9 @@ export default function ResumeCard({ conn, pending, onResume, onDismiss }: Props
   }, [conn, pending, unsettled]);
   const p = state.p;
   const dismiss = () => { clearPending(); onDismiss(); };
+  // Forgetting a launch that may sit on-chain unsplit takes two taps; a settled one takes one.
+  const [confirming, setConfirming] = useState(false);
+  const risky = !(state.status === "expired" || state.status === "failed" || (state.status === "landed" && p.step === "done"));
   const tag = `$${p.symbol}`;
   const tx = p.sig ? solscanTx(p.sig) : null;
   return (
@@ -41,7 +44,7 @@ export default function ResumeCard({ conn, pending, onResume, onDismiss }: Props
         {p.image ? <img src={p.image} alt="" className="resume-img" /> : <span className="resume-img letter">{p.symbol.slice(0, 1)}</span>}
         <div>
           <span className="eyebrow">Unfinished launch</span>
-          <b>{p.name} <span className="mono muted">{tag}</span>{p.parentSymbol ? <span className="muted"> · under ${p.parentSymbol}</span> : <span className="muted"> · root, quoted in SOL</span>}</b>
+          <b>{p.name} <span className="mono muted">{tag}</span>{p.parentSymbol ? <span className="muted"> · under ${p.parentSymbol}</span> : <span className="muted"> · new tree, priced in SOL</span>}</b>
           <span className="hint">Mint <span className="mono">{p.mint.slice(0, 8)}…{p.mint.slice(-6)}</span> · started {new Date(p.createdAt).toLocaleString("en-US", { hour: "2-digit", minute: "2-digit", month: "short", day: "numeric" })}</span>
         </div>
       </div>
@@ -50,14 +53,20 @@ export default function ResumeCard({ conn, pending, onResume, onDismiss }: Props
       {state.status === "unknown" && !tx && <p className="muted">The wallet did not hand back a signature, so the chain is checked for {tag}'s curve every few seconds. If your wallet shows the launch as sent, give it a minute; if it never lands, it should not have been charged.</p>}
       {state.status === "expired" && <p className="muted">No launch transaction landed within its validity window, so it should not have been charged{tx ? <>; <Ext href={tx}>verify on Solscan ↗</Ext></> : " (check your wallet's activity if in doubt)"}. Fill the form again to launch.</p>}
       {state.status === "failed" && tx && <p className="muted">The launch transaction failed on-chain, so no coin was created and only the network fee was spent. <Ext href={tx}>See why ↗</Ext></p>}
-      {state.status === "landed" && p.step === "split-pending" && <p className="muted"><b>{tag} exists on-chain</b> but its fee split was never locked, so Spore does not list it yet and every creator fee currently stays with you. Finishing takes one more signature; no new mint, no re-upload.</p>}
+      {state.status === "landed" && p.step === "split-pending" && <p className="muted"><b>{tag} exists on-chain</b> but its fee split was never locked, so Spore does not list it yet and every creator fee currently stays with you. Finishing takes one more signature; no new mint, no re-upload.{p.agent ? <> <span className="resume-agent">Your agent earns nothing until the fee split is locked.</span></> : null}</p>}
       {state.status === "landed" && p.step === "done" && <p className="muted">{tag} launched and its fee split is locked. You can open the coin page any time.</p>}
       <div className="resume-actions">
         {state.status === "landed" && p.step === "split-pending" && <button type="button" className="btn accent" onClick={() => onResume(p)}>Finish the fee split</button>}
         {state.status === "landed" && <Link to={`/c/${p.mint}`} className="btn ghost">View on Spore</Link>}
         {(state.status === "landed" || state.status === "unknown") && tx && <Ext href={tx} className="btn ghost">Transaction ↗</Ext>}
-        <button type="button" className="btn ghost" onClick={dismiss}>{state.status === "expired" || state.status === "failed" ? "Dismiss" : "Forget this launch"}</button>
+        {!risky ? <button type="button" className="btn ghost" onClick={dismiss}>{state.status === "expired" || state.status === "failed" ? "Dismiss" : "Forget this launch"}</button>
+          : confirming ? <>
+            <button type="button" className="btn ghost resume-forget" onClick={dismiss}>Forget anyway</button>
+            <button type="button" className="btn ghost" onClick={() => setConfirming(false)}>Keep it</button>
+          </>
+          : <button type="button" className="btn ghost" onClick={() => setConfirming(true)}>Forget this launch</button>}
       </div>
+      {risky && confirming && <p className="hint resume-forget-hint" role="status">{state.status === "landed" ? "The coin stays on-chain, unsplit and unlisted." : "If it landed, the coin stays on-chain, unsplit and unlisted."} This only clears the reminder in this browser.</p>}
     </section>
   );
 }

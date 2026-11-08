@@ -87,13 +87,17 @@ const COMET_HEAD = `rgba(${BUY_RGB},0.95)`, COMET_TAIL = `rgba(${BUY_RGB},0.45)`
 const ripPaths: (Path2D | null)[] = [null, null, null, null, null, null];
 const flashIdx = new Int32Array(MAX_FLASH), flashA = new Float32Array(MAX_FLASH);
 const easeInOut = (u: number) => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u));
+/// Effects actually drawn by the last drawFx (on screen, in their lifetime): what keeps the render loop
+/// animating; a slot ticking off screen does not.
+let drawnLast = 0;
+export const fxDrawn = () => drawnLast;
 
 /// Draws every live slot (after links, before bubbles). Returns the number of active slots.
 export function drawFx(ctx: CanvasRenderingContext2D, fx: Fx, st: MapStore, sprites: SpriteSet, k: number, tx: number, ty: number, w: number, h: number, now: number, still: boolean): number {
   const { node, t0, mag, kind, peer } = fx;
   const { x, y, r, born, color } = st;
   const n = st.n;
-  let active = 0, flashes = 0, heads: Path2D | null = null, tails = false;
+  let active = 0, drawn = 0, flashes = 0, heads: Path2D | null = null, tails = false;
   for (let p = 0; p < 6; p++) ripPaths[p] = null;
   for (let q = 0; q < FX_SLOTS; q++) {
     const i = node[q];
@@ -104,7 +108,7 @@ export function drawFx(ctx: CanvasRenderingContext2D, fx: Fx, st: MapStore, spri
     const life = kd === K_COMET ? COMET_MS : still ? STATIC_RING_MS : RIPPLE_MS;
     if (age >= life) { node[q] = -1; continue; }
     active++;
-    if (age < 0) continue; // pending (the parent leg of a comet)
+    if (age < 0) { drawn++; continue; } // pending (the parent leg of a comet): due soon, keep the frames coming
     if (born[i] > now) continue;
     const u = age / life, m = mag[q];
     const sx = x[i] * k + tx, sy = y[i] * k + ty, base = Math.max(r[i] * k, 2);
@@ -118,6 +122,7 @@ export function drawFx(ctx: CanvasRenderingContext2D, fx: Fx, st: MapStore, spri
       if (len < 1) continue;
       const e = easeInOut(u), hx = sx + dx * e, hy = sy + dy * e;
       const tl = Math.min(14, len * e), ux = dx / len, uy = dy / len;
+      drawn++;
       if (!heads) heads = new Path2D();
       heads.moveTo(hx + 2.2, hy); heads.arc(hx, hy, 2.2, 0, Math.PI * 2);
       if (!tails) { ctx.beginPath(); tails = true; }
@@ -133,6 +138,7 @@ export function drawFx(ctx: CanvasRenderingContext2D, fx: Fx, st: MapStore, spri
       a = (1 - u) * (0.55 + 0.4 * m);
     }
     const b = a < 0.3 ? 0 : a < 0.6 ? 1 : 2, pk = kd * 3 + b;
+    drawn++;
     let path = ripPaths[pk]; if (!path) { path = new Path2D(); ripPaths[pk] = path; }
     path.moveTo(sx + rad, sy); path.arc(sx, sy, rad, 0, Math.PI * 2);
     if (fx.flash[q] && age < FLASH_MS && flashes < MAX_FLASH && !still) { flashIdx[flashes] = i; flashA[flashes] = (1 - age / FLASH_MS) * 0.7; flashes++; }
@@ -153,5 +159,6 @@ export function drawFx(ctx: CanvasRenderingContext2D, fx: Fx, st: MapStore, spri
     }
     ctx.restore();
   }
+  drawnLast = drawn;
   return active;
 }

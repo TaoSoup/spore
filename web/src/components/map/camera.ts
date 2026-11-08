@@ -93,6 +93,7 @@ const ease = (u: number) => u < RAMP ? CRUISE * u * u / (2 * RAMP) : u > 1 - RAM
 /// `follow` is applied on landing (keeps a still-moving node centred). Reduced motion jumps.
 export function flyTo(s: State, target: ZoomTransform, now: number, opts?: { follow?: { i: number; k: number } | null }): void {
   s.autoFit = false; s.follow = null; s.flight = null;
+  s.dirty = true; if (s.wake) s.wake(); // the render loop may be asleep (draw.ts invalidate, without the import cycle)
   const follow = opts?.follow ?? null;
   const t = s.t;
   if (s.static || !s.w || !s.h || !Number.isFinite(target.k) || !Number.isFinite(target.x) || !Number.isFinite(target.y)) { s.t = target; s.follow = follow; s.camJump = true; return; }
@@ -120,7 +121,7 @@ export function flyTo(s: State, target: ZoomTransform, now: number, opts?: { fol
 }
 
 /// Stops every camera motion (the user took the wheel, or a drag started).
-export function cancelFlight(s: State): void { s.flight = null; s.follow = null; s.autoFit = false; }
+export function cancelFlight(s: State): void { s.flight = null; s.follow = null; s.autoFit = false; s.dirty = true; if (s.wake) s.wake(); }
 
 const setView = (s: State, ux: number, uy: number, k: number, scx: number, scy: number) => { s.t = new ZoomTransform(k, scx - ux * k, scy - uy * k); };
 

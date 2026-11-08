@@ -111,3 +111,12 @@ export const exactAmount = (raw: bigint, decimals: number) => {
   const i = s.slice(0, s.length - decimals), f = s.slice(s.length - decimals).replace(/0+$/, "");
   return f ? `${i}.${f}` : i;
 };
+
+/* ---------- card vocabulary (redesign 2026-10-20): cards, rows and boards never show dust like
+   "$0.0₁₁505"; the exact value stays available in a title and on the coin page. */
+/// "—" for null · "$0" · "< $0.01" · otherwise usd().
+export const usdCard = (n: number | null | undefined): string => (!finite(n) ? "—" : n === 0 ? "$0" : n > 0 && n < 0.01 ? "< $0.01" : usd(n));
+/// Bonding-curve progress for cards: "0%" · "< 0.1%" · pct() · "100%".
+export const pctCurve = (x: number | null | undefined): string => (!finite(x) ? "—" : x <= 0 ? "0%" : x < 0.001 ? "< 0.1%" : pct(x));
+/// "1 trade" · "17 trades" (count() formatting).
+export const plural = (n: number | null | undefined, one: string, many = `${one}s`): string => `${count(n)} ${n === 1 ? one : many}`;

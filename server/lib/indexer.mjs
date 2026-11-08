@@ -1,11 +1,11 @@
 // The indexer: backfill (once, resumable), live log subscription, refresh loop (DESIGN §6).
 //
 // Shape of the work:
-//   backfill  getProgramAccounts per depth → resolve each curve's mint → walk ancestors → mint data
+//   backfill  getProgramAccounts per depth (and per listed quote asset) → resolve each curve's mint → walk ancestors → mint data
 //   live      CreateEvent / TradeEvent / CompleteEvent (+ pump-amm Buy/SellEvent for graduated coins)
 //   refresh   hot coins every tick, the whole set on a rolling schedule, SOL price every minute
 // All RPC traffic shares one budget (rpc.mjs), so the backfill never starves the live path.
-import { PUMP_SDK, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, GLOBAL_PDA, QUOTE_CONTROL_PDA, PublicKey, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT,
+import { USDC_MINT, PUMP_SDK, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, GLOBAL_PDA, QUOTE_CONTROL_PDA, PublicKey, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT,
   bondingCurvePda, canonicalPumpPoolPdaWithQuote, normalizeQuoteMint, feeSharingConfigPda, metaplexPda, pk, b58 } from "./sdk.mjs";
 import { BONDING_CURVE_DISCRIMINATOR, decodeCurve, decodeEvent, decodeMint, decodeMetaplex, decodePool, decodeShares, decodeTokenAccount, eventsInLogs, plain } from "./decode.mjs";
 import { LogsSubscriber } from "./live.mjs";
@@ -13,13 +13,23 @@ import { curvePriceQuote, poolPriceQuote, units } from "./pricing.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
 const SOL_MINT = NATIVE_MINT.toBase58(); // encoded once: toBase58() is a base58 encode per call
+const USDC_MINT_STR = String(USDC_MINT);
 /** Programs whose events the live subscription acts on; a CPI into another program cannot inject events. */
 const LIVE_EVENT_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.toBase58()]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const chunks = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
 const DEPTH_OFFSET = 141; // BondingCurve.depth (DESIGN §2)
+const QUOTE_MINT_OFFSET = 83; // BondingCurve.quote_mint (measured on live curves: a coin quoted in $gmonad, $gmonad quoted in MON)
+// The slice of a BondingCurve the asset walk reads, from offset 32: real_quote_reserves u64 at 0, `complete` at 16
+// (48), quote_mint at 51..83 (83..115), depth at 109 (141). A staged row that holds only this slice is shorter than
+// CURVE_FULL_MIN and gets its full account fetched before it is resolved.
+const CURVE_SLICE_OFFSET = 32, CURVE_SLICE_LEN = 110, CURVE_FULL_MIN = 142;
+const ZERO_KEY_HEX = "0".repeat(64);
+const sliceCurve = (buf) => { const q = buf.subarray(QUOTE_MINT_OFFSET - CURVE_SLICE_OFFSET, QUOTE_MINT_OFFSET - CURVE_SLICE_OFFSET + 32); return { rq: Number(buf.readBigUInt64LE(0)), complete: buf[48 - CURVE_SLICE_OFFSET] === 1, quoteMint: q.toString("hex") === ZERO_KEY_HEX ? null : new PublicKey(q).toBase58(), depth: buf[DEPTH_OFFSET - CURVE_SLICE_OFFSET] }; };
 /** Full re-scan of a depth (getProgramAccountsV2 on Helius walks the whole pump key space, ~8 min per depth); the live stream covers the rest. */
 const BACKFILL_RESCAN_S = 7 * 24 * 3600;
+/** Listed-asset scans cost the same full walk each; the live stream adds their new coins, so a month between walks. */
+const ASSET_RESCAN_S = 30 * 24 * 3600;
 const SHARES_TTL_S = 6 * 3600;
 // On-demand lookups (/api/coin, eligibility) remember whether a mint is a pump coin for this long,
 // so a stream of requests for the same mint costs one RPC round, not one per request.
@@ -28,6 +38,9 @@ const FETCH_CACHE_MAX = 2_000;
 // A coin younger than this gets its fee-sharing config re-read on every refresh: a spawn through
 // Spore writes the config in (or right after) the create transaction, and the "ours" flag depends on it.
 const YOUNG_S = 30 * 60;
+// A migrated pool that prices other coins (the quote mint of tracked children) is re-read once per this
+// window instead of once per full pass, so a child's chain price does not trail its parent's pool.
+const PRICING_POOL_MS = 4 * 60_000;
 // Map stream (DESIGN §11.5): a `pair` is announced at most once per mint within this window (the
 // create path and the enrich path both try), and `mapdelta` batches are flushed on this timer with
 // at most this many entries each (largest locked value first; the rest carry over).
@@ -37,7 +50,14 @@ export const MAPDELTA_MAX = 500;
 // Listed quote mints with a CoinGecko id: trees rooted in a coin quoted in one of these get USD
 // (and SOL) prices. PUMP is the common case; tokenized stocks have no public price feed here.
 const QUOTE_PRICE_IDS = { pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn: "pump-fun" };
-const COINGECKO = `https://api.coingecko.com/api/v3/simple/price?ids=${["solana", ...Object.values(QUOTE_PRICE_IDS)].join(",")}&vs_currencies=usd`;
+// Every other listed quote (tokenized stocks, CARDS, WBTC, ...) is priced from Jupiter's public price
+// API, at most 50 mints per call, calls one after another; a price backed by less than this much
+// liquidity is ignored (thin pools quote anything). CoinGecko's mints above are never overwritten.
+export const JUP_PRICE = "https://lite-api.jup.ag/price/v3?ids=";
+export const JUP_BATCH = 50;
+export const JUP_MIN_LIQ_USD = 5_000;
+export const QUOTE_USD_MS = 120_000;
+const COINGECKO = `https://api.coingecko.com/api/v3/simple/price?ids=${["solana", ...Object.values(QUOTE_PRICE_IDS)].join(",")}&vs_currencies=usd&include_market_cap=true`;
 
 export class Indexer {
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
@@ -45,9 +65,10 @@ export class Indexer {
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true, ...opts };
     this.live = null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
-    this.hot = new Set(); this.cursor = 0; this.refreshing = false;
+    this.hot = new Set(); this.cursor = 0; this.pricingCursor = 0; this.refreshing = false;
     this.fetchCache = new Map(); // mint → { at, found } for fetchCoin
     this.pairSent = new Map();   // mint → when its `pair` event went out (dedupe)
+    this.assetScanning = false;  // the asset walk (scanAssetQuotes) in flight
     this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 } };
   }
 
@@ -57,6 +78,9 @@ export class Indexer {
     this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, onLogs: (n) => this.onLogs(n), onConnect: () => { this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
+    this.refreshQuoteUsd().catch(() => {});
+    this.timers.push(setInterval(() => this.refreshQuoteUsd().catch(() => {}), QUOTE_USD_MS));
+    this.backfillPoolVq().then(() => this.refreshPricingPools()).catch(() => {}); // pool virtual quotes never read, then every pool that prices other coins (biggest families first)
     this.timers.push(setInterval(() => this.refresh({ reason: "tick" }).catch((e) => this.log.warn(`refresh: ${e.message}`)), this.opts.refreshMs));
     this.timers.push(setInterval(() => this.loadGlobal().catch(() => {}), 10 * 60_000));
     this.timers.push(setInterval(() => { try { this.flushMapDelta(); } catch (e) { this.log.warn(`mapdelta: ${e.message}`); } }, MAPDELTA_MS));
@@ -76,16 +100,20 @@ export class Indexer {
    */
   announcePair(mint) {
     const c = this.model.get(mint);
-    if (!c || !c.tracked || c.depth < 1 || !c.quoteMint) return false;
-    const p = this.model.get(c.quoteMint);
-    if (!p || !p.tracked) return false;
+    if (!c || !c.tracked || !c.quoteMint) return false;
+    // A coin quoted in a listed asset (depth 0 on chain): its family top is the asset's bubble, not a coin.
+    const underAsset = c.depth < 1 && c.quoteMint !== SOL_MINT && !this.model.coins.has(c.quoteMint);
+    if (c.depth < 1 && !underAsset) return false;
+    const p = underAsset ? null : this.model.get(c.quoteMint);
+    if (!underAsset && (!p || !p.tracked)) return false;
     const at = this.pairSent.get(mint);
     if (at != null && Date.now() - at < PAIR_DEDUPE_MS) return false;
     this.pairSent.set(mint, Date.now());
     if (this.pairSent.size > 5_000) for (const [m, t] of this.pairSent) { if (Date.now() - t >= PAIR_DEDUPE_MS) this.pairSent.delete(m); if (this.pairSent.size <= 2_500) break; }
     this.state.map.pairs++;
     // `parentMint` on both halves, as on a `since=` node, so a client that does not hold the parent yet can hang it under its own parent instead of drawing it as a root.
-    this.hub?.emit("pair", { coin: { ...this.model.mapRef(c, true), parentMint: p.mint }, parent: { ...this.model.mapRef(p, true), parentMint: p.depth > 0 ? p.quoteMint ?? null : null } });
+    const parent = underAsset ? { ...this.model.assetMapRef(c.quoteMint), parentMint: null } : { ...this.model.mapRef(p, true), parentMint: p.depth > 0 ? p.quoteMint ?? null : null };
+    this.hub?.emit("pair", { coin: { ...this.model.mapRef(c, true), parentMint: c.quoteMint }, parent });
     return true;
   }
   /**
@@ -102,7 +130,7 @@ export class Indexer {
       const c = this.model.get(mint);
       if (!c || !c.tracked) continue;
       const r = this.model.mapRef(c, true);
-      entries.push({ mint, mcapUsd: r.mcapUsd, lockedUsd: r.lockedUsd, children: r.children, descendants: r.descendants, migrated: r.migrated, name: r.name, symbol: r.symbol, image: r.image });
+      entries.push({ mint, mcapUsd: r.mcapUsd, mcapCapUsd: r.mcapCapUsd ?? null, lockedUsd: r.lockedUsd, children: r.children, descendants: r.descendants, migrated: r.migrated, name: r.name, symbol: r.symbol, image: r.image });
     }
     if (!entries.length) return null;
     entries.sort((a, b) => (b.lockedUsd ?? -1) - (a.lockedUsd ?? -1));
@@ -131,8 +159,38 @@ export class Indexer {
         const j = await r.json();
         if (j?.solana?.usd > 0) this.model.setSolUsd(Number(j.solana.usd));
         for (const [mint, id] of Object.entries(QUOTE_PRICE_IDS)) if (j?.[id]?.usd > 0) this.model.setQuoteUsd(mint, Number(j[id].usd));
+        // The asset's circulating market cap (its bubble's mcap; on-chain supply overstates PUMP about x2).
+        for (const [mint, id] of Object.entries(QUOTE_PRICE_IDS)) if (j?.[id]?.usd_market_cap > 0) this.model.setQuoteMcap(mint, Number(j[id].usd_market_cap));
       }
     } catch { /* keep the last prices (DESIGN §6.3) */ }
+  }
+
+  /**
+   * USD prices of the listed quote mints CoinGecko does not cover (the keys of assetFamilies() that are
+   * not SOL, not USDC, not a coin we track and not a CoinGecko mint), from Jupiter in batches of 50,
+   * sequential, 6 s each. Accepted: usdPrice > 0 with liquidity absent or >= JUP_MIN_LIQ_USD. Written
+   * with one setQuoteUsdMany (one bump); a failed batch keeps the last values. Returns the accepted map.
+   */
+  async refreshQuoteUsd({ fetchImpl = this.opts.fetch ?? fetch } = {}) {
+    const skip = new Set([SOL_MINT, USDC_MINT_STR, ...Object.keys(QUOTE_PRICE_IDS)]);
+    const mints = [...this.model.assetFamilies().keys()].filter((m) => !skip.has(m) && !this.model.get(m)?.tracked);
+    const got = {};
+    for (const batch of chunks(mints, JUP_BATCH)) {
+      try {
+        const r = await fetchImpl(JUP_PRICE + batch.join(","), { signal: AbortSignal.timeout(6_000) });
+        if (!r.ok) continue;
+        const j = await r.json();
+        for (const m of batch) {
+          // A Token-2022 ScaledUiAmount mint (tokenized stocks, pre-IPO tokens): usdPrice is per scaled UI unit, while every
+          // quote price here is per raw amount / 10^decimals, so the prescaled price is the one to use when Jupiter gives it.
+          const e = j?.[m]; const pre = Number(e?.scaledUiConfig?.usdPricePrescaled);
+          const p = pre > 0 && Number.isFinite(pre) ? pre : Number(e?.usdPrice); const liq = e?.liquidity;
+          if (p > 0 && Number.isFinite(p) && (liq == null || Number(liq) >= JUP_MIN_LIQ_USD)) got[m] = p;
+        }
+      } catch { /* keep the last prices for this batch */ }
+    }
+    if (Object.keys(got).length) this.model.setQuoteUsdMany(got);
+    return got;
   }
 
   // ---------------------------------------------------------------- backfill
@@ -173,6 +231,11 @@ export class Indexer {
     await this.ensureShares();
     if (this.opts.createdAtProbe) await this.probeCreatedAt();
     this.state.phase = "live";
+    // Coins quoted in a listed asset (USDC, PUMP, MON, …) are depth 0 on chain, so the depth scans never see
+    // them; before this only the ones with a child (found through its ancestor walk) reached the asset's
+    // family. One streamed walk of the whole pump key space (~5 min, ASSET_RESCAN_S apart) stages every one of
+    // them, after the service is live so the site never waits on it; the live stream adds the new ones between walks.
+    await this.scanAssetQuotes().catch((e) => this.log.warn(`backfill: assets: ${e.message}`));
   }
 
   /**
@@ -191,10 +254,12 @@ export class Indexer {
       if (stats.resolved >= limit) { this.log.info(`backfill: BACKFILL_LIMIT=${limit} reached (${stats.resolved} resolved)`); return; }
       const batch = db.backfillPending(Math.min(50, limit - stats.resolved));
       if (!batch.length) return;
+      await this.#fillCurveData(batch);
       let i = 0;
       await Promise.all(Array.from({ length: Math.min(concurrency, batch.length) }, async () => {
         while (i < batch.length && !this.stopped) {
           const row = batch[i++];
+          if (!row.data) { db.backfillFail(row.curve, "curve account gone"); continue; }
           try { await this.resolveOne(row); } catch (e) { db.backfillFail(row.curve, e.message); this.log.warn(`backfill: ${row.curve}: ${e.message}`); }
         }
       }));
@@ -227,23 +292,88 @@ export class Indexer {
     this.model.upsertCoin({ mint, ...curve, tracked: true });
     db.backfillResolve(key, mint);
   }
+  /**
+   * Every bonding curve quoted in a listed asset (depth 0 with a quote mint), staged for `resolveCurves` like
+   * the depth scans' rows: one streamed walk of the pump program reading a 110-byte slice of each curve (real
+   * quote reserves, `complete`, quote mint, depth), at most once per ASSET_RESCAN_S and one at a time. A staged
+   * row holds only that slice; `resolveCurves` fetches the full accounts for such rows in batches. Then the
+   * new coins are resolved, their parents, mint data and pools pulled. Returns how many curves were new.
+   */
+  async scanAssetQuotes() {
+    const db = this.model.db, key = "scanned:assets";
+    if (this.assetScanning || nowS() - db.backfillGet(key, 0) < ASSET_RESCAN_S) return 0;
+    this.assetScanning = true;
+    try {
+      const t0 = Date.now();
+      const rows = [];
+      const r = await this.rpc.scanProgramAccounts(PUMP_PROGRAM_ID.toBase58(), { filters: [{ memcmp: { offset: 0, bytes: bs58(BONDING_CURVE_DISCRIMINATOR) } }], dataSlice: { offset: CURVE_SLICE_OFFSET, length: CURVE_SLICE_LEN } }, (pubkey, slice) => {
+        if (slice.length < CURVE_SLICE_LEN) return;
+        const c = sliceCurve(slice);
+        if (!c.quoteMint || c.depth !== 0) return;
+        rows.push({ curve: pubkey, depth: 0, quoteMint: c.quoteMint, data: slice.toString("base64"), graduated: c.complete, rq: c.rq });
+      });
+      let staged = 0;
+      db.transaction(() => {
+        for (const row of rows) {
+          if (this.model.byCurve(row.curve) || db.backfillCurve(row.curve)?.resolvedAt) continue;
+          db.backfillCurveUpsert(row); staged++;
+        }
+      });
+      db.backfillSet(key, nowS());
+      this.model.setBackfill({ ...db.backfillStats() });
+      this.log.info(`backfill: assets: ${r.accounts} curves walked (${r.pages} pages), ${rows.length} quoted in a listed asset, ${staged} new, in ${Math.round((Date.now() - t0) / 1000)} s`);
+      if (staged) {
+        await this.resolveCurves();
+        await this.ensureAncestors();
+        await this.ensureMintInfo();
+        await this.ensurePools();
+        this.model.setBackfill({ ...db.backfillStats() });
+      }
+      return staged;
+    } finally { this.assetScanning = false; }
+  }
+  /** Rows staged by the asset walk hold a slice of the curve: fetch the full accounts (100 per call) and persist them. */
+  async #fillCurveData(batch) {
+    const short = batch.filter((r) => Buffer.from(r.data, "base64").length < CURVE_FULL_MIN);
+    if (!short.length) return;
+    const db = this.model.db;
+    for (const part of chunks(short, 100)) {
+      const infos = await this.rpc.getMultipleAccounts(part.map((r) => r.curve));
+      infos.forEach((info, i) => {
+        const row = part[i];
+        if (!info) { row.data = null; return; }
+        try {
+          const c = decodeCurve(info.data, row.curve);
+          row.data = info.data.toString("base64");
+          db.backfillCurveUpsert({ curve: row.curve, depth: c.depth, quoteMint: c.quoteMint, data: row.data, graduated: c.complete || c.migrated, rq: Number(BigInt(c.realQuoteReserves)) });
+        } catch { row.data = null; }
+      });
+    }
+  }
 
-  /** Every tracked coin's quote-mint chain down to depth 0 lives in the model (DESIGN §6.1). */
+  /**
+   * Every tracked coin's quote-mint chain down to depth 0 lives in the model (DESIGN §6.1). An ancestor that
+   * arrives already migrated gets its pool (vaults + virtual quote) read right away: without it every coin
+   * below it has no price until the rolling refresh reaches it (up to FULL_REFRESH_MS).
+   */
   async ensureAncestors({ rpc = this.rpc } = {}) {
+    const addedMints = [];
     for (let round = 0; round <= 6; round++) {
       const missing = new Set();
       for (const c of this.model.coins.values()) if (c.quoteMint && !this.model.coins.has(c.quoteMint) && !this.#isListedQuote(c.quoteMint)) missing.add(c.quoteMint);
-      if (!missing.size) return;
+      if (!missing.size) break;
       const mints = [...missing];
       const infos = await rpc.getMultipleAccounts(mints.map((m) => bondingCurvePda(m).toBase58()));
       let added = 0;
       infos.forEach((info, i) => {
         if (!info || info.owner !== PUMP_PROGRAM_ID.toBase58()) return;
-        try { this.model.upsertCoin({ mint: mints[i], ...decodeCurve(info.data, bondingCurvePda(mints[i])), tracked: true }); added++; } catch { /* not a curve */ }
+        try { this.model.upsertCoin({ mint: mints[i], ...decodeCurve(info.data, bondingCurvePda(mints[i])), tracked: true }); added++; addedMints.push(mints[i]); } catch { /* not a curve */ }
       });
       this.log.info(`backfill: ancestors round ${round}: ${added}/${mints.length} added`);
-      if (!added) return;
+      if (!added) break;
     }
+    const migrated = addedMints.map((m) => this.model.get(m)).filter((c) => c?.migrated);
+    if (migrated.length) await this.ensurePools(migrated, { rpc });
   }
   #isListedQuote(mint) {
     return mint === SOL_MINT || (this.model.global?.whitelistedQuoteMints ?? []).includes(mint) || !!this.quoteControlRaw?.mints.some((m) => m.mint.toBase58() === mint);
@@ -279,26 +409,87 @@ export class Indexer {
     if (mints.length) this.log.info(`mints: ${mints.length} fetched (${needMetaplex.length} via Metaplex)`);
   }
 
-  /** Canonical pool + vault balances for migrated coins (the price and locked source after graduation). */
+  /**
+   * Canonical pool, vault addresses and the pool's signed `virtual_quote_reserves` for migrated coins (the
+   * price and locked source after graduation), then their vault balances. A coin whose pool is already
+   * known but whose virtual quote was never read (rows written before it priced the pool) is read straight
+   * from its pool account. Returns `{ coins, read, vqNonZero, vqNegative }`.
+   */
   async ensurePools(only = null, { rpc = this.rpc } = {}) {
-    const coins = [...(only ?? this.model.coins.values())].filter((c) => c.migrated && !c.poolQuoteVault);
+    const coins = [...(only ?? this.model.coins.values())].filter((c) => c.migrated && (!c.poolQuoteVault || c.poolVirtualQuote == null));
+    const n = { coins: coins.length, read: 0, vqNonZero: 0, vqNegative: 0 };
     for (const part of chunks(coins, 100)) {
-      const pools = part.map((c) => canonicalPumpPoolPdaWithQuote(pk(c.mint), normalizeQuoteMint(c.quoteMint ? pk(c.quoteMint) : null)).toBase58());
+      const pools = part.map((c) => c.pool ?? canonicalPumpPoolPdaWithQuote(pk(c.mint), normalizeQuoteMint(c.quoteMint ? pk(c.quoteMint) : null)).toBase58());
       const infos = await rpc.getMultipleAccounts(pools);
       infos.forEach((info, i) => {
         const p = info ? decodePool(info.data) : null;
-        if (p) this.model.upsertCoin({ mint: part[i].mint, pool: pools[i], poolBaseVault: p.baseVault, poolQuoteVault: p.quoteVault });
+        if (!p) return;
+        n.read++;
+        const vq = BigInt(p.virtualQuoteReserves);
+        if (vq !== 0n) n.vqNonZero++;
+        if (vq < 0n) n.vqNegative++;
+        this.model.upsertCoin({ mint: part[i].mint, pool: pools[i], poolBaseVault: p.baseVault, poolQuoteVault: p.quoteVault, poolVirtualQuote: p.virtualQuoteReserves });
       });
     }
-    await this.refreshVaults(coins.map((c) => this.model.get(c.mint)).filter((c) => c?.poolQuoteVault), { rpc });
+    // The pool accounts were just read: only the vault balances are left.
+    await this.refreshVaults(coins.map((c) => this.model.get(c.mint)).filter((c) => c?.poolQuoteVault), { rpc, pools: false });
+    if (only == null && coins.length) this.log.info(`pools: ${coins.length} migrated coins to read; ${n.read} pools read, vq != 0 ${n.vqNonZero}, vq < 0 ${n.vqNegative}`);
+    this.state.pools = n;
+    return n;
   }
-  async refreshVaults(coins, { rpc = this.rpc } = {}) {
+  /** One pass of ensurePools over every coin (start-up backfill of the pool virtual quote); concurrent calls share it. */
+  backfillPoolVq() {
+    this.vqBackfill ??= this.ensurePools().catch((e) => { this.log.warn(`pools: ${e.message}`); return null; }).finally(() => { this.vqBackfill = null; });
+    return this.vqBackfill;
+  }
+  /** Migrated coins whose pool prices tracked children (they are those children's quote mint), most children first. */
+  pricingPools() {
+    const out = [];
+    for (const [mint, kids] of this.model.children) {
+      if (!kids.size) continue;
+      const c = this.model.get(mint);
+      if (!c?.migrated || !c.poolBaseVault || !c.poolQuoteVault) continue;
+      let n = 0;
+      for (const m of kids) if (this.model.get(m)?.tracked) n++;
+      if (n) out.push([c, n]);
+    }
+    return out.sort((a, b) => b[1] - a[1] || (a[0].mint < b[0].mint ? -1 : 1)).map(([c]) => c);
+  }
+  /** The next slice of pricingPools() for one refresh tick, sized so the whole set is re-read once per PRICING_POOL_MS. */
+  pricingSlice() {
+    const all = this.pricingPools();
+    if (!all.length) return [];
+    const n = Math.min(all.length, Math.max(20, Math.ceil(all.length * this.opts.refreshMs / PRICING_POOL_MS)));
+    const at = this.pricingCursor % all.length;
+    this.pricingCursor = (at + n) % all.length;
+    return Array.from({ length: n }, (_, i) => all[(at + i) % all.length]);
+  }
+  /** One pass of refreshVaults over every pool that prices other coins (start-up, after the virtual-quote backfill). */
+  async refreshPricingPools({ rpc = this.rpc } = {}) {
+    const pools = this.pricingPools();
+    if (!pools.length) return 0;
+    await this.refreshVaults(pools, { rpc });
+    this.state.pricingPoolsAt = nowS();
+    this.log.info(`pools: ${pools.length} pricing pools re-read`);
+    return pools.length;
+  }
+  /**
+   * Vault balances of migrated coins and, with `pools` (the default), the pool account itself for its signed
+   * `virtual_quote_reserves`, re-read every time (nothing proves it never changes): [pool, base vault, quote
+   * vault] per coin, 33 coins (99 accounts) per call. A pool account that does not decode keeps the last value.
+   */
+  async refreshVaults(coins, { rpc = this.rpc, pools = true } = {}) {
     const withPool = coins.filter((c) => c.poolBaseVault && c.poolQuoteVault);
-    for (const part of chunks(withPool, 50)) {
-      const infos = await rpc.getMultipleAccounts(part.flatMap((c) => [c.poolBaseVault, c.poolQuoteVault]));
+    for (const part of chunks(withPool, pools ? 33 : 50)) {
+      const keys = [], at = [];
+      for (const c of part) { at.push(keys.length); if (pools && c.pool) keys.push(c.pool); keys.push(c.poolBaseVault, c.poolQuoteVault); }
+      const infos = await rpc.getMultipleAccounts(keys);
       part.forEach((c, i) => {
-        const base = infos[2 * i] ? decodeTokenAccount(infos[2 * i].data) : null, quote = infos[2 * i + 1] ? decodeTokenAccount(infos[2 * i + 1].data) : null;
-        if (base && quote) this.model.upsertCoin({ mint: c.mint, poolBase: base.amount, poolQuote: quote.amount, refreshedAt: nowS() });
+        let k = at[i];
+        let p = null;
+        if (pools && c.pool) { p = infos[k] ? decodePool(infos[k].data) : null; k++; }
+        const base = infos[k] ? decodeTokenAccount(infos[k].data) : null, quote = infos[k + 1] ? decodeTokenAccount(infos[k + 1].data) : null;
+        if (base && quote) this.model.upsertCoin({ mint: c.mint, poolBase: base.amount, poolQuote: quote.amount, ...(p ? { poolVirtualQuote: p.virtualQuoteReserves } : {}), refreshedAt: nowS() });
       });
     }
   }
@@ -334,7 +525,7 @@ export class Indexer {
     try { await this.#enrich(mint, c.quoteMint); } catch (e) { this.log.warn(`adopt ${mint}: ${e.message}`); }
     this.hot.add(mint);
     const fresh = this.model.get(mint);
-    if (fresh && this.model.isOurCoin(fresh)) this.hub?.emit("coin", this.model.view(fresh));
+    if (fresh && this.model.isOurCoin(fresh)) this.hub?.emit("coin", this.model.view(fresh, { all: true }));
     this.announcePair(mint);
     return fresh;
   }
@@ -382,16 +573,22 @@ export class Indexer {
     });
   }
 
-  #onCreate(e, slot) {
-    // Depth 0 coins are only interesting as parents; a depth ≥ 1 coin is a spawn and joins the tree.
-    if (e.depth < 1) return;
+  #onCreate(e, slot) { this.onCreate(e, slot); }
+  /**
+   * A CreateEvent from the live stream. Depth 0 coins are only interesting as parents, except a coin quoted
+   * in a listed asset (USDC, MON, …): pump.fun counts it as a root, the map draws it under the asset's bubble
+   * (model.assetFamilies), so it joins the tree like a spawn. A depth ≥ 1 coin is a spawn and joins the tree.
+   */
+  onCreate(e, slot) {
+    const assetQuoted = e.depth < 1 && !!e.quoteMint && e.quoteMint !== SOL_MINT;
+    if (e.depth < 1 && !assetQuoted) return;
     this.#insertCreate(e, slot);
     // The map hears about the pair at once when the parent is already tracked (both modes), and
     // after the parent chain is pulled otherwise (announcePair dedupes the second try).
     this.announcePair(e.mint);
     // In "ours" mode a spawn is announced only once its sharing config names the platform (or the
     // UI reported it); the config lands in the same transaction, so it is read right away.
-    const emit = () => { const c = this.model.get(e.mint); if (c && (this.model.mode === "all" || this.model.isOurCoin(c))) this.hub?.emit("coin", this.model.view(c)); this.announcePair(e.mint); };
+    const emit = () => { const c = this.model.get(e.mint); if (c && (this.model.mode === "all" || this.model.isOurCoin(c))) this.hub?.emit("coin", this.model.view(c, { all: true })); this.announcePair(e.mint); };
     this.#enrich(e.mint, e.quoteMint).catch((x) => this.log.warn(`create ${e.mint}: ${x.message}`)).finally(emit);
     this.log.info(`live: spawn ${e.symbol} (${e.mint}) depth ${e.depth} under ${e.quoteMint ?? "SOL"}`);
   }
@@ -411,7 +608,7 @@ export class Indexer {
   }
   /** Unknown parent (a depth-0 coin that just became one): pull its chain; then mint data and the sharing config of the coin itself. */
   async #enrich(mint, quoteMint) {
-    if (quoteMint && !this.model.coins.has(quoteMint)) await this.ensureAncestors();
+    if (quoteMint && !this.model.coins.has(quoteMint) && !this.#isListedQuote(quoteMint)) await this.ensureAncestors();
     // A parent that was only looked at on demand (untracked, memory only) is a parent now: it
     // joins the tree so the map and the leaderboard can draw the pair.
     const parent = quoteMint ? this.model.get(quoteMint) : null;
@@ -432,7 +629,7 @@ export class Indexer {
   #onPoolTrade(mint, e, sig, slot, idx) {
     const c = this.model.upsertCoin({ mint, poolBase: e.poolBaseReserves, poolQuote: e.poolQuoteReserves });
     const baseDecimals = this.model.decimalsOf(mint), quoteDecimals = this.model.quoteDecimals(c);
-    const priceQuote = poolPriceQuote(e.poolQuoteReserves, e.poolBaseReserves, baseDecimals, quoteDecimals);
+    const priceQuote = poolPriceQuote(e.poolQuoteReserves, e.poolBaseReserves, baseDecimals, quoteDecimals, c.poolVirtualQuote);
     if (priceQuote == null) return;
     this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, priceQuote });
   }
@@ -450,7 +647,7 @@ export class Indexer {
   #onComplete(e) {
     const c = this.model.upsertCoin({ mint: e.mint, complete: true });
     this.hot.add(e.mint);
-    this.hub?.emit("coin", this.model.view(c));
+    this.hub?.emit("coin", this.model.view(c, { all: true }));
     this.log.info(`live: ${e.mint} completed its curve`);
   }
 
@@ -497,7 +694,10 @@ export class Indexer {
       // Re-read the model: the objects in `coins` predate the upserts above.
       const fresh = coins.map((c) => this.model.get(c.mint)).filter(Boolean);
       await this.ensurePools(fresh.filter((c) => newlyMigrated.has(c.mint) || (c.migrated && !c.poolQuoteVault)));
-      await this.refreshVaults(fresh.filter((c) => c.migrated && c.poolQuoteVault && !newlyMigrated.has(c.mint)));
+      const vaults = new Map(fresh.filter((c) => c.migrated && c.poolQuoteVault && !newlyMigrated.has(c.mint)).map((c) => [c.mint, c]));
+      for (const c of this.pricingSlice()) if (!newlyMigrated.has(c.mint)) vaults.set(c.mint, c);
+      await this.refreshVaults([...vaults.values()]);
+      this.state.lastVaultsAt = nowS();
       await this.ensureMintInfo(fresh);
       await this.ensureShares(fresh.filter((c) => hotMints.has(c.mint) || nowS() - (c.sharesAt ?? 0) > SHARES_TTL_S), { force: true });
       for (const c of coins) { const uri = this.model.mint(c.mint)?.uri; if (uri) this.meta?.request(uri, { front: hotMints.has(c.mint) }); }

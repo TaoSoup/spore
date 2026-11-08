@@ -54,6 +54,12 @@ npm run fixtures                # re-capture test/fixtures from mainnet (read-on
 | `PUBLIC_URL` | `https://sporepad.com` | Origin the partner API (`/v1`) builds absolute links and image URLs on. |
 | `V1_RATE_PUBLIC` / `V1_RATE_PARTNER` | `60` / `1200` | `/v1` requests per minute: per client IP without a key, per key with one. |
 | `V1_STREAMS_PUBLIC` / `V1_STREAMS_PARTNER` / `V1_STREAMS_MAX` | `2` / `20` / `2000` | Concurrent `/v1/stream` connections per IP, per key, and in total. |
+| `AGENTS` | `off` | Root agents (DESIGN §13). `off`: nothing runs (the read API still serves what is stored). `dry`: agents propose coins and build + simulate their launch transactions; nothing is ever signed or sent. |
+| `AGENT_TICK_SEC` | `300` | How often the agents' loop evaluates each enabled agent (10 … 86 400). |
+| `AGENT_MIN_SCORE` / `AGENT_COOLDOWN_MIN` / `AGENT_MAX_PER_HOUR` | `40` / `60` / `12` | Proposal gates: minimum momentum score, minutes between two proposals of one root, proposals per hour across all agents. |
+| `AGENT_PROBE` | `dBs75Gf7RXQMAsMLuTLYdH2fHV1ac9zgCEh6zC7TxXs` | Funded public wallet that pays the fee in launch simulations (only its address is used). |
+| `LLM_URL` / `LLM_MODEL` | unset | Language model for the agents: a `/chat/completions` endpoint in the common JSON chat format and the model name. Unset = deterministic fallback. |
+| `LLM_KEY_FILE` | unset | File holding the provider key (read once, never logged). `LLM_KEY` in the environment is refused at boot. |
 
 Every variable is validated at boot by `lib/config.mjs`; a bad value stops the process with every
 problem listed (`spore: invalid configuration: - PORT=… must be …`). `deploy/env.example` documents
@@ -245,8 +251,60 @@ first (see the security notes in the fix report).
 `node:sqlite`, WAL mode: `coins`, `mints`, `trades` (≤ 2 000 per mint, 24 h volume and candles),
 `meta` (off-chain JSON cache with `attempts`; weekly re-read of a resolved image, backoff retries from
 15 min to 24 h, IPFS gateway rotation), `backfill_curves`, `backfill_state`, `kv` (SOL price,
-decoded `Global`, schema version), `api_keys` (partner keys as sha256, usage counters). `coins.updated_at` is milliseconds (v3). Migrations are idempotent
-(`CREATE IF NOT EXISTS` plus versioned column additions; v3 also rescales `updated_at` once).
+decoded `Global`, schema version), `api_keys` (partner keys as sha256, usage counters), `agents` and
+`agent_proposals` (root agents: status, profile, run counters; every proposal with its simulation;
+logos as files in `DATA_DIR/agents/`). `coins.updated_at` is milliseconds (v3). Migrations are idempotent
+(`CREATE IF NOT EXISTS` plus versioned column additions; v3 also rescales `updated_at` once; new tables
+need no version bump).
+
+## Root agents (DESIGN §13, phase 0: dry run)
+
+**On the site (DESIGN §13.2).** The API serves only public agents — roots that are Spore launches
+(`model.isOurCoin`) and agents the owner runs; a paused agent of a foreign root (the 2026-10-19 seeds)
+is never served — and, for each, its wallet and balances, lifetime totals, the coins it launched and
+its activity, read from the live ledger `DATA_DIR/agents/ledger.jsonl` (`lib/agents-live/ledger.mjs`:
+tailed incrementally by byte offset, malformed lines skipped and counted in `/api/health.agents.ledger`,
+the lines of one action folded into one item with a human title and its transaction). Balances come
+from the live pass under `AGENTS=live`, else from the RPC on the api lane, cached 60 s per address.
+Nothing is written for the site; `AGENTS=off` still serves what is stored.
+
+Every root coin can have an agent that learns what the coin is about and proposes new coins under it.
+In this phase an agent **never signs or sends anything and holds no key**: it builds the exact launch
+transaction and simulates it. That is enforced in code: `lib/agents/` has no keypair type, signing or
+send call (a test scans it), all chain access goes through `readOnlyRpc` (five reads plus
+`simulateTransaction`, everything else throws), and the agent wallet and the mint are placeholder PDAs
+(off-curve: no private key can exist).
+
+One run (`lib/agents/runner.mjs`): **profile** (`profile.mjs`, built once: summary, 3-8 themes, tone,
+avoid, palette; from the language model when `LLM_URL`/`LLM_KEY_FILE`/`LLM_MODEL` are set, else a
+deterministic keyword fallback) → **momentum score** (`scorer.mjs`: trades/buys in the last hour, 24 h
+trades and volume from `lib/activity.mjs`, children, time since the last proposal; 0-100 with a reason)
+→ **gates** (score ≥ `AGENT_MIN_SCORE`, one per root per `AGENT_COOLDOWN_MIN`, ≤ `AGENT_MAX_PER_HOUR`
+across agents; only depth-0, non-mayhem roots) → **six ideas** (`designer.mjs`: model ideas topped up by
+templates, wordplay on the ticker), filtered (lengths, plain text, no links, `blocklist.mjs` people and
+brands, hashed slurs and vulgar words, tickers of the root's children and the 2 000 biggest coins, a
+child's name, near-duplicates of the root ticker) and ranked (theme fit, brevity, uniqueness) → **logo**
+(`logo.mjs`: SVG from the palette, a motif and stroke-font letters, rasterised by `@resvg/resvg-wasm`,
+512×512 PNG in `DATA_DIR/agents/<id>.png`) → **simulation** (`simulate.mjs`: create_v2 under the root +
+sharing config with Spore's split for the agent's placeholder, the same instructions as the web's
+`buildSpawnTx`, two transactions under a migrated root; the first simulated with the probe wallet paying
+the fee and lending the placeholder 0.1 SOL, the second's rent computed) → stored proposal (`proposed`,
+or `rejected` when the simulation failed) → SSE `agent { root, proposal }`.
+
+With `AGENTS=dry` the loop runs in-process every `AGENT_TICK_SEC`, one run at a time, on the api RPC
+lane; it also announces proposals the CLI wrote. Measured 2026-10-19 on the full-data copy: a run takes
+≈ 1.5 s (most of it the simulation's five reads), the first launch transaction is 884-891 B and uses
+145-205 k CU, the estimated cost is ≈ 0.0148 SOL (no launch fee).
+
+```
+node --disable-warning=ExperimentalWarning scripts/agents.mjs seed                      # enable the six seed roots
+node --disable-warning=ExperimentalWarning scripts/agents.mjs enable <rootMint>          # depth-0 indexed roots only; builds the profile
+node --disable-warning=ExperimentalWarning scripts/agents.mjs run-once <rootMint>        # one dry run now (past the gates unless --gated)
+node --disable-warning=ExperimentalWarning scripts/agents.mjs rebuild-profile <rootMint>
+node --disable-warning=ExperimentalWarning scripts/agents.mjs pause <rootMint>
+node --disable-warning=ExperimentalWarning scripts/agents.mjs list
+```
+Same `DATA_DIR` (or `--data`) and environment as the server (`RPC_URL` for run-once).
 
 ## API
 
@@ -271,7 +329,12 @@ DESIGN §7, plus a few extras that never replace a contract field:
 - `GET /api/fees/:mint` → `{ mint, quoteMint, quoteSymbol, quoteDecimals, quoteUsd, shares, bucket, vault, amm, total, totalUsd, perShare: [{ address, bps, amount }], migrated, claimable, reason, updatedAt }` (DESIGN §11.6): one coin's pending creator fees for the coin page's "Creator fees" card, read live on the api lane from the curve's `creatorFee` bucket (`bucket`), the sharing config's creator vault (`vault`: SOL above the vault's rent floor, or the vault's quote ATA) and, once migrated, the AMM creator vault ATA plus the pool's unswept `creator_fees` (`amm`); amounts are raw quote units as strings (`quoteMint` null = SOL), `shares` is the on-chain config (null when there is none; a config the indexer has not seen yet is adopted into the model), `perShare` is each shareholder's cut of `total`, `claimable` is false with a `reason` for a holder-reward coin, a coin without a config or an empty total (the browser's preflight simulation decides the program's minimum); cached 15 s per mint (`updatedAt` moves when it refreshes, so a refetch right after a claim may still show the old numbers), ETag + `max-age=5`, 404 for a mint pump.fun does not know, 503 while the RPC is unreachable and nothing is cached
 - `GET /api/claims/:wallet` → `{ wallet, coins: [CoinRef & Fees & { yourBps, yourAmount, yourUsd }], totals: { usd, byQuote: [{ quoteMint, quoteSymbol, quoteDecimals, amount, usd }] }, updatedAt }`: every indexed coin whose fee-sharing config names the wallet (max 100), sorted by the wallet's part in USD; 400 on a malformed wallet (DESIGN §11.7).
 - `GET /api/claims?limit=50` → `{ coins, totals, updatedAt }`: the Spore launches with creator fees waiting, biggest first; cached 30 s. Both read fee accounts in batches through the per-mint cache `/api/fees` uses.
-- `GET /api/health` → `{ ok, status, uptimeS, indexer: { phase, lagS, backfill }, ws: { connected, lastMessageAgoMs, backoffMs }, rpc, rpcLanes, meta, images, metahost (+ quota), treasury, sse, sseStats, memoryMb }`; `?strict=1` answers 503 when degraded (socket down > 2 min or no refresh for 5 min)
+- `GET /api/agents` → `{ mode, agents: [{ root, status, profile, stats: { runs, proposals, lastRunAt, nextRunAt, score, scoreReason }, latest, model, modelLabel, wallet, totals, launched, activity }] }`: every public root agent (DESIGN §13, §13.2: Spore roots and agents the owner runs; a paused agent of a foreign root is never served), running ones first, with the root's live momentum, its latest proposal, its wallet `{ address, sol, usdc, usd, updatedAt }` (balances from the live pass or the RPC, 60 s cache; null until read), lifetime totals from its ledger `{ launches, launchSol, claimsSol, claimsUsd, aiUsd, aiCalls, payoutsSol, payoutsUsdc, lastActivityAt }`, the last 12 coins it launched `{ mint, name, symbol, image, createdAt, signature, why, logoSource }` and its last 8 actions `{ at, kind: launch|claim|payout|ai|swap|split, status, title, amountSol, amountUsdc, usd, mint, symbol, signature, explorer }` with human titles (`Launched $X`, `Claimed 0.0549 SOL from $SPORE`, `Paid 0.12 SOL to the owner`, `Thought with Claude Sonnet 5.5 ($0.013)`, `Drew a logo ($0.008)`); `max-age=10` + ETag
+- `GET /api/agents/:root` → `{ agent, proposals, activity, launched }`: the agent, its proposals (newest first, ≤ 50), its last 200 actions and every coin it launched; 400 malformed, 404 when the coin has no public agent. A proposal is `{ id, createdAt, name, symbol, description, image, score, reason, sim: { ok, bytes, unitsConsumed, estCostSol, err }, source, why, logoSource, runnersUp, status, rejectedReason }`; `image` is `/api/agents/img/<id>.png`
+- `GET /api/agents/coin/:mint` → `{ role: "root" | "child" | null, root, agent: { address, status, wallet, totals, model, modelLabel } | null, launch: { signature, at, why, logoSource, proposalId } | null }`: what a coin page shows — the mint has a public agent (`root`), a public agent launched it (`child`), or neither (`null` role with a 200; a coin without an agent is the normal case); 400 malformed
+- `GET /api/agents/img/<id>.png` → a proposal's logo (immutable; only files a stored proposal names, 404 otherwise; on the image rate limit)
+- `GET /api/health` → `{ ok, status, uptimeS, indexer: { phase, lagS, backfill }, ws: { connected, lastMessageAgoMs, backoffMs }, rpc, rpcLanes, meta, images, metahost (+ quota), treasury, sse, sseStats, agents, memoryMb }`; `?strict=1` answers 503 when degraded (socket down > 2 min or no refresh for 5 min)
+- SSE `agent { root, proposal }` on `/api/events` whenever an agent stores a proposal (also one the CLI wrote, within one tick)
 
 ## Partner API (/v1, DESIGN §12)
 
@@ -281,6 +344,7 @@ Read-only data for other trading terminals, versioned under `/v1` (`lib/v1.mjs`,
 - `GET /v1/coin/:mint/family` → `{ mint, name, symbol, image, depth, quoteMint, quoteSymbol, root, parent, ancestors, children: { count, top }, descendants, lockedUsd, mcapUsd, change24h, trades1h, launchedOnSpore, links }`: any pump.fun mint (live lookup on the api RPC lane when not indexed; 404 when it is not a pump coin, 503 when the lookup fails); `top` = up to 20 children by locked value; `change24h` in percent against the last trade at or before 24 h ago (null without trades); cached 5 s per mint.
 - `GET /v1/tree/:mint` → `{ root, nodes: [{ ...MapCoin, parentMint }], total }`: the whole tree containing the mint, root first, breadth-first, siblings by locked value; cached 10 s per root.
 - `GET /v1/map[?since=<ms>]` and `GET /v1/heat`: the `/api/map?scope=all&limit=all` and `/api/map/heat` bodies from the same caches (the map bytes rewritten once per build so images are absolute; `since` rounded down to the second).
+- `GET /v1/agents`, `GET /v1/agents/:root` and `GET /v1/agents/coin/:mint`: the `/api/agents` bodies with absolute image URLs (root images, launched coins and logos on `PUBLIC_URL`); `agent` is also an opt-in `/v1/stream` type.
 - `GET /v1/stream?types=pair,trade,heat,stats[,mapdelta,coin][&mint=<coin>]`: the hub's events (the hub has a `subscribe` hook for in-process listeners), filtered by type and by the tree of `mint` (root resolved per event), `heat` rows derived per trade, absolute images, `retry: 3000`, heartbeat every 25 s, backpressure cut at 256 KB.
 - `GET /v1/openapi.json`: the OpenAPI 3.1 document (tests check that every route is listed and every `$ref` resolves).
 
@@ -359,8 +423,15 @@ lib/api.mjs         express routes
 lib/v1.mjs          partner API: tiers, family/tree/map/heat, filtered stream (DESIGN §12)
 lib/openapi.mjs     OpenAPI 3.1 document of /v1
 lib/apikeys.mjs     partner keys: generation, sha256 storage, verify cache, batched usage counters
+lib/agents-live/ledger.mjs  the agents' ledger for the site (DESIGN §13.2): incremental tail by byte offset, one item per action, human titles, totals
+lib/agents/         root agents, dry run (DESIGN §13): registry (tables + API views, the site's views §13.2), profile, llm (provider + key file), scorer (momentum + gates),
+                    designer (ideas, filters, rubric), blocklist (people, brands, hashed slurs), logo (SVG → PNG via resvg-wasm), simulate (read-only RPC,
+                    placeholder keys, launch build + simulation), runner (loop, one run at a time, SSE announce)
 scripts/capture-fixtures.mjs   captures real events/accounts into test/fixtures
 scripts/backup.mjs             online sqlite backup (backup API, integrity check, retention)
 scripts/keys.mjs               partner API keys: create (printed once) / list / revoke / usage
-test/*.test.mjs     decoders (real bytes), pricing, split, launch fee, allowlists, db, model, ours mode (model + API, bps floor), spawn verification (real create tx, fixtures/tx-create.json), indexer adopt + lookup cache, metadata host (deploy lock, quotas, gc), API contract (incl. proxy rules), hardening (headers, CSP, 413, 429, compression, ETag, health, treasury, upload validation), per-coin fees (shape, split, migrated SOL vaults, cache, 304, 404, no config / nothing / holder-reward), SSE caps, validation, SSRF guards (v6 forms, pinning), config, RPC lanes, live reconnect, treasury, partner API (shapes, 404s, live lookup, cache headers, CORS, read-only, tiers, stream filters, embed framing, OpenAPI refs), API keys (format, hash-only storage, revocation, batched usage, CLI), network smoke
+scripts/agents.mjs             root agents: enable / pause / rebuild-profile / run-once / list / seed
+test/*.test.mjs     root agents (profile fallback + model path + key never logged, scorer gates, designer filters, logo PNG, no signer / read-only RPC /
+                    ledger reader (offsets, malformed lines, folding, titles, totals), site views (public rule, wallets, balance cache, coin roles),
+                    placeholder keys, launch shape, runner pipeline + kill switch + one-at-a-time, API + /v1 shapes, CLI; mainnet simulation with RPC_URL), decoders (real bytes), pricing, split, launch fee, allowlists, db, model, ours mode (model + API, bps floor), spawn verification (real create tx, fixtures/tx-create.json), indexer adopt + lookup cache, metadata host (deploy lock, quotas, gc), API contract (incl. proxy rules), hardening (headers, CSP, 413, 429, compression, ETag, health, treasury, upload validation), per-coin fees (shape, split, migrated SOL vaults, cache, 304, 404, no config / nothing / holder-reward), SSE caps, validation, SSRF guards (v6 forms, pinning), config, RPC lanes, live reconnect, treasury, partner API (shapes, 404s, live lookup, cache headers, CORS, read-only, tiers, stream filters, embed framing, OpenAPI refs), API keys (format, hash-only storage, revocation, batched usage, CLI), network smoke
 ```

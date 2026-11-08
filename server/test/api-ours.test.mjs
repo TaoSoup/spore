@@ -77,7 +77,12 @@ test("GET /api/roots: depth-0 ancestors of our coins, counts over our descendant
 });
 
 test("GET /api/coin: children filtered, otherChildren reported; a foreign coin still opens", async () => {
-  const root = await get(`/api/coin/${K.ROOT}`);
+  // (2026-10-21) default = every pump.fun child, like the map; `scope=ours` keeps the listing-mode view
+  const all = await get(`/api/coin/${K.ROOT}`);
+  assert.equal(all.body.otherChildren, 0); assert.equal(all.body.coin.otherChildren, 0);
+  assert.equal(all.body.children.length, 3, "every pump.fun child by default");
+  assert.ok([K.A, K.B].every((m) => all.body.children.some((c) => c.mint === m)));
+  const root = await get(`/api/coin/${K.ROOT}?scope=ours`);
   assert.deepEqual(root.body.children.map((c) => c.mint).sort(), [K.A, K.B].sort());
   assert.equal(root.body.otherChildren, 1);
   assert.equal(root.body.children.find((c) => c.mint === K.B).ours, false, "FOREIGN is context on the way to DEEP");
@@ -86,7 +91,9 @@ test("GET /api/coin: children filtered, otherChildren reported; a foreign coin s
 });
 
 test("GET /api/tree and /api/map follow the scope; /api/candles is 404 off-scope", async () => {
-  const tree = await get(`/api/tree/${K.ROOT}?depth=3`);
+  const treeAll = await get(`/api/tree/${K.ROOT}?depth=3`);
+  assert.equal(treeAll.body.children.length, 3, "the whole pump.fun tree by default"); assert.equal(treeAll.body.coin.otherChildren, 0);
+  const tree = await get(`/api/tree/${K.ROOT}?depth=3&scope=ours`);
   assert.deepEqual(tree.body.children.map((n) => n.coin.mint).sort(), [K.A, K.B].sort());
   assert.deepEqual(tree.body.children.find((n) => n.coin.mint === K.B).children.map((n) => n.coin.mint), [K.G]);
   const map = await get("/api/map");
@@ -144,7 +151,7 @@ test("POST /api/spawned: the transaction is verified on-chain before the coin is
   // Unknown mint (not indexed yet) with a verified create: pending only.
   const u = await post("/api/spawned", { mint: "9CuFcRfiqEsBEQUCPTTVHaruQU7n9N7HKNSEk5VEivu", sig: SIG.U });
   assert.deepEqual([u.body.ours, u.body.oursPending, u.body.coin], [false, true, null]);
-  for (let i = 0; i < 20; i++) await post("/api/spawned", { mint: K.A, sig: SIG.X });
+  for (let i = 0; i < 200; i++) await post("/api/spawned", { mint: K.A, sig: SIG.X });
   assert.equal((await post("/api/spawned", { mint: K.A, sig: SIG.X })).status, 429);
   // clean up for the other tests
   model.pending.delete(K.X); model.pending.delete("9CuFcRfiqEsBEQUCPTTVHaruQU7n9N7HKNSEk5VEivu"); model.sweepPending(); model.upsertCoin({ mint: K.X, updatedAt: 1, feePaid: null });

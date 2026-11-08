@@ -92,7 +92,7 @@ export default function StreamConsole() {
       <ol className="docs-console-log" aria-label="Received events" aria-live="off">
         {lines.length === 0 ? <li className="docs-console-empty">{on ? "Waiting for the first event… trades arrive every few seconds; new pairs are rarer." : "Press Connect to open the stream from this page."}</li>
           : lines.map((l) => (
-            <li key={l.id}>
+            <li key={l.id} className="is-new">
               <details>
                 <summary><time className="mono">{clock(l.at)}</time><span className={`docs-ev type-${l.type}`}>{l.type}</span><span className="docs-console-text">{l.text}</span></summary>
                 <pre><code>{pretty(l.raw)}</code></pre>
