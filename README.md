@@ -31,10 +31,6 @@ npm run build                        # web/dist is served by the API
 
 Tests: `cd server && npm test` · `cd web && npm run typecheck`. Mainnet transaction simulations: `web/test/simulate.mts` (see `web/test/README.md`).
 
-## Public API
-
-The API behind sporepad.com is open to read: `GET /api/map?scope=all&limit=all` (the whole forest, `since=<ms>` for deltas), `/api/stats`, `/api/coin/<mint>`, `/api/search?q=`, `/api/eligibility/<mint>`, `/api/candles/<mint>`, SSE `/api/events` (`pair`, `mapdelta`, `trade`, `coin`, `stats`). Shapes are documented in `server/README.md`.
-
 ## License
 
 MIT — see `LICENSE`.
