@@ -15,6 +15,10 @@ import { parseQuote, buildPayment, createPaidLlm, createPaymentLedger, PayError 
 const ROOT = "HfzNFxar7oggDCHnK2ekkygDsLNuCGh3dXdRQS3wJTJY";
 const ROOT2 = "BsbsB3WLq7vbY5En3MBCAsTrcwaCxNKY2Mp5pGuLpump";
 const tmp = () => mkdtempSync(join(tmpdir(), "spore-agents-live-"));
+// Windows has no POSIX permission bits (statSync reports 666 whatever mode a file was written with),
+// and readVaultKey skips its mode check there, so the mode-600 checks run elsewhere only.
+const POSIX_MODES = process.platform !== "win32";
+const assertMode600 = (file) => { if (POSIX_MODES) assert.equal(statSync(file).mode & 0o777, 0o600); };
 
 function vaultIn(dir) {
   const keyFile = join(dir, "vault.key");
@@ -25,11 +29,11 @@ function vaultIn(dir) {
 test("vault: key file is created once, mode 600, and refuses loose permissions", () => {
   const dir = tmp(), keyFile = join(dir, "vault.key");
   initVaultKey(keyFile);
-  assert.equal(statSync(keyFile).mode & 0o777, 0o600);
+  assertMode600(keyFile);
   assert.throws(() => initVaultKey(keyFile), VaultError);
   assert.equal(readVaultKey(keyFile).length, 32);
   chmodSync(keyFile, 0o644);
-  assert.throws(() => readVaultKey(keyFile), /mode 600/);
+  if (POSIX_MODES) assert.throws(() => readVaultKey(keyFile), /mode 600/);
 });
 
 test("vault: creates a wallet once, address round-trips, file is 600 and holds no plain secret", () => {
@@ -40,7 +44,7 @@ test("vault: creates a wallet once, address round-trips, file is 600 and holds n
   assert.ok(vault.has(ROOT));
   assert.throws(() => vault.create(ROOT), /already has a wallet/);
   const file = join(vault.dir, `${ROOT}.json`);
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assertMode600(file);
   const rec = JSON.parse(readFileSync(file, "utf8"));
   assert.deepEqual(Object.keys(rec).sort(), ["address", "createdAt", "ct", "iv", "root", "tag", "v"]);
   assert.equal(rec.address, w.address);

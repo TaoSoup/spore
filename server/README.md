@@ -10,7 +10,7 @@ charges a launch fee at spawn and hosts metadata itself (pump.fun's IPFS upload 
 
 ```
 npm start                       # production: BACKFILL on, serves ../web/dist if built
-npm run dev                     # BACKFILL_LIMIT=150: a bounded backfill that finishes in ~1 min on the public RPC
+npm run dev                     # --backfill-limit=150 (= BACKFILL_LIMIT=150): a bounded backfill that finishes in ~1 min on the public RPC
 npm test                        # node --test (SPORE_NET=0 skips the mainnet smoke test)
 npm run fixtures                # re-capture test/fixtures from mainnet (read-only)
 ```
@@ -34,7 +34,7 @@ npm run fixtures                # re-capture test/fixtures from mainnet (read-on
 | `REFRESH_MS` | `30000` | Refresh tick. Hot coins (live activity, recently viewed) are re-read every tick. |
 | `FULL_REFRESH_MS` | `1200000` | Every tracked curve is re-read once per this window, spread over the ticks. |
 | `BACKFILL` | `1` | `0` disables the backfill (live subscription only). |
-| `BACKFILL_LIMIT` | unlimited | Stop resolving curves after this many (development). |
+| `BACKFILL_LIMIT` | unlimited | Stop resolving curves after this many (development). The flag `--backfill-limit=N` after `index.mjs` sets it too and wins over the environment (`npm run dev` uses it, so the script runs under cmd.exe). |
 | `CONCURRENCY` | `4` | Parallel RPC requests. |
 | `RPC_RPS` | `4` public / `40` otherwise | Request budget per second of the indexer lane (backfill, refresh, live); the public RPC caps each method at ~40 per 10 s per IP. |
 | `RPC_API_RPS` / `RPC_PROXY_RPS` | `RPC_RPS / 4` (min 1) | Separate budgets for request-driven lookups (unknown coin pages, eligibility, spawn verification) and for the browser's `/api/rpc` traffic. A 429 pauses only the lane that hit it, so a client can never stall the indexer. |

@@ -6,7 +6,7 @@
 import express from "express";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { brotliCompressSync, gzipSync, constants as Z } from "node:zlib";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { checkEligibility } from "./eligibility.mjs";
 import { PublicKey, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, PUMP_FEE_PROGRAM_ID, VersionedTransaction } from "./sdk.mjs";
 import { META_NAME_RE, META_TYPES, QuotaError } from "./metahost.mjs";
@@ -777,7 +777,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     };
     app.get("/", wrap(sendIndex));
     app.use(express.static(distDir, { index: false, fallthrough: true, setHeaders: (res, p) => {
-      if (p.includes(`${join(distDir, "assets")}/`)) res.setHeader("cache-control", "public, max-age=31536000, immutable");
+      if (p.includes(`${join(distDir, "assets")}${sep}`)) res.setHeader("cache-control", "public, max-age=31536000, immutable");
       else res.setHeader("cache-control", "public, max-age=3600");
     } }));
     app.get(/^(?!\/(api|v1)(\/|$)).*/, wrap((req, res) => (req.path.includes(".") ? res.status(404).type("text").send("not found") : sendIndex(req, res))));

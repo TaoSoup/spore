@@ -31,6 +31,23 @@ export const DEFAULT_QUOTA = { ipPerDay: 500, bytesPerDay: 256 * 1024 * 1024, de
 export const DEFAULT_GC_MS = 24 * 3600_000;
 const DAY_MS = 24 * 3600_000;
 
+/**
+ * `{ file, args, shell }` for execFile to run `npx <args>`. POSIX: npx itself, no shell. Windows: npx
+ * is npx.cmd, which Node starts only through cmd.exe (`shell: true`; a .cmd spawned directly fails
+ * with EINVAL since the CVE-2024-27980 fix), and cmd.exe takes one command line. So every argument is
+ * double-quoted, with trailing backslashes doubled so they cannot escape the closing quote, and an
+ * argument holding what cmd.exe would still expand or split on inside quotes (`"`, `%`, a line
+ * break) is refused. `npx` itself stays bare: a batch file started by a quoted bare name gets the
+ * current directory as its %~dp0, and npm's npx.cmd finds npx-cli.js through %~dp0.
+ * Also used by tools/publish-meta.mjs.
+ */
+export function npxCommand(args, platform = process.platform) {
+  if (platform !== "win32") return { file: "npx", args, shell: false };
+  const bad = args.find((a) => /["%\r\n]/.test(a));
+  if (bad !== undefined) throw new Error(`cannot pass ${JSON.stringify(bad)} to npx on Windows (cmd.exe would alter it)`);
+  return { file: ["npx", ...args.map((a) => `"${a.replace(/(\\+)$/, "$1$1")}"`)].join(" "), args: [], shell: true };
+}
+
 /** Thrown when a daily quota is exhausted; the API answers 429 with `retryAfter`. */
 export class QuotaError extends Error {
   constructor(message, retryAfter) { super(message); this.name = "QuotaError"; this.retryAfter = retryAfter; }
@@ -190,8 +207,9 @@ export class MetaHost {
     return new Promise((resolveP, reject) => {
       // Never put the token on the command line: it travels in the environment only.
       const env = { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: this.accountId };
-      execFile("npx", [WRANGLER, "pages", "deploy", this.root, "--project-name", this.project, "--branch", "main", "--commit-dirty=true"],
-        { env, cwd: this.cwd, timeout: this.timeoutMs, maxBuffer: 8 * 1024 * 1024, encoding: "utf8" },
+      const npx = npxCommand([WRANGLER, "pages", "deploy", this.root, "--project-name", this.project, "--branch", "main", "--commit-dirty=true"]);
+      execFile(npx.file, npx.args,
+        { env, cwd: this.cwd, timeout: this.timeoutMs, maxBuffer: 8 * 1024 * 1024, encoding: "utf8", shell: npx.shell },
         (err, stdout, stderr) => {
           if (err) {
             const why = err.killed || err.signal === "SIGTERM" ? `timed out after ${Math.round(this.timeoutMs / 1000)} s` : (String(stderr || stdout || err.message).trim().split("\n").filter(Boolean).slice(-3).join(" | ") || `exit ${err.code}`);

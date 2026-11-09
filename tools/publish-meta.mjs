@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { npxCommand } from "../server/lib/metahost.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 ? process.argv[i + 1] : d; };
@@ -41,7 +42,8 @@ if (!existsSync(join(ROOT, "index.html"))) writeFileSync(join(ROOT, "index.html"
 const uri = `https://${DOMAIN}/m/${jsonName}`;
 if (!flag("no-deploy")) {
   const token = readFileSync(`${homedir()}/.cloudflare-token`, "utf8").trim();
-  const out = execFileSync("npx", ["wrangler@3.99.0", "pages", "deploy", ROOT, "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"], { env: { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID ?? "<account-id>" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 180_000 });
+  const npx = npxCommand(["wrangler@3.99.0", "pages", "deploy", ROOT, "--project-name", PROJECT, "--branch", "main", "--commit-dirty=true"]);
+  const out = execFileSync(npx.file, npx.args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: token, CLOUDFLARE_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID ?? "<account-id>" }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 180_000, shell: npx.shell });
   const m = out.match(/https:\/\/[a-z0-9.-]+\.pages\.dev/g);
   console.error(`deployed${m ? ` (${m[m.length - 1]})` : ""}`);
 }

@@ -44,6 +44,21 @@ test("overrides: Helius-style URLs derive the socket, ORIGINS parsed, trust prox
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("command-line flags: --backfill-limit=N (npm run dev) sets BACKFILL_LIMIT over the environment; other arguments ignored", () => {
+  const dir = tmp();
+  try {
+    const base = { DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m") };
+    assert.equal(loadConfig(base, { here: dir, argv: ["--backfill-limit=150"] }).backfillLimit, 150);
+    assert.equal(loadConfig({ ...base, BACKFILL_LIMIT: "9" }, { here: dir, argv: ["--backfill-limit=150"] }).backfillLimit, 150, "the flag wins, as the VAR=value prefix did");
+    assert.equal(loadConfig({ ...base, BACKFILL_LIMIT: "9" }, { here: dir, argv: ["extra", "--other=1"] }).backfillLimit, 9);
+    assert.equal(loadConfig(base, { here: dir, argv: ["--backfill-limit="] }).backfillLimit, Infinity, "empty = unset");
+    const env = { ...base }; loadConfig(env, { here: dir, argv: ["--backfill-limit=150"] });
+    assert.equal(env.BACKFILL_LIMIT, undefined, "the caller's env is not modified");
+    assert.throws(() => loadConfig(base, { here: dir, argv: ["--backfill-limit"] }), /--backfill-limit needs a value/);
+    assert.throws(() => loadConfig(base, { here: dir, argv: ["--backfill-limit=-1"] }), /BACKFILL_LIMIT="-1" must be an integer ≥ 0/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("every bad value is reported at once, by name, with the fix", () => {
   const dir = tmp();
   try {

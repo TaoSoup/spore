@@ -36,6 +36,9 @@ const dirs = [];
 const scratch = () => { const d = mkdtempSync(join(tmpdir(), "spore-brief-")); dirs.push(d); return d; };
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 const warnings = () => { const seen = []; return { seen, info() {}, warn: (m) => seen.push(m), error() {} }; };
+// Windows has no POSIX permission bits (statSync reports 666 whatever mode a file was written with;
+// lib/agents-live/vault.mjs skips its mode check there too), so the mode is checked elsewhere only.
+const assertMode600 = (file) => { if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600); };
 const peopleCtx = (o = {}) => ({ rootMint: HUMAN, rootSymbol: "HUMAN", rootName: "Human", brief: { text: BRIEF, mode: "people" }, childSymbols: new Set(), childNames: new Set(), childPersons: new Set(), topSymbols: new Set(["TRUMP", "ELON", "BONK"]), ...o });
 const person = (name, symbol, description = `${name}: one of a kind.`) => ({ name, symbol, description });
 
@@ -61,7 +64,7 @@ test("set / clear: atomic JSON in DATA_DIR/agents/briefs.json, mode 600; the sto
   assert.equal(store.get(HUMAN), null);
   const b = setBrief(file, HUMAN, { text: BRIEF, mode: "people", now: 1_792_500_000 });
   assert.deepEqual(b, { text: BRIEF, mode: "people", setAt: 1_792_500_000 });
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assertMode600(file);
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { [HUMAN]: b });
   assert.deepEqual(store.get(HUMAN), b, "picked up without a restart");
   assert.equal(store.get(K.ROOT), null);
@@ -73,7 +76,7 @@ test("set / clear: atomic JSON in DATA_DIR/agents/briefs.json, mode 600; the sto
   assert.equal(store.get(HUMAN).text, BRIEF, "a refused set leaves the file as it was");
   assert.equal(clearBrief(file, K.ROOT), true); assert.equal(clearBrief(file, K.ROOT), false);
   assert.equal(store.get(K.ROOT), null);
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assertMode600(file);
   // A hand-edited file: invalid entries are dropped (warned), a broken file means no briefs, never a crash.
   writeFileSync(file, JSON.stringify({ [HUMAN]: { text: "Famous people.", mode: "people", setAt: 9 }, bad: { text: "x" }, [K.A]: { text: "<script>", mode: "free" } }));
   assert.deepEqual(store.get(HUMAN), { text: "Famous people.", mode: "people", setAt: 9 });
@@ -99,7 +102,7 @@ test("CLI: set (inline and --file -), get, list, clear; refusals exit 1, usage e
   const set = await cli(dir, ["set", HUMAN, "Famous", "people,", "one", "per", "coin.", "--mode", "people"]);
   assert.equal(set.code, 0, set.stderr);
   assert.match(set.stdout, new RegExp(`^brief set for ${HUMAN} \\(mode people, 28 characters\\)`));
-  assert.equal(statSync(briefsFile(dir)).mode & 0o777, 0o600);
+  assertMode600(briefsFile(dir));
   const get = await cli(dir, ["get", HUMAN]);
   assert.equal(get.code, 0, get.stderr);
   const g = JSON.parse(get.stdout);
