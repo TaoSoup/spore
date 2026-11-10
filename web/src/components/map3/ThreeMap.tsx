@@ -98,7 +98,7 @@ function collectObstacles(root: HTMLElement | null): EngineRect[] {
 }
 
 export default function ThreeMap(props: ThreeMapProps) {
-  const { nodes, byMint, limit, source, mode, inset, fitInset, select, fresh, highlight, heat, streamStatus, titleTags, titleTagsCompact } = props;
+  const { nodes, byMint, limit, source, mode, onModeChange, inset, fitInset, select, fresh, highlight, heat, streamStatus, titleTags, titleTagsCompact } = props;
   const families = props.families ?? null;
   const familiesRef = useRef(families); familiesRef.current = families;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -497,6 +497,13 @@ export default function ThreeMap(props: ThreeMapProps) {
         <button type="button" onClick={() => handle.scaleBy(1 / 1.5)} aria-label="Zoom out" title="Zoom out">−</button>
         <button type="button" onClick={() => handle.fit()} aria-label="Fit to view" title="Fit"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" /></svg></button>
       </div>
+      {onModeChange && (
+        <div className="bm-size seg" role="group" aria-label="Size bubbles by">
+          <span className="bm-size-label">size</span>
+          <button type="button" aria-pressed={mode === "locked"} onClick={() => onModeChange("locked")}>locked</button>
+          <button type="button" aria-pressed={mode === "mcap"} onClick={() => onModeChange("mcap")}>mcap</button>
+        </div>
+      )}
       {slow && <div className="m3-status" role="status">Building the map…</div>}
     </div>
   );

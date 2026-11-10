@@ -14,6 +14,8 @@ export type ThreeMapHandle = BubbleMapHandle & { readonly renderer: "three"; chi
 export type ThreeMapProps = {
   nodes: BubbleNode[]; byMint: ReadonlyMap<string, BubbleNode>; limit: RootsLimit; source: MapSource;
   mode: SizeMode;
+  /** Shows the on-map "size: locked | mcap" pill (.bm-size, top right, like the classic map's) and reports a click. */
+  onModeChange?: (m: SizeMode) => void;
   inset: Map3Inset; fitInset: Map3Inset;
   select: string | null; onSelect: (n: BubbleNode | null) => void; onHover?: (mint: string | null) => void;
   fresh: Set<string>; highlight: ((n: BubbleNode) => boolean) | null; heat: HeatIndex | null; streamStatus: StreamStatus;

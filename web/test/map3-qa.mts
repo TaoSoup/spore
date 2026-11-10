@@ -391,13 +391,12 @@ try {
   // ---------------------------------------------------------------- (f)
   await section("f", async (s, check) => {
     await toOverview(page);
-    // the overview defaults to market cap (no size param); the "size by" switch lives in the page's .map-tools, never in the
-    // engine's own .bm-size control
+    // the overview defaults to market cap (no size param); the on-map "size: locked | mcap" pill (.bm-size) switches it
     const size0 = await param(page, "size");
     s.defaultSize = size0;
     check(size0 === null, `the overview carries ?size=${size0} (market cap is the default: no size param)`);
-    const sizeButtons = await page.evalJs<number>(`document.querySelectorAll(".m3 .bm-size button").length`);
-    check(sizeButtons === 0, `${sizeButtons} .bm-size buttons inside the map (the size switch belongs to the page, not the engine)`);
+    const sizeBtns = await page.evalJs<{ text: string; on: boolean }[]>(`[...document.querySelectorAll(".m3 .bm-size button")].map((b) => ({ text: b.textContent.trim(), on: b.getAttribute("aria-pressed") === "true" }))`);
+    check(J(sizeBtns) === J([{ text: "locked", on: false }, { text: "mcap", on: true }]), `the size pill reads ${J(sizeBtns)} (want locked | mcap, mcap pressed)`);
     await settle(page);
     await sleep(600);
     const r = await page.evalJs<{ dom: { mint: string; symbol: string | null; share: number }[] | null; cl: { root: string; tag: string; title: string }[]; titles: string[]; texts: string[]; look: string | null }>(`(() => { const d = __sporeMapPage.dominance(5); return { dom: d ? d.mcap.top : null, cl: __sporeMap.clusters(120), titles: __sporeMap.titles(), texts: [...document.querySelectorAll(".m3 .m3-labels .lb.pl")].map((e) => e.textContent), look: typeof __sporeMap.look === "function" ? __sporeMap.look() : null }; })()`);

@@ -44,7 +44,6 @@ function ChunkFailed({ onFallback }: ThreeMapProps) {
 const ThreeMap: ComponentType<ThreeMapProps> = lazy(() => loadThreeMap().then((m): { default: ComponentType<ThreeMapProps> } => ({ default: m.default }), (): { default: ComponentType<ThreeMapProps> } => ({ default: ChunkFailed })));
 
 const LIMITS: RootsLimit[] = ["all", 200, 60];
-const SIZES: [SizeMode, string][] = [["mcap", "market cap"], ["locked", "locked"]];
 /// Phones default to the top 200 roots (DESIGN §11.5); "all" stays one tap away.
 const PHONE_W = 700;
 /// The left column, Key and side panel dock beside the map above this width; below it they become pills and a bottom sheet.
@@ -85,7 +84,7 @@ function MapHint({ cam, gone, renderer }: { cam: CamStore; gone: boolean; render
 /// The whole pump.fun pair ecosystem as one map (DESIGN §11.5): every root with a tracked child and every
 /// descendant, rendered from the IndexedDB cache first and patched by `since=` deltas and live events.
 /// URL state: `?focus=<mint>` selects a coin (the camera flies to it with its parent and children),
-/// `?size=locked` sizes families by locked value (no param = market cap), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
+/// `?size=locked` sizes families by locked value (the on-map size pill; no param or `?size=mcap` = market cap), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
 /// holds the counters, search, highlight chips and live rails; the selected coin opens a side panel
 /// (a bottom sheet on phones). Arrow keys walk the tree; Esc clears. Each family's share of the whole map
 /// (lib/map/dominance.ts, both size modes) rides on its title, its tooltip, the side panel and the
@@ -131,8 +130,8 @@ export default function MapPage() {
   const fallbackRef = useRef(fallback); fallbackRef.current = fallback;
   const rootsParam = params.get("roots");
   const limit: RootsLimit = rootsParam === "all" ? "all" : rootsParam === "200" ? 200 : rootsParam === "60" ? 60 : renderer === "three" ? "all" : phone ? 200 : "all";
-  // `?size=locked` sizes families and coins by the value they lock; market cap is the default. The engine rebuilds on a
-  // switch and keeps its family order (ThreeMap BuildReason "mode").
+  // The on-map "size: locked | mcap" pill (both renderers) sets `?size=locked`; market cap is the default (`?size=mcap`, the
+  // older links' form, reads the same). The engine rebuilds on a switch and keeps its family order (ThreeMap BuildReason "mode").
   const mode: SizeMode = params.get("size") === "locked" ? "locked" : "mcap";
   const hlParam = params.get("hl");
   const keys = useMemo(() => parseHl(hlParam), [hlParam]);
@@ -410,16 +409,10 @@ export default function MapPage() {
   const ready = !data.loading || data.nodes.length > 0;
   const heatRow = selected && heat ? heat.rows.get(selected.mint) ?? null : null;
   const rootsSeg = (
-    <>
-      <div className="map-tools">
-        <span className="tools-label">size by</span>
-        <div className="seg" role="group" aria-label="What sizes families and coins"><SlidingPill />{SIZES.map(([m, label]) => <button type="button" key={m} aria-pressed={mode === m} onClick={() => setMode(m)}>{label}</button>)}</div>
-      </div>
-      <div className="map-tools">
-        <span className="tools-label">roots</span>
-        <div className="seg" role="group" aria-label="How many roots to draw"><SlidingPill />{LIMITS.map((l) => <button type="button" key={l} aria-pressed={limit === l} onClick={() => setLimit(l)}>{l === "all" ? "all" : `top ${l}`}</button>)}</div>
-      </div>
-    </>
+    <div className="map-tools">
+      <span className="tools-label">roots</span>
+      <div className="seg" role="group" aria-label="How many roots to draw"><SlidingPill />{LIMITS.map((l) => <button type="button" key={l} aria-pressed={limit === l} onClick={() => setLimit(l)}>{l === "all" ? "all" : `top ${l}`}</button>)}</div>
+    </div>
   );
   const heatLine = <p className="map-heatline"><span className="map-heat-i"><i className="map-heat-glyph g-new" aria-hidden="true" /><b>{count(drawn.fresh24)}</b> new pairs 24h</span>{tradesPerMin != null && <><span className="map-heat-sep" aria-hidden="true"> · </span><span className="map-heat-i"><i className="map-heat-glyph g-trades" aria-hidden="true" /><b>{tradesPerMin >= 10 ? Math.round(tradesPerMin) : tradesPerMin.toFixed(1)}</b> trades/min</span></>}</p>;
   const digestChip = digest && digest.pairs > 0 && seenAt != null ? (
@@ -441,11 +434,11 @@ export default function MapPage() {
       {ready && !data.error && nodes.length === 0 && <div className="map-state launch"><NoSpawnsYet hint="The map draws every root coin a pair was opened under on pump.fun and the coins beneath it. It fills in as pairs appear." /></div>}
       {nodes.length > 0 && (renderer === "three" ? (
         <MapBoundary onError={(d) => onFallback("mount-error", d)}><Suspense fallback={<div className="bm bm-full" aria-busy="true" />}>
-          <ThreeMap ref={map} nodes={nodes} byMint={byMint} limit={limit} source={data.source} mode={mode} inset={inset} fitInset={fitInset} select={focus} onSelect={onSelect}
+          <ThreeMap ref={map} nodes={nodes} byMint={byMint} limit={limit} source={data.source} mode={mode} onModeChange={setMode} inset={inset} fitInset={fitInset} select={focus} onSelect={onSelect}
             fresh={data.fresh} highlight={hl.predicate} heat={heat} streamStatus={status} onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} onFallback={onFallback} look={look} families={families} />
         </Suspense></MapBoundary>
       ) : (
-        <BubbleMap ref={map} nodes={nodes} height="100%" mode={mode} lockedUi={false} className="bm-full" inset={inset} select={focus} onSelect={onSelect}
+        <BubbleMap ref={map} nodes={nodes} height="100%" mode={mode} onModeChange={setMode} className="bm-full" inset={inset} select={focus} onSelect={onSelect}
           fresh={data.fresh} onLayout={data.persistPositions} highlight={hl.predicate} live heat={heat} hideLegend onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} clusterInfo={clusterInfo} />
       ))}
       <div className="map-overlay" ref={overlayRef}>

@@ -114,7 +114,7 @@ export type BubbleMapHandle = {
 /// hovered tree's tooltip (by its top's mint).
 type Props = {
   nodes: BubbleNode[]; focus?: string; select?: string | null; onSelect?: (n: BubbleNode | null) => void; height: number | string; mode?: SizeMode; onModeChange?: (m: SizeMode) => void;
-  /// false hides the locked-value UI (the size toggle and the locked tooltip rows): the map page, which sizes by market cap only.
+  /// false hides the locked-value UI (the size toggle and the locked tooltip rows).
   lockedUi?: boolean;
   ref?: Ref<BubbleMapHandle>; className?: string; inset?: Inset; fresh?: Set<string>; onLayout?: (pos: { mint: string; x: number; y: number }[]) => void;
   highlight?: ((n: BubbleNode) => boolean) | null; live?: boolean; heat?: HeatIndex | null; hideLegend?: boolean; onCamera?: (c: { k: number }) => void;
