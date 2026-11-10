@@ -75,6 +75,7 @@ import { TAU, rnd } from "./util.js";
 import { TOK, heatClass, EASE, DUR } from "./tokens.js";
 
 const DEG = Math.PI / 180;
+const XY_NET_FRAMES = 30;               // (local perf) safety-net cadence of the moved-coin scan (see syncOffsetsFrame)
 // (veins lane, 2026-10-21 16:00Z, LANES.md "veins — live curves") galaxy veins = ONE instanced draw of live cubics. Every
 // vein runs centre to centre; the cubic is rebuilt per vertex from the LIVE end positions (position texture uPos) and two
 // control points stored in the chord frame, so veins re-bend every frame as coins move (no offsets, no shear, no lag).
@@ -509,6 +510,16 @@ export async function buildLinks(S, pause = null) {
     if (changed) { offTex.needsUpdate = true; offOn.value = offCount > 0 ? 1 : 0; offFrameChanged = changed; offSyncs++; }
     return changed;
   }
+  // (local perf 2026-11-09) the per-frame callers (the frame hook and three onBeforeRender hooks) share one scan per frame, and
+  // only while a coin may be moving (S.xyScan, motion.js) or every XY_NET_FRAMES as a safety net: an O(N) pass over 58k coins
+  // four times a frame at 144-165 Hz was the top JS cost of an idle map. Explicit movers (setPositions, follow) sync directly.
+  let syncFrame = -1;
+  function syncOffsetsFrame() {
+    if (syncFrame === S.frame) return 0;
+    syncFrame = S.frame;
+    if (!(S.xyScan > 0) && S.frame % XY_NET_FRAMES !== 0) return 0;
+    return syncOffsets();
+  }
   const offAt = (i, out, o) => { if (i >= 0 && i < N) { out[o] = offX[i]; out[o + 1] = offY[i]; } else { out[o] = 0; out[o + 1] = 0; } };
 
   const premult = (m) => { m.blending = THREE.CustomBlending; m.blendEquation = THREE.AddEquation; m.blendSrc = THREE.OneFactor; m.blendDst = THREE.OneMinusSrcAlphaFactor; m.blendSrcAlpha = THREE.OneFactor; m.blendDstAlpha = THREE.OneMinusSrcAlphaFactor; m.forceSinglePass = true; return m; };
@@ -733,7 +744,7 @@ void main(){
   const links = new THREE.Mesh(lGeo, lMat); links.frustumCulled = false; links.renderOrder = 4; if (!G) scene.add(links);
   // the drag sim may run after this lane's frame hook: sync the offsets right before drawing too (texture + uniform
   // uploads happen after onBeforeRender, so links never trail a dragged coin by a frame)
-  links.onBeforeRender = () => { syncOffsets(); };
+  links.onBeforeRender = () => { syncOffsetsFrame(); };
 
   // ------------------------------------------------------------------------------------------------------------
   // 2c. (veins lane) GALAXY VEINS: one InstancedBufferGeometry; base strip (NSEG + 1) x 2 vertices, position = (t, side, 0);
@@ -904,7 +915,7 @@ void main(){
 }`,
     }));
     veins = new THREE.Mesh(vGeo, vMat); veins.frustumCulled = false; veins.renderOrder = 4; scene.add(veins);
-    veins.onBeforeRender = () => { syncOffsets(); syncPos(); };
+    veins.onBeforeRender = () => { syncOffsetsFrame(); syncPos(); };
   }
   // CPU mirror of the live cubic of the vein into c (parent -> child), n segments -> out[2 (n + 1)] world
   const cubicInto = (c, n, out) => {
@@ -1077,7 +1088,7 @@ void main(){
     const px = (arcFollow.dev || 0) * S.cam.k, u = Math.max(0, Math.min(1, (px - 1.5) / 4.5));
     gU.uArcFade.value = 1 - u * u * (3 - 2 * u);
   }
-  genArcs.onBeforeRender = () => { syncOffsets(); arcFollow(); };
+  genArcs.onBeforeRender = () => { syncOffsetsFrame(); arcFollow(); };
   const setKnockouts = (list = []) => {
     for (let j = 0; j < 12; j++) { const q = list[j]; if (q && q.fam >= 0) knock[j].set(q.fam, q.gen, q.angle, q.half); else knock[j].set(-1, -1, 0, 0); }
     S.invalidate();
@@ -1608,7 +1619,9 @@ void main(){
     for (const c of branchList) if (linkStart[c] >= 0 || hasLink(c)) { emS[c] = 1; writeEmph(c); }
     Object.assign(brT, { from: 0, to: 1, t0: performance.now(), run: true }); lU.uBranchT.value = 0; S.invalidate();
   };
-  const follow = (list, n) => { const m = list && list.length ? syncList(list, n == null ? list.length : n) : syncOffsets(); if (m) S.invalidate(); return m; };
+  // an explicit mover also wakes the per-frame position scans (bubbles' scanXY, breathCheck), which otherwise run only while
+  // the sim steps; 3 frames because motion.js counts it down before those hooks run
+  const follow = (list, n) => { S.xyScan = 3; const m = list && list.length ? syncList(list, n == null ? list.length : n) : syncOffsets(); if (m) S.invalidate(); return m; };
   // (map3 port) highlight mask: bitOf(coin) for the links of built coins (texel = child), born links follow their newborn
   // (b.ci, bornBit). One 160 ms crossfade from what each link shows now; uHlOn stays on while a mask is set or fading out.
   let hlActive = false;
@@ -1637,7 +1650,7 @@ void main(){
 
   S.onFrame((now) => {
     let more = false;
-    if (syncOffsets()) more = true;                             // coins moved (drag sim): links/arcs follow this frame
+    if (syncOffsetsFrame()) more = true;                        // coins moved (drag sim): links/arcs follow this frame
     if (G) {   // (veins lane) live positions + instance flushes
       syncPos();
       if (vWDirty) { vWAttr.needsUpdate = true; vWDirty = false; }

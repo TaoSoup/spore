@@ -391,12 +391,13 @@ try {
   // ---------------------------------------------------------------- (f)
   await section("f", async (s, check) => {
     await toOverview(page);
-    // families are sized by market cap only (the locked|mcap control left the page 2026-10-25): no size param, no .bm-size
+    // the overview defaults to market cap (no size param); the "size by" switch lives in the page's .map-tools, never in the
+    // engine's own .bm-size control
     const size0 = await param(page, "size");
     s.defaultSize = size0;
-    check(size0 === null, `the overview carries ?size=${size0} (market cap is the only mode: no size param)`);
+    check(size0 === null, `the overview carries ?size=${size0} (market cap is the default: no size param)`);
     const sizeButtons = await page.evalJs<number>(`document.querySelectorAll(".m3 .bm-size button").length`);
-    check(sizeButtons === 0, `${sizeButtons} .bm-size buttons on the page (the size control was removed)`);
+    check(sizeButtons === 0, `${sizeButtons} .bm-size buttons inside the map (the size switch belongs to the page, not the engine)`);
     await settle(page);
     await sleep(600);
     const r = await page.evalJs<{ dom: { mint: string; symbol: string | null; share: number }[] | null; cl: { root: string; tag: string; title: string }[]; titles: string[]; texts: string[]; look: string | null }>(`(() => { const d = __sporeMapPage.dominance(5); return { dom: d ? d.mcap.top : null, cl: __sporeMap.clusters(120), titles: __sporeMap.titles(), texts: [...document.querySelectorAll(".m3 .m3-labels .lb.pl")].map((e) => e.textContent), look: typeof __sporeMap.look === "function" ? __sporeMap.look() : null }; })()`);

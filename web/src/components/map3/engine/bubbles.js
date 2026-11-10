@@ -51,7 +51,8 @@
 //   a class crossfade or a rim flash is still animating (render-on-demand keeps drawing).
 //   Reads shared uniforms: uPx uDpr uTime uDustExpand uHover uHoverFam uMinScale uDimMix uHoverT uK0 uFadeP uFadeD
 //   uFocusFam uFocusMix (final polish: other families recede when one owns the view).
-//   Debug: S.debug.obj.bubbles (shadows stays null: the drop-shadow pass is deleted); S.debug.map.logos;
+//   Debug: S.debug.obj.bubbles (shadows stays null: the drop-shadow pass is deleted); S.debug.map.logos (cells reserved at
+//          build: the HI planets plus the pinned LO tops, not every top);
 //          S.debugFns.bubbleLOD() -> per-LOD instance counts at the current zoom + HDR emitter count.
 //   (map3 port) setHl(bitOf(i) -> 0|1, tSec?)  highlight mask over every instance (births included); logoPx(i) = atlas
 //                                cell px once that coin's logo is drawn (256 hi, 128 lo), else 0.
@@ -119,6 +120,7 @@ const BIRTH_S = 0.5;        // amendment C: scale-in / fade-in, cubic ease-out
 // untouched launches recede. At and above $10k the size is exactly rad(), so the legend keys stay true.
 const SEED_BROOD = 60, SEED_M = 1e4, SEED_G = 0.8, SEED_RMIN = 0.25, SEED_NOCAP = 0.4;
 const FAMFLASH_S = 0.3;     // amendment B: family rim flash, ease-out
+const XY_NET_FRAMES = 30;   // (local perf) safety-net cadence of the moved-coin scan (state.js xyScan)
 const SPARE = 512;          // free instances for coins born after the build (addCoin)
 const smoothJ = (a, b, t) => { t = Math.max(0, Math.min(1, (t - a) / (b - a))); return t * t * (3 - 2 * t); };
 
@@ -141,8 +143,8 @@ export function buildBubbles(S) {
 
   // ======================= logo atlases (visibility lane, 2026-10-21) =======================
   // Two GPU-only atlases (render-target textures, cleared to the pre-fill #123020, never a CPU-side canvas):
-  //   LO: 64 x 64 cells of 64 px (4096^2; phone 32 px cells, 2048^2) = 4,096 cells: every family top first, then children
-  //       drawn >= LOGO_MIN_PX (flat; galaxy 10 px) by drawn size, LRU eviction of off-screen children. Code 64 + j.
+  //   LO: 64 x 64 cells of 64 px (4096^2; phone 32 px cells, 2048^2) = 4,096 cells: the LO_PIN biggest family tops pinned,
+  //       then the other tops and the children drawn >= the logo size by drawn size, LRU eviction of off-screen cells. Code 64 + j.
   //   HI: 8 x 8 cells of 256 px (2048^2; phone 128 px, 1024^2) = 64 cells: the planet tops; cell 62 = the selected coin,
   //       63 = the focused coin (S.U.uFocusCoin). Code 0..63.
   // A logo lands in its cell with texSubImage2D (renderer.copyTextureToTexture) in batches <= every 250 ms, <= 2 ms each,
@@ -160,7 +162,7 @@ export function buildBubbles(S) {
   const loHas = new Uint16Array(CAP), hiHas = new Uint16Array(CAP);              // logo px landed in that cell (0 = pre-fill)
   const loOwn = new Int32Array(LO_N).fill(-1), hiOwn = new Int32Array(HI_N).fill(-1);
   const loUse = new Float64Array(LO_N);                 // last time the owner was wanted (LRU)
-  const loPin = new Uint8Array(LO_N);                   // family tops never leave their cell
+  const loPin = new Uint8Array(LO_N);                   // the LO_PIN pinned family tops never leave their cell
   const isTopOfPlanet = new Uint8Array(N); for (const f of planets) isTopOfPlanet[f.top] = 1;
   const isTop = new Uint8Array(CAP); for (const f of fams) if (f.top >= 0 && f.top < N) isTop[f.top] = 1;
   const glyphOf = (i) => { const s = String((sym && sym[i]) || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); const q = s ? GLYPHS.indexOf(s[0]) : -1; return q < 0 ? 0 : q; };
@@ -217,8 +219,14 @@ export function buildBubbles(S) {
   }
   const hiList = [];
   planets.forEach((f) => { if (hiList.length < HI_PLANETS) { takeHi(f.top, hiList.length); hiList.push(f.top); } });
+  // (local fix 2026-11-09) only the LO_PIN biggest family tops keep a cell for good. Pinning every top filled the whole LO
+  // atlas once a map had more families than cells (5k families against 4,096 cells on the full pump.fun index): no child ever
+  // got a cell (zoomed into a family, 0 of its on-screen children showed a logo) and the tops past 4,096 had none either. The
+  // other tops take a cell like children do (assignCells: on screen, drawn >= the logo size, LRU eviction).
+  const LO_PIN = Math.min(LO_N >> 2, 1024);
   const loTops = [];
-  for (const f of fams) if (f.top >= 0 && f.top < N && hiC[f.top] < 0 && takeLo(f.top, 0, true) >= 0) loTops.push(f.top);
+  const byShare = fams.filter((f) => f.top >= 0 && f.top < N && hiC[f.top] < 0).sort((a, b) => (b.share || 0) - (a.share || 0));
+  for (const f of byShare) { if (loTops.length >= LO_PIN) break; if (takeLo(f.top, 0, true) >= 0) loTops.push(f.top); }
   const logoList = [...hiList, ...loTops];
   // what a coin draws: a landed logo (hi before lo), else the pre-fill letter while its logo may still come, else -1
   // (galaxy: a family top with no logo URL at all carries a quiet monogram, code -50 - glyph)
@@ -1092,8 +1100,8 @@ void main(){
   const logoPx = (i) => (i >= 0 && i < CAP ? (hiC[i] >= 0 && hiHas[i] ? hiHas[i] : loC[i] >= 0 && loHas[i] ? loHas[i] : 0) : 0);
 
   // ======================= (visibility lane) atlas cell assignment + coverage debug =======================
-  // Every family top owns a cell from the build (pinned). Children drawn >= 10 px on screen with a logo URL take LO cells,
-  // biggest first; a full atlas evicts the least recently wanted child cell. Re-evaluated at most every 250 ms while the
+  // The LO_PIN biggest family tops own a cell from the build (pinned). Other tops and children drawn on screen at the logo
+  // size with a logo URL take LO cells, biggest first; a full atlas evicts the least recently wanted unpinned cell. Re-evaluated at most every 250 ms while the
   // camera moves, and once more when it settles. HI_SEL / HI_FOC follow selectCoin and S.U.uFocusCoin.
   const onScreenQ = (q, r, W, H, k) => {
     const sx = (aXY[q * 2] - S.cam.x) * k + W / 2, sy = H / 2 - (aXY[q * 2 + 1] - S.cam.y) * k;
@@ -1122,11 +1130,22 @@ void main(){
     needAssign = false; assignAt = now;
     const t0 = performance.now(), W = S.W(), H = S.H(), k = S.cam.k, nI = img ? img.length : 0;
     // (bubbles lane, look fix 2026-10-22) flat children take a cell from LOGO_MIN_PX (4.5 px, the tops' threshold); galaxy 10 px
-    const KID_PX = G ? 10 : LOGO_MIN_PX;
+    const KID_PX = G ? 10 : LOGO_MIN_PX, TOP_PX = G ? LOD.logo : LOGO_MIN_PX;
+    const dustTops = G || S.dustExpand > 0.02;
     const cand = [], cr = [];
     for (let q = 0; q < count; q++) {
       const i = perm[q];
-      if (i >= nI || isTop[i] || !img[i] || failedLogo.has(i)) continue;
+      if (i >= nI || !img[i] || failedLogo.has(i)) continue;
+      if (isTop[i]) {
+        // (local fix) an unpinned top without a cell competes for one like a child, once it is drawn (planets always; a
+        // dust-family top once the field has handed off) at the logo size; a pinned top only refreshes its LRU stamp. Only
+        // the planets' permanent HI cells skip this: a top holding HI_SEL / HI_FOC keeps a LO cell too, so it still has its
+        // logo when the selection or focus moves on
+        if ((hiC[i] >= 0 && hiC[i] < HI_PLANETS) || !(dustTops || (i < N && isTopOfPlanet[i]))) continue;
+        const r = screenR(i);
+        if (r < TOP_PX || !onScreenQ(q, r, W, H, k)) continue;
+        cand.push(i); cr.push(r); continue;
+      }
       if (drawR[i] * k * 1.05 < KID_PX && aA[q * 4] < KID_PX) continue;   // cheap bound before the exact mirror
       const r = screenR(i);
       if (r < KID_PX || !onScreenQ(q, r, W, H, k)) continue;
@@ -1138,7 +1157,7 @@ void main(){
     // on-screen cell (before, the list was built lazily at the first miss, before smaller on-screen owners were touched)
     for (const j of ord) { const i = cand[j]; if (loC[i] >= 0) { loUse[loC[i]] = now; if (!loHas[i]) want.push(j); } }
     // pass 2: assign, biggest first, at most ASSIGN_MAX new cells per pass (the next pass, 250 ms on, continues); a full
-    // atlas evicts the least recently wanted unpinned (child) cell = an off-screen child; pinned tops never move
+    // atlas evicts the least recently wanted unpinned cell = an off-screen child or unpinned top; pinned tops never move
     let ev = null, evAt = 0, assigned = 0;
     for (const j of ord) {
       const i = cand[j];
@@ -1362,7 +1381,8 @@ void main(){
     if (uploadBatch(now)) busy = true;
     if (dirty.size) busy = true;
     // (round 2, amendment E) a lane that moves coins mutates S.X/S.Y in place; follow it the same frame
-    scanXY();
+    // (local perf) only while a coin may be moving (S.xyScan, set by motion.js while the sim steps), plus a safety net
+    if (S.xyScan > 0 || S.frame % XY_NET_FRAMES === 0) scanXY();
     if (glows && glowTick(now)) busy = true;
     if (glows && U.uTime.value < glowFlashUntil) busy = true;
     // (round 2, amendment A) breathing: off (at once) under reduced motion, else eases in over 600 ms
@@ -1374,7 +1394,8 @@ void main(){
     const bTo = rm || asleep ? 0 : 1;
     if (uBreath.value !== bTo) { uBreath.value = rm ? 0 : asleep ? Math.max(0, uBreath.value - dt / BREATH_FADE_MS) : Math.min(1, uBreath.value + dt / 600); busy = true; }
     if (!rm && !asleep) {
-      if (now - breath.at > 200 || breath.cx !== S.cam.x || breath.cy !== S.cam.y || breath.ck !== S.cam.k) breathCheck(now);
+      // (local perf) an O(N) pass: while the camera moves, at most every 100 ms instead of every frame
+      if (now - breath.at > 200 || ((breath.cx !== S.cam.x || breath.cy !== S.cam.y || breath.ck !== S.cam.k) && now - breath.at > 100)) breathCheck(now);
       if (breath.vis && now - breath.reqAt >= breath.interval - 2) { breath.reqAt = now; breath.requests++; busy = true; }
     }
     return busy || U.uTime.value < animUntil;

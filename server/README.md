@@ -48,6 +48,7 @@ npm run fixtures                # re-capture test/fixtures from mainnet (read-on
 | `UPLOAD_DAILY_IP` / `UPLOAD_DAILY_MB` / `UPLOAD_DAILY_DEPLOYS` | `20` / `256` / `200` | Daily quotas of `/api/upload`: uploads per client IP, new bytes written and Pages deploys run (fixed 24 h window from boot; 429 with `retryAfter` when spent). |
 | `META_GC_HOURS` | `24` | Uploaded metadata files no indexed coin references after this many hours are deleted (and un-published with the next deploy). `0` keeps everything. Only files `/api/upload` wrote are ever considered. |
 | `IMG_CACHE_MB` | `512` | Disk budget of the image proxy cache; the oldest files are evicted beyond it. |
+| `IMG_THUMB_MB` | `128` | Disk budget of the map logo thumbnails (64/128/256 px, about 7 KB each at 64 px); raise it for a full pump.fun index (about 58k coins need about 400 MB at 64 px). |
 | `CSP_CONNECT` | empty | Extra `connect-src` hosts for the SPA's Content-Security-Policy (normally none: the browser reaches the chain only through `/api/rpc`). |
 | `TREASURY_TTL_MS` | `60000` | Cache of `GET /api/treasury`. |
 | `DIST_DIR` | `../web/dist` | Built web app served with the SPA fallback. |

@@ -1464,7 +1464,7 @@ export function buildMotion(S) {
   }
 
   // ---------- frame ----------
-  let lastT0 = performance.now(), lastMoveT = -1e9, lastRenderT = -1e9, wasMoving = false, movedPrev = false;
+  let lastT0 = performance.now(), lastMoveT = -1e9, lastRenderT = -1e9, wasMoving = false, movedPrev = false, labelsAt = -1e9;
   let renders = 0, skips = 0, fadeStarted = false, errors = 0; const whyN = {};
   // (map3 port) onCamera relay: at most every 250 ms while the camera changes, once when it settles, once at the first frame
   let camEmitAt = -1e9;
@@ -1577,6 +1577,8 @@ export function buildMotion(S) {
     // before the frame hooks (bubbles reads S.X/S.Y in its hook on this same frame)
     let simOn = false;
     try { simOn = simStep(now, dt); } catch (err) { if (errors++ < 3) console.error(err); }
+    // (local perf) the position scans run in the frames the sim stepped and 2 more (a last snap, a release)
+    if (simOn || drag.i >= 0) S.xyScan = 3; else if (S.xyScan > 0) S.xyScan--;
     if (statsDirty && now - statsAt > 2000) pushStats();
     // 3. hover (only once the camera is still; a page-pinned hover holds until the next pointermove), dwell, tooltip delay,
     //    hull
@@ -1615,7 +1617,9 @@ export function buildMotion(S) {
     if (galFired) { if (drew) ring(galT, now, 64); galFired = false; }   // (galaxy) renders the galaxy hook asked for (galHz)
     govern(now, drew);
     // 5. labels
-    if ((moved && (!phone() || S.frame % 2 === 0)) || (movedPrev && !moved) || labelsDirty || S.frame % 10 === 0) { S.labels.layoutLabels(); labelsDirty = false; }
+    // (local perf) the idle refresh is time-based (every 160 ms, the old 10 frames at 60 Hz): at 144-165 Hz the frame count
+    // re-laid every label 15-17 times a second on a still map
+    if ((moved && (!phone() || S.frame % 2 === 0)) || (movedPrev && !moved) || labelsDirty || now - labelsAt >= 160) { S.labels.layoutLabels(); labelsDirty = false; labelsAt = now; }
     movedPrev = moved; S.dirty = false;
     // 6. (map3 port) the page: camera relay, frame stats, the first frame
     if (moved && now - camEmitAt >= 250) emitCamera();

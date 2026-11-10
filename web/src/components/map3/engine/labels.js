@@ -519,7 +519,11 @@ export async function buildLabels(S) {
     const movSet = movingNow ? new Set() : null;
     if (movSet) for (let q = 0; q < drm.nMoved; q++) { const i = drm.moved[q]; if (i >= 0 && i < N) movSet.add(i); }
     const visitG = movSet ? (i) => { if (!movSet.has(i)) visit(i); } : visit;
-    if (S.worldGrid && ((wx1 - wx0) / cellW) * ((wy1 - wy0) / cellW) < N / 2) S.worldGrid.forEachIn(wx0, wy0, wx1, wy1, visitG);
+    // (local perf 2026-11-09) before the dust field hands off only the members of the planet families pass visit() (it skips
+    // their tops and every dust family): walk those instead of every grid cell of the view (12k cells holding all 58k coins at
+    // the overview of the full index, on every layout)
+    if (!showDust) { for (const f of planets) { const m = f.members; for (let q = 0; q < m.length; q++) visitG(m[q]); } }
+    else if (S.worldGrid && ((wx1 - wx0) / cellW) * ((wy1 - wy0) / cellW) < N / 2) S.worldGrid.forEachIn(wx0, wy0, wx1, wy1, visitG);
     else for (let i = 0; i < N; i++) visitG(i);
     if (movSet) for (const i of movSet) visit(i);
     if (obs.length > 3000) { obs.sort((a, b) => R[b] - R[a]); if (kidsOK) for (let j = 3000; j < obs.length; j++) smallI.push(obs[j]); obs.length = 3000; }   // overflow still counts for density
@@ -941,8 +945,13 @@ export async function buildLabels(S) {
       tip.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
     }
     tip.classList.add("on");
+    dockFlag();
   };
-  const hideTip = () => { if (!tip) return; tip.classList.remove("on"); tipI = -1; };
+  const hideTip = () => { if (!tip) return; tip.classList.remove("on"); tipI = -1; dockFlag(); };
+  // (local perf 2026-11-09) the docked phone tip hides the zoom controls through a class on the map root. The CSS used to be
+  // .m3:has(.m3-tip.dock.on): every label toggling its own .on class (all through a zoom) re-ran that :has() over the map's
+  // subtree, ~2x the style work per frame of a flight.
+  function dockFlag() { const root = tip && tip.closest(".m3"); if (root) root.classList.toggle("m3-tip-docked", tip.classList.contains("dock") && tip.classList.contains("on")); }
   const tipInfo = () => ({ on: !!tip && tip.classList.contains("on"), i: tipI, dock: !!tip && tip.classList.contains("dock"), text: tip && tip.classList.contains("on") ? tipText : "" });
   // (map3 port) the phone dock sits above the page's bottom inset (the peek sheet / pills)
   const setDock = () => { if (tip) tip.style.setProperty("--m3-dock-bottom", `${Math.max(0, Number(S.inset.bottom) || 0) + 8}px`); };
@@ -1017,7 +1026,14 @@ export async function buildLabels(S) {
     kidPool.clear(); genPool.clear(); toasts.length = 0; placedBoxes.length = 0; items.length = 0; soft.length = 0; small.length = 0;
     grid.clear(); softGrid.clear(); smallGrid.clear();
     if (lctx) { try { lctx.setTransform(1, 0, 0, 1, 0, 0); lctx.clearRect(0, 0, lcv.width, lcv.height); } catch { /* ignore */ } lcv.width = lcv.height = 0; }
-    if (tip) { tip.classList.remove("on"); tip.innerHTML = ""; }
+    // the docked-card flag lives on the .m3 root, which outlives this engine (size-mode / roots / data rebuilds): clear it
+    // unless a newer engine's card is already docked there
+    if (tip) {
+      tip.classList.remove("on");
+      const root = tip.closest(".m3");
+      if (root && !root.querySelector(".m3-tip.dock.on")) root.classList.remove("m3-tip-docked");
+      tip.innerHTML = "";
+    }
     readyDone = false;
   });
 }

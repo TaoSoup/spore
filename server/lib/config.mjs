@@ -74,6 +74,8 @@ export function loadConfig(env = process.env, { here = process.cwd() } = {}) {
   const uploadQuota = { ipPerDay: num("UPLOAD_DAILY_IP", DEFAULT_QUOTA.ipPerDay, { min: 1, integer: true }), bytesPerDay: num("UPLOAD_DAILY_MB", DEFAULT_QUOTA.bytesPerDay / 1024 / 1024, { min: 1 }) * 1024 * 1024, deploysPerDay: num("UPLOAD_DAILY_DEPLOYS", DEFAULT_QUOTA.deploysPerDay, { min: 1, integer: true }) };
   const metaGcHours = num("META_GC_HOURS", 24, { min: 0 }); // 0 = never delete uploaded files
   const imgCacheBytes = num("IMG_CACHE_MB", 512, { min: 1 }) * 1024 * 1024;
+  // map logo thumbnails (64/128/256 px, ~7 KB each at 64): the full pump.fun index (~58k coins) needs ~400 MB at 64 px alone
+  const imgThumbBytes = num("IMG_THUMB_MB", 128, { min: 1 }) * 1024 * 1024;
   const distDir = get("DIST_DIR", join(here, "../web/dist"));
   // Partner API (DESIGN §12): absolute links and image URLs are built on PUBLIC_URL; tiers per minute.
   const publicUrl = url("PUBLIC_URL", "https://sporepad.com", ["http:", "https:"]).replace(/\/+$/, "");
@@ -140,5 +142,5 @@ export function loadConfig(env = process.env, { here = process.cwd() } = {}) {
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, distDir, publicUrl, v1Limits };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits };
 }

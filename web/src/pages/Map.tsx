@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useStats } from "../lib/hooks";
 import { useStreamStatus } from "../lib/events";
-import { ago, count } from "../lib/format";
+import { ago, count, usd } from "../lib/format";
 import { useMapData } from "../lib/map/use-map-data";
 import { assetTopIn, coinNode, softwareGl, undrawnByTop, useFamilyNode, useFamilyStore, type FamilyTier } from "../lib/map/family";
 import { useMapHeat } from "../lib/map/heat";
@@ -44,6 +44,7 @@ function ChunkFailed({ onFallback }: ThreeMapProps) {
 const ThreeMap: ComponentType<ThreeMapProps> = lazy(() => loadThreeMap().then((m): { default: ComponentType<ThreeMapProps> } => ({ default: m.default }), (): { default: ComponentType<ThreeMapProps> } => ({ default: ChunkFailed })));
 
 const LIMITS: RootsLimit[] = ["all", 200, 60];
+const SIZES: [SizeMode, string][] = [["mcap", "market cap"], ["locked", "locked"]];
 /// Phones default to the top 200 roots (DESIGN §11.5); "all" stays one tap away.
 const PHONE_W = 700;
 /// The left column, Key and side panel dock beside the map above this width; below it they become pills and a bottom sheet.
@@ -84,7 +85,7 @@ function MapHint({ cam, gone, renderer }: { cam: CamStore; gone: boolean; render
 /// The whole pump.fun pair ecosystem as one map (DESIGN §11.5): every root with a tracked child and every
 /// descendant, rendered from the IndexedDB cache first and patched by `since=` deltas and live events.
 /// URL state: `?focus=<mint>` selects a coin (the camera flies to it with its parent and children),
-/// `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
+/// `?size=locked` sizes families by locked value (no param = market cap), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
 /// holds the counters, search, highlight chips and live rails; the selected coin opens a side panel
 /// (a bottom sheet on phones). Arrow keys walk the tree; Esc clears. Each family's share of the whole map
 /// (lib/map/dominance.ts, both size modes) rides on its title, its tooltip, the side panel and the
@@ -130,8 +131,9 @@ export default function MapPage() {
   const fallbackRef = useRef(fallback); fallbackRef.current = fallback;
   const rootsParam = params.get("roots");
   const limit: RootsLimit = rootsParam === "all" ? "all" : rootsParam === "200" ? 200 : rootsParam === "60" ? 60 : renderer === "three" ? "all" : phone ? 200 : "all";
-  // Families are sized by market cap (the engine's "mcap" mode; the locked-value mode is not offered on the page).
-  const mode: SizeMode = "mcap";
+  // `?size=locked` sizes families and coins by the value they lock; market cap is the default. The engine rebuilds on a
+  // switch and keeps its family order (ThreeMap BuildReason "mode").
+  const mode: SizeMode = params.get("size") === "locked" ? "locked" : "mcap";
   const hlParam = params.get("hl");
   const keys = useMemo(() => parseHl(hlParam), [hlParam]);
   const stress = import.meta.env.DEV ? Math.min(100_000, Number(params.get("stress")) || 0) : 0;
@@ -208,16 +210,18 @@ export default function MapPage() {
   // stock …) are not coins of the index the site's own counter reports, so they are left out of the headline.
   const ghosts = useMemo(() => undrawnByTop(nodes, byMint), [nodes, byMint]);
   const drawn = useMemo(() => {
-    let roots = 0, fresh24 = 0, ghost = 0, assets = 0;
+    let roots = 0, fresh24 = 0, ghost = 0, assets = 0, locked = 0;
     for (const g of ghosts.values()) ghost += g;
     const from = Math.floor(Date.now() / 1000) - 86_400;
     for (const n of nodes) {
       if (n.asset === true) assets++;
+      // a coin's lockedUsd is what its direct children lock in their curves, so the sum over the drawn coins is the map's total
+      if (n.lockedUsd != null && n.lockedUsd > 0) locked += n.lockedUsd;
       if (!n.parentMint || !byMint.has(n.parentMint)) roots++;
       else if ((n.createdAt ?? 0) >= from) fresh24++;
     }
     const total = nodes.length + ghost;
-    return { roots, total, coins: total - assets, assets, ghost, fresh24 };
+    return { roots, total, coins: total - assets, assets, ghost, fresh24, locked };
   }, [nodes, byMint, ghosts]);
   const coinsTitle = `${exact(drawn.coins)} pump.fun coins on the map: ${exact(drawn.coins - drawn.ghost)} drawn and ${exact(drawn.ghost)} more in the listed assets' families${drawn.assets > 0 ? `; the ${exact(drawn.assets)} listed assets drawn as family tops (USDC, WBTC, …) are not counted` : ""}`;
   const tradesPerMin = useMemo(() => { if (!heat) return null; let t = 0; for (const r of heat.rows.values()) t += r.t1h; return t / 60; }, [heat]);
@@ -237,12 +241,12 @@ export default function MapPage() {
   }, [selected, allByMint]);
   const family = useMemo(() => (famTop && dom ? { top: famTop, locked: dom.locked.byTop.get(famTop.mint) ?? null, mcap: dom.mcap.byTop.get(famTop.mint) ?? null, families: dom.locked.ranked.length, ghost: ghosts.get(famTop.mint) ?? 0 } : null), [famTop, dom, ghosts]);
   const clusterInfo = useCallback((top: string) => {
-    const m = shareOf(dom?.mcap.byTop.get(top));
+    const m = shareOf(dom?.[mode].byTop.get(top));
     if (m == null) return null;
     const cur = m;
     return (
       <>
-        <div className="bm-tip-row"><em>dominance</em><strong><span className="cur">{sharePct(m)}</span> of market cap</strong></div>
+        <div className="bm-tip-row"><em>dominance</em><strong><span className="cur">{sharePct(m)}</span> of {mode === "locked" ? "locked value" : "market cap"}</strong></div>
         <div className="bm-tip-bar" aria-hidden="true">{cur > 0 && <i style={{ width: `${Math.min(100, cur * 100)}%` }} />}</div>
       </>
     );
@@ -268,6 +272,7 @@ export default function MapPage() {
     }, { replace: true });
   }, [setParams]);
   const setLimit = useCallback((l: RootsLimit) => setParams((p) => { const n = new URLSearchParams(p); n.set("roots", String(l)); return n; }, { replace: true }), [setParams]);
+  const setMode = useCallback((m: SizeMode) => setParams((p) => { const n = new URLSearchParams(p); if (m === "locked") n.set("size", "locked"); else n.delete("size"); return n; }, { replace: true }), [setParams]);
   const setKeys = useCallback((ks: HlKey[]) => setParams((p) => { const n = new URLSearchParams(p); const v = formatHl(ks); if (v) n.set("hl", v); else n.delete("hl"); return n; }, { replace: true }), [setParams]);
   const toggleKey = useCallback((k: HlKey) => setKeys(keys.includes(k) ? keys.filter((x) => x !== k) : [...keys, k]), [keys, setKeys]);
   const onSelect = useCallback((n: BubbleNode | null) => select(n?.mint ?? null), [select]);
@@ -405,10 +410,16 @@ export default function MapPage() {
   const ready = !data.loading || data.nodes.length > 0;
   const heatRow = selected && heat ? heat.rows.get(selected.mint) ?? null : null;
   const rootsSeg = (
-    <div className="map-tools">
-      <span className="tools-label">roots</span>
-      <div className="seg" role="group" aria-label="How many roots to draw"><SlidingPill />{LIMITS.map((l) => <button type="button" key={l} aria-pressed={limit === l} onClick={() => setLimit(l)}>{l === "all" ? "all" : `top ${l}`}</button>)}</div>
-    </div>
+    <>
+      <div className="map-tools">
+        <span className="tools-label">size by</span>
+        <div className="seg" role="group" aria-label="What sizes families and coins"><SlidingPill />{SIZES.map(([m, label]) => <button type="button" key={m} aria-pressed={mode === m} onClick={() => setMode(m)}>{label}</button>)}</div>
+      </div>
+      <div className="map-tools">
+        <span className="tools-label">roots</span>
+        <div className="seg" role="group" aria-label="How many roots to draw"><SlidingPill />{LIMITS.map((l) => <button type="button" key={l} aria-pressed={limit === l} onClick={() => setLimit(l)}>{l === "all" ? "all" : `top ${l}`}</button>)}</div>
+      </div>
+    </>
   );
   const heatLine = <p className="map-heatline"><span className="map-heat-i"><i className="map-heat-glyph g-new" aria-hidden="true" /><b>{count(drawn.fresh24)}</b> new pairs 24h</span>{tradesPerMin != null && <><span className="map-heat-sep" aria-hidden="true"> · </span><span className="map-heat-i"><i className="map-heat-glyph g-trades" aria-hidden="true" /><b>{tradesPerMin >= 10 ? Math.round(tradesPerMin) : tradesPerMin.toFixed(1)}</b> trades/min</span></>}</p>;
   const digestChip = digest && digest.pairs > 0 && seenAt != null ? (
@@ -446,11 +457,12 @@ export default function MapPage() {
             </div>
             <h1>Ecosystem <em>map</em></h1>
             {renderer === "three"
-              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of market cap; the coins inside are sized by market cap. Colour is the last trade, lime within 30 min; the rim's bright arc counts trades in 24 h. A pulse runs along a link when a coin trades and a ring marks a new pair. Drag a coin and the map flows around it.</p>
-              : <p className="lead">Clusters are root coins and every pair under them. The big bubble in the middle is the root: its size is the whole family. Every other bubble is sized by its own market cap. Rings flash on trades; dots flow on pairs that traded in the last 30 min. Lime ring = launched on Spore.</p>}
+              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of {mode === "locked" ? "locked value" : "market cap"}; the coins inside are sized by {mode === "locked" ? "the value they lock" : "market cap"}. Colour is the last trade, lime within 30 min; the rim's bright arc counts trades in 24 h. A pulse runs along a link when a coin trades and a ring marks a new pair. Drag a coin and the map flows around it.</p>
+              : <p className="lead">Clusters are root coins and every pair under them. The big bubble in the middle is the root: its size is the whole family. Every other bubble is sized by {mode === "locked" ? "the value it locks" : "its own market cap"}. Rings flash on trades; dots flow on pairs that traded in the last 30 min. Lime ring = launched on Spore.</p>}
             <div className="map-stats">
               <div><em>roots</em><strong><LiveNumber value={ready ? drawn.roots : null} format={countOrDash} kind="count" /></strong></div>
               <div><em>coins</em><strong title={ready ? coinsTitle : undefined}><LiveNumber value={ready ? drawn.coins : null} format={exact} kind="count" /></strong></div>
+              <div><em>locked</em><strong className="accent" title="value locked in the curves of the drawn coins' children">{ready ? usd(drawn.locked) : "—"}</strong></div>
             </div>
             {ready && heatLine}
             {digestChip}
@@ -461,7 +473,7 @@ export default function MapPage() {
           // the camera) does not jump while the data syncs.
           <div className="map-panel card compact">
             <h1 className="map-sr">Ecosystem map</h1>
-            <p className="map-line" title={`stream ${STATUS_LABEL[status]}`}><LiveDot short /><span><b>{ready ? count(drawn.roots) : "—"}</b> roots<i className="map-line-sep" aria-hidden="true" /><b title={ready ? coinsTitle : undefined}>{ready ? exact(drawn.coins) : "—"}</b> coins</span></p>
+            <p className="map-line" title={`stream ${STATUS_LABEL[status]}`}><LiveDot short /><span><b>{ready ? count(drawn.roots) : "—"}</b> roots<i className="map-line-sep" aria-hidden="true" /><b title={ready ? coinsTitle : undefined}>{ready ? exact(drawn.coins) : "—"}</b> coins<i className="map-line-sep" aria-hidden="true" /><b className="accent">{ready ? usd(drawn.locked) : "—"}</b> locked</span></p>
             {phone && limit !== "all" && <p className="map-line sub">top {limit} roots on this screen · <button type="button" className="linkish" onClick={() => setLimit("all")}>show all {count(data.total)}</button></p>}
             {data.error && data.nodes.length > 0 && <p className="map-line sub">update failed · <button type="button" className="linkish" onClick={data.reload}>retry</button></p>}
           </div>

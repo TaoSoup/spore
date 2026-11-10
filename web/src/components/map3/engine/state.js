@@ -180,6 +180,10 @@ export function createState(container, layers, opts, life = createLife()) {
     // ---- camera + runtime (motion.js mutates; everyone reads) ----
     cam: { x: 0, y: 0, k: 1 }, tgt: { x: 0, y: 0, k: 1 },
     dirty: true, needsRender: true, frame: 0,
+    // (local perf 2026-11-09) frames left in which a coin may have moved (motion.js sets it while the coin sim steps): the
+    // O(N) "did anything move" scans of bubbles (scanXY) and links (syncOffsets) run only then, plus every XY_NET_FRAMES
+    // as a safety net. 58k coins x several scans x 144-165 frames/s kept the main thread busy on an idle map.
+    xyScan: 3,
     dustExpand: 0, dustA: 1, hoverI: -1,
     worldGrid: null,
 

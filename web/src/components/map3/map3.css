@@ -141,7 +141,7 @@
 .m3 .m3-tip.dock.on { pointer-events: auto; }
 /* (final fix) the docked card spans the width and would sit over the +/- column: the zoom buttons step aside while
    it is up (pinch still zooms; the size toggle below the card stays). */
-.m3:has(.m3-tip.dock.on) .bm-controls { opacity: 0; visibility: hidden; pointer-events: none; }
+.m3.m3-tip-docked .bm-controls { opacity: 0; visibility: hidden; pointer-events: none; }
 
 /* ---------- reduced motion: the OS preference and the site's "pause animations" toggle ---------- */
 @media (prefers-reduced-motion: reduce) {

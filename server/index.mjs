@@ -44,7 +44,7 @@ const metahost = new MetaHost({ root: cfg.metaDir, domain: cfg.pagesDomain, proj
 const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, log });
 const hub = new EventHub({ maxClients: cfg.sseMaxClients, maxPerIp: cfg.ssePerIp });
 const imgWork = new ImgWork({ log }); // thumbnails and logo sheets render on a worker thread, never on this loop
-const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.imgCacheBytes, concurrency: 8, work: imgWork });   // 8 origin downloads at once (map logos from far)
+const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.imgCacheBytes, thumbMaxBytes: cfg.imgThumbBytes, concurrency: 8, work: imgWork });   // 8 origin downloads at once (map logos from far)
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
 const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.

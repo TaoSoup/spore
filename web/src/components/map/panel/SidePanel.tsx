@@ -338,7 +338,7 @@ function FamilyBlock({ family, mode }: { family: Family; mode: SizeMode }) {
   const size = row.members + (family.ghost ?? 0);
   return (
     <section className="map-side-dom" aria-label={`${sym(family.top)} family dominance`}>
-      <DominanceLine locked={locked} mcap={mcap} mode={mode} only="mcap"
+      <DominanceLine locked={locked} mcap={mcap} mode={mode} only={mode === "mcap" ? "mcap" : undefined}
         label={<><b>{sym(family.top)}</b> family · {count(size)} coin{size === 1 ? "" : "s"} · #{count(row.rank)} of {count(family.families)}</>} />
     </section>
   );

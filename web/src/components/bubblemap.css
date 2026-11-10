@@ -77,7 +77,7 @@ main.map-main { padding: 0; }
 /* the counters: three mono instruments between hairlines, the rule above leads in with lime */
 /* three equal columns while the numbers fit; a figure wider than its third (COINS at 300k+, written out in full) widens
    its own column instead of being cut to "332,3…" */
-.map-stats { position: relative; display: grid; grid-template-columns: repeat(2, minmax(max-content, 1fr)); margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.map-stats { position: relative; display: grid; grid-template-columns: repeat(3, minmax(max-content, 1fr)); margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--rule); }
 .map-stats::before { content: ""; position: absolute; left: 0; top: -1px; width: 56px; height: 1px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .65; }
 .map-stats div { display: grid; gap: 3px; min-width: 0; padding: 0 10px; }
 .map-stats div:first-child { padding-left: 0; }

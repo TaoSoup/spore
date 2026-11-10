@@ -21,7 +21,7 @@ test("defaults: public RPC at 4 rps, ours mode, no launch fee, loopback trust, r
     assert.equal(c.platformMinBps, 5000); assert.equal(c.rpcApiRps, 1); assert.equal(c.rpcProxyRps, 1);
     assert.equal(c.sseMaxClients, 20000); assert.equal(c.ssePerIp, 16);
     assert.deepEqual(c.uploadQuota, { ipPerDay: 500, bytesPerDay: 256 * 1024 * 1024, deploysPerDay: 200 });
-    assert.equal(c.metaGcHours, 24); assert.equal(c.imgCacheBytes, 512 * 1024 * 1024);
+    assert.equal(c.metaGcHours, 24); assert.equal(c.imgCacheBytes, 512 * 1024 * 1024); assert.equal(c.imgThumbBytes, 128 * 1024 * 1024);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
