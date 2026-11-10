@@ -11,8 +11,8 @@
 //   (d) page → map: a Rails row → selected() + a flight; ↓ / → walk the tree; "0" → zoom() < 1.05; "+" → ×1.5 ± 10 %
 //   (e) hover: a real mouse over a coin → .m3-tip.on with "Market cap"; over the selected coin → no tooltip;
 //       a side-panel kid row → hovered() is that kid
-//   (f) size: market cap only (no size param, no .bm-size control); the top-5 planet tags equal
-//       __sporeMapPage.dominance().mcap (sharePct); still no control and no size param after a reload
+//   (f) size: locked value by default (no size param; the .bm-size pill reads locked | mcap with locked pressed); the top-5
+//       planet tags equal __sporeMapPage.dominance().locked (sharePct); the pill and no size param after a reload
 //   (g) highlight: ?hl=ours → hl() = 1 exactly for hlCounts().ours coins
 //   (h) live (MockES): trade → fx() > 0 within 300 ms + lastTrade advanced; pair → has() within 1 s, nodes() + 1,
 //       builds() unchanged, a "new ·" toast; 300 trades in 5 s → rAF p95 ≤ 17.5 ms, 0 long tasks; mapdelta →
@@ -391,17 +391,17 @@ try {
   // ---------------------------------------------------------------- (f)
   await section("f", async (s, check) => {
     await toOverview(page);
-    // the overview defaults to market cap (no size param); the on-map "size: locked | mcap" pill (.bm-size) switches it
+    // the overview defaults to locked value (no size param); the on-map "size: locked | mcap" pill (.bm-size) switches it
     const size0 = await param(page, "size");
     s.defaultSize = size0;
-    check(size0 === null, `the overview carries ?size=${size0} (market cap is the default: no size param)`);
+    check(size0 === null, `the overview carries ?size=${size0} (locked value is the default: no size param)`);
     const sizeBtns = await page.evalJs<{ text: string; on: boolean }[]>(`[...document.querySelectorAll(".m3 .bm-size button")].map((b) => ({ text: b.textContent.trim(), on: b.getAttribute("aria-pressed") === "true" }))`);
-    check(J(sizeBtns) === J([{ text: "locked", on: false }, { text: "mcap", on: true }]), `the size pill reads ${J(sizeBtns)} (want locked | mcap, mcap pressed)`);
+    check(J(sizeBtns) === J([{ text: "locked", on: true }, { text: "mcap", on: false }]), `the size pill reads ${J(sizeBtns)} (want locked | mcap, locked pressed)`);
     await settle(page);
     await sleep(600);
-    const r = await page.evalJs<{ dom: { mint: string; symbol: string | null; share: number }[] | null; cl: { root: string; tag: string; title: string }[]; titles: string[]; texts: string[]; look: string | null }>(`(() => { const d = __sporeMapPage.dominance(5); return { dom: d ? d.mcap.top : null, cl: __sporeMap.clusters(120), titles: __sporeMap.titles(), texts: [...document.querySelectorAll(".m3 .m3-labels .lb.pl")].map((e) => e.textContent), look: typeof __sporeMap.look === "function" ? __sporeMap.look() : null }; })()`);
+    const r = await page.evalJs<{ dom: { mint: string; symbol: string | null; share: number }[] | null; cl: { root: string; tag: string; title: string }[]; titles: string[]; texts: string[]; look: string | null }>(`(() => { const d = __sporeMapPage.dominance(5); return { dom: d ? d.locked.top : null, cl: __sporeMap.clusters(120), titles: __sporeMap.titles(), texts: [...document.querySelectorAll(".m3 .m3-labels .lb.pl")].map((e) => e.textContent), look: typeof __sporeMap.look === "function" ? __sporeMap.look() : null }; })()`);
     const galaxyTitles = r.look === "galaxy";   // galaxy: "N · 38%"; flat: "38% · N coins"
-    if (check(!!r.dom && r.dom.length >= 5, "__sporeMapPage.dominance() returned no mcap table")) {
+    if (check(!!r.dom && r.dom.length >= 5, "__sporeMapPage.dominance() returned no locked table")) {
       const rows = r.dom!.map((d) => {
         const want = sharePct(d.share), c = r.cl.find((x) => x.root === d.mint), shown = r.titles.includes(d.mint);
         const inLabel = shown ? r.texts.some((t) => galaxyTitles ? t.includes(` · ${want}`) : t.includes(`${want} · `)) : null;
@@ -409,18 +409,18 @@ try {
       });
       s.top5 = rows;
       for (const x of rows) {
-        check(x.tag === x.want, `$${x.symbol}: engine tag ${x.tag}, dominance mcap says ${x.want}`);
+        check(x.tag === x.want, `${x.symbol}: engine tag ${x.tag}, dominance locked says ${x.want}`);
         if (x.shown) check(x.inLabel === true, `$${x.symbol}: no planet label reads "${galaxyTitles ? `… · ${x.want}` : `${x.want} · …`}"`);
       }
-      check(rows.filter((x) => x.shown).length >= 3, `only ${rows.filter((x) => x.shown).length} of the top-5 mcap families are labelled`);
+      check(rows.filter((x) => x.shown).length >= 3, `only ${rows.filter((x) => x.shown).length} of the top-5 locked families are labelled`);
     }
-    s.shot = await shot(page, "f-mcap.png");
+    s.shot = await shot(page, "f-locked.png");
     await page.reload();
     await page.waitFor(mapReadyJs("three"), 60_000, "the map after the reload");
     const buttonsAfter = await page.evalJs<number>(`document.querySelectorAll(".m3 .bm-size button").length`);
     const sizeAfter = await param(page, "size");
     s.afterReload = { buttons: buttonsAfter, size: sizeAfter };
-    check(buttonsAfter === 0, `after a reload ${buttonsAfter} .bm-size buttons (expected none)`);
+    check(buttonsAfter === 2, `after a reload ${buttonsAfter} .bm-size buttons (expected the locked | mcap pill)`);
     check(sizeAfter === null, `after a reload ?size=${sizeAfter} (expected none)`);
   });
 

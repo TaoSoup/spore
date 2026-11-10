@@ -84,7 +84,7 @@ function MapHint({ cam, gone, renderer }: { cam: CamStore; gone: boolean; render
 /// The whole pump.fun pair ecosystem as one map (DESIGN §11.5): every root with a tracked child and every
 /// descendant, rendered from the IndexedDB cache first and patched by `since=` deltas and live events.
 /// URL state: `?focus=<mint>` selects a coin (the camera flies to it with its parent and children),
-/// `?size=locked` sizes families by locked value (the on-map size pill; no param or `?size=mcap` = market cap), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
+/// `?size=mcap` sizes by market cap instead of locked value (the on-map size pill; no param or `?size=locked` = locked), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
 /// holds the counters, search, highlight chips and live rails; the selected coin opens a side panel
 /// (a bottom sheet on phones). Arrow keys walk the tree; Esc clears. Each family's share of the whole map
 /// (lib/map/dominance.ts, both size modes) rides on its title, its tooltip, the side panel and the
@@ -130,9 +130,9 @@ export default function MapPage() {
   const fallbackRef = useRef(fallback); fallbackRef.current = fallback;
   const rootsParam = params.get("roots");
   const limit: RootsLimit = rootsParam === "all" ? "all" : rootsParam === "200" ? 200 : rootsParam === "60" ? 60 : renderer === "three" ? "all" : phone ? 200 : "all";
-  // The on-map "size: locked | mcap" pill (both renderers) sets `?size=locked`; market cap is the default (`?size=mcap`, the
-  // older links' form, reads the same). The engine rebuilds on a switch and keeps its family order (ThreeMap BuildReason "mode").
-  const mode: SizeMode = params.get("size") === "locked" ? "locked" : "mcap";
+  // Locked value is the default, as before c515fcb; the on-map "size: locked | mcap" pill (both renderers) sets `?size=mcap`
+  // (`?size=locked` reads as the default). The engine rebuilds on a switch and keeps its family order (ThreeMap BuildReason "mode").
+  const mode: SizeMode = params.get("size") === "mcap" ? "mcap" : "locked";
   const hlParam = params.get("hl");
   const keys = useMemo(() => parseHl(hlParam), [hlParam]);
   const stress = import.meta.env.DEV ? Math.min(100_000, Number(params.get("stress")) || 0) : 0;
@@ -271,7 +271,7 @@ export default function MapPage() {
     }, { replace: true });
   }, [setParams]);
   const setLimit = useCallback((l: RootsLimit) => setParams((p) => { const n = new URLSearchParams(p); n.set("roots", String(l)); return n; }, { replace: true }), [setParams]);
-  const setMode = useCallback((m: SizeMode) => setParams((p) => { const n = new URLSearchParams(p); if (m === "locked") n.set("size", "locked"); else n.delete("size"); return n; }, { replace: true }), [setParams]);
+  const setMode = useCallback((m: SizeMode) => setParams((p) => { const n = new URLSearchParams(p); if (m === "mcap") n.set("size", "mcap"); else n.delete("size"); return n; }, { replace: true }), [setParams]);
   const setKeys = useCallback((ks: HlKey[]) => setParams((p) => { const n = new URLSearchParams(p); const v = formatHl(ks); if (v) n.set("hl", v); else n.delete("hl"); return n; }, { replace: true }), [setParams]);
   const toggleKey = useCallback((k: HlKey) => setKeys(keys.includes(k) ? keys.filter((x) => x !== k) : [...keys, k]), [keys, setKeys]);
   const onSelect = useCallback((n: BubbleNode | null) => select(n?.mint ?? null), [select]);

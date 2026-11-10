@@ -154,7 +154,7 @@ async function mainRun() {
     result.k0 = await p.evalJs("__sporeMap.zoom()");
     const sizeUi = await p.evalJs<{ pressed: string[]; buttons: number; sizeParam: string | null }>(SIZE_UI_JS);
     result.sizeUi = sizeUi;
-    if (want("G4")) gate("G4 size control", sizeUi, `no size control (market cap only), no size param`, sizeUi.buttons === 0 && sizeUi.sizeParam === null);
+    if (want("G4")) gate("G4 size control", sizeUi, `the locked | mcap pill, locked pressed (the default), no size param`, sizeUi.buttons === 2 && J(sizeUi.pressed) === J(["locked"]) && sizeUi.sizeParam === null);
     const imgA = await shot(p, "overview");
     if (want("G1") && !PHONE) {
       // (fixer) what the owner sees from far: tops drawn at or above the logo threshold, and how many show a logo
@@ -313,7 +313,7 @@ async function pokemonAt(url: string, label: string): Promise<{ r: number | null
   const br = await launchChrome({ gpu: "metal", width: 1440, height: 900 });
   const p = await br.newPage({ width: 1440, height: 900, dpr: 1 });
   try {
-    await p.navigate(url.replace(/\/$/, "") + withDebug("/map"), 60_000);
+    await p.navigate(url.replace(/\/$/, "") + withDebug("/map?size=mcap"), 60_000);   // the Pokémon probe measures market-cap sizing
     await p.waitFor(mapReadyJs("three"), 120_000, "three map");
     await settle(p, 1500);
     if (!(await p.evalJs<boolean>(`__sporeMap.zoomTo(${J(CARDS)}, 4)`))) return null;

@@ -272,14 +272,14 @@ try {
   await sleep(200);
   check((await param("hl")) === null, "(d) clear did not remove ?hl");
   const sizeUi = await evalJs<{ buttons: number; size: string | null }>(`({ buttons: document.querySelectorAll(".bm-size button").length, size: new URLSearchParams(location.search).get("size") })`);
-  check(sizeUi.buttons === 0 && sizeUi.size === null, `(d) the map has no size control and no ?size (families are sized by market cap only): ${JSON.stringify(sizeUi)}`);
+  check(sizeUi.buttons === 2 && sizeUi.size === null, `(d) the map shows the locked | mcap size pill and no ?size (locked value is the default): ${JSON.stringify(sizeUi)}`);
   await evalJs("window.__oldDoc = true");
   await send("Page.reload", {}, S);
   await waitFor("window.__oldDoc === undefined", 30_000, "the reloaded document"); // the old document answers until the new one commits
   await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 60_000, "map after reload");
   await assertRenderer("(d) reload");
   const sizeReload = await evalJs<{ param: string | null; buttons: number }>(`({ param: new URLSearchParams(location.search).get("size"), buttons: document.querySelectorAll(".bm-size button").length })`);
-  check(sizeReload.param === null && sizeReload.buttons === 0, `(d) no size control after a reload: ${JSON.stringify(sizeReload)}`);
+  check(sizeReload.param === null && sizeReload.buttons === 2, `(d) the size pill and no ?size after a reload: ${JSON.stringify(sizeReload)}`);
   result.d = { chip, expectOurs, hlAfter, sizeReload };
   await spa("/map");
   await settle();
