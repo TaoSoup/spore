@@ -15,8 +15,12 @@ export type EngineInset = { left?: number; top?: number; right?: number; bottom?
 export type EngineRect = { x0: number; y0: number; x1: number; y1: number };
 export type EngineImage = HTMLCanvasElement | ImageBitmap | HTMLImageElement;
 export type EngineImages = { want(url: string, px: number): EngineImage | null; onLoaded(cb: () => void): () => void; ready(url: string): boolean;
-  /** The loader gave up on this source (404, dead sheet cell, decode failure): the engine stops asking and draws the monogram. */
-  failed?(url: string): boolean };
+  /** The loader failed this source for now (404, dead sheet cell, decode failure, its retries used up): the engine stops
+   * asking and draws the monogram. */
+  failed?(url: string): boolean;
+  /** When a failed source takes a want again (Date.now() ms; 0 = now, Infinity = not on this page). The engine asks again
+   * then, if the coin is drawn; without it a failure is for good. */
+  retryAt?(url: string): number };
 export type EngineCallbacks = { onSelect(mint: string | null): void; onHover(mint: string | null): void; onCamera(c: { k: number }): void; onFirstFrame(): void; onLost(): void;
   /** Galaxy: coins the viewer dragged, at each rope commit (world units; a top: its offset from the designed layout, any other
    * coin: its offset relative to its parent's). The shell merges them and passes them back as EngineOptions.moved. */
@@ -93,7 +97,12 @@ export type EngineHandle = {
   select(mint: string | null, opts?: { fly?: boolean }): boolean; selected(): string | null;
   hover(mint: string | null): void; setHighlight(test: ((mint: string) => boolean) | null): void;
   setHeat(heat: EngineHeat): void; applyEvent(e: EngineEvent): void;
-  patchCoins(p: { mint: string; mcapUsd: number | null }[]): void;
+  /** Market caps (tooltip and callout numbers); an entry with `image` also sets that coin's logo URL (patchImages). */
+  patchCoins(p: readonly { mint: string; mcapUsd: number | null; image?: string | null }[]): void;
+  /** Logo URLs that changed after the build (null = none): the coin forgets its old logo state and asks for the new one
+   * (at once when it owns an atlas cell, else when it is next drawn at the logo size). Newborns included. Returns how many
+   * coins took a new URL (unchanged ones and coins the engine does not draw are skipped). */
+  patchImages(p: readonly { mint: string; image: string | null }[]): number;
   setTags(tagOf: (topMint: string) => string | null): void;
   setInset(inset: EngineInset, fitInset: EngineInset, obstacles: EngineRect[]): void;
   setReducedMotion(on: boolean): void; setFeed(state: "up" | "down"): void; resize(): void;

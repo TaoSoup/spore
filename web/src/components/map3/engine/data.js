@@ -15,6 +15,9 @@
 //       sym[], img[], mint[], par[] (-1 = family top), gen[], famOf[], kids[][], mc[] (USD, 0 = none),
 //       val[] (value weight = opts.valueOf, the coin's part of its family value in the size mode), age[] (s since last trade, Infinity = none in
 //       24 h), n24[], crt[] (creation time, s, 0 = unknown)
+//       (logos that come later, 2026-11-10) img[] is the build's copy, but not frozen: bubbles.patchImage replaces a coin's URL
+//       when the page's data changes it (EngineHandle.patchImages / patchCoins), and bubbles.addCoin appends a newborn's at
+//       its index (>= N), so img.length can exceed N
 //     mintIdx: Map mint -> coin index
 //     fams[] {id, members[], maxGen, top, value, age, n24, share, rank, planet, valueL, valueM, shareL, shareM, rankL, rankM}
 //                   value/share = the current mode's (valueL/shareL locked, valueM/shareM mcap); rankL/rankM = 0-based rank by

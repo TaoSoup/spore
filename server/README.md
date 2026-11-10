@@ -48,7 +48,7 @@ npm run fixtures                # re-capture test/fixtures from mainnet (read-on
 | `UPLOAD_DAILY_IP` / `UPLOAD_DAILY_MB` / `UPLOAD_DAILY_DEPLOYS` | `20` / `256` / `200` | Daily quotas of `/api/upload`: uploads per client IP, new bytes written and Pages deploys run (fixed 24 h window from boot; 429 with `retryAfter` when spent). |
 | `META_GC_HOURS` | `24` | Uploaded metadata files no indexed coin references after this many hours are deleted (and un-published with the next deploy). `0` keeps everything. Only files `/api/upload` wrote are ever considered. |
 | `IMG_CACHE_MB` | `512` | Disk budget of the image proxy cache; the oldest files are evicted beyond it. |
-| `IMG_THUMB_MB` | `128` | Disk budget of the map logo thumbnails (64/128/256 px, about 7 KB each at 64 px); raise it for a full pump.fun index (about 58k coins need about 400 MB at 64 px). |
+| `IMG_THUMB_MB` | `2048` | Disk budget of the map logo thumbnails (64/128/256 px files in `DATA_DIR/img`, about 9 KB each at 64 px: 44k logos took 378 MB on 2026-11-10, so the default holds about 230k logos). Thumbnails are kept whatever their age; past this budget the least recently served are deleted first, never one served or made in the last 24 h (the budget overruns with a warning rather than drop what the map shows). The warm pass stops at 85 % of it and never evicts; first sight (a new coin's logo) goes on to 95 % and then evicts thumbnails nobody was served for 30 days, least recently used first, down to 90 %, so new coins keep getting logos (the 85-95 % band is their reserve: the warm pass does not refill what first sight freed); what could not be made is logged at most every 10 min with counts. See "Logo capture". |
 | `CSP_CONNECT` | empty | Extra `connect-src` hosts for the SPA's Content-Security-Policy (normally none: the browser reaches the chain only through `/api/rpc`). |
 | `TREASURY_TTL_MS` | `60000` | Cache of `GET /api/treasury`. |
 | `DIST_DIR` | `../web/dist` | Built web app served with the SPA fallback. |
@@ -200,23 +200,80 @@ stamps feed (so a late-resolved logo or name reaches open maps), at most 500 ent
 ride on every node. Off-chain JSON is fetched for **every tracked coin in both modes**: `MetaFetcher`
 runs a sweep every minute that queues every tracked coin whose uri has no row, a stale row, or a
 failed row whose backoff elapsed, ordered by locked value then recency; 6 workers; results persist in
-`meta` (`attempts` counts consecutive failures: retries after 15 min, 30 min, 1 h … capped at 24 h; a
-resolved image is re-read weekly, a resolved JSON without an image daily; a uri that once resolved
-keeps its image when a later re-read fails). IPFS content (`ipfs://`, any `/ipfs/<cid>` path, or
+`meta` (`attempts` counts consecutive failures: retries after 15 min, 30 min, 1 h … capped at 24 h;
+a temporary failure (429, 5xx, a timeout or network error, gateways that mixed a 403/404 with any
+of those, or a rotation whose gateways all did not resolve, which is our DNS) at 3 h while fewer than
+5 fetches failed in a row, then on up to a day like any other; a non-IPFS host that answered 404/410
+or does not resolve 5 times in a row (`dead_streak` counts that run, any other failure or a success
+resets it; `attempts` counts every failure) is asked weekly, and until then on the usual backoff, so a
+local DNS outage costs a few retries, not a week; `metaRetryS` in `lib/meta.mjs`; a resolved image is re-read weekly, a resolved JSON
+without an image daily; a uri that once resolved keeps its image when a later re-read fails). IPFS content (`ipfs://`, any `/ipfs/<cid>` path, or
 `<cid>.ipfs.<gateway>`) goes through the gateway rotation pump.mypinata.cloud → ipfs.io → dweb.link
 → gateway.pinata.cloud → w3s.link (DESIGN §11.5's four in their order, with pump.fun's own pinata
 gateway in front: measured 2026-10-19 it answers in 0.2 s, 200 for everything pump.fun pinned and a
 definitive 403 otherwise, while the three public gateways answer 429 within seconds of six workers
 and gateway.pinata.cloud needs ~7 s per CID; cf-ipfs.com is dead and never asked; a gateway outside
 the rotation that a creator wrote into the uri is tried first, the content may only be there). A
-403/404/410/5xx, a 429 or a timeout from one gateway moves to the next; each attempt has its own
+403/404/410/5xx, a 429 or a timeout from one gateway moves to the next (a rotation where some
+gateways said 403/404 while others were rate-limited is requeued like a rate-limited fetch, and stored
+when that does not help with a per-gateway summary such as `403 pump.mypinata.cloud; 429 ipfs.io;
+timeout dweb.link` as its error, a temporary failure: pump.fun's pinata answers 403 for whatever it
+did not pin, which says nothing about the public gateways); each attempt has its own
 10 s timeout under a 25 s budget per uri (15 s / 30 s for images); the least-busy gateway is asked
 first so the workers spread over the rotation (200 ms spacing per host, 429 pauses per host as
 before). The image proxy uses the same rotation and allowlist (`dweb.link` / `w3s.link` path form
 included; they redirect to the listed `<cid>.ipfs.*` form). This is HTTP to gateways only, never the
 RPC. `/api/health.meta` reports the coverage over tracked coins, `{ total, withMeta, withImage,
 noUri, failed, queued }` (`failed` = coins whose last fetch failed), plus this process's counters
-under `run: { fetched, failed, rateLimited, rotated, sweeps }`.
+under `run: { fetched, failed, failedTransient, rateLimited, rotated, sweeps }`.
+
+**Logo capture** (`ImageCache` in `lib/meta.mjs`, files in `DATA_DIR/img`). A logo is captured the
+first time its url is seen and kept for good:
+
+- *First sight.* `Model.setMeta` (a metadata image that is new or changed) and `setAssetIcons` call
+  `model.onImage`, which `index.mjs` points at `ImageCache.enqueueThumb`: the 64 px thumbnail is made
+  at once (deduplicated, at most 20k waiting, 2 at a time), before the map asks and before the host
+  can die. The periodic warm pass (3 min after boot, then every 30 min, at most 20 min each) covers
+  every tracked coin's logo, family tops, the biggest families' children and the coins each listed
+  asset family draws first (`Model.warmImageUrls`); a pass resumes where the previous one stopped,
+  across restarts too (kv `imgWarmCursor`, the next url and its position), and a pass that gets round
+  the whole list starts the next one at the top.
+- *Download slots.* 8 origin downloads at once; background work (first sight, warm pass) may hold at
+  most 4 of them, and a freed slot goes to the most urgent waiter: a visitor's `/api/img` or
+  `/api/logo-sheet` first, then first sight, then the warm pass (renders queue the same way). A
+  visitor asking for a url the warm pass queued lifts that download to the front.
+- *Kept for good.* A thumbnail is served whatever its age and never deleted for it: its url names the
+  image (IPFS content never changes; a new logo comes with a new url). Only the `IMG_THUMB_MB` budget
+  evicts, least recently served first (the file's mtime records the last serve, at most every 6 h, so
+  the order survives a restart). The warm pass stops at 85 % of that budget and never evicts; first
+  sight goes on to 95 % and then evicts thumbnails nobody was served (or that were made) in the last
+  30 days, down to 90 % of the budget, so a new coin still gets its logo on a full disk. The 85-95 %
+  band is first sight's reserve: the warm pass does not refill the room an eviction freed (when both
+  stopped at 95 % it did, and every new coin cost ~11k idle thumbnails); a capture that
+  is refused all the same is counted (`freshFull`, `warmFull`) and logged at most every 10 min with
+  the counts since the last warning. Originals keep their own `IMG_CACHE_MB` budget and a 24 h
+  refresh; a stale original whose refresh fails is still served.
+- *Failures are classified* and kept in sqlite (`img_fail`: url, kind, error, attempts,
+  gone_attempts, next retry), so a restart does not download the dead again. Temporary (429 or every
+  gateway pausing, 5xx, timeouts, network errors, IPFS gateways that mixed a no with any of those,
+  every gateway or two of the rotation's own not resolving: our DNS; one rotation gateway that does
+  not resolve is not enough, it may be gone for good): retried after 1 min, doubling (6 tries within the first
+  hour, then on up to a day, so an unpinned CID is not asked every hour forever); `/api/img` answers
+  `503` with `Retry-After` (the wait left, at most 300 s) and `/api/logo-sheet` leaves the cell
+  pending, however long the wait. Permanent (404/410 and the other definitive 4xx, not an image, too
+  large, a lone host that did not resolve 3 times in a row: before that it is temporary, our DNS may
+  be down, retried after 15 min and then 30, so the third miss comes at least 45 min after the first
+  and a short local outage does not kill the logo): retried after 1 h, then a day, then weekly;
+  `/api/img` answers 404 and the sheet cell is dead. `attempts` counts the failures in a row of one
+  kind, so three temporary failures and then a 404 wait like a first 404 (an hour), not a fourth
+  failure; a permanent failure counts the permanent failures since the last success
+  (`gone_attempts` carries the count across temporary ones in between), so a url that alternates 404
+  and 502 still reaches the weekly wait instead of ~330 fetches a week. A logo that downloads but
+  cannot be drawn is a dead sheet cell for a week while `/api/img` keeps serving its original; an
+  animated webp is drawn from its first frame. Rows past their retry time by 30 days are forgotten.
+
+`/api/health.images` has the counters plus `thumbFiles`, `slots` (active / background / waiting per
+priority), `fresh` (first-sight queue) and `failing: { gone, temp, nothumb }`.
 
 **Live-path cost.** A trade used to trigger a full derived recompute (`computed()`, ≈ 90 ms at 15k
 coins) because the coin's own upsert had just bumped the model version; `Model.priceOf(mint)` prices
@@ -250,8 +307,9 @@ first (see the security notes in the fix report).
 ## Storage
 
 `node:sqlite`, WAL mode: `coins`, `mints`, `trades` (≤ 2 000 per mint, 24 h volume and candles),
-`meta` (off-chain JSON cache with `attempts`; weekly re-read of a resolved image, backoff retries from
-15 min to 24 h, IPFS gateway rotation), `backfill_curves`, `backfill_state`, `kv` (SOL price,
+`meta` (off-chain JSON cache with `attempts` and `dead_streak`; weekly re-read of a resolved image, backoff retries from
+15 min to 24 h, IPFS gateway rotation), `img_fail` (the image proxy's failed urls with kind and next
+retry), `backfill_curves`, `backfill_state`, `kv` (SOL price,
 decoded `Global`, schema version), `api_keys` (partner keys as sha256, usage counters), `agents` and
 `agent_proposals` (root agents: status, profile, run counters; every proposal with its simulation;
 logos as files in `DATA_DIR/agents/`). `coins.updated_at` is milliseconds (v3). Migrations are idempotent
@@ -323,7 +381,8 @@ DESIGN §7, plus a few extras that never replace a contract field:
 - `POST /api/spawned` `{ mint, sig }` → `{ ok, mint, ours, oursPending, verified: true, feePaid?, coin }` the Spawn page reports a signed spawn; the transaction is read back and must be a pump create of that mint by a wallet with the launch fee paid to the platform, else `400 { error }` (`404 { error, retryAfter: 3 }` until the RPC sees the signature); 20 per 10 min per IP, verdicts cached per signature
 - `GET /m/:name` → a self-hosted metadata/image file (immutable)
 - `GET /api/events` → SSE `coin | trade | stats`, heartbeat comment every 15 s
-- `GET /api/img?u=` → cached image proxy for URLs the API itself handed out (the `image` of an indexed coin or a file on our metadata host; anything else is 404 even on an allowed host; allowlist in `lib/meta.mjs`, 4 MB, 24 h, `IMG_CACHE_MB` budget); `Coin.image` already points here
+- `GET /api/img?u=[&w=64|128|256]` → cached image proxy for URLs the API itself handed out (the `image` of an indexed coin or a file on our metadata host; anything else is 404 even on an allowed host; allowlist in `lib/meta.mjs`, 4 MB, 24 h, `IMG_CACHE_MB` budget); with `w` a PNG thumbnail (`x-img-thumb`) when one can be drawn, kept for good under `IMG_THUMB_MB`; `503` + `Retry-After` while a temporary failure holds the image back, `404` for a permanent one (see "Logo capture"); `Coin.image` already points here
+- `GET /api/logo-sheet?w=64&m=<mint>,…[&f=webp|png]` → one image of up to 256 mints' 64 px logos, 16 per row; `x-sheet` / `x-sheet-dead` are hex bitmaps of present / dead cells (byte j bit b = cell 8j+b), a cell in neither is pending (still rendering, or a temporary failure: ask again), `x-sheet-pending` counts them (`no-store` while any is pending)
 - `POST /api/upload` → `{ metadataUri, imageUri, metadata }` self-hosted (see "Metadata host"; 5 per 10 min per IP, daily quotas → `429 { error, retryAfter }`)
 - `POST /api/rpc` → allow-listed JSON-RPC proxy (no `getProgramAccounts`) on its own RPC lane; batches of at most 5; `getMultipleAccounts` ≤ 32 keys; `getTokenAccountsByOwner` never `jsonParsed`; `sendTransaction` / `simulateTransaction` only for transactions that invoke a pump program (decoded and checked, base64 or base58); relayed answers capped at 2 MB; 60 per minute per IP
 - `GET /api/treasury` → `{ platform, ourCoins, pendingByQuote: [{ quoteMint, symbol, amount, usd, coins }], coins, updatedAt }`: the platform's pending creator-fee share, read from the curve bucket, creator vault and AMM vault of every coin whose sharing config names the platform (DESIGN §11.4); cached 60 s; empty until the first launch

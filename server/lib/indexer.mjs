@@ -41,6 +41,17 @@ const YOUNG_S = 30 * 60;
 // A migrated pool that prices other coins (the quote mint of tracked children) is re-read once per this
 // window instead of once per full pass, so a child's chain price does not trail its parent's pool.
 const PRICING_POOL_MS = 4 * 60_000;
+// Mint records (name, symbol and the metadata uri that leads to a coin's logo). resolveOne stores only the
+// token program, so every resolved backfill batch reads its own mints at once; the catch-up reads the ones
+// stored before that (or whose batch read failed): a bounded slice soon after boot and every 10 min after,
+// on the main lane like the rest. A mint read without a uri is tried again once a day, not every run.
+export const MINT_CATCHUP_FIRST_MS = 60_000;
+export const MINT_CATCHUP_MS = 10 * 60_000;
+export const MINT_CATCHUP_MAX = 2_000;
+const MINT_URI_RETRY_S = 24 * 3600;
+// The rolling refresh's place in model.tracked(), kept across restarts (backfill_state): a full pass takes
+// hours on a big index, and a cursor back at 0 on every boot left the tail of the list never refreshed.
+export const REFRESH_CURSOR_KEY = "refresh:cursor";
 // Map stream (DESIGN §11.5): a `pair` is announced at most once per mint within this window (the
 // create path and the enrich path both try), and `mapdelta` batches are flushed on this timer with
 // at most this many entries each (largest locked value first; the rest carry over).
@@ -62,14 +73,20 @@ const COINGECKO = `https://api.coingecko.com/api/v3/simple/price?ids=${["solana"
 export class Indexer {
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
-    this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true, ...opts };
+    this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
+      mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, ...opts };
     this.live = null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
-    this.hot = new Set(); this.cursor = 0; this.pricingCursor = 0; this.refreshing = false;
+    // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
+    this.hot = new Set(); this.cursor = 0; this.cursorRestored = false; this.pricingCursor = 0; this.refreshing = false;
+    // A mint run in flight (#mintLane): catchUpMintInfo, or a whole-index read (ensureAllMintInfo) the catch-up would only
+    // duplicate; `mintRun` settles when it ends.
+    this.mintCatchingUp = false; this.mintRun = null;
     this.fetchCache = new Map(); // mint → { at, found } for fetchCoin
     this.pairSent = new Map();   // mint → when its `pair` event went out (dedupe)
     this.assetScanning = false;  // the asset walk (scanAssetQuotes) in flight
-    this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 } };
+    this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 },
+      mints: { batchRead: 0, batchFailed: 0, catchUpRuns: 0, catchUpRead: 0, unread: null, lastCatchUpAt: null } };
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -84,6 +101,10 @@ export class Indexer {
     this.timers.push(setInterval(() => this.refresh({ reason: "tick" }).catch((e) => this.log.warn(`refresh: ${e.message}`)), this.opts.refreshMs));
     this.timers.push(setInterval(() => this.loadGlobal().catch(() => {}), 10 * 60_000));
     this.timers.push(setInterval(() => { try { this.flushMapDelta(); } catch (e) { this.log.warn(`mapdelta: ${e.message}`); } }, MAPDELTA_MS));
+    // Mint records stored unread (thousands on a full index): a first slice once the live phase is up, then one per interval.
+    // Timers, not awaited, so start() and the backfill never wait on it; clearInterval in stop() clears the timeout too.
+    const catchUp = () => this.catchUpMintInfo().catch((e) => this.log.warn(`mints: catch-up: ${e.message}`));
+    this.timers.push(setTimeout(catchUp, this.opts.mintCatchupFirstMs), setInterval(catchUp, this.opts.mintCatchupMs));
     if (this.opts.backfill) this.runBackfill().catch((e) => { this.state.lastError = e.message; this.log.error(`backfill failed: ${e.stack ?? e}`); });
     else { this.model.setBackfill({ done: true, ...this.model.db.backfillStats() }); this.state.phase = "live"; }
   }
@@ -222,7 +243,7 @@ export class Indexer {
     this.state.phase = "backfill:ancestors";
     await this.ensureAncestors();
     this.state.phase = "backfill:mints";
-    await this.ensureMintInfo();
+    await this.ensureAllMintInfo();
     this.model.setBackfill({ done: true, ...db.backfillStats() });
     this.state.backfillDoneAt = nowS();
     this.log.info(`backfill: done (${this.model.backfill.resolved}/${this.model.backfill.total} curves, ${this.model.coins.size} coins)`);
@@ -242,7 +263,9 @@ export class Indexer {
    * Turns staged curves into coins. A curve stores no mint, so the token accounts the curve owns
    * are listed (Token-2022 first, SPL Token for older coins): the one whose mint is not the quote
    * mint is the coin's mint. Priority: graduated first, then biggest raise, then deepest, so the
-   * leaderboard fills with the coins that matter first. `backfillLimit` bounds dev runs.
+   * leaderboard fills with the coins that matter first. `backfillLimit` bounds dev runs. Each batch's
+   * coins get their mint records read before the next batch (#readBatchMints), not after the whole
+   * backfill drains (days on a full index), so their names and logos show while it runs.
    */
   async resolveCurves() {
     const db = this.model.db;
@@ -256,23 +279,47 @@ export class Indexer {
       if (!batch.length) return;
       await this.#fillCurveData(batch);
       let i = 0;
+      const stored = [];
       await Promise.all(Array.from({ length: Math.min(concurrency, batch.length) }, async () => {
         while (i < batch.length && !this.stopped) {
           const row = batch[i++];
           if (!row.data) { db.backfillFail(row.curve, "curve account gone"); continue; }
-          try { await this.resolveOne(row); } catch (e) { db.backfillFail(row.curve, e.message); this.log.warn(`backfill: ${row.curve}: ${e.message}`); }
+          try { const mint = await this.resolveOne(row); if (mint) stored.push(mint); } catch (e) { db.backfillFail(row.curve, e.message); this.log.warn(`backfill: ${row.curve}: ${e.message}`); }
         }
       }));
       this.model.setBackfill({ ...db.backfillStats() });
+      await this.#readBatchMints(stored);
+    }
+  }
+  /**
+   * The mint records of a resolved batch that were never read (and of their quote mints: the parent
+   * #resolveByMint just stored for free): one getMultipleAccounts per 100, one Metaplex round for SPL
+   * mints, new uris to the metadata fetcher. Never throws: a failed read is logged and left to the
+   * catch-up (catchUpMintInfo), so resolveCurves goes on. Returns how many mints were read.
+   */
+  async #readBatchMints(mints) {
+    if (!mints.length || this.stopped) return 0;
+    let want = [];
+    try {
+      want = this.#unreadMints(mints.map((m) => this.model.get(m)).filter(Boolean));
+      if (!want.length) return 0;
+      await this.#readMints(want, this.rpc);
+      this.state.mints.batchRead += want.length;
+      return want.length;
+    } catch (e) {
+      this.state.mints.batchFailed += want.length;
+      this.log.warn(`backfill: mint info for ${want.length} mints: ${e.message} (left to the catch-up)`);
+      return 0;
     }
   }
 
+  /** Resolves one staged curve into a coin; returns its mint. */
   async resolveOne(row) {
     const db = this.model.db;
     const curve = decodeCurve(Buffer.from(row.data, "base64"), row.curve);
     // Already known (live CreateEvent or a child's quote mint pointed here): no RPC needed.
     const known = this.model.byCurve(row.curve);
-    if (known) { db.backfillResolve(row.curve, known.mint); return; }
+    if (known) { db.backfillResolve(row.curve, known.mint); return known.mint; }
     let accounts = await this.rpc.getTokenAccountsByOwner(row.curve, TOKEN_2022_PROGRAM_ID.toBase58());
     if (!accounts.some((a) => a.mint !== curve.quoteMint)) accounts = accounts.concat(await this.rpc.getTokenAccountsByOwner(row.curve, TOKEN_PROGRAM_ID.toBase58()));
     const base = accounts.find((a) => a.mint !== curve.quoteMint);
@@ -282,6 +329,7 @@ export class Indexer {
     db.backfillResolve(row.curve, base.mint);
     // The parent curve is now identified for free: its mint is this coin's quote mint.
     if (curve.quoteMint) this.#resolveByMint(curve.quoteMint);
+    return base.mint;
   }
   #resolveByMint(mint) {
     const db = this.model.db;
@@ -325,7 +373,7 @@ export class Indexer {
       if (staged) {
         await this.resolveCurves();
         await this.ensureAncestors();
-        await this.ensureMintInfo();
+        await this.ensureAllMintInfo();
         await this.ensurePools();
         this.model.setBackfill({ ...db.backfillStats() });
       }
@@ -385,28 +433,112 @@ export class Indexer {
    * mints fall back to the Metaplex PDA. Then the off-chain JSON is queued (lazy, cached).
    */
   async ensureMintInfo(only = null, { rpc = this.rpc } = {}) {
+    const mints = this.#unreadMints(only ?? this.model.coins.values());
+    const n = await this.#readMints(mints, rpc);
+    if (mints.length) this.log.info(`mints: ${mints.length} fetched (${n.metaplex} via Metaplex)`);
+  }
+  /**
+   * ensureMintInfo over the whole index (the backfill's "backfill:mints" phase, the asset walk), on the mint lane: a
+   * catch-up already running finishes first (what it read is not read again), and the catch-up timer skips while this
+   * runs (it would read a slice of the same mints a second time).
+   */
+  async ensureAllMintInfo() {
+    while (this.mintCatchingUp) await this.mintRun;
+    return this.#mintLane(() => this.ensureMintInfo());
+  }
+  /** Runs `fn` as the one mint run in flight (`mintCatchingUp`, settled `mintRun`); the caller checked that none is. */
+  async #mintLane(fn) {
+    this.mintCatchingUp = true;
+    let settle; this.mintRun = new Promise((r) => { settle = r; });
+    try { return await fn(); } finally { this.mintCatchingUp = false; this.mintRun = null; settle(); }
+  }
+  /** The mints of `coins` and their non-SOL quote mints whose record is missing, has no decimals or was never read on chain. */
+  #unreadMints(coins) {
     const wanted = new Set();
     const consider = (m) => { if (!m || m === SOL_MINT) return; const info = this.model.mint(m); if (!info || info.decimals == null || !info.onchainAt) wanted.add(m); };
-    for (const c of only ?? this.model.coins.values()) { consider(c.mint); consider(c.quoteMint); }
-    const mints = [...wanted];
+    for (const c of coins) { consider(c.mint); consider(c.quoteMint); }
+    return [...wanted];
+  }
+  /**
+   * Reads the mint accounts of `mints` (100 per call) and, for the ones without Token-2022 metadata, their
+   * Metaplex PDA, then hands every uri to the metadata fetcher; that last step also runs when a call
+   * failed, so what was stored before it still gets fetched. Returns `{ metaplex }` (Metaplex lookups).
+   */
+  async #readMints(mints, rpc) {
     const needMetaplex = [];
-    for (const part of chunks(mints, 100)) {
-      const infos = await rpc.getMultipleAccounts(part);
-      infos.forEach((info, i) => {
-        const mint = part[i];
-        if (!info) { this.model.setMint({ mint, onchainAt: nowS() }); return; }
-        const m = decodeMint(info.data, info.owner);
-        if (!m) { this.model.setMint({ mint, onchainAt: nowS() }); return; }
-        this.model.setMint({ mint, decimals: m.decimals, tokenProgram: m.tokenProgram, supply: m.supply, ...(m.metadata ?? {}), onchainAt: m.metadata ? nowS() : 0 });
-        if (!m.metadata) needMetaplex.push(mint);
-      });
+    try {
+      for (const part of chunks(mints, 100)) {
+        const infos = await rpc.getMultipleAccounts(part);
+        infos.forEach((info, i) => {
+          const mint = part[i];
+          if (!info) { this.model.setMint({ mint, onchainAt: nowS() }); return; }
+          const m = decodeMint(info.data, info.owner);
+          if (!m) { this.model.setMint({ mint, onchainAt: nowS() }); return; }
+          this.model.setMint({ mint, decimals: m.decimals, tokenProgram: m.tokenProgram, supply: m.supply, ...(m.metadata ?? {}), onchainAt: m.metadata ? nowS() : 0 });
+          if (!m.metadata) needMetaplex.push(mint);
+        });
+      }
+      for (const part of chunks(needMetaplex, 100)) {
+        const infos = await rpc.getMultipleAccounts(part.map((m) => metaplexPda(m).toBase58()));
+        infos.forEach((info, i) => { const md = info ? decodeMetaplex(info.data) : null; this.model.setMint({ mint: part[i], ...(md ?? {}), onchainAt: nowS() }); });
+      }
+    } finally {
+      for (const m of mints) { const uri = this.model.mint(m)?.uri; if (uri) this.meta?.request(uri); }
     }
-    for (const part of chunks(needMetaplex, 100)) {
-      const infos = await rpc.getMultipleAccounts(part.map((m) => metaplexPda(m).toBase58()));
-      infos.forEach((info, i) => { const md = info ? decodeMetaplex(info.data) : null; this.model.setMint({ mint: part[i], ...(md ?? {}), onchainAt: nowS() }); });
-    }
-    for (const m of mints) { const uri = this.model.mint(m)?.uri; if (uri) this.meta?.request(uri); }
-    if (mints.length) this.log.info(`mints: ${mints.length} fetched (${needMetaplex.length} via Metaplex)`);
+    return { metaplex: needMetaplex.length };
+  }
+  /**
+   * Mint records the backfill stored unread (resolveOne keeps only the token program, and the whole-index
+   * ensureMintInfo runs only once resolveCurves drains, days away on a full index) or whose batch read
+   * failed. Up to `max` mints per run (a multiple of the 100 per call keeps the calls full): never-read
+   * ones first, then ones read without a uri more than MINT_URI_RETRY_S ago; within each, the biggest
+   * families first (direct children of the family top, from the model's child index: no derived numbers
+   * needed), a listed asset's own mint (the top of a family) before any coin. One run at a time, on the
+   * main lane. Logs one line per run (none while nothing is left and nothing was left last time).
+   * Returns `{ unread, noUri, read, withUri, metaplex, ms }`, or null when a run is already going
+   * (another catch-up, or the whole-index read: ensureAllMintInfo).
+   */
+  async catchUpMintInfo({ max = this.opts.mintCatchupMax } = {}) {
+    if (this.mintCatchingUp || this.stopped) return null;
+    return this.#mintLane(async () => {
+      const t0 = Date.now(), retryBefore = nowS() - MINT_URI_RETRY_S, TOP = Number.MAX_SAFE_INTEGER;
+      const kids = (m) => this.model.children.get(m)?.size ?? 0;
+      const family = (c) => { const anc = this.model.ancestors(c.mint); return kids((anc.length ? anc[anc.length - 1] : c).mint); };
+      const unread = [], noUri = [], seen = new Set();
+      // The weight is computed only for mints that are picked (thousands), not for every coin.
+      const pick = (m, weight) => {
+        if (!m || m === SOL_MINT || seen.has(m)) return;
+        seen.add(m);
+        const info = this.model.mint(m);
+        if (!info || !info.onchainAt) unread.push([m, weight()]);
+        else if (!info.uri && info.onchainAt < retryBefore) noUri.push([m, weight()]);
+      };
+      for (const c of this.model.coins.values()) {
+        if (!c.tracked) continue;
+        pick(c.mint, () => family(c));
+        // A quote mint that is not a coin is a listed asset (PUMP, USDC, …): its bubble tops a family.
+        if (c.quoteMint && !this.model.coins.has(c.quoteMint)) pick(c.quoteMint, () => TOP);
+      }
+      const byWeight = (a, b) => b[1] - a[1];
+      const todo = [...unread.sort(byWeight), ...noUri.sort(byWeight)].slice(0, Math.max(0, max)).map(([m]) => m);
+      const out = { unread: unread.length, noUri: noUri.length, read: 0, withUri: 0, metaplex: 0, ms: 0 };
+      const last = this.state.mints.unread;
+      this.state.mints.catchUpRuns++; this.state.mints.lastCatchUpAt = nowS(); this.state.mints.unread = unread.length;
+      if (!todo.length) {
+        if (last !== 0) this.log.info("mints: catch-up: every mint record read");
+        return out;
+      }
+      let error = null;
+      try { out.metaplex = (await this.#readMints(todo, this.rpc)).metaplex; } catch (e) { error = e; }
+      // Read = stamped by this run (a never-read mint had 0, a uri-less one an older stamp); a failed call leaves its part unstamped.
+      for (const m of todo) { const info = this.model.mint(m); if (info?.onchainAt > retryBefore) out.read++; if (info?.uri) out.withUri++; }
+      out.ms = Date.now() - t0;
+      this.state.mints.catchUpRead += out.read;
+      this.state.mints.unread = unread.reduce((n, [m]) => n + (this.model.mint(m)?.onchainAt ? 0 : 1), 0);
+      const line = `mints: catch-up: ${out.read}/${todo.length} read (${unread.length} never read, ${noUri.length} without a uri), ${out.withUri} with a uri, ${out.metaplex} via Metaplex, in ${out.ms} ms`;
+      if (error) this.log.warn(`${line}; stopped: ${error.message}`); else this.log.info(line);
+      return out;
+    });
   }
 
   /**
@@ -662,9 +794,11 @@ export class Indexer {
     this.refreshing = true;
     try {
       const all = this.model.tracked();
+      if (!this.cursorRestored && all.length) this.#restoreCursor(all);
       const perTick = Math.max(50, Math.ceil(all.length * this.opts.refreshMs / this.opts.fullRefreshMs));
       const slice = all.length ? Array.from({ length: Math.min(perTick, all.length) }, (_, i) => all[(this.cursor + i) % all.length]) : [];
       this.cursor = all.length ? (this.cursor + slice.length) % all.length : 0;
+      if (all.length) this.#saveCursor(all);
       const recent = Date.now() - 120_000;
       // Views older than the hot window are dead weight; on-demand coins nobody looks at any more leave memory.
       this.model.pruneTouched(120_000);
@@ -704,6 +838,25 @@ export class Indexer {
       this.state.lastRefreshAt = nowS();
       this.hub?.emit("stats", this.model.stats());
     } finally { this.refreshing = false; }
+  }
+  /**
+   * The cursor the last run saved: the index of the mint it would have refreshed next when that mint is
+   * still listed (coins added or evicted before it shift indexes), else the saved index when it is still
+   * inside the list, else 0 (the list got shorter: a new pass). model.tracked() keeps the db's row order
+   * across restarts, so the index alone is a good fallback. Once per Indexer, on the first non-empty list.
+   */
+  #restoreCursor(all) {
+    this.cursorRestored = true;
+    try {
+      const saved = this.model.db.backfillGet(REFRESH_CURSOR_KEY, null);
+      if (!saved || typeof saved !== "object") return;
+      const at = typeof saved.mint === "string" ? all.findIndex((c) => c.mint === saved.mint) : -1;
+      this.cursor = at >= 0 ? at : Number.isInteger(saved.i) && saved.i >= 0 && saved.i < all.length ? saved.i : 0;
+    } catch (e) { this.log.warn(`refresh: cursor not restored: ${e.message}`); }
+  }
+  /** One small row per tick (backfill_state, like the scan stamps): the index and the mint the next tick starts at. */
+  #saveCursor(all) {
+    try { this.model.db.backfillSet(REFRESH_CURSOR_KEY, { i: this.cursor, mint: all[this.cursor]?.mint ?? null }); } catch { /* a lost cursor only means a pass restarts at 0 */ }
   }
 
   // ---------------------------------------------------------------- on-demand (API)

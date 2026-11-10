@@ -24,7 +24,7 @@ import { EngineError, mountEngine, type EngineCallbacks, type EngineFrameStats, 
 import { buildRoots, heatPayload, PHONE_BAND_PX, reducedMotionNow, tagFn, valueFn, valueFns, WIDE_PX } from "./adapter";
 import { useEngineSync } from "./use-engine-sync";
 import { registerMap3Debug } from "./debug-hooks";
-import { imageFailed, imageFor, imageReady, onImageLoaded, registerLogoMints } from "../../lib/map/images";
+import { imageFailed, imageFor, imageReady, imageRetryAt, onImageLoaded, registerLogoMints } from "../../lib/map/images";
 import { DEBUG_HOOKS } from "../../lib/map/debug";
 import type { BubbleNode, RootsLimit, SizeMode } from "../../lib/map/types";
 import type { HeatIndex } from "../../lib/map/heat";
@@ -61,7 +61,12 @@ const WARM_HEAT_MS = 120_000;
 let lastHeat: { heat: HeatIndex; seenAt: number } | null = null;
 const warmHeat = (): HeatIndex | null => (lastHeat && performance.now() - lastHeat.seenAt < WARM_HEAT_MS ? lastHeat.heat : null);
 
-const IMAGES: EngineImages = { want: imageFor, onLoaded: onImageLoaded, ready: imageReady, failed: imageFailed };
+const IMAGES: EngineImages = { want: imageFor, onLoaded: onImageLoaded, ready: imageReady, failed: imageFailed, retryAt: imageRetryAt };
+/// (logos that come later, 2026-11-10) A new engine is handed every node's logo URL once, this long after it mounted: the
+/// node list may have changed while it was building (a since= delta right after a cache paint is the usual case), and the
+/// sync's first node pass (use-engine-sync, <= 1 s after the mount) only records what it sees, so a logo that arrived in
+/// between would never reach the bubbles. The engine skips unchanged URLs; later changes come as node patches.
+const IMAGE_RECONCILE_MS = 2_500;
 /// (family-all) ?swarm=0 on a debug build (dev, or ?debug) mounts without the swarm layer: the A/B for every look pair.
 const SWARM_ON = !(DEBUG_HOOKS && typeof location !== "undefined" && /[?&]swarm=0(&|$)/.test(location.search));
 const zeroStats = (): EngineFrameStats => ({ frames: 0, settling: { n: 0, avg: 0, p95: 0, max: 0 }, settled: { n: 0, avg: 0, p95: 0, max: 0 }, labels: 0, drawn: 0 });
@@ -145,6 +150,7 @@ export default function ThreeMap(props: ThreeMapProps) {
   /// (mode, limit, band, select-unknown, drift, context) passes it back as opts.moved, so a dropped coin stays dropped.
   /// It lives only as long as this mount; nothing is stored beyond the page.
   const movedRef = useRef(new Map<string, { dx: number; dy: number }>());
+  const reconcileRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [live, setLive] = useState<{ engine: EngineHandle; builtAt: number } | null>(null);
   const engine = live?.engine ?? null;
   const [rebuild, setRebuild] = useState<Rebuild>({ n: 0, reason: "first" });
@@ -192,6 +198,7 @@ export default function ThreeMap(props: ThreeMapProps) {
       pendingRef.current = null;
       for (const r of retiring) { if (r.t) clearTimeout(r.t); destroyQuietly(r.h); r.layer.remove(); }
       retiring.clear();
+      if (reconcileRef.current) { clearTimeout(reconcileRef.current); reconcileRef.current = null; }
       const h = engineRef.current;
       engineRef.current = null;
       if (h) destroyQuietly(h);
@@ -289,6 +296,7 @@ export default function ThreeMap(props: ThreeMapProps) {
     };
 
     let input: ReturnType<typeof buildRoots>;
+    const builtNodes = nodesRef.current;
     registerLogoMints(nodesRef.current); // source -> mint for the logo sheets, before the engine asks for any logo
     try { input = buildRoots(nodesRef.current); }
     catch (e) { settle(); layer.remove(); fail("mount-error", e); return; }
@@ -328,6 +336,12 @@ export default function ThreeMap(props: ThreeMapProps) {
       if (root.clientWidth !== w0 || root.clientHeight !== h0) guard(() => h.resize());
       setLive({ engine: h, builtAt: performance.now() });
       guard(() => onCameraRef.current({ k: h.zoom() }));
+      if (reconcileRef.current) clearTimeout(reconcileRef.current);
+      reconcileRef.current = setTimeout(() => {
+        reconcileRef.current = null;
+        const now = nodesRef.current;
+        if (engineRef.current === h && now !== builtNodes) guard(() => { h.patchImages(now); });
+      }, IMAGE_RECONCILE_MS);
     }, (err: unknown) => {
       settle();
       layer.remove();

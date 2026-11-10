@@ -152,13 +152,17 @@ export function createDiffState(nodes: readonly BubbleNode[]): DiffState {
   return { seen };
 }
 
-export type NodeDiff = { births: { coin: BubbleNode; parent: BubbleNode | null }[]; patches: { mint: string; mcapUsd: number | null }[]; unknown: number; removed: number };
+/// A known coin's change for EngineHandle.patchCoins: the market cap always, `image` only when the logo URL changed.
+export type NodePatch = { mint: string; mcapUsd: number | null; image?: string | null };
+export type NodeDiff = { births: { coin: BubbleNode; parent: BubbleNode | null }[]; patches: NodePatch[]; unknown: number; removed: number };
 
 /// One pass over the node list (spec 5.7), O(n):
 /// - births: coins the engine does not know whose parent it knows, created within BIRTH_MAX_AGE_S of nowS
 ///   (unix s), with the parent node when the page holds it;
-/// - patches: known coins whose node object changed since the last pass and whose mcapUsd differs (a
-///   known coin seen for the first time, such as a birth the engine placed, is only recorded);
+/// - patches: known coins whose node object changed since the last pass and whose mcapUsd or image differs
+///   (`image` is set only when the URL changed: a since= delta or a mapdelta that brings a logo the build did
+///   not have; the engine copied img[] at build and would never see it otherwise); a known coin seen for the
+///   first time, such as a birth the engine placed, is only recorded;
 /// - unknown: coins the engine does not know that are not births;
 /// - removed: coins in the state's set (what the engine built, plus coins recorded since) that are no
 ///   longer in the list.
@@ -174,7 +178,10 @@ export function diffNodes(state: DiffState, nodes: readonly BubbleNode[], byMint
     if (prev !== undefined) present++;
     if (knows(m)) {
       if (prev === n) continue;
-      if (prev !== undefined && !Object.is(prev.mcapUsd, n.mcapUsd)) patches.push({ mint: m, mcapUsd: n.mcapUsd });
+      if (prev !== undefined) {
+        if ((prev.image ?? null) !== (n.image ?? null)) patches.push({ mint: m, mcapUsd: n.mcapUsd, image: n.image ?? null });
+        else if (!Object.is(prev.mcapUsd, n.mcapUsd)) patches.push({ mint: m, mcapUsd: n.mcapUsd });
+      }
       if (prev === undefined) present++;
       seen.set(m, n);
       continue;

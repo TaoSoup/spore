@@ -1,6 +1,7 @@
 // Map logos from far (owner 2026-10-21): ImageCache.warm makes each url's 64 px thumbnail ahead of the
 // first visitor, through get() and thumb(); a second pass is all hits; a broken url counts as failed.
-// Model.warmImageUrls lists every family top's logo plus gen-1 of the biggest families. Stub fetch only.
+// Model.warmImageUrls lists every family top's logo plus gen-1 of the biggest families (a listed asset's drawn coins
+// count as its children). Stub fetch only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
@@ -41,7 +42,7 @@ test("ImageCache.warm: missing thumbnails are made (concurrency-limited), fresh 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("Model.warmImageUrls: every family top's logo (roots with a child, asset tops) plus gen-1 of the biggest families", async () => {
+test("Model.warmImageUrls: every family top's logo (roots with a child, asset tops) plus gen-1 of the biggest families, a listed asset's drawn coins among them", async () => {
   const { Db } = await import("../lib/db.mjs");
   const { Model } = await import("../lib/model.mjs");
   const { K, PLATFORM, quiet, base, T22 } = await import("./helpers/tree.mjs");
@@ -58,10 +59,19 @@ test("Model.warmImageUrls: every family top's logo (roots with a child, asset to
     m.setMeta(`https://ipfs.io/ipfs/Qm/${s}.json`, { image: `https://ipfs.io/ipfs/Qm/${s}.png` });
   }
   const urls = m.warmImageUrls(60).map((u) => u.split("/").pop()).sort();
-  assert.deepEqual(urls, ["a.png", "cards.png", "r.png"], "ROOT (top), A (gen-1 of a big family), CARDS (asset top); not G (gen-2) nor the childless U; X is a member of CARDS");
+  assert.deepEqual(urls, ["a.png", "cards.png", "r.png", "x.png"], "ROOT (top), A (gen-1 of a big family), CARDS (asset top), X (a coin the CARDS family draws: its child on the map); not G (gen-2) nor the childless U");
   // with `all`: the same head (most wanted first), then every other tracked coin's logo (a zoom into any family asks for its children)
   const all = m.warmImageUrls(60, true).map((u) => u.split("/").pop());
-  assert.deepEqual(all.slice(0, 3).sort(), ["a.png", "cards.png", "r.png"], "tops and gen-1 of the big families stay first");
-  assert.deepEqual(all.slice(3).sort(), ["g.png", "u.png", "x.png"], "then the rest: G (gen-2), U (childless), X (asset child)");
+  assert.deepEqual(all.slice(0, 4).sort(), ["a.png", "cards.png", "r.png", "x.png"], "tops, gen-1 of the big families and the drawn asset coins stay first");
+  assert.deepEqual(all.slice(4).sort(), ["g.png", "u.png"], "then the rest: G (gen-2), U (childless)");
+  // an asset family outside the biggest still has its drawn coins ahead of every other tracked coin
+  const none = m.warmImageUrls(0, true).map((u) => u.split("/").pop());
+  assert.deepEqual(none.slice(0, 2).sort(), ["cards.png", "r.png"], "the tops first");
+  assert.equal(none[2], "x.png", "then the drawn asset coins (no big family asked for)");
+  assert.deepEqual(none.slice(3).sort(), ["a.png", "g.png", "u.png"]);
+  // a listed asset whose metadata has no image warms its stored icon (what its bubble shows)
+  m.setAssetIcons({ [K.S]: "https://ipfs.io/ipfs/Qm/icon-s.png" });
+  m.upsertCoin({ mint: "SxCoin1111111111111111111111111111111111111", curve: "C6", depth: 0, quoteMint: K.S, ...base });
+  assert.ok(m.warmImageUrls(60).includes("https://ipfs.io/ipfs/Qm/icon-s.png"));
   assert.equal(new Set(all).size, all.length, "deduped");
 });

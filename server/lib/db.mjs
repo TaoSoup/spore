@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS trades_time ON trades(time);
 CREATE TABLE IF NOT EXISTS meta (
   uri TEXT PRIMARY KEY, image TEXT, description TEXT, twitter TEXT, telegram TEXT, website TEXT,
   fetched_at INTEGER NOT NULL DEFAULT 0, ok INTEGER NOT NULL DEFAULT 0, error TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0
+  attempts INTEGER NOT NULL DEFAULT 0, dead_streak INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS backfill_curves (
   curve TEXT PRIMARY KEY, depth INTEGER NOT NULL, quote_mint TEXT, data TEXT NOT NULL,
@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS agent_proposals (
 );
 CREATE INDEX IF NOT EXISTS agent_proposals_root ON agent_proposals(root_mint, created_at);
 CREATE INDEX IF NOT EXISTS agent_proposals_created ON agent_proposals(created_at);
+CREATE TABLE IF NOT EXISTS img_fail (
+  url TEXT PRIMARY KEY, kind TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 1,
+  failed_at INTEGER NOT NULL, retry_at INTEGER NOT NULL, gone_attempts INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -112,9 +116,19 @@ export class Db {
       if (!this.db.prepare("PRAGMA table_info(meta)").all().some((c) => c.name === "attempts")) this.db.exec("ALTER TABLE meta ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
       this.db.exec("UPDATE coins SET updated_at = updated_at * 1000 WHERE updated_at > 0 AND updated_at < 100000000000");
     }
+    // `meta.dead_streak`: consecutive "dead" failures (a non-IPFS host's 404/410, a name that does not resolve); the
+    // weekly retry needs META_DEAD_AFTER of them in a row (lib/meta.mjs metaRetryS). Guarded by the column's absence
+    // alone, like pool_vquote; rows from before start at 0, so none is asked weekly before it failed that way 5 times.
+    if (!this.db.prepare("PRAGMA table_info(meta)").all().some((c) => c.name === "dead_streak")) this.db.exec("ALTER TABLE meta ADD COLUMN dead_streak INTEGER NOT NULL DEFAULT 0");
     // `api_keys` (partner API keys, DESIGN §12) and `agents` / `agent_proposals` (root agents,
     // DESIGN §13; statements in lib/agents/registry.mjs) are new tables only, so CREATE IF NOT
-    // EXISTS above is their migration.
+    // EXISTS above is their migration. So is `img_fail` (the image proxy's failed downloads and
+    // undrawable logos with their kind and next retry, lib/meta.mjs ImageCache; times in ms).
+    // `img_fail.gone_attempts`: the permanent failures since the last success, carried across temporary ones in between
+    // (lib/meta.mjs ImageCache #fail), so a url alternating 404 and 502 still reaches the weekly wait. Guarded by the
+    // column's absence alone, like dead_streak (a table made before it has none); old rows start at 0, and a "gone" row
+    // counts with its own `attempts` anyway.
+    if (!this.db.prepare("PRAGMA table_info(img_fail)").all().some((c) => c.name === "gone_attempts")) this.db.exec("ALTER TABLE img_fail ADD COLUMN gone_attempts INTEGER NOT NULL DEFAULT 0");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -154,7 +168,7 @@ export class Db {
       vol24All: p("SELECT mint, COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE time >= ? GROUP BY mint"),
       metaGet: p("SELECT * FROM meta WHERE uri = ?"),
       metaAll: p("SELECT * FROM meta"),
-      metaSet: p(`INSERT OR REPLACE INTO meta (uri, image, description, twitter, telegram, website, fetched_at, ok, error, attempts) VALUES (@uri, @image, @description, @twitter, @telegram, @website, @fetchedAt, @ok, @error, @attempts)`),
+      metaSet: p(`INSERT OR REPLACE INTO meta (uri, image, description, twitter, telegram, website, fetched_at, ok, error, attempts, dead_streak) VALUES (@uri, @image, @description, @twitter, @telegram, @website, @fetchedAt, @ok, @error, @attempts, @deadStreak)`),
       bfCurveUpsert: p(`INSERT INTO backfill_curves (curve, depth, quote_mint, data, graduated, rq) VALUES (@curve, @depth, @quoteMint, @data, @graduated, @rq)
         ON CONFLICT(curve) DO UPDATE SET depth = excluded.depth, quote_mint = excluded.quote_mint, data = excluded.data, graduated = excluded.graduated, rq = excluded.rq`),
       bfCurvePending: p("SELECT curve, depth, quote_mint, data FROM backfill_curves WHERE resolved_at = 0 AND error IS NULL ORDER BY graduated DESC, rq DESC, depth DESC LIMIT ?"),
@@ -175,6 +189,11 @@ export class Db {
       keysAll: p("SELECT id, name, contact, tier, created_at, revoked_at, last_used_at, requests FROM api_keys ORDER BY id"),
       keyRevoke: p("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"),
       keyUsage: p("UPDATE api_keys SET requests = requests + ?, last_used_at = MAX(COALESCE(last_used_at, 0), ?) WHERE id = ?"),
+      imgFailAll: p("SELECT url, kind, error, attempts, gone_attempts, failed_at, retry_at FROM img_fail"),
+      imgFailSet: p("INSERT OR REPLACE INTO img_fail (url, kind, error, attempts, gone_attempts, failed_at, retry_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
+      imgFailDelete: p("DELETE FROM img_fail WHERE url = ?"),
+      imgFailPrune: p("DELETE FROM img_fail WHERE retry_at < ?"),
+      imgFailDropKind: p("DELETE FROM img_fail WHERE kind = ?"),
     };
   }
 
@@ -237,8 +256,8 @@ export class Db {
 
   metaGet(uri) { const r = this.q.metaGet.get(uri); return r ? Db.meta(r) : null; }
   allMeta() { return this.q.metaAll.all().map(Db.meta); }
-  static meta(r) { return { uri: r.uri, image: r.image, description: r.description, twitter: r.twitter, telegram: r.telegram, website: r.website, fetchedAt: r.fetched_at, ok: !!r.ok, error: r.error, attempts: r.attempts ?? 0 }; }
-  metaSet(m) { this.q.metaSet.run({ uri: m.uri, image: m.image ?? null, description: m.description ?? null, twitter: m.twitter ?? null, telegram: m.telegram ?? null, website: m.website ?? null, fetchedAt: m.fetchedAt ?? now(), ok: m.ok ? 1 : 0, error: m.error ?? null, attempts: m.attempts ?? 0 }); }
+  static meta(r) { return { uri: r.uri, image: r.image, description: r.description, twitter: r.twitter, telegram: r.telegram, website: r.website, fetchedAt: r.fetched_at, ok: !!r.ok, error: r.error, attempts: r.attempts ?? 0, deadStreak: r.dead_streak ?? 0 }; }
+  metaSet(m) { this.q.metaSet.run({ uri: m.uri, image: m.image ?? null, description: m.description ?? null, twitter: m.twitter ?? null, telegram: m.telegram ?? null, website: m.website ?? null, fetchedAt: m.fetchedAt ?? now(), ok: m.ok ? 1 : 0, error: m.error ?? null, attempts: m.attempts ?? 0, deadStreak: m.deadStreak ?? 0 }); }
 
   backfillCurveUpsert(c) { this.q.bfCurveUpsert.run({ curve: c.curve, depth: c.depth, quoteMint: c.quoteMint ?? null, data: c.data, graduated: c.graduated ? 1 : 0, rq: c.rq }); }
   backfillPending(limit) { return this.q.bfCurvePending.all(limit).map((r) => ({ curve: r.curve, depth: r.depth, quoteMint: r.quote_mint, data: r.data })); }
@@ -269,6 +288,16 @@ export class Db {
   apiKeyRevoke(id, at = now()) { return Number(this.q.keyRevoke.run(at, id).changes) > 0; }
   /** Adds batched per-key counters (`[{ id, requests, lastUsedAt }]`) in one transaction. */
   apiKeyUsage(rows) { if (rows.length) this.transaction(() => { for (const r of rows) this.q.keyUsage.run(r.requests, r.lastUsedAt, r.id); }); }
+
+  // The image proxy's failure memory (lib/meta.mjs ImageCache): one row per url that failed, with its
+  // kind ("gone" | "temp" | "nothumb"), consecutive attempts, the permanent failures since the last
+  // success (`goneAttempts`) and the time (ms) it may be tried again.
+  imgFailAll() { return this.q.imgFailAll.all().map((r) => ({ url: r.url, kind: r.kind, error: r.error, attempts: r.attempts, goneAttempts: r.gone_attempts ?? 0, at: r.failed_at, retryAt: r.retry_at })); }
+  imgFailSet(f) { this.q.imgFailSet.run(f.url, f.kind, f.error == null ? null : String(f.error).slice(0, 200), f.attempts ?? 1, f.goneAttempts ?? 0, f.at ?? Date.now(), f.retryAt ?? Date.now()); }
+  imgFailDelete(url) { this.q.imgFailDelete.run(url); }
+  /** Forgets rows whose retry time is before `before` (ms); returns how many went. */
+  imgFailPrune(before) { return Number(this.q.imgFailPrune.run(before).changes); }
+  imgFailDropKind(kind) { return Number(this.q.imgFailDropKind.run(kind).changes); }
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }

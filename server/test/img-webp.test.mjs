@@ -1,7 +1,8 @@
 // WebP logos (most launchpad CDNs serve them) get real 64/128/256 px thumbnails: renderThumb decodes
 // them with libwebp (wasm) and box-downsamples; GET /api/img?w= answers a PNG thumbnail with
-// x-img-thumb like for png/jpeg; an undecodable or animated webp still serves the original; warm()
-// covers webp urls. Fixture: test/fixtures/logo.webp (64 x 64 lossy, alpha). Stub fetch only.
+// x-img-thumb like for png/jpeg; an undecodable webp still serves the original, an animated one is
+// drawn from its first frame; warm() covers webp urls. Fixture: test/fixtures/logo.webp (64 x 64
+// lossy, alpha). Stub fetch only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
@@ -10,7 +11,7 @@ import { tmpdir } from "node:os";
 import express from "express";
 import { ImageCache, HostPacer, ImgWork, renderThumb } from "../lib/meta.mjs";
 import { decodePng } from "../lib/png.mjs";
-import { decodeWebp } from "../lib/webp.mjs";
+import { decodeWebp, firstFrameWebp } from "../lib/webp.mjs";
 import { pngSize } from "../lib/agents/logo.mjs";
 
 const WEBP = readFileSync(new URL("./fixtures/logo.webp", import.meta.url));
@@ -84,4 +85,25 @@ test("warm() makes webp thumbnails too, through the worker or inline alike", asy
       assert.equal(cache.stats.thumbs, 2, "warm thumbnails are not redrawn");
     } finally { work.close(); rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+test("an animated webp is drawn from its first frame (libwebp's still decoder refuses an animation); a still or truncated file has no first frame", async () => {
+  // the fixture's frame (its ALPH + VP8 chunks after the VP8X header) as two ANMF frames of an animation
+  const chunk = (id, body) => { const h = Buffer.alloc(8); h.write(id, 0, "latin1"); h.writeUInt32LE(body.length, 4); return Buffer.concat([h, body, Buffer.alloc(body.length & 1)]); };
+  const frameData = WEBP.subarray(12 + 18);
+  const anmf = Buffer.alloc(16); anmf.writeUIntLE(63, 6, 3); anmf.writeUIntLE(63, 9, 3); anmf.writeUIntLE(100, 12, 3); // 64 x 64 at (0, 0), 100 ms
+  const vp8x = Buffer.alloc(10); vp8x[0] = 0x10 | 0x02; vp8x.writeUIntLE(63, 4, 3); vp8x.writeUIntLE(63, 7, 3); // alpha + animation, 64 x 64
+  const body = Buffer.concat([Buffer.from("WEBP"), chunk("VP8X", vp8x), chunk("ANIM", Buffer.alloc(6)), chunk("ANMF", Buffer.concat([anmf, frameData])), chunk("ANMF", Buffer.concat([anmf, frameData]))]);
+  const head = Buffer.alloc(8); head.write("RIFF", 0, "latin1"); head.writeUInt32LE(body.length, 4);
+  const anim = Buffer.concat([head, body]);
+  const still = await decodeWebp(WEBP), first = await decodeWebp(anim);
+  assert.ok(first, "decoded");
+  assert.equal(first.width, 64); assert.equal(first.height, 64);
+  assert.equal(Buffer.compare(Buffer.from(first.data), Buffer.from(still.data)), 0, "the first frame, pixel for pixel");
+  const png = await renderThumb(anim, "image/webp", 64);
+  assert.deepEqual(pngSize(png), { width: 64, height: 64 });
+  assert.equal(firstFrameWebp(WEBP), null, "a still webp is no animation");
+  assert.equal(firstFrameWebp(anim.subarray(0, 200)), null, "truncated");
+  assert.equal(await decodeWebp(anim.subarray(0, 200)), null);
+  assert.equal(firstFrameWebp(STUB), null);
 });

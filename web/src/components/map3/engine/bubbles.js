@@ -122,6 +122,9 @@ const SEED_BROOD = 60, SEED_M = 1e4, SEED_G = 0.8, SEED_RMIN = 0.25, SEED_NOCAP 
 const FAMFLASH_S = 0.3;     // amendment B: family rim flash, ease-out
 const XY_NET_FRAMES = 30;   // (local perf) safety-net cadence of the moved-coin scan (state.js xyScan)
 const SPARE = 512;          // free instances for coins born after the build (addCoin)
+// (logos that come later) the failed-logo sweep runs at most this often; it asks at most FAIL_ASK_MAX cell owners again per
+// run (one logo sheet's worth), the rest at the next runs
+export const FAIL_SWEEP_MS = 1_000, FAIL_ASK_MAX = 128;
 const smoothJ = (a, b, t) => { t = Math.max(0, Math.min(1, (t - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 const f3 = (v) => (Number.isInteger(v) ? v.toFixed(1) : String(v));
@@ -239,7 +242,9 @@ export function buildBubbles(S) {
     return -1;
   }
   let setCode = () => {};   // replaced once the instance attributes exist
-  const failedLogo = new Set();
+  // (logos that come later, 2026-11-10) coin -> when the loader takes a want for its logo again (Date.now() ms; Infinity =
+  // not on this page). A failure is no longer for good: see sweepFailed.
+  const failedLogo = new Map();
   const drawnImg = new Array(CAP).fill(null);
   const images = S.images && typeof S.images.want === "function" ? S.images : null;
   const pendingLogo = new Set();                         // coins whose logo is wanted and not yet in their cell
@@ -253,14 +258,62 @@ export function buildBubbles(S) {
   // too: before, such a top stayed in pendingLogo for ever (the engine learned a failure only from the test proxy's 1x1)
   // and roots6Dead undercounted, so QA's done condition (roots6Drawn + roots6Dead == roots6) could never be reached.
   const srcFailed = (i) => { if (!images || typeof images.failed !== "function") return false; try { return !!images.failed(img[i]); } catch { return false; } };
+  // (logos that come later, 2026-11-10) the loader's dead time for a source (images.retryAt: Date.now() ms, 0 = may ask now);
+  // a loader without retryAt keeps the old rule (a failure is for good)
+  const retryAtOf = (i) => { if (!images || typeof images.retryAt !== "function") return Infinity; try { const t = Number(images.retryAt(img[i])); return t >= 0 ? t : Infinity; } catch { return Infinity; } };
+  // One timer at the earliest retry time: sweepFailed drops the coins whose time has come (the loader agreeing), so the next
+  // cell pass asks for them again if they are drawn then (a coin without a cell is not asked: no burst at expiry). A coin
+  // that owns a cell is asked at once: a planet (HI cell) is not a cell-pass candidate, galaxy has no P1 pass, and the cell
+  // pass asks an owner only while its cell is empty, so one still showing an older logo (its URL was patched, the new one
+  // failed) was never asked again. At most FAIL_ASK_MAX of them per sweep; the rest stay due for the next one.
+  // (fix 2026-11-10) one sweep timer at a time and one sweep per FAIL_SWEEP_MS: a sweep run early by a load notice
+  // (recheckLogos) cancels the pending timer; before, each such sweep left it running and started one more timer chain, so
+  // hours of load notices piled up live timers and sweeps (test/map3-logo-retry.test.mts).
+  let failNext = Infinity, failTimer = 0, sweptAt = -Infinity;
+  const fails = { swept: 0, back: 0 };
+  const sweepDue = () => failedLogo.size > 0 && Date.now() >= failNext && Date.now() - sweptAt >= FAIL_SWEEP_MS;
+  function failLogo(i, at) {
+    if (!(at > Date.now())) at = Date.now() + FAIL_SWEEP_MS;   // failed but "may ask now": look again shortly, never in a loop
+    failedLogo.set(i, at); pendingLogo.delete(i); setCode(i);
+    if (at < failNext) { failNext = at; armFail(); }
+  }
+  function armFail() {
+    if (failTimer) S.life.clearTimeout(failTimer);
+    failTimer = 0;
+    if (S.dead || !(failNext < Infinity)) return;
+    failTimer = S.life.timeout(sweepFailed, Math.min(0x7fffffff, Math.max(FAIL_SWEEP_MS, failNext - Date.now())));
+  }
+  function sweepFailed() {
+    if (failTimer) S.life.clearTimeout(failTimer);   // run early (recheckLogos): this sweep replaces the pending timer
+    failTimer = 0; failNext = Infinity; fails.swept++;
+    if (S.dead || !images) return;
+    const now = Date.now(), due = [];
+    sweptAt = now;
+    let next = Infinity, asks = 0;
+    for (const [i, at] of failedLogo) {
+      // the loader has the last word: another coin with the same source may have failed it again meanwhile
+      const t = at > now ? at : retryAtOf(i);
+      if (t > now) { if (t !== at) failedLogo.set(i, t); if (t < next) next = t; continue; }
+      // a cell owner past this sweep's FAIL_ASK_MAX stays failed (due) until the next sweep, in failure order
+      if (hiC[i] >= 0 || loC[i] >= 0) { if (asks >= FAIL_ASK_MAX) { next = Math.min(next, now + FAIL_SWEEP_MS); continue; } asks++; }
+      due.push(i);
+    }
+    failNext = next; armFail();
+    for (const i of due) {
+      failedLogo.delete(i);
+      setCode(i);
+      if (hiC[i] >= 0 || loC[i] >= 0) wantLogo(i);   // may fail it again (failLogo re-arms the timer)
+    }
+    if (due.length) { fails.back += due.length; needAssign = true; }
+  }
   function wantLogo(i) {
     if (!images || !img[i]) return;
-    if (srcFailed(i)) { failedLogo.add(i); pendingLogo.delete(i); setCode(i); return; }
+    if (srcFailed(i)) { failLogo(i, retryAtOf(i)); return; }
     let im = null;
     try { im = images.want(img[i], wantPx(i)); } catch { im = null; }
     if (!im) { pendingLogo.add(i); return; }
     const sz = imSize(im);
-    if (!(sz > 2)) { failedLogo.add(i); pendingLogo.delete(i); setCode(i); return; }   // the proxy's 1x1 for a dead upstream
+    if (!(sz > 2)) { failLogo(i, Infinity); return; }   // the proxy's 1x1 for a dead upstream (the loader holds it as loaded)
     if (im !== drawnImg[i]) dirty.set(i, im);
     if (sz >= Math.min(wantPx(i), hiC[i] >= 0 ? HI_CELL : LO_CELL)) pendingLogo.delete(i); else pendingLogo.add(i);
   }
@@ -324,6 +377,7 @@ export function buildBubbles(S) {
   let logoCheckAt = -1e9, logoTimer = 0;
   const recheckLogos = () => {
     logoTimer = 0; logoCheckAt = performance.now();
+    if (!S.dead && sweepDue()) sweepFailed();   // the timer's work, if a load notice came first
     if (S.dead || !images || !pendingLogo.size) return;
     for (const i of [...pendingLogo]) {
       let rdy = false; try { rdy = images.ready(img[i]); } catch { rdy = false; }
@@ -347,7 +401,8 @@ export function buildBubbles(S) {
     let off = null;
     try {
       off = images.onLoaded(() => {
-        if (S.dead || logoTimer || !pendingLogo.size) return;
+        // (logos that come later) a notice also runs a due failed-logo sweep (a background tab's timers run late)
+        if (S.dead || logoTimer || !(pendingLogo.size || sweepDue())) return;
         logoTimer = S.life.timeout(recheckLogos, Math.max(0, logoCheckAt + 250 - performance.now()));
       });
     } catch { off = null; }
@@ -1039,6 +1094,16 @@ void main(){
     if (!(i >= 0 && i < CAP)) return -1;
     if (invIdx[i] >= 0) return invIdx[i];
     if (count >= CAP) return -1;
+    // (logos that come later, 2026-11-10) a newborn carries its logo: img[] (S.img, shared with labels) grows with the born
+    // indices, so the cell pass asks for it once it is drawn at the logo size, like a built child; before, opts.img was
+    // dropped and a live birth stayed a plain disc. Its mint resolves later image patches (coinIndex).
+    if (img) {
+      while (img.length <= i) img.push(null);
+      if (!img[i] && typeof o.img === "string" && o.img) img[i] = o.img;
+      failedLogo.delete(i); pendingLogo.delete(i); dirty.delete(i); drawnImg[i] = null; hiWant[i] = 0;
+      if (img[i]) needAssign = true;
+    }
+    if (typeof o.mint === "string" && o.mint) bornIdx.set(o.mint, i);
     const get = (arr, d) => (arr && i < arr.length && arr[i] != null && !Number.isNaN(arr[i]) ? arr[i] : d);
     const famId = get(famOf, o.fam ?? -1), f = famId >= 0 ? fams[famId] : null;
     const x = o.x ?? get(X, 0), y = o.y ?? get(Y, 0), r = o.r ?? get(R, 0.55), ag = o.age ?? get(age, Infinity), nn = o.n24 ?? get(n24, 0);
@@ -1056,6 +1121,28 @@ void main(){
     touch(atHeat, k * 4, 4); touch(atA, k * 4, 4); touch(atB, k * 4, 4); touch(atFlash, k * 3, 3); touch(atBirth, k * 3, 3); touch(atXY, k * 2, 2); touch(atIn, k, 1);
     bubbles.count = count; S.invalidate();
     return k;
+  }
+  // (logos that come later) newborn mint -> coin index (built coins resolve through S.mintIdx)
+  const bornIdx = new Map();
+  const coinIndex = (m) => { if (m == null) return -1; const i = S.mintIdx ? S.mintIdx.get(m) : undefined; if (i !== undefined) return i; const b = bornIdx.get(m); return b === undefined ? -1 : b; };
+  // (logos that come later, 2026-11-10) a coin's image URL changed after the build (a since= delta, a mapdelta, metadata read
+  // late): img[i] takes the new URL and everything learned about the old one is forgotten (failed, pending, the drawn bitmap,
+  // a waiting upload, the HI upgrade). A coin that owns a cell asks for the new logo at once and keeps showing the old one
+  // until it lands (no flicker when the same picture moves to a new URL); any other coin is asked by the next cell pass once
+  // it is drawn at the logo size. A null URL drops the logo. False for a coin the mesh does not hold or an unchanged URL.
+  let patchedN = 0;
+  function patchImage(i, url) {
+    if (!img || !(i >= 0 && i < CAP) || invIdx[i] < 0) return false;
+    const u = typeof url === "string" && url ? url : null;
+    if ((img[i] || null) === u) return false;
+    while (img.length <= i) img.push(null);
+    img[i] = u;
+    failedLogo.delete(i); pendingLogo.delete(i); dirty.delete(i); drawnImg[i] = null; hiWant[i] = 0;
+    if (!u) { hiHas[i] = 0; loHas[i] = 0; }
+    else if (hiC[i] >= 0 || loC[i] >= 0) wantLogo(i);
+    setCode(i);
+    needAssign = true; patchedN++;
+    return true;
   }
   // (round 2) drawn world radius of instance q at zoom k: the matrix scale (layout's R, or addCoin's r) times the seed-head
   // factor, which engages over 1.3k0 -> 2k0 exactly as in the vertex shader
@@ -1313,7 +1400,7 @@ void main(){
       const r = screenR(i); if (r < minR || !onScreenQ(q, r, W, H, k)) continue;
       let rdy = null; try { rdy = images && img[i] ? !!images.ready(img[i]) : null; } catch { rdy = null; }
       let host = null; try { host = img[i] ? new URL(String(img[i]), location.href).searchParams.get("u") : null; host = host ? new URL(host).host : (img[i] ? String(img[i]).slice(0, 40) : null); } catch { host = img[i] ? String(img[i]).slice(0, 40) : null; }
-      rows.push({ i, sym: sym ? sym[i] : "", r: +r.toFixed(2), img: !!img[i], cell: loC[i], has: loHas[i], code: logoIdx[i], pending: pendingLogo.has(i), failed: failedLogo.has(i), ready: rdy, dirty: dirty.has(i), host });
+      rows.push({ i, sym: sym ? sym[i] : "", r: +r.toFixed(2), img: !!img[i], cell: loC[i], has: loHas[i], code: logoIdx[i], pending: pendingLogo.has(i), failed: failedLogo.has(i), retryInS: failedLogo.has(i) ? Math.round((failedLogo.get(i) - Date.now()) / 1000) : null, ready: rdy, dirty: dirty.has(i), host });
     }
     rows.sort((a, b) => b.r - a.r);
     const n = rows.length, drawn = rows.filter((x) => x.code >= 0).length, noCell = rows.filter((x) => x.img && x.cell < 0).length, pend = rows.filter((x) => x.pending).length;
@@ -1341,6 +1428,8 @@ void main(){
     for (let q = 0; q < LO_N; q++) if (loOwn[q] >= 0) o.usedLo++;
     for (let q = 0; q < HI_N; q++) if (hiOwn[q] >= 0) o.usedHi++;
     o.upload = { ...up }; o.assign = { ...asg }; o.dirty = dirty.size; o.pending = pendingLogo.size; o.failed = failedLogo.size;
+    // (logos that come later) failed coins that will be asked again, sweeps run, coins handed back to the cell pass, image patches
+    { let r = 0; for (const t of failedLogo.values()) if (t < Infinity) r++; o.failedRetry = r; } o.failSweeps = fails.swept; o.failedBack = fails.back; o.patched = patchedN;
     o.loCell = LO_CELL; o.hiCell = HI_CELL; o.t = performance.now();
     return o;
   };
@@ -1422,8 +1511,8 @@ void main(){
 
   // (look fix) drawsDustTops: galaxy only. Flat: dust.js draws every small family as a speck at the overview (every family visible,
   // calm); bubbles' dust-top discs fade in with uDustExpand (motion.js picks a dust top through the dust grid until then)
-  Object.assign(S.bubbles, { mesh: bubbles, perm, invIdx, cls, atlas: HIa.rt.texture, atlasHi: HIa.rt.texture, atlasLo: LOa.rt.texture, logoIdx, logoList, setCoinHeat, flashRim, selectCoin, screenR, outerR, setInside, hasLogo: (i) => logoIdx[i] >= 0, drawnPx: screenR, drawsDustTops: G, atlasStats: () => ({ ...up, dirty: dirty.size, pending: pendingLogo.size }),
-    flashFamily, flashCore, birth, syncXY, addCoin, moveCoin, capacity: CAP, count: () => count, drawR, rangesSafe: true,
+  Object.assign(S.bubbles, { mesh: bubbles, perm, invIdx, cls, atlas: HIa.rt.texture, atlasHi: HIa.rt.texture, atlasLo: LOa.rt.texture, logoIdx, logoList, setCoinHeat, flashRim, selectCoin, screenR, outerR, setInside, hasLogo: (i) => logoIdx[i] >= 0, drawnPx: screenR, drawsDustTops: G, atlasStats: () => ({ ...up, dirty: dirty.size, pending: pendingLogo.size, failed: failedLogo.size }),
+    flashFamily, flashCore, birth, syncXY, addCoin, moveCoin, patchImage, coinIndex, capacity: CAP, count: () => count, drawR, rangesSafe: true,
     glows, flashCorona, look: G ? "galaxy" : "flat",
     setHl, hlOf, logoPx, breathState: () => ({ on: +uBreath.value.toFixed(2), asleep: !!breath.asleep, sleepMs: BREATH_SLEEP_MS, sinceInputMs: Math.round(performance.now() - (S.lastInputAt || 0)), visible: breath.vis, rMaxPx: +breath.rMax.toFixed(1), renderEveryMs: Math.round(breath.interval), requests: breath.requests }) });
   // (map3 port) teardown: the mesh, its geometry (+ the quad it borrows from), the material, both atlases and the glyphs
@@ -1431,7 +1520,7 @@ void main(){
     scene.remove(bubbles);
     if (!S.contextLost) { bGeo.dispose(); quad.dispose(); bMat.dispose(); HIa.rt.dispose(); LOa.rt.dispose(); scLo.t.dispose(); scHi.t.dispose(); gTex.dispose(); }   // a lost context took them already
     scLo.c.width = scLo.c.height = 0; scHi.c.width = scHi.c.height = 0; gCan.width = gCan.height = 0;
-    drawnImg.fill(null); pendingLogo.clear(); dirty.clear();
+    drawnImg.fill(null); pendingLogo.clear(); dirty.clear(); failedLogo.clear(); bornIdx.clear();
   });
   Object.assign(S.debug.obj, { bubbles, shadows: null, glows, coronas: glows });
   // (visibility lane) exports before buildLinks: drawn world radius (seed-head shrink applied) and the static CSS-px floor

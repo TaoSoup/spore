@@ -4,7 +4,7 @@
 // build); the unregister function deletes it only while it is still this object. window.__sporeMap3 holds
 // the engine counters (no instance) and is never deleted, so a script can check that every engine died.
 import { DEBUG_HOOKS } from "../../lib/map/debug";
-import { imageStats } from "../../lib/map/images";
+import { imageRetryAt, imageStats } from "../../lib/map/images";
 import type { BubbleNode } from "../../lib/map/types";
 import { engineCounters, type EngineDebug, type EngineEvent, type EngineHandle } from "./engine/index.js";
 
@@ -107,6 +107,10 @@ export function registerMap3Debug(ctx: Map3DebugCtx): () => void {
     frameStats: () => H()?.frameStats() ?? null,
     resetFrames: () => { E()?.resetFrames(); },
     images: imageStats,
+    /// (logos that come later) QA: changed logo URLs as a since= delta brings them; the coins whose URL changed
+    patchImages: (list: { mint: string; image: string | null }[]) => H()?.patchImages(list) ?? 0,
+    /// (logos that come later) a source's dead time in the loader (Date.now() ms; 0 = may be asked now)
+    imageRetryAt,
     logo: (mint: string) => { const e = E(); if (!e) return 0; const i = idxOf(e, mint); return i < 0 ? 0 : e.logoPx(i); },
     testHighlight: (kind: "ours" | "min1k" | null) => {
       const e = E(); if (!e) return 0;

@@ -217,6 +217,41 @@ test("diffNodes: births within 900 s under a known parent, identity patches with
   assert.equal(r.removed, 1);
 });
 
+test("diffNodes: a changed logo URL is a patch with `image` (null -> url, url -> url, url -> null); an mcap-only change has no image key", () => {
+  const ns = base();
+  const state = createDiffState(ns);
+  const known = new Set(ns.map((n) => n.mint));
+  const knows = (m: string) => known.has(m);
+  const u1 = "/api/img?u=https%3A%2F%2Fipfs.test%2Fa.png", u2 = "/api/img?u=https%3A%2F%2Fcdn.test%2Fa.png";
+  // a: its metadata arrived (null -> url) with a new mcap; b: a new object with the same image and mcap (nothing); c: mcap only
+  let next = ns.map((n) => (n.mint === "a" ? { ...n, image: u1, mcapUsd: 13_000 } : n.mint === "b" ? { ...n } : n.mint === "c" ? { ...n, mcapUsd: 301 } : n));
+  let d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, [{ mint: "a", mcapUsd: 13_000, image: u1 }, { mint: "c", mcapUsd: 301 }]);
+  assert.equal("image" in d.patches[1], false, "an mcap-only patch never touches the engine's image");
+  // the URL moves (url -> url), then goes away (url -> null); the mcap stays
+  next = next.map((n) => (n.mint === "a" ? { ...n, image: u2 } : n));
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, [{ mint: "a", mcapUsd: 13_000, image: u2 }]);
+  next = next.map((n) => (n.mint === "a" ? { ...n, image: null } : n));
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, [{ mint: "a", mcapUsd: 13_000, image: null }]);
+  // undefined and null are the same "no image" (an older cache row without the field)
+  next = next.map((n) => (n.mint === "a" ? ({ ...n, image: undefined } as unknown as BubbleNode) : n));
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, []);
+  // a newborn the engine placed (first sighting) is only recorded; its logo arriving later is a patch like any other
+  const born = node("born", "a", { createdAt: NOW - 10 });
+  next = [...next, born];
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.births.map((b) => b.coin.mint), ["born"]);
+  known.add("born");
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, []);
+  next = next.map((n) => (n.mint === "born" ? { ...n, image: u1 } : n));
+  d = diffNodes(state, next, new Map(next.map((n) => [n.mint, n])), knows, NOW);
+  assert.deepEqual(d.patches, [{ mint: "born", mcapUsd: 1_000, image: u1 }]);
+});
+
 test("shouldRebuild: max(200, 1 % of coins) drifted AND idle (3 s after a cache paint, else 10 s idle and 10 min since the build)", () => {
   const go = { unknown: 0, removed: 0, coins: 10_000, idleMs: 10_000, sinceBuildMs: 600_000, firstSyncAfterCache: false };
   assert.equal(shouldRebuild({ ...go, unknown: 199 }), false);

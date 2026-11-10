@@ -56,6 +56,22 @@ function installFocus(S) {
   }
 }
 
+// (logos that come later, 2026-11-10) image URLs that changed after the build ({mint, image}: a node patch from a since= delta
+// or a mapdelta, a late metadata read) reach the coins they belong to: built coins by S.mintIdx, newborns by the mint
+// bubbles.addCoin saw. An entry without an `image` key (an mcap-only patch) is skipped, an unchanged URL costs one compare.
+// Returns how many coins took a new URL.
+function patchImages(S, list) {
+  const B = S.bubbles;
+  if (!Array.isArray(list) || !B || typeof B.patchImage !== "function") return 0;
+  let n = 0;
+  for (const p of list) {
+    if (!p || typeof p.mint !== "string" || p.image === undefined) continue;
+    const i = B.coinIndex(p.mint);
+    if (i >= 0 && B.patchImage(i, p.image)) n++;
+  }
+  return n;
+}
+
 const counters = { live: 0, created: 0, destroyed: 0 };
 export function engineCounters() { return { live: counters.live, created: counters.created, destroyed: counters.destroyed }; }
 
@@ -213,7 +229,9 @@ export async function mountEngine(container, opts) {
     setHighlight: guard((t) => api.setHighlight(t)),
     setHeat: guard((h) => api.setHeat(h)),
     applyEvent: guard((e) => api.applyEvent(e)),
-    patchCoins: guard((p) => api.patchCoins(p)),
+    // a node patch carries `image` when the coin's URL changed: the market cap goes to motion, the URL to the bubbles
+    patchCoins: guard((p) => { api.patchCoins(p); patchImages(S, p); }),
+    patchImages: guard((p) => patchImages(S, p), 0),
     setTags: guard((fn) => S.labels.setTags(fn)),
     setInset: guard((a, b, c) => api.setInset(a, b, c)),
     setReducedMotion: guard((on) => api.setReducedMotion(on)),

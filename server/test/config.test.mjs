@@ -21,7 +21,7 @@ test("defaults: public RPC at 4 rps, ours mode, no launch fee, loopback trust, r
     assert.equal(c.platformMinBps, 5000); assert.equal(c.rpcApiRps, 1); assert.equal(c.rpcProxyRps, 1);
     assert.equal(c.sseMaxClients, 20000); assert.equal(c.ssePerIp, 16);
     assert.deepEqual(c.uploadQuota, { ipPerDay: 500, bytesPerDay: 256 * 1024 * 1024, deploysPerDay: 200 });
-    assert.equal(c.metaGcHours, 24); assert.equal(c.imgCacheBytes, 512 * 1024 * 1024); assert.equal(c.imgThumbBytes, 128 * 1024 * 1024);
+    assert.equal(c.metaGcHours, 24); assert.equal(c.imgCacheBytes, 512 * 1024 * 1024); assert.equal(c.imgThumbBytes, 2048 * 1024 * 1024);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -36,9 +36,9 @@ test("overrides: Helius-style URLs derive the socket, ORIGINS parsed, trust prox
     assert.equal(loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), TRUST_PROXY: "false" }, { here: dir }).trustProxy, false);
     assert.equal(loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), TRUST_PROXY: "10.0.0.0/8, 127.0.0.1" }, { here: dir }).trustProxy, "10.0.0.0/8, 127.0.0.1");
     assert.equal(loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), ORIGIN: "https://old.example" }, { here: dir }).origins[0], "https://old.example", "legacy ORIGIN still read");
-    const h = loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), RPC_URL: "https://mainnet.helius-rpc.com/?api-key=abc", PLATFORM_MIN_BPS: "1500", RPC_API_RPS: "3", RPC_PROXY_RPS: "2.5", RATE_SSE: "5", SSE_PER_IP: "2", UPLOAD_DAILY_IP: "3", UPLOAD_DAILY_MB: "1", UPLOAD_DAILY_DEPLOYS: "4", META_GC_HOURS: "0", IMG_CACHE_MB: "64", SPLIT_BPS: "8500,0,0,1500" }, { here: dir });
+    const h = loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), RPC_URL: "https://mainnet.helius-rpc.com/?api-key=abc", PLATFORM_MIN_BPS: "1500", RPC_API_RPS: "3", RPC_PROXY_RPS: "2.5", RATE_SSE: "5", SSE_PER_IP: "2", UPLOAD_DAILY_IP: "3", UPLOAD_DAILY_MB: "1", UPLOAD_DAILY_DEPLOYS: "4", META_GC_HOURS: "0", IMG_CACHE_MB: "64", IMG_THUMB_MB: "256", SPLIT_BPS: "8500,0,0,1500" }, { here: dir });
     assert.equal(h.platformMinBps, 1500); assert.equal(h.rpcApiRps, 3); assert.equal(h.rpcProxyRps, 2.5); assert.equal(h.rates.sse.limit, 5); assert.equal(h.ssePerIp, 2);
-    assert.deepEqual(h.uploadQuota, { ipPerDay: 3, bytesPerDay: 1024 * 1024, deploysPerDay: 4 }); assert.equal(h.metaGcHours, 0); assert.equal(h.imgCacheBytes, 64 * 1024 * 1024);
+    assert.deepEqual(h.uploadQuota, { ipPerDay: 3, bytesPerDay: 1024 * 1024, deploysPerDay: 4 }); assert.equal(h.metaGcHours, 0); assert.equal(h.imgCacheBytes, 64 * 1024 * 1024); assert.equal(h.imgThumbBytes, 256 * 1024 * 1024);
     assert.equal(loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), RPC_URL: "https://mainnet.helius-rpc.com/?api-key=abc", SPLIT_BPS: "8500,0,0,1500" }, { here: dir }).platformMinBps, 1500, "the floor follows the platform slice");
     assert.equal(loadConfig({ DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m"), RPC_URL: "https://mainnet.helius-rpc.com/?api-key=abc" }, { here: dir }).rpcApiRps, 10, "a quarter of RPC_RPS");
   } finally { rmSync(dir, { recursive: true, force: true }); }

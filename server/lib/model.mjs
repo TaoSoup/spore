@@ -266,9 +266,19 @@ export class Model {
     if (m.image) this.imageUrls.add(m.image);
     this.db.metaSet(m);
     // A logo that just arrived (or changed) reaches every coin behind this uri: `since=` and `mapdelta`.
-    if ((prev?.image ?? null) !== (m.image ?? null)) for (const mint of this.mintsOfUri(uri)) this.#stamp(mint);
+    if ((prev?.image ?? null) !== (m.image ?? null)) {
+      for (const mint of this.mintsOfUri(uri)) this.#stamp(mint);
+      if (m.image) this.#imageSeen(m.image);
+    }
     this.#bump();
   }
+  /**
+   * Called with every image URL the moment the model first learns it (a metadata image, a listed asset's icon):
+   * index.mjs points it at ImageCache.enqueueThumb, so the logo's thumbnail is made at first sight, not when the
+   * next warm pass reaches it (or never, when its host dies first). Never throws into the caller.
+   */
+  onImage = null;
+  #imageSeen(url) { try { this.onImage?.(url); } catch (e) { this.log.warn?.(`model: onImage: ${e?.message ?? e}`); } }
   /** Has the API handed out this image URL (so the proxy may fetch it)? */
   knownImage(url) { return this.imageUrls.has(url); }
   /**
@@ -495,6 +505,7 @@ export class Model {
     for (const [mint, url] of icons instanceof Map ? icons : Object.entries(icons ?? {})) {
       if (typeof mint !== "string" || typeof url !== "string" || !url.startsWith("https://") || this.assetIcons.get(mint) === url) continue;
       this.assetIcons.set(mint, url); this.imageUrls.add(url); n++;
+      this.#imageSeen(url);
       // The asset node rides the next `since=` delta with a member (mapSince adds the asset of a changed member).
       const member = this.assetFamilies().get(mint)?.[0];
       if (member) this.#stamp(member.mint);
@@ -526,18 +537,28 @@ export class Model {
   }
   /**
    * Raw logo URLs the map wants as thumbnails from far (ImageCache.warm), most wanted first: every family top (a root
-   * with a child, a listed asset top), the direct children of the bigFamilies largest families by descendants, and with
-   * `all` every other tracked coin's logo after them (the map draws a child's logo from 4.5 px, so a zoom into ANY family
-   * asks for its children; a cold family cost 2-5 s of sheet re-asks before this).
+   * with a child, a listed asset top, with its stored icon when its metadata has no image), the direct children of the
+   * bigFamilies largest families, then the coins every other listed-asset family draws (assetDrawn: they are on the map
+   * like any root's children, so they no longer wait behind every tracked coin), and with `all` every other tracked
+   * coin's logo after them (the map draws a child's logo from 4.5 px, so a zoom into ANY family asks for its children;
+   * a cold family cost 2-5 s of sheet re-asks before this). A listed asset's family competes for "largest" by its coin
+   * count and its drawn coins stand for its children.
    */
   warmImageUrls(bigFamilies = 60, all = false) {
     const out = new Set();
-    const add = (mint) => { const u = this.metaFor({ mint })?.image; if (u) out.add(u); };
-    const roots = this.allRoots(), d = this.computed();
+    const add = (mint) => { const u = this.imageOfMint(mint); if (u) out.add(u); };
+    const roots = this.allRoots(), d = this.computed(), fams = this.assetFamilies(), drawn = this.assetDrawn();
     for (const r of roots) add(r.mint);
-    for (const mint of this.assetFamilies().keys()) add(mint);
-    const big = roots.slice().sort((a, b) => (d.get(b.mint)?.descendants ?? 0) - (d.get(a.mint)?.descendants ?? 0)).slice(0, bigFamilies);
-    for (const r of big) for (const k of this.childrenOf(r.mint)) add(k.mint);
+    for (const mint of fams.keys()) add(mint);
+    // the drawn coins of a listed asset's family, biggest first (mapAll's order): its children on the map
+    const drawnKids = (asset) => [...(drawn.get(asset) ?? [])].sort((a, b) => sortKey(d.get(b)?.lockedUsd) - sortKey(d.get(a)?.lockedUsd) || sortKey(d.get(b)?.priceUsd) - sortKey(d.get(a)?.priceUsd));
+    const families = [
+      ...roots.map((r) => ({ size: d.get(r.mint)?.descendants ?? 0, kids: () => this.childrenOf(r.mint).map((k) => k.mint) })),
+      ...[...fams].map(([asset, members]) => ({ size: members.length, kids: () => drawnKids(asset) })),
+    ];
+    families.sort((a, b) => b.size - a.size);
+    for (const f of families.slice(0, bigFamilies)) for (const mint of f.kids()) add(mint);
+    for (const asset of fams.keys()) for (const mint of drawnKids(asset)) add(mint);
     if (all) for (const c of this.tracked()) add(c.mint);
     return [...out];
   }

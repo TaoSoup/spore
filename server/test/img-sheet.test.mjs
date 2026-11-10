@@ -227,7 +227,8 @@ test("ImgWork: the worker thread and the inline mode produce identical sheets an
 test("eviction: a thumbnail survives the eviction of its original; the thumbnail budget evicts the oldest thumbnails first", async () => {
   const png = await logo();
   const thumb = await renderThumb(png, "image/png", 64);
-  const { cache, done } = makeCache({ maxBytes: 3 * png.length, thumbMaxBytes: Math.floor(2.5 * thumb.length) });
+  // thumbKeepMs 0: every thumbnail here is minutes old at most, and the default keeps whatever was made or served within a day
+  const { cache, done } = makeCache({ maxBytes: 3 * png.length, thumbMaxBytes: Math.floor(2.5 * thumb.length), thumbKeepMs: 0 });
   try {
     const u0 = url("0.png"), hit = await cache.get(u0);
     const t0 = await cache.thumb(u0, hit, 64);

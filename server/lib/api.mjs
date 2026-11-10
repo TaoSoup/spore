@@ -190,7 +190,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
     map: { ...(model.mapStats ?? {}), total: model.mapCache?.total ?? null, cachedVersion: model.mapCache?.version ?? null, dirty: model.dirty?.size ?? 0, family: model.familyStats ? { ...model.familyStats, ...model.familyHeld() } : null },
     ws: ws ? { connected: ws.connected, lastMessageAgoMs: ws.lastMessageAgoMs, connects: ws.connects, errors: ws.errors, backoffMs: ws.backoffMs ?? null, reconnecting: !!ws.reconnecting } : null,
     activity: model.activity ? { ...model.activity.size(), seededMs: model.activity.seededMs ?? null } : null,
-    rpc: rpc?.snapshot?.() ?? snap.rpc ?? null, rpcLanes: rpc?.laneSnapshot?.() ?? null, meta: meta?.snapshot?.() ?? meta?.stats ?? snap.meta ?? null, images: images?.stats ?? null,
+    rpc: rpc?.snapshot?.() ?? snap.rpc ?? null, rpcLanes: rpc?.laneSnapshot?.() ?? null, meta: meta?.snapshot?.() ?? meta?.stats ?? snap.meta ?? null, images: images?.snapshot?.() ?? images?.stats ?? null,
     metahost: metahost ? { ...metahost.stats, quota: metahost.quota?.snapshot?.() ?? null } : null, treasury: treasury?.stats ?? null,
     sse: hub?.clients?.size ?? 0, sseStats: hub?.stats ?? null, v1: v1?.snapshot?.() ?? null, agents: agents ? { ...(agents.runner?.snapshot?.() ?? { mode: agents.mode }), live: agents.live?.snapshot?.() ?? null, vault: !!agents.vault, ledger: agents.ledger?.snapshot?.() ?? null } : null, solUsd: model.solUsd, memoryMb: { rss: Math.round(mem.rss / 1e6), heap: Math.round(mem.heapUsed / 1e6) },
   };

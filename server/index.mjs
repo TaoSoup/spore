@@ -44,7 +44,11 @@ const metahost = new MetaHost({ root: cfg.metaDir, domain: cfg.pagesDomain, proj
 const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, log });
 const hub = new EventHub({ maxClients: cfg.sseMaxClients, maxPerIp: cfg.ssePerIp });
 const imgWork = new ImgWork({ log }); // thumbnails and logo sheets render on a worker thread, never on this loop
-const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.imgCacheBytes, thumbMaxBytes: cfg.imgThumbBytes, concurrency: 8, work: imgWork });   // 8 origin downloads at once (map logos from far)
+// 8 origin downloads at once (map logos from far), at most half of them for background work (first sight, warm
+// pass) so a visitor's /api/img and /api/logo-sheet never queue behind it; failures and the warm cursor live in sqlite.
+const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.imgCacheBytes, thumbMaxBytes: cfg.imgThumbBytes, concurrency: 8, work: imgWork, store: db });
+// First sight: every image url the model learns (a metadata image, an asset icon) gets its 64 px thumbnail queued at once.
+model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
 const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
@@ -99,9 +103,10 @@ const imageSweep = setInterval(() => { try { images.sweep(); } catch { /* best e
 // Map logos from far: the 64 px thumbnail of every family top (+ gen-1 of the 60 biggest) made ahead of the
 // first visitor, 3 min after boot (the backfill's mints and metadata are loaded by then) and every 30 min.
 // (repair 2026-10-22) every tracked coin's logo, tops and big families first; one pass at a time (a pass stops at
-// WARM_MAX_MS; failed urls rest WARM_RETRY_MS), so the dead upstreams never pile the passes up.
+// WARM_MAX_MS and the next one, after a restart too, resumes where it stopped: kv imgWarmCursor; failed urls rest
+// for their kind's retry time, kept in sqlite img_fail), so the dead upstreams never pile the passes up.
 let warmRun = null;
-const warmLogos = () => warmRun ?? (warmRun = images.warm(model.warmImageUrls(60, true), 64, 4).then((r) => log.info(`img warm: ${r.ok}/${r.n} thumbnails ready, ${r.failed} failed (${r.skipped} skipped${r.stopped ? ", stopped at the time budget" : ""}), ${r.ms} ms`)).catch((e) => log.warn(`img warm: ${e.message}`)).finally(() => { warmRun = null; }));
+const warmLogos = () => warmRun ?? (warmRun = images.warm(model.warmImageUrls(60, true), 64, 4, { resume: "imgWarmCursor" }).then((r) => log.info(`img warm: ${r.ok}/${r.n} thumbnails ready from #${r.from}, ${r.failed} failed (${r.skipped} skipped${r.full ? `, ${r.full} over the thumbnail budget` : ""}${r.stopped ? ", stopped at the time budget" : ""}), ${r.ms} ms`)).catch((e) => log.warn(`img warm: ${e.message}`)).finally(() => { warmRun = null; }));
 const imageWarmFirst = setTimeout(warmLogos, 3 * 60_000); imageWarmFirst.unref();
 const imageWarm = setInterval(warmLogos, 30 * 60_000); imageWarm.unref();
 // Uploaded metadata nobody launched with is removed after META_GC_HOURS (0 keeps everything); the
@@ -136,7 +141,7 @@ function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   log.info(`shutting down (${signal})`);
-  clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc);
+  clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
   indexer.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();

@@ -43,7 +43,8 @@ const anyAlpha = (px) => { for (let i = 3; i < px.length; i += 4) if (px[i] !== 
 
 /**
  * PNG bytes of a w x w centre-cropped (cover) thumbnail of a raster image, or null when it cannot be
- * drawn (unknown type or size, undecodable or animated webp, a fully transparent result).
+ * drawn (unknown type or size, undecodable webp, a fully transparent result). An animated webp is drawn
+ * from its first frame (decodeWebp).
  */
 export async function renderThumb(bytes, type, w) {
   if (!THUMB_TYPES.has(type) || !IMAGE_THUMB_SIZES.has(w) || !bytes?.byteLength) return null;
