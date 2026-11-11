@@ -269,6 +269,33 @@ first time its url is seen and kept for good:
   is refused all the same is counted (`freshFull`, `warmFull`) and logged at most every 10 min with
   the counts since the last warning. Originals keep their own `IMG_CACHE_MB` budget and a 24 h
   refresh; a stale original whose refresh fails is still served.
+- *SVG logos* (since 2026-11-11; Backpack's stock tokens, for one, name `backpack.exchange/api/stock-logo/<SYMBOL>`,
+  which answers `image/svg+xml`) are drawn into a PNG and kept as the original, served as `image/png` like
+  any downloaded PNG (thumbnails and sheets as usual); SVG bytes are never stored or served, they can script on
+  our origin. An SVG is what is declared `svg` or sniffed as an XML document with an `<svg>` root (plain text
+  and XML types are sniffed too; a stored `Content-Encoding` gzip / deflate / br is undone first, within the
+  same cap), at most 1 MB. It is fitted into 256 x 256 (aspect kept, transparent
+  ground) by resvg on the image worker (`rasterizeSvg` in `lib/img-worker.mjs`), never on the event loop, and
+  nothing outside the document is loaded: no system fonts (text is set in the vendored Geist faces), no
+  image, stylesheet or file; scripts are not run. Before resvg sees it, a document is held to what a logo needs
+  (one linear tag-level pass, references replaced as resvg reads them, so no spelling gets past it): the
+  elements in `SVG_ELEMENTS` only (shapes, groups, `use`, `symbol`, `switch`, gradients, `clipPath`, `text` /
+  `tspan`, `style`, title / desc / metadata; elements of other namespaces, such as editor metadata, are
+  skipped by resvg and allowed), so pattern, mask, filter and `fe*`, image, foreignObject, script and marker
+  are refused; every `href` must point inside the document (`#id`); no `filter` attribute or CSS property;
+  at most 32 levels deep, 10,000 elements and 2,000 characters of text; plain internal entities only (no
+  references or markup in them, none external or parameter, at most 64 KB of expansion). A drawing still
+  running 1.5 s after the worker took it up ends that worker (the only way to stop resvg; it is no crash,
+  the next job starts a fresh one; the verdict waits a turn of the loop, so an answer already in wins).
+  Memory: while the worker holds a job (any op: thumbnails, sheets and cards too) the main thread samples
+  the process's RSS every 10 ms, and a rise of more than 256 MB since the job began ends the worker (an SVG
+  then fails for good, a thumbnail is "cannot be drawn", the jobs behind it fail once); resvg's own memory
+  is capped at 384 MB besides (`lib/resvg-wasm.mjs`, the same bytes on every thread, so V8 compiles the module
+  once), which holds while the loop is too busy to sample; and a worker
+  that trapped in resvg or holds over 128 MB of wasm memory after a job is replaced once idle (a logo leaves
+  ~10 MB). What cannot be drawn (too big, not an SVG, what a logo does not need, a parse error, no size,
+  nothing drawn, past the deadline or the memory bound) is a permanent failure (`svg: …`); the worker dying
+  under it is temporary until it happened twice in a row; with no worker at all it is temporary.
 - *Failures are classified* and kept in sqlite (`img_fail`: url, kind, error, attempts,
   gone_attempts, next retry), so a restart does not download the dead again. Temporary (429 or every
   gateway pausing, 5xx, timeouts, network errors, IPFS gateways that mixed a no with any of those,
@@ -293,9 +320,15 @@ first time its url is seen and kept for good:
   dead); an animated webp is drawn from its first frame. Rows past their retry time by 30 days are
   forgotten. When the rotation gains a gateway (`GATEWAY_RULE`), the next boot forgets the IPFS
   failures the old rotation recorded as temporary or with a per-gateway summary (kv `imgGatewayRule`).
+  When the proxy learns to draw another type (`IMG_TYPE_RULE`; 2 draws SVG), the next boot forgets, once, the
+  failures an older rule recorded for it (`not an image: image/svg+xml` and the like, and `not an image:
+  text/plain` / `text/xml`, which rule 1 refused before the download; kv `imgTypeRule`) and
+  queues those urls for first sight, so the logos come back within seconds of the restart.
 
 `/api/health.images` has the counters plus `thumbFiles`, `slots` (active / background / waiting per
-priority), `fresh` (first-sight queue) and `failing: { gone, temp, nothumb }`.
+priority), `fresh` (first-sight queue), `failing: { gone, temp, nothumb }` and `work`, the image worker's
+counters (`jobs`, `failed`, `restarts`, `inline`, `overtime`, `overMemory`, `recycled`). Each worker
+replacement is also logged (`img work: worker replaced (<why>)`).
 
 **Live-path cost.** A trade used to trigger a full derived recompute (`computed()`, ≈ 90 ms at 15k
 coins) because the coin's own upsert had just bumped the model version; `Model.priceOf(mint)` prices
@@ -403,7 +436,7 @@ DESIGN §7, plus a few extras that never replace a contract field:
 - `POST /api/spawned` `{ mint, sig }` → `{ ok, mint, ours, oursPending, verified: true, feePaid?, coin }` the Spawn page reports a signed spawn; the transaction is read back and must be a pump create of that mint by a wallet with the launch fee paid to the platform, else `400 { error }` (`404 { error, retryAfter: 3 }` until the RPC sees the signature); 20 per 10 min per IP, verdicts cached per signature
 - `GET /m/:name` → a self-hosted metadata/image file (immutable)
 - `GET /api/events` → SSE `coin | trade | stats`, heartbeat comment every 15 s
-- `GET /api/img?u=[&w=64|128|256]` → cached image proxy for URLs the API itself handed out (the `image` of an indexed coin or a file on our metadata host; anything else is 404 even on an allowed host; allowlist in `lib/meta.mjs`, 4 MB, 24 h, `IMG_CACHE_MB` budget); with `w` a PNG thumbnail (`x-img-thumb`) when one can be drawn, kept for good under `IMG_THUMB_MB`; `503` + `Retry-After` while a temporary failure holds the image back, `404` for a permanent one (see "Logo capture"); `Coin.image` already points here
+- `GET /api/img?u=[&w=64|128|256]` → cached image proxy for URLs the API itself handed out (the `image` of an indexed coin or a file on our metadata host; anything else is 404 even on an allowed host; allowlist in `lib/meta.mjs`, 4 MB, 24 h, `IMG_CACHE_MB` budget; an SVG logo, at most 1 MB, is served as the PNG drawn from it, never as SVG); with `w` a PNG thumbnail (`x-img-thumb`) when one can be drawn, kept for good under `IMG_THUMB_MB`; `503` + `Retry-After` while a temporary failure holds the image back, `404` for a permanent one (see "Logo capture"); `Coin.image` already points here
 - `GET /api/logo-sheet?w=64&m=<mint>,…[&f=webp|png]` → one image of up to 256 mints' 64 px logos, 16 per row; `x-sheet` / `x-sheet-dead` are hex bitmaps of present / dead cells (byte j bit b = cell 8j+b), a cell in neither is pending (still rendering, or a temporary failure: ask again), `x-sheet-pending` counts them (`no-store` while any is pending; `private, max-age=60` with a dead cell, a verdict that can change on the server within minutes; `private, max-age=600` for logos only)
 - `POST /api/upload` → `{ metadataUri, imageUri, metadata }` self-hosted (see "Metadata host"; 5 per 10 min per IP, daily quotas → `429 { error, retryAfter }`)
 - `POST /api/rpc` → allow-listed JSON-RPC proxy (no `getProgramAccounts`) on its own RPC lane; batches of at most 5; `getMultipleAccounts` ≤ 32 keys; `getTokenAccountsByOwner` never `jsonParsed`; `sendTransaction` / `simulateTransaction` only for transactions that invoke a pump program (decoded and checked, base64 or base58); relayed answers capped at 2 MB; 60 per minute per IP

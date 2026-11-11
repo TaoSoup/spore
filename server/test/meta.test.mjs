@@ -89,7 +89,7 @@ test("ImageCache refuses disallowed hosts without fetching, caches an allowed im
     assert.equal(await cache.get("https://ipfs.io/ipfs/big.png"), null);
     assert.equal(await cache.get("https://ipfs.io/ipfs/page.html"), null);
     assert.equal(await cache.get("https://ipfs.io/ipfs/fake.png"), null, "declared png with non-png bytes");
-    assert.equal(await cache.get("https://ipfs.io/ipfs/logo.svg"), null, "svg is never proxied");
+    assert.equal(await cache.get("https://ipfs.io/ipfs/logo.svg"), null, "an svg that cannot be drawn (no namespace) is refused; a drawn one is served as a PNG, never as svg (img-svg.test.mjs)");
     assert.deepEqual({ hits: cache.stats.hits, failed: cache.stats.failed }, { hits: 1, failed: 4 });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

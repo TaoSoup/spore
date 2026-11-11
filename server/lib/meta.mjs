@@ -5,8 +5,9 @@
 // locked value, then recency; failures retry with a growing backoff that survives restarts, shorter
 // for a temporary failure, weekly for a host that keeps saying the file is gone);
 // images are served only from an allowlist of hosts pump.fun coins actually use, capped at 4 MB and
-// cached on disk for 24 h; their 64 px thumbnails are made the moment an image url is first seen and
-// kept for good (only a disk budget evicts them, least recently served first; on a full budget a new
+// cached on disk for 24 h (an SVG logo, capped at 1 MB, is drawn into a PNG on the image worker and
+// kept and served as that PNG: SVG bytes are never stored or served, they can script); their 64 px
+// thumbnails are made the moment an image url is first seen and kept for good (only a disk budget evicts them, least recently served first; on a full budget a new
 // coin's first-sight thumbnail evicts one unused for 30 days, the warm pass none). The browser never
 // loads a creator-supplied URL directly. IPFS content is
 // tried through a gateway rotation (pump.fun's own pinata gateway, then ipfs.filebase.io → 4everland.io →
@@ -18,13 +19,15 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, statSync, createReadStream, unlinkSync, readdirSync, renameSync, existsSync, utimesSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
+import zlib from "node:zlib";
 import { META_NAME_RE, META_TYPES } from "./metahost.mjs";
 import { HostGuard, guardedFetch, pinnedFetch } from "./net.mjs";
 import { sniffImage } from "./validate.mjs";
-import { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, renderThumb, runOp } from "./img-worker.mjs";
+import { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, SVG_MAX_BYTES, SVG_DRAW_MAX_MS, SVG_RASTER_PX, WORKER_RECYCLE_BYTES, WORKER_JOB_MAX_BYTES, RESVG_MEMORY_MAX_BYTES, renderThumb, runOp, isSvgDocument } from "./img-worker.mjs";
 
-export { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, renderThumb };
+export { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, SVG_MAX_BYTES, SVG_DRAW_MAX_MS, SVG_RASTER_PX, WORKER_RECYCLE_BYTES, WORKER_JOB_MAX_BYTES, RESVG_MEMORY_MAX_BYTES, renderThumb };
 
 export const META_TTL_S = 7 * 24 * 3600;      // a resolved JSON with an image is re-read this often (IPFS content never changes)
 export const META_NOIMAGE_TTL_S = 24 * 3600;  // resolved, but no usable image: looked at again daily
@@ -43,6 +46,14 @@ export const META_IMAGE_RULE = 2;
 // (2026-11-10) added ipfs.filebase.io and 4everland.io, which served all 5 stuck CIDs probed while every old public
 // gateway answered 429 on sight. Bump it whenever the rotation gains a gateway.
 export const GATEWAY_RULE = 2;
+// Version of what the image proxy can turn into a logo. Rule 2 (2026-11-11) draws an SVG into a PNG original (img-worker.mjs
+// rasterizeSvg) where rule 1 refused it as "not an image: image/svg+xml", a permanent failure retried after a week: 124 logos
+// of the local index, 80 of them the family tops of Backpack's stock tokens (backpack.exchange/api/stock-logo/<SYMBOL>
+// answers image/svg+xml). Rule 1 also refused plain text and XML before the download, which rule 2 sniffs (raw file hosts
+// serve .svg as text/plain). At boot the image proxy forgets, once (kv "imgTypeRule"), the failures an older rule recorded
+// for those (TYPE_REFUSAL_RE) and queues their urls for first sight (ImageCache, #loadFails); no other failure is touched.
+export const IMG_TYPE_RULE = 2;
+const TYPE_REFUSAL_RE = /^not (?:an|a raster) image\b.*svg|^not an image: text\/(?:plain|xml)$/i;
 export const IMAGE_TTL_MS = 24 * 3600 * 1000;
 export const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 export const META_MAX_BYTES = 512 * 1024;
@@ -271,7 +282,8 @@ export function localMetaFile(u) {
  * resolved metadata kept its image on hosts outside the old allowlist — various launchpad CDNs,
  * solanatracker.io …). Safety does not rest on the host name: the SSRF guard (lib/net.mjs) refuses
  * private and special addresses at fetch time and on every redirect, the proxy sniffs the bytes,
- * refuses SVG and caps the size, and only images the API handed out are proxied (api.mjs).
+ * serves a raster type only (an SVG logo as a PNG drawn from it, never the SVG) and caps the size, and
+ * only images the API handed out are proxied (api.mjs).
  * `KNOWN_IMAGE_HOSTS` is kept for tests and documentation of what pump.fun coins mostly use.
  */
 export function isAllowedImageUrl(u) {
@@ -761,8 +773,8 @@ export const SHEET_CELL = 64;
  * with any of those, a rotation whose gateways did not resolve) waits IMG_TEMP_RETRY_MS, doubling per failure: the
  * first IMG_TEMP_SHORT_TRIES waits stay within IMG_TEMP_RETRY_MAX_MS, later ones grow on to IMG_TEMP_LONG_MAX_MS (a
  * day: an unpinned CID is not asked 170 times a week), and it answers 503 with a short Retry-After (a pending
- * sheet cell) all along. A permanent one (404/410 and the other definitive 4xx, not an image, too large) waits
- * IMG_GONE_RETRY_MS by failure count (an hour, a day, then a week each time, so a file that appears late is not
+ * sheet cell) all along. A permanent one (404/410 and the other definitive 4xx, not an image, too large, an SVG
+ * that cannot be drawn: "svg: ...", ImageCache #rasterize) waits IMG_GONE_RETRY_MS by failure count (an hour, a day, then a week each time, so a file that appears late is not
  * lost for a week) and answers 404 (a dead cell). A lone host that does not resolve is temporary (our DNS may be
  * down) until it failed that way IMG_DNS_GONE_AFTER times in a row, then permanent; its temporary waits are at
  * least IMG_DNS_RETRY_MS, doubling (15 min, then 30), so the third miss comes at least 45 min after the first and a
@@ -804,6 +816,23 @@ const THUMB_NAME_RE = /\.w\d+\.png$/;
 
 /** A download failure that knows its kind ("gone" | "temp"). */
 const failure = (kind, message) => Object.assign(new Error(message), { kind });
+const inflaters = { gzip: promisify(zlib.gunzip), deflate: promisify(zlib.inflate), deflateRaw: promisify(zlib.inflateRaw), br: promisify(zlib.brotliDecompress) };
+/**
+ * `body` decoded from its Content-Encoding (gzip, deflate or br: some hosts send a stored encoding whatever was asked,
+ * and pinnedFetch hands the bytes over as they came) into at most `cap` bytes; past it a permanent failure (`tooLarge`).
+ * A body not in that coding (a fetch layer that decoded it already, a wrong header) or in a coding not read here is
+ * returned as it is: the sniff decides.
+ */
+async function decodedBody(body, coding, cap, tooLarge) {
+  const tries = coding === "gzip" || coding === "x-gzip" ? (body[0] === 0x1f && body[1] === 0x8b ? [inflaters.gzip] : [])
+    : coding === "deflate" ? [inflaters.deflate, inflaters.deflateRaw] // zlib-wrapped as the spec says, or raw as some servers send it
+      : coding === "br" ? [inflaters.br] : [];
+  for (const inflate of tries) {
+    try { return await inflate(body, { maxOutputLength: cap }); }
+    catch (e) { if (e?.code === "ERR_BUFFER_TOO_LARGE") throw failure("gone", tooLarge); }
+  }
+  return body;
+}
 /**
  * "temp", "gone" or "dns" for an error the rotation threw (every candidate failed on the network): a refused address,
  * a TLS or redirect fault are not going to heal by themselves; a lone host that does not resolve is "dns" (#fail makes
@@ -820,27 +849,44 @@ function thrownKind(e) {
 /** The run a failure belongs to (its attempts count within it): its kind, with a lone host's "does not resolve" a temporary run of its own. */
 const failRun = (kind, error) => (kind === "temp" && isDnsMiss(error) ? "dns" : kind);
 
+/** How often ImgWork samples the process's memory while a worker holds jobs (resvg grew by up to 3.5 GB/s: tens of MB between samples). */
+export const WORKER_MEM_POLL_MS = 10;
 /**
  * The thread image work runs on (lib/img-worker.mjs): one worker, jobs answered in order, buffers
  * handed over rather than copied, respawned when it dies (the jobs in flight fail once, as transient).
  * `{ inline: true }` runs the same functions on the calling thread, which tests use and the cache
  * falls back to when a worker cannot be spawned or keeps crashing. Without it every thumbnail render
  * (8-80 ms), sheet composition (50-120 ms) and share card (35-110 ms) would block the event loop,
- * i.e. SSE and the indexer.
+ * i.e. SSE and the indexer. An SVG logo (`svg`) is never drawn inline: it has a deadline
+ * (SVG_DRAW_MAX_MS from the moment the worker takes it up), and a drawing past it ends the worker,
+ * the only way to stop resvg; the job fails for good, the jobs queued behind it fail once as transient,
+ * and the next job starts a fresh worker. The verdict waits one turn of the loop, so an answer that
+ * came in while the loop was held (and is only waiting to be read) wins over the timer. Every job, whatever
+ * its op, is watched the same way for memory: while a worker holds jobs, the process's RSS is sampled every
+ * WORKER_MEM_POLL_MS, and a rise past `jobMaxBytes` (WORKER_JOB_MAX_BYTES) since the job began ends the
+ * worker; resvg's own memory in a worker is capped besides (RESVG_MEMORY_MAX_BYTES), which holds while the
+ * loop is too busy to sample. A worker that trapped inside resvg or whose wasm memory grew past
+ * WORKER_RECYCLE_BYTES is replaced as soon as it is idle (new jobs go to a fresh one meanwhile).
+ * None of these counts as the worker dying, so none can push the work inline; each is logged and counted
+ * (`stats`, in /api/health as images.work).
  */
 export class ImgWork {
-  constructor({ inline = false, log = console } = {}) {
-    this.inline = inline; this.log = log; this.worker = null; this.pending = new Map(); this.seq = 0; this.closed = false;
-    this.stats = { jobs: 0, failed: 0, restarts: 0, inline: inline ? 1 : 0 };
+  constructor({ inline = false, log = console, svgMaxMs = SVG_DRAW_MAX_MS, recycleBytes = WORKER_RECYCLE_BYTES, jobMaxBytes = WORKER_JOB_MAX_BYTES, resvgMaxBytes = RESVG_MEMORY_MAX_BYTES } = {}) {
+    this.inline = inline; this.log = log; this.svgMaxMs = svgMaxMs; this.recycleBytes = recycleBytes; this.jobMaxBytes = jobMaxBytes; this.resvgMaxBytes = resvgMaxBytes;
+    this.worker = null; this.pending = new Map(); this.seq = 0; this.closed = false;
+    this.retiring = new Set(); // workers being replaced: they finish what they hold, take nothing new and are ended (not a crash)
+    this.memBase = new Map(); this.memTimer = null; // busy worker → the memory sample its current job began at (#watch)
+    this.stats = { jobs: 0, failed: 0, restarts: 0, inline: inline ? 1 : 0, overtime: 0, overMemory: 0, recycled: 0 };
   }
   #spawn() {
     try {
       // a worker refuses most process-level node flags (the test runner alone passes a dozen), so only the warning switches carry over
       const execArgv = process.execArgv.filter((a) => /^(--disable-warning=|--no-warnings)/.test(a));
-      const w = new Worker(new URL("./img-worker.mjs", import.meta.url), { workerData: { role: "img" }, execArgv });
-      w.on("message", (m) => this.#onMessage(m));
-      w.on("error", (e) => this.#gone(e));
-      w.on("exit", (code) => this.#gone(new Error(`image worker exited (${code})`)));
+      const w = new Worker(new URL("./img-worker.mjs", import.meta.url), { workerData: { role: "img", recycleBytes: this.recycleBytes, resvgMaxBytes: this.resvgMaxBytes }, execArgv });
+      // every event names its worker: an old one ending late must not touch the jobs of the one that replaced it
+      w.on("message", (m) => this.#onMessage(w, m));
+      w.on("error", (e) => this.#gone(w, e));
+      w.on("exit", (code) => this.#gone(w, new Error(`image worker exited (${code})`)));
       w.unref(); // idle, it never keeps the process alive; ref'd while jobs wait
       this.worker = w;
       return w;
@@ -850,34 +896,102 @@ export class ImgWork {
       return null;
     }
   }
-  #gone(err) {
-    const w = this.worker;
-    if (!w) return;
-    this.worker = null;
-    if (!this.closed) { this.stats.restarts++; this.log.warn?.(`img work: ${err.message}; ${this.pending.size} jobs dropped, worker restarts on the next job`); }
-    if (this.stats.restarts > 5 && !this.inline) { this.inline = true; this.stats.inline = 1; this.log.warn?.("img work: worker keeps dying, rendering inline from now on"); }
-    for (const p of this.pending.values()) { const e = new Error(`image worker failed: ${err.message}`); e.transient = true; p.reject(e); }
-    this.pending.clear();
+  #busy(w) { for (const p of this.pending.values()) if (p.w === w) return true; return false; }
+  /** The id of the job worker `w` is running (they are answered in the order they were posted), or 0. */
+  #current(w) { for (const [id, p] of this.pending) if (p.w === w) return id; return 0; }
+  /** What the watchdog compares: the process's RSS, and this thread's own heap and buffers (a rise of those is not the worker's). */
+  static #sample() { const m = process.memoryUsage(); return { rss: m.rss, own: m.heapTotal + m.external }; }
+  /** Worker `w` starts a job (it was idle, or answered the one before): the memory it may grow by counts from here. */
+  #watch(w) {
+    if (!(this.jobMaxBytes > 0)) return;
+    this.memBase.set(w, ImgWork.#sample());
+    if (!this.memTimer) { this.memTimer = setInterval(() => this.#sampleMemory(), WORKER_MEM_POLL_MS); this.memTimer.unref?.(); }
   }
-  #onMessage(m) {
+  #unwatch(w) {
+    this.memBase.delete(w);
+    if (!this.memBase.size && this.memTimer) { clearInterval(this.memTimer); this.memTimer = null; }
+  }
+  #sampleMemory() {
+    const now = ImgWork.#sample();
+    for (const [w, base] of this.memBase) {
+      const rise = now.rss - base.rss - Math.max(0, now.own - base.own);
+      // the verdict waits a turn of the loop: an answer already in (the loop was held) wins, as for a deadline
+      if (rise > this.jobMaxBytes) { const id = this.#current(w); setImmediate(() => this.#overMemory(w, id)); }
+    }
+  }
+  /**
+   * Job `id` grew the process past `jobMaxBytes` while worker `w` ran it: the worker is ended at once and the job fails for
+   * good (`memory`), the jobs queued behind it once, as transient. When another worker was busy too (one being replaced),
+   * which of them grew cannot be told: all of them are ended and every job they held fails once, as transient.
+   */
+  #overMemory(w, id) {
+    const p = this.pending.get(id);
+    if (!p || p.w !== w) return; // answered meanwhile
+    const mb = Math.round(this.jobMaxBytes / 2 ** 20), others = [...this.memBase.keys()].filter((x) => x !== w);
+    this.stats.overMemory++;
+    this.log.warn?.(`img work: a ${p.op} job grew the process past ${mb} MB; ${others.length ? "the busy workers are" : "its worker is"} ended and replaced`);
+    if (!others.length) {
+      this.pending.delete(id); clearTimeout(p.timer); this.stats.failed++;
+      p.reject(Object.assign(new Error(p.op === "svg" ? `svg: drawing it took over ${mb} MB of memory` : `${p.op}: it took over ${mb} MB of memory`), { memory: true }));
+    }
+    for (const x of [w, ...others]) { this.#unwatch(x); this.#retire(x, true, `a job grew the process past ${mb} MB`); }
+  }
+  /** Worker `w` died or was ended: its jobs fail once, as transient; a death of its own (not a retirement, not close) counts as a restart. */
+  #gone(w, err) {
+    const retired = this.retiring.delete(w), current = this.worker === w;
+    if (current) this.worker = null;
+    this.#unwatch(w);
+    const dropped = [];
+    for (const [id, p] of this.pending) if (p.w === w) { dropped.push(p); this.pending.delete(id); }
+    if (current && !retired && !this.closed) {
+      this.stats.restarts++; this.log.warn?.(`img work: ${err.message}; ${dropped.length} jobs dropped, worker restarts on the next job`);
+      if (this.stats.restarts > 5 && !this.inline) { this.inline = true; this.stats.inline = 1; this.log.warn?.("img work: worker keeps dying, rendering inline from now on"); }
+    }
+    for (const p of dropped) { clearTimeout(p.timer); const e = new Error(`image worker failed: ${err.message}`); e.transient = true; p.reject(e); }
+  }
+  /** Takes `w` out of service (`why`, logged): new jobs go to a fresh worker; `w` is ended at once (`now`), else once it holds no job. */
+  #retire(w, now, why) {
+    if (this.worker === w) this.worker = null;
+    if (!this.retiring.has(w)) { this.retiring.add(w); this.stats.recycled++; this.log.info?.(`img work: worker replaced (${why}); ${this.stats.recycled} so far`); }
+    if (now || !this.#busy(w)) w.terminate().catch(() => {});
+  }
+  /** A drawing ran past its deadline: it fails for good and its worker is ended (resvg cannot be interrupted otherwise). */
+  #overtime(w, id) {
+    const p = this.pending.get(id);
+    if (!p || p.w !== w) return; // answered meanwhile
+    this.pending.delete(id); this.stats.overtime++; this.stats.failed++;
+    this.log.warn?.(`img work: a drawing ran past ${p.deadlineMs} ms; its worker is ended and replaced`);
+    p.reject(Object.assign(new Error(`svg: drawing it took over ${p.deadlineMs} ms`), { overtime: true }));
+    this.#unwatch(w);
+    this.#retire(w, true, `a drawing ran past ${p.deadlineMs} ms`);
+  }
+  #onMessage(w, m) {
     const p = this.pending.get(m.id);
-    if (!p) return;
-    this.pending.delete(m.id);
-    if (!this.pending.size) this.worker?.unref();
+    if (!p || p.w !== w) return;
+    // the verdict waits a turn of the loop (setImmediate): when the loop was held past the deadline, the timer fires before
+    // the poll phase reads an answer that came in meanwhile, which is to win
+    if (m.started) { if (p.deadlineMs > 0) { p.timer = setTimeout(() => setImmediate(() => this.#overtime(w, m.id)), p.deadlineMs); p.timer.unref?.(); } return; }
+    this.pending.delete(m.id); clearTimeout(p.timer);
+    if (this.#busy(w)) this.#watch(w); else this.#unwatch(w); // the worker takes up its next job at once
+    if (m.recycle) this.#retire(w, false, m.recycle === "trap" ? "it trapped inside resvg" : `its wasm memory is over ${Math.round(this.recycleBytes / 2 ** 20)} MB`);
+    else if (this.retiring.has(w) && !this.#busy(w)) w.terminate().catch(() => {});
+    if (!this.#busy(w)) w.unref();
     if (m.ok) p.resolve({ bytes: m.bytes ? Buffer.from(m.bytes.buffer, m.bytes.byteOffset, m.bytes.byteLength) : null, type: m.type, failed: m.failed ?? [] });
     else { this.stats.failed++; p.reject(new Error(m.error)); }
   }
-  async #run(msg, transfer) {
+  async #run(msg, transfer, { deadlineMs = 0, inlineOk = true } = {}) {
     this.stats.jobs++;
     if (!this.inline && !this.closed) {
       const w = this.worker ?? this.#spawn();
       if (w) return new Promise((resolve, reject) => {
-        const id = ++this.seq;
-        this.pending.set(id, { resolve, reject });
+        const id = ++this.seq, idle = !this.#busy(w);
+        this.pending.set(id, { resolve, reject, w, op: msg.op, deadlineMs, timer: null });
+        if (idle) this.#watch(w);
         w.ref();
-        try { w.postMessage({ id, ...msg }, transfer); } catch (e) { this.pending.delete(id); if (!this.pending.size) w.unref(); reject(e); }
+        try { w.postMessage({ id, ...msg, deadlineMs }, transfer); } catch (e) { this.pending.delete(id); if (!this.#busy(w)) { w.unref(); this.#unwatch(w); } reject(e); }
       });
     }
+    if (!inlineOk) throw Object.assign(new Error("no image worker to draw it on"), { transient: true, noWorker: true });
     try { const r = await runOp(msg); return { bytes: r.bytes ?? null, type: r.type, failed: r.failed ?? [] }; }
     catch (e) { this.stats.failed++; throw e; }
   }
@@ -897,12 +1011,26 @@ export class ImgWork {
     const r = await this.#run({ op: "card", svg: String(svg) }, []);
     return r.bytes;
   }
+  /**
+   * PNG bytes of a downloaded SVG logo drawn into SVG_RASTER_PX (rasterizeSvg in img-worker.mjs), on the worker only and
+   * within `svgMaxMs` (SVG_DRAW_MAX_MS) of the worker taking it up; throws why it cannot be drawn (`overtime` past the deadline,
+   * `transient` when the worker died under it, `noWorker` when there is none: inline it could hold the loop for minutes).
+   */
+  async svg({ bytes }) {
+    if (this.closed) throw Object.assign(new Error("no image worker to draw it on"), { transient: true, noWorker: true });
+    const u8 = own(bytes);
+    const r = await this.#run({ op: "svg", bytes: u8 }, [u8.buffer], { deadlineMs: this.svgMaxMs, inlineOk: false });
+    return r.bytes;
+  }
   /** Ends the worker; later jobs run inline (the shutdown path may still serve a request or two). */
   close() {
     this.closed = true;
-    const w = this.worker;
-    this.#gone(new Error("closed"));
-    w?.terminate().catch(() => {});
+    for (const w of [this.worker, ...this.retiring]) {
+      if (!w) continue;
+      this.#gone(w, new Error("closed"));
+      w.terminate().catch(() => {});
+    }
+    clearInterval(this.memTimer); this.memTimer = null; this.memBase.clear();
   }
 }
 /** A Uint8Array over its own ArrayBuffer (a copy when `bytes` shares one, e.g. Node's buffer pool), so it can be transferred. */
@@ -940,7 +1068,7 @@ export class ImageCache {
     this.thumbEvictPause = 0; this.freshEvictPause = 0; this.cursors = new Map();
     this.fullWarnAt = -Infinity; this.fullRefused = { fresh: 0, warm: 0, since: 0 }; // #bgFull's rate-limited warning
     this.fresh = new Set(); this.freshBusy = new Set(); this.freshActive = 0; this.freshConcurrency = freshConcurrency; this.freshMax = freshMax; this.closed = false;
-    this.stats = { hits: 0, misses: 0, failed: 0, failedTemp: 0, failedGone: 0, staleServed: 0, evicted: 0, bytes: 0, thumbs: 0, thumbHits: 0, thumbFailed: 0, noThumb: 0, thumbBytes: 0, thumbsEvicted: 0, sheets: 0, sheetCells: 0, sheetPending: 0, sheetDead: 0, sheetMs: 0, bgDownloads: 0, freshQueued: 0, freshDropped: 0, freshMade: 0, freshFull: 0, freshEvicted: 0, warmFull: 0 };
+    this.stats = { hits: 0, misses: 0, failed: 0, failedTemp: 0, failedGone: 0, staleServed: 0, evicted: 0, bytes: 0, thumbs: 0, thumbHits: 0, thumbFailed: 0, noThumb: 0, thumbBytes: 0, thumbsEvicted: 0, sheets: 0, sheetCells: 0, sheetPending: 0, sheetDead: 0, sheetMs: 0, bgDownloads: 0, freshQueued: 0, freshDropped: 0, freshMade: 0, freshFull: 0, freshEvicted: 0, warmFull: 0, svgDrawn: 0, svgFailed: 0 };
     this.thumbInFlight = new Map(); // `${w}:${url}` → { promise, job } of a render
     this.renderCrashes = new Map(); // url → renders of it the image worker died under, in a row (THUMB_CRASHES_MAX)
     this.#measure();
@@ -978,7 +1106,21 @@ export class ImageCache {
         this.store.kvSet?.("imgGatewayRule", GATEWAY_RULE);
         this.log.info?.(`img: gateway rule ${GATEWAY_RULE}: ${drop.length} IPFS failures of the old rotation forgotten`);
       }
+      // a proxy that learned to draw SVG (IMG_TYPE_RULE) forgets, once, the SVG, plain-text and XML refusals an older rule
+      // recorded (a week's wait each) and asks for those logos again at once, on the first-sight queue; every other failure
+      // stays as it is
+      let recheck = [];
+      if (typeof this.store.kvGet === "function" && Number(this.store.kvGet("imgTypeRule", 1)) < IMG_TYPE_RULE) {
+        const drop = this.store.imgFailAll().filter((f) => TYPE_REFUSAL_RE.test(String(f.error ?? "")));
+        const forget = () => { for (const f of drop) this.store.imgFailDelete(f.url); };
+        if (typeof this.store.transaction === "function") this.store.transaction(forget); else forget();
+        this.store.kvSet?.("imgTypeRule", IMG_TYPE_RULE);
+        recheck = drop.map((f) => f.url);
+        this.log.info?.(`img: type rule ${IMG_TYPE_RULE}: ${drop.length} logos refused by the old rule (SVG, plain text, XML) forgotten and asked again`);
+      }
       for (const f of this.store.imgFailAll()) this.fails.set(f.url, f);
+      // after the constructor returns (the caller may still wire the cache up); a closed cache queues nothing
+      if (recheck.length) setImmediate(() => { for (const u of recheck) this.enqueueThumb(u); }).unref?.();
     } catch (e) { this.log.warn?.(`img: cannot read the failure memory: ${e?.message ?? e}`); }
   }
   /** The failure that still holds `url` back (`{ kind, error, attempts, at, retryAt }`), or null when there is none or its retry time came. */
@@ -1143,7 +1285,7 @@ export class ImageCache {
     this.stats.misses++;
     const flight = this.inFlight.get(url);
     if (flight) { this.#promote(flight.ticket, prio); return flight.promise; }
-    const ticket = { prio, waiting: false, bg: false, resolve: null };
+    const ticket = { prio, waiting: false, bg: false, resolve: null, render: null }; // render: the drawing of its SVG (#rasterize)
     const promise = this.#download(url, file, sidecar, ticket)
       .then((hit) => { if (hit || !stale || !existsSync(stale.file)) return hit; this.stats.staleServed++; return stale; })
       .finally(() => this.inFlight.delete(url));
@@ -1164,15 +1306,28 @@ export class ImageCache {
       // a 429 elsewhere in the rotation, a 5xx or a timeout make a "no" temporary; a definitive 4xx everywhere is not
       if (!res.ok) throw failure(hit.transient || softStatus(res.status) ? "temp" : "gone", hit.summary ?? `HTTP ${res.status}`);
       const declared = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-      // SVG can script: refused by name before the download and, like everything else, by the sniff
-      // below. Other declared types are not trusted either way (gateways send octet-stream for images).
-      if (declared.includes("svg") || declared.startsWith("text/")) throw failure("gone", `not an image: ${declared}`);
-      if (Number(res.headers.get("content-length") || 0) > IMAGE_MAX_BYTES) throw failure("gone", "too large");
+      // Declared types are not trusted either way (gateways send octet-stream for images): the bytes decide below. A page
+      // (text/html, text/css ...) is refused before the download; plain text and XML may be an SVG (raw file hosts).
+      const svgDeclared = declared.includes("svg");
+      if (!svgDeclared && declared.startsWith("text/") && declared !== "text/plain" && declared !== "text/xml") throw failure("gone", `not an image: ${declared}`);
+      const cap = svgDeclared ? SVG_MAX_BYTES : IMAGE_MAX_BYTES, svgOver = `svg: over ${SVG_MAX_BYTES / 1024} KB`;
+      if (Number(res.headers.get("content-length") || 0) > cap) throw failure("gone", svgDeclared ? svgOver : "too large");
       let body;
-      try { body = await readBounded(res, IMAGE_MAX_BYTES); }
-      catch (e) { throw failure(String(e?.message).startsWith("body over") ? "gone" : "temp", e?.message ?? String(e)); }
+      try { body = await readBounded(res, cap); }
+      catch (e) { const over = String(e?.message).startsWith("body over"); throw failure(over ? "gone" : "temp", over && svgDeclared ? svgOver : e?.message ?? String(e)); }
+      // a stored Content-Encoding is undone within the same cap (an SVG beyond it is refused below, after the sniff)
+      const coding = (res.headers.get("content-encoding") || "").trim().toLowerCase();
+      if (coding && coding !== "identity") body = await decodedBody(body, coding, cap, svgDeclared ? svgOver : "too large");
       // The served type is what the bytes prove, never what the gateway claimed.
-      const type = sniffImage(body);
+      let type = sniffImage(body);
+      // SVG can script on our origin, so its bytes are never stored or served: it is drawn into a PNG on the image worker
+      // (rasterizeSvg: no fonts, images or files from outside, at most SVG_DRAW_MAX_MS), which becomes the original
+      if (!type && (svgDeclared || isSvgDocument(body))) {
+        if (body.length > SVG_MAX_BYTES) throw failure("gone", svgOver);
+        body = await this.#rasterize(url, body, ticket);
+        type = sniffImage(body);
+        if (type !== "image/png") throw failure("gone", "svg: not drawn");
+      }
       if (!type) throw failure("gone", `not a raster image (${declared})`);
       const tmp = `${file}.${process.pid}.tmp`;
       writeFileSync(tmp, body);
@@ -1188,6 +1343,35 @@ export class ImageCache {
       this.#fail(url, e?.kind ?? "temp", e); // an unclassified fault (the disk, say) is temporary
       return null;
     } finally { this.#leave(ticket); }
+  }
+  /**
+   * The PNG original of the SVG logo `bytes` of `url`, drawn by the image worker (ImgWork.svg) through the render queue
+   * like a thumbnail, at the download's priority (an on-demand ask that joins lifts it: #promote); throws a classified
+   * failure. What the drawing refuses or cannot do (not an SVG, entities, a parse or render error, no size, nothing drawn,
+   * past SVG_DRAW_MAX_MS) is permanent; the worker dying under it is temporary until it happened THUMB_CRASHES_MAX times
+   * in a row on this url, as for a thumbnail; no worker at all (it cannot start, or keeps dying) is temporary.
+   */
+  async #rasterize(url, bytes, ticket) {
+    const job = { prio: ticket.prio, started: false, resolve: null, run: async () => {
+      try { return { png: await this.work.svg({ bytes }) }; } catch (error) { return { error }; }
+    } };
+    const done = new Promise((resolve) => { job.resolve = resolve; });
+    ticket.render = job;
+    this.renderQ[job.prio].push(job);
+    this.#drainRenders();
+    const r = await done;
+    ticket.render = null;
+    if (r?.png) { this.renderCrashes.delete(url); this.stats.svgDrawn++; return r.png; }
+    this.stats.svgFailed++;
+    const e = r?.error, msg = String(e?.message ?? e ?? "not drawn").slice(0, 160);
+    if (e?.noWorker) throw failure("temp", `svg: ${msg}`);
+    if (e?.transient) {
+      const n = (this.renderCrashes.get(url) ?? 0) + 1;
+      if (n < THUMB_CRASHES_MAX) { this.renderCrashes.set(url, n); throw failure("temp", `svg: ${msg}`); }
+      this.renderCrashes.delete(url);
+      throw failure("gone", `svg: the image worker died drawing it ${n} times in a row`);
+    }
+    throw failure("gone", msg.startsWith("svg: ") ? msg : `svg: ${msg}`);
   }
   /**
    * `{ file, type, thumb: w }` when the w px thumbnail of `url` is on disk (whatever its age), else null (no original
@@ -1457,20 +1641,21 @@ export class ImageCache {
   #dispatch() {
     for (const q of this.waiting) while (q.length && this.#fits(q[0])) { const t = q.shift(); this.#take(t); t.resolve(); }
   }
-  /** An on-demand ask joined a download still waiting for a background slot: it waits as an on-demand one now. */
+  /** An on-demand ask joined a download still waiting for a background slot: it waits as an on-demand one now (and so does the drawing of its SVG, #rasterize). */
   #promote(t, prio) {
     if (prio >= t.prio) return;
     if (t.waiting) { const q = this.waiting[t.prio], i = q.indexOf(t); if (i >= 0) q.splice(i, 1); t.prio = prio; this.waiting[prio].push(t); this.#dispatch(); }
     else t.prio = prio; // running already: it keeps the slot it has
+    if (t.render) this.#promoteRender(t.render, prio);
   }
   /** Download slots in use and waiting, per kind (health). */
   slots() { return { active: this.active, bgActive: this.bgActive, concurrency: this.concurrency, bgConcurrency: this.bgConcurrency, waiting: this.waiting.map((q) => q.length) }; }
-  /** `stats` plus the queues and the failure memory, for /api/health. */
+  /** `stats` plus the queues, the failure memory and the image worker's counters (`work`: ImgWork.stats), for /api/health. */
   snapshot() {
     let gone = 0, temp = 0, nothumb = 0;
     const now = this.now();
     for (const f of this.fails.values()) if (f.retryAt > now) { if (f.kind === "temp") temp++; else if (f.kind === "gone") gone++; else nothumb++; }
-    return { ...this.stats, thumbFiles: this.thumbIdx.size, thumbMaxBytes: this.thumbMaxBytes, slots: this.slots(), fresh: this.freshPending, failing: { gone, temp, nothumb } };
+    return { ...this.stats, thumbFiles: this.thumbIdx.size, thumbMaxBytes: this.thumbMaxBytes, slots: this.slots(), fresh: this.freshPending, failing: { gone, temp, nothumb }, work: { ...this.work?.stats } };
   }
 
   /** The answer for an image the proxy cannot serve: 503 with a short Retry-After while a temporary failure holds it back, else 404. */

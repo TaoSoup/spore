@@ -83,7 +83,7 @@ The unit is sandboxed (`ProtectSystem=strict`): writable paths are only `server/
 | out | `RPC_URL` / `WS_URL` | indexer (getProgramAccounts at boot, getMultipleAccounts batches, logsSubscribe), browser proxy `/api/rpc` (allow-listed methods, 60/min per IP) |
 | out | `api.coingecko.com` | SOL and PUMP prices every 60 s |
 | out | any public https host | off-chain metadata JSON of coins (DNS-checked against private ranges, redirects re-validated, 512 KB cap) |
-| out | image allowlist (ipfs.io, pinata, pump.fun, arweave, `PAGES_DOMAIN`) | image proxy `/api/img` (4 MB cap, magic-byte sniffed, SVG refused, 24 h disk cache) |
+| out | image allowlist (ipfs.io, pinata, pump.fun, arweave, `PAGES_DOMAIN`) | image proxy `/api/img` (4 MB cap, magic-byte sniffed, an SVG logo drawn into a PNG on the image worker and never served as SVG, 24 h disk cache) |
 | out | Cloudflare API via `npx wrangler` | publishing `deploy/pages/public` after an upload (single-flight, 240 s timeout) |
 | in | `:8793` from the proxy | everything else |
 

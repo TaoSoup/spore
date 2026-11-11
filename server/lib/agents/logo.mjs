@@ -6,12 +6,10 @@
 // characters wraps onto two rows, at the name's word break when it has one) instead of text,
 // so rendering never depends on fonts installed on the machine and the same input always gives the
 // same bytes.
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { rng } from "./designer.mjs";
+import { resvgWasm } from "../resvg-wasm.mjs";
 
 export const LOGO_SIZE = 512;
-const require = createRequire(import.meta.url);
 
 // Glyphs: polylines on a 4-wide, 6-high grid (y down).
 const O = [[1, 0], [3, 0], [4, 1], [4, 5], [3, 6], [1, 6], [0, 5], [0, 1], [1, 0]];
@@ -156,7 +154,8 @@ let ready = null;
 async function resvg() {
   ready ??= (async () => {
     const mod = await import("@resvg/resvg-wasm");
-    await mod.initWasm(readFileSync(require.resolve("@resvg/resvg-wasm/index_bg.wasm")));
+    // the bytes the image worker uses too (memory capped): V8 compiles the module once for both
+    await mod.initWasm(resvgWasm());
     return mod;
   })();
   ready.catch(() => { ready = null; });
