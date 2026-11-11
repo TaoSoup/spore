@@ -12,9 +12,19 @@ export const DEFAULT_PLATFORM_WALLET = "FcbEAMqBvJVsfcFWDbED7geyBLR88ypcY88BoUSg
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 // Per-IP rate limits (requests per window) — DEPLOY.md documents each.
 export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000] };
+// Command-line flags that stand in for a variable, so a package.json script needs no POSIX
+// `VAR=value node …` prefix (cmd.exe cannot run one): `npm run dev` passes --backfill-limit=150.
+// A flag wins over the environment, as that prefix did; other arguments are ignored, as before.
+export const FLAG_VARS = { "--backfill-limit": "BACKFILL_LIMIT" };
 
-export function loadConfig(env = process.env, { here = process.cwd() } = {}) {
+export function loadConfig(env = process.env, { here = process.cwd(), argv = [] } = {}) {
   const errors = [];
+  for (const arg of argv) {
+    const eq = arg.indexOf("="), flag = eq < 0 ? arg : arg.slice(0, eq);
+    if (!Object.hasOwn(FLAG_VARS, flag)) continue;
+    if (eq < 0) errors.push(`${flag} needs a value (${flag}=…)`);
+    else env = { ...env, [FLAG_VARS[flag]]: arg.slice(eq + 1) };
+  }
   const get = (k, d) => (env[k] === undefined || env[k] === "" ? d : String(env[k]));
   const num = (k, d, { min = -Infinity, max = Infinity, integer = false } = {}) => {
     const raw = get(k, d);

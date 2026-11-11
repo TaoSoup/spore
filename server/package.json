@@ -6,7 +6,7 @@
   "main": "index.mjs",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning index.mjs",
-    "dev": "BACKFILL_LIMIT=150 node --disable-warning=ExperimentalWarning index.mjs",
+    "dev": "node --disable-warning=ExperimentalWarning index.mjs --backfill-limit=150",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.mjs",
     "fixtures": "node scripts/capture-fixtures.mjs"
   },

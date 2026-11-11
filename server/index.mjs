@@ -33,7 +33,7 @@ const log = {
 };
 
 let cfg;
-try { cfg = loadConfig(process.env, { here }); }
+try { cfg = loadConfig(process.env, { here, argv: process.argv.slice(2) }); }
 catch (e) { console.error(`spore: ${e.message}`); process.exit(1); }
 
 const db = new Db(join(cfg.dataDir, "spore.sqlite"));

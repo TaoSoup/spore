@@ -3,10 +3,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { MetaHost, metaFiles, META_NAME_RE, DEFAULT_PAGES_DOMAIN, DailyQuota, QuotaError } from "../lib/metahost.mjs";
+import { delimiter, join } from "node:path";
+import { MetaHost, metaFiles, META_NAME_RE, DEFAULT_PAGES_DOMAIN, DailyQuota, QuotaError, npxCommand } from "../lib/metahost.mjs";
 import { Db } from "../lib/db.mjs";
 import { configureLocalMetaHost, localMetaFile, isAllowedImageUrl, MetaFetcher, ImageCache } from "../lib/meta.mjs";
 
@@ -123,6 +124,31 @@ test("a missing token file is a clear error before wrangler is spawned", async (
     const host = new MetaHost({ root, tokenFile: join(root, "nope"), log: { info() {}, error() {} } });
     await assert.rejects(host.deploy(), /token file .*nope is missing/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("npxCommand: npx directly on POSIX; on Windows one cmd.exe line, every argument quoted, the unquotable refused", () => {
+  const args = ["wrangler@3.99.0", "pages", "deploy", "/opt/spore/deploy/pages/public", "--project-name", "spore"];
+  assert.deepEqual(npxCommand(args, "linux"), { file: "npx", args, shell: false });
+  assert.deepEqual(npxCommand(args, "darwin"), { file: "npx", args, shell: false });
+  assert.deepEqual(npxCommand(["pages", "C:\\Spore Data\\public\\", "--x"], "win32"), { file: 'npx "pages" "C:\\Spore Data\\public\\\\" "--x"', args: [], shell: true });
+  for (const a of ['a"b', "%PATH%", "a\nb", "a\rb"]) assert.throws(() => npxCommand(["x", a], "win32"), /cannot pass .* to npx on Windows/, JSON.stringify(a));
+});
+
+test("npxCommand: arguments reach npx intact through the platform's real launcher (a stand-in npx on PATH)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spore-npx-"));
+  try {
+    writeFileSync(join(dir, "argv.cjs"), "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n");
+    // The same shape as npm's own launchers: npx.cmd finds its script through %~dp0 and forwards %*,
+    // the POSIX one forwards "$@". The child runs elsewhere (cwd), so a wrong %~dp0 cannot pass.
+    if (process.platform === "win32") writeFileSync(join(dir, "npx.cmd"), `@"${process.execPath}" "%~dp0argv.cjs" %*\r\n`);
+    else { writeFileSync(join(dir, "npx"), `#!/bin/sh\nexec "${process.execPath}" "${join(dir, "argv.cjs")}" "$@"\n`); chmodSync(join(dir, "npx"), 0o755); }
+    const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+    const env = { ...process.env, [pathKey]: `${dir}${delimiter}${process.env[pathKey] ?? ""}` };
+    const args = ["wrangler@3.99.0", "deploy", join(dir, "My Pages (x) & co", "public"), "a^b|c<d>e", "!bang!", "trailing\\", "x\\\\y", "", "--commit-dirty=true"];
+    const npx = npxCommand(args);
+    const out = await new Promise((res, rej) => execFile(npx.file, npx.args, { env, cwd: tmpdir(), shell: npx.shell, encoding: "utf8", timeout: 20_000 }, (err, stdout, stderr) => (err ? rej(new Error(`${err.message} ${stderr}`)) : res(stdout))));
+    assert.deepEqual(JSON.parse(out), args);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("local-first resolution: URLs on PAGES_DOMAIN read from disk (metadata and images), remote hosts untouched", async () => {
