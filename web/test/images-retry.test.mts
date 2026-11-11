@@ -1,9 +1,11 @@
-// Failures in the map image loader (src/lib/map/images.ts) are not final for the page: a temporary one (429 / 408 / 5xx, the
-// server's 503 + Retry-After, a network error, a timeout) waits out RETRY_STEPS_MS (never sooner than Retry-After, plus
+// Failures in the map image loader (src/lib/map/images.ts) are not final for the page: a temporary one (408, the API's own 5xx
+// answers, which are JSON, its 503 + Retry-After, a timeout) waits out RETRY_STEPS_MS (never sooner than Retry-After, plus
 // jitter) and is asked again by the loader itself; wants during the wait start nothing. Past the last step, and at once for a
 // 404 or a dead sheet cell, the source is dead for DEAD_MS, doubling per death (imageFailed / imageRetryAt say so, the
 // listeners are told); after that ONE want asks it again, and at the DEATH_MAX-th death it stays failed for the page. Time is node:test's mock clock
 // (setTimeout + Date); jitter is pinned with a Math.random stub where a test needs exact times.
+// (2026-11-10) a network error or a proxy's error page of a request to our API is the LINK's failure (no step, a probe) and a
+// 429 pauses every start: test/images-link.test.mts.
 // The request limits: FETCH_MAX_MS from the fetch() call (the browser's own queue counts only here), FETCH_TIMEOUT_MS for the
 // body from the answer's headers; both timers end with the request, and an unread body (a non-ok answer, of a single load
 // or a sheet) is dropped.
@@ -32,7 +34,8 @@ function sheetResponse(n: number, present: string, dead = "", pending = 0) {
   return new Response(`SHEET:${n}`, { status: 200, headers: { "content-type": "image/webp", "x-sheet": present, "x-sheet-dead": dead, "x-sheet-n": String(n), "x-sheet-cols": "16", "x-sheet-cell": "64", "x-sheet-pending": String(pending) } });
 }
 const imgResponse = () => new Response("IMG", { status: 200, headers: { "content-type": "image/png", "x-img-thumb": "64" } });
-const status = (code: number, headers: Record<string, string> = {}) => new Response("no", { status: code, headers });
+/// An answer of the API server itself: its errors are JSON (a 5xx without JSON or Retry-After is a proxy's page: the link's).
+const status = (code: number, headers: Record<string, string> = {}) => new Response(JSON.stringify({ error: "no" }), { status: code, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const settle = async (n = 16) => { for (let i = 0; i < n; i++) await tick(); };
 /// Yields (setImmediate, never a timer: the timers are mocked) until `pred` or `maxMs` of real time.
@@ -72,6 +75,7 @@ async function fresh(o: { sheet?: (mints: string[], signal: Sig) => Answer; img?
     calls.push(url);
     const u = new URL(url, "http://local.test"), signal = init?.signal ?? undefined;
     if (u.pathname === "/api/logo-sheet") return o.sheet ? o.sheet((u.searchParams.get("m") ?? "").split(","), signal) : status(404);
+    if (u.pathname === "/api/health") return status(200);   // the probe of a link that is down: the server answers (JSON)
     return o.img ? o.img(url, signal) : imgResponse();
   };
   // createImageBitmap(blob): a "sheet" blob decodes to a 1024 x rows*64 bitmap, anything else to a 200 x 200 original;
@@ -261,15 +265,18 @@ test("DEATH_MAX deaths, each dead time twice the last (at most DEAD_MAX_MS): the
   } finally { off(); }
 });
 
-test("a network error and a timeout are temporary: held 10 s, then 30 s, then drawn", async () => {
+// (2026-11-10) this test held a network error 10 s like a timeout; a network error of a request to our API is the link's now:
+// no retry step, a probe (GET /api/health) LINK_PROBE_MS later; answered, it forgives the source's first such failure and the
+// source goes again at once (test/images-link.test.mts has the outage itself)
+test("a timeout is temporary: held 10 s and asked again; a network error then is the link's (no step): the probe 1 s later puts the link up and it is drawn", async () => {
   const off = clock();
   try {
     let n = 0;
     const h = await fresh({
       img: () => {
         n++;
-        if (n === 1) throw new TypeError("Failed to fetch");
-        if (n === 2) return Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+        if (n === 1) return Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+        if (n === 2) throw new TypeError("Failed to fetch");
         return imgResponse();
       },
     });
@@ -277,16 +284,19 @@ test("a network error and a timeout are temporary: held 10 s, then 30 s, then dr
     const src = S(5);
     m.imageFor(src, 40);
     await settle();
-    assert.equal(m.imageStats().held, 1);
+    assert.equal(m.imageStats().held, 1, "the timeout is held");
     await advance(m.RETRY_STEPS_MS[0]);
     assert.equal(h.calls.length, 2);
-    assert.equal(m.imageStats().held, 1, "the timeout is held too");
+    let st = m.imageStats();
+    assert.equal(st.held, 0, "the network error is not held"); assert.equal(st.heldN, 1); assert.equal(st.linkDown, true); assert.equal(st.queued, 1);
     assert.equal(m.imageFailed(src), false);
-    await advance(m.RETRY_STEPS_MS[1] - 1);
-    assert.equal(h.calls.length, 2, "the second step");
+    await advance(m.LINK_PROBE_MS - 1);
+    assert.equal(h.calls.length, 2, "not before LINK_PROBE_MS");
     await advance(1);
     await until(() => m.imageReady(src));
-    assert.equal(h.calls.length, 3);
+    assert.deepEqual(h.calls.slice(2), ["/api/health", `${src}&w=64`], "the probe, then the logo at once");
+    st = m.imageStats();
+    assert.equal(st.linkDown, false); assert.equal(st.heldN, 1); assert.equal(st.probes, 1); assert.equal(st.linkRecoveries, 1);
   } finally { off(); }
 });
 
@@ -497,7 +507,8 @@ function requestTimers(m: Loader) {
 }
 
 // startSheet reads no body for a non-ok answer: its `finally` drops it (t.close()), which also ends the request's timers.
-// A 503 is a transient sheet failure (the next sheet carries the sources), a 404 turns sheets off (per request).
+// The API's 503 (JSON) is a failure of the sheet route: a cooldown, the sources go per request (until 2026-11-10 a transient
+// failure that the next sheet retried); a 404 turns sheets off (per request).
 for (const code of [503, 404]) {
   test(`a non-ok sheet answer (${code}) ends the request's timers and drops its unread body`, async () => {
     const off = clock();
@@ -508,7 +519,7 @@ for (const code of [503, 404]) {
       const h = await fresh({
         sheet: (mints, signal) => {
           sigs.push(signal);
-          if (sigs.length === 1) return new Response(stalledBody(signal, () => { cancelled++; }), { status: code });
+          if (sigs.length === 1) return new Response(stalledBody(signal, () => { cancelled++; }), { status: code, headers: { "content-type": "application/json" } });
           return sheetResponse(mints.length, hexOf(mints.length, () => true));
         },
       });
@@ -517,13 +528,12 @@ for (const code of [503, 404]) {
       m.registerLogoMints(nodes(4, 30));
       for (let i = 30; i < 34; i++) m.imageFor(S(i), 40);
       await until(() => m.imageStats().ready === 4);
+      assert.equal(h.sheetCalls().length, 1);
+      assert.equal(h.imgCalls().length, 4, "per request");
       if (code === 503) {
-        assert.equal(h.sheetCalls().length, 2, "a transient failure: the next sheet carries them");
-        assert.equal(h.imgCalls().length, 0);
-      } else {
-        assert.equal(h.sheetCalls().length, 1, "no sheets on this server");
-        assert.equal(h.imgCalls().length, 4, "per request");
-      }
+        assert.equal(m.imageStats().sheetsOff, false, "the route failed: a cooldown, not sheets off");
+        assert.equal(m.imageStats().sheetsCoolUntil, T0 + m.SHEET_COOL_MS);
+      } else assert.equal(m.imageStats().sheetsOff, true, "no sheets on this server");
       assert.equal(cancelled, 1, `the ${code}'s body is dropped, not left open`);
       assert.ok(spy.armed() >= 4, `the spy saw the requests' timers (${spy.armed()})`);
       assert.equal(spy.pending(), 0, "no request timer is still pending");
@@ -537,7 +547,9 @@ for (const code of [503, 404]) {
   });
 }
 
-test("sheets: an answer 4 min after fetch() is read; a sheet body that stalls is cut FETCH_TIMEOUT_MS after its headers and its sources go back to the queue", async () => {
+// (2026-11-10) the cut sheet's sources went back to the queue and the next sheet carried them; a cut sheet is a failure of the
+// sheet route now: they go per request while sheets cool down
+test("sheets: an answer 4 min after fetch() is read; a sheet body that stalls is cut FETCH_TIMEOUT_MS after its headers, its sources go back to the queue and per request (sheets cool down)", async () => {
   const off = clock();
   try {
     let n = 0;
@@ -568,10 +580,12 @@ test("sheets: an answer 4 min after fetch() is read; a sheet body that stalls is
     assert.equal(h.sheetCalls().length, 2, "still reading the body");
     await advance(1);
     await until(() => m.imageStats().ready === 8);
-    assert.equal(h.sheetCalls().length, 3, "cut: the sources went back to the queue and the next sheet carried them");
+    assert.equal(h.sheetCalls().length, 2, "cut: no third sheet while sheets cool down");
+    assert.equal(h.imgCalls().length, 4, "the sources went back to the queue and per request");
     assert.equal(sigs[1]?.aborted, true);
+    const st = m.imageStats();
+    assert.equal(st.sheetsOff, false); assert.equal(st.sheetCools, 1); assert.equal(st.linkDown, false);
     await advance(MAX);
-    assert.equal(sigs[0]?.aborted, false); assert.equal(sigs[2]?.aborted, false);
-    assert.equal(h.imgCalls().length, 0);
+    assert.equal(sigs[0]?.aborted, false);
   } finally { off(); }
 });

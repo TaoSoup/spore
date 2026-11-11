@@ -3,7 +3,8 @@
 // waits at most 3 h while fewer than 5 fetches failed in a row, then backs off to a day; a non-IPFS host that answered
 // 404/410 or does not resolve 5 times IN A ROW (deadStreak) is asked weekly; anything else keeps the 15 min -> 24 h
 // backoff. A rotation that said no while other gateways were rate-limited is requeued like a rate-limited one and
-// stored with its per-gateway summary. Stub fetch only.
+// stored with its per-gateway summary; one in which no public gateway looked is a deferral (2026-11-10, its own rules
+// in meta-gateways.test.mjs). Stub fetch only.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MetaFetcher, HostPacer, isTransientError, metaFailKind, metaRetryS, retryAfterS, META_RETRY_TRANSIENT_MAX_S, META_RETRY_DEAD_S, META_DEAD_AFTER, META_RETRY_MAX_S } from "../lib/meta.mjs";
@@ -39,7 +40,8 @@ test("metaRetryS: temporary failures wait at most 3 h at first, a dead host week
   assert.equal(metaRetryS(CDN, { error: "cannot resolve m.rapidlaunch.io: ENOTFOUND", attempts: 9, deadStreak: 9 }), META_RETRY_DEAD_S);
   assert.equal(metaRetryS(IPFS, { error: "HTTP 404", attempts: 9, deadStreak: 0 }), 24 * 3600, "IPFS keeps the daily cap");
   assert.equal(metaRetryS(CDN, { error: "HTTP 403", attempts: 12 }), 24 * 3600);
-  assert.equal(metaRetryS(IPFS, { error: "403 pump.mypinata.cloud; 429 ipfs.io", attempts: 4 }), retryAfterS(4)); assert.equal(META_RETRY_TRANSIENT_MAX_S, 3 * 3600);
+  // (a 403 from pump's pinata and a 429 alone are a deferral since 2026-11-10: meta-gateways.test.mjs; a timeout is not)
+  assert.equal(metaRetryS(IPFS, { error: "403 pump.mypinata.cloud; 429 ipfs.io; timeout dweb.link", attempts: 4 }), retryAfterS(4)); assert.equal(META_RETRY_TRANSIENT_MAX_S, 3 * 3600);
   assert.equal(metaRetryS(CDN, { error: "HTTP 503", attempts: 1 }), 15 * 60, "the first retry is as soon as ever");
 });
 
@@ -64,7 +66,7 @@ test("metaRetryS (repair 2026-11-10): a temporary failure that keeps coming back
 });
 
 test("ENOTFOUND (repair 2026-11-10): a rotation whose gateways all failed to resolve is our DNS (temporary), a lone host is weekly only after 5 in a row", async () => {
-  const all = "ENOTFOUND pump.mypinata.cloud; ENOTFOUND ipfs.io; ENOTFOUND dweb.link; ENOTFOUND gateway.pinata.cloud; ENOTFOUND w3s.link";
+  const all = "ENOTFOUND pump.mypinata.cloud; ENOTFOUND ipfs.filebase.io; ENOTFOUND 4everland.io; ENOTFOUND ipfs.io; ENOTFOUND dweb.link; ENOTFOUND gateway.pinata.cloud; ENOTFOUND w3s.link";
   assert.equal(isTransientError(all), true); assert.equal(metaFailKind(IPFS, all), "transient");
   assert.equal(isTransientError("ENOTFOUND own.gateway.io; ENOTFOUND other.gateway.io"), true, "every candidate");
   assert.equal(isTransientError("403 pump.mypinata.cloud; ENOTFOUND ipfs.io; ENOTFOUND dweb.link"), true, "two rotation gateways exist: not resolving them is our resolver");
@@ -79,7 +81,7 @@ test("ENOTFOUND (repair 2026-11-10): a rotation whose gateways all failed to res
   const partial = new HostGuard({ resolve: async (h) => { if (h === "pump.mypinata.cloud") return [{ address: "93.184.216.34", family: 4 }]; throw Object.assign(new Error("x"), { code: "ENOTFOUND" }); } });
   const p2 = new HostPacer({ fetchImpl: async () => new Response("", { status: 403 }), guard: partial, sleep: async () => {} });
   const hit = await p2.fetchAny(IPFS);
-  assert.equal(hit.res.status, 403); assert.equal(hit.transient, true); assert.match(hit.summary, /^403 pump\.mypinata\.cloud; ENOTFOUND ipfs\.io/);
+  assert.equal(hit.res.status, 403); assert.equal(hit.transient, true); assert.match(hit.summary, /^403 pump\.mypinata\.cloud; ENOTFOUND ipfs\.filebase\.io; ENOTFOUND 4everland\.io; ENOTFOUND ipfs\.io/);
   // MetaFetcher: the IPFS uri is a transient failure; the lone host is dead, retried on the usual backoff until 5 in a row
   const { stored, model } = fakeModel();
   const f = new MetaFetcher(model, { pacer, concurrency: 1 });
@@ -112,16 +114,16 @@ test("HostPacer.fetchAny says how the rotation went: limited / transient / a per
   const m = await mixed.fetchAny(IPFS);
   assert.equal(m.res.status, 403, "the answer that came is returned, as before");
   assert.equal(m.limited, true); assert.equal(m.transient, true);
-  assert.equal(m.summary, "403 pump.mypinata.cloud; 429 ipfs.io; 429 dweb.link; 429 gateway.pinata.cloud; 429 w3s.link");
+  assert.equal(m.summary, "403 pump.mypinata.cloud; 429 ipfs.filebase.io; 429 4everland.io; 429 ipfs.io; 429 dweb.link; 429 gateway.pinata.cloud; 429 w3s.link");
   const gone = await new HostPacer({ fetchImpl: async () => new Response("", { status: 404 }), sleep: async () => {} }).fetchAny(IPFS);
-  assert.equal(gone.limited, false); assert.equal(gone.transient, false); assert.equal(gone.summary.split("; ").length, 5);
+  assert.equal(gone.limited, false); assert.equal(gone.transient, false); assert.equal(gone.summary.split("; ").length, 7);
   const one = await new HostPacer({ fetchImpl: async () => new Response("", { status: 404 }), sleep: async () => {} }).fetchAny(CDN);
   assert.equal(one.summary, null, "one candidate: the status says it all"); assert.equal(one.transient, false);
   const slow = new HostPacer({ fetchImpl: async () => { throw new Error("The operation was aborted due to timeout"); }, sleep: async () => {} });
-  await assert.rejects(() => slow.fetchAny(IPFS), (e) => e.transient === true && e.summary.startsWith("timeout pump.mypinata.cloud; timeout ipfs.io"));
+  await assert.rejects(() => slow.fetchAny(IPFS), (e) => e.transient === true && e.summary.startsWith("timeout pump.mypinata.cloud; timeout ipfs.filebase.io"));
 });
 
-test("MetaFetcher: a 403 from pump's pinata while the public gateways are rate-limited is requeued, then stored as a temporary failure with the gateways' summary", async () => {
+test("MetaFetcher: a 403 from pump's pinata while the public gateways are rate-limited is requeued, then stored with the gateways' summary as a deferral (2026-11-10: no public gateway looked, so no failed attempt)", async () => {
   const { stored, model } = fakeModel();
   const fetchImpl = async (u) => new Response("", { status: u.startsWith("https://pump.mypinata.cloud/") ? 403 : 429 });
   const f = new MetaFetcher(model, { pacer: new HostPacer({ fetchImpl, sleep: async () => {} }), concurrency: 1 });
@@ -129,18 +131,18 @@ test("MetaFetcher: a 403 from pump's pinata while the public gateways are rate-l
     f.request(IPFS); await tick();
     assert.equal(stored.size, 0, "not stored as a failure: requeued like a rate-limited fetch");
     assert.equal(f.stats.rateLimited, 1); assert.equal(f.attempts.get(IPFS), 1);
-    // the requeues ran out (three of them): stored with the summary, as a temporary failure
+    // the requeues ran out (three of them): stored with the summary, as a deferral (a temporary failure, but no failed attempt)
     f.attempts.set(IPFS, 3); f.request(IPFS); await tick();
     const row = stored.get(IPFS);
     assert.equal(row.ok, false); assert.equal(row.attempts, 1);
-    assert.match(row.error, /^403 pump\.mypinata\.cloud; (?:429|paused) ipfs\.io/);
-    assert.equal(metaFailKind(IPFS, row.error), "transient"); assert.equal(f.stats.failedTransient, 1);
-    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 16 * 60), true, "the next try in 15 min");
+    assert.match(row.error, /^403 pump\.mypinata\.cloud; (?:429|paused) ipfs\.filebase\.io/);
+    assert.equal(metaFailKind(IPFS, row.error), "deferred"); assert.equal(isTransientError(row.error), true);
+    assert.equal(f.stats.failedTransient, 1); assert.equal(f.stats.deferred, 1);
+    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 16 * 60), true, "the next try within 15 min");
     stored.set(IPFS, { ...row, attempts: 4 });
-    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 3 * 3600 + 1), true, "and not later than 3 h while it failed fewer than 5 times");
+    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 3600 + 1), true, "and within the hour, whatever the count");
     stored.set(IPFS, { ...row, attempts: 12 });
-    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 3 * 3600 + 1), false, "after a dozen temporary failures it backs off further");
-    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 24 * 3600 + 1), true, "up to a day");
+    assert.equal(f.needsFetch(IPFS, row.fetchedAt + 3600 + 1), true, "a dozen deferrals do not back off towards a day (they did before 2026-11-10)");
   } finally { f.stop(); }
 });
 
@@ -156,7 +158,8 @@ test("MetaFetcher: 403 plus timeouts is stored at once (nothing was rate-limited
     f.request(IPFS); await tick();
     const row = stored.get(IPFS);
     assert.equal(row.ok, false); assert.equal(f.stats.rateLimited, 0);
-    assert.equal(row.error, "403 pump.mypinata.cloud; timeout ipfs.io; timeout dweb.link; timeout gateway.pinata.cloud; timeout w3s.link");
+    assert.equal(row.error, "403 pump.mypinata.cloud; timeout ipfs.filebase.io; timeout 4everland.io; timeout ipfs.io; timeout dweb.link; timeout gateway.pinata.cloud; timeout w3s.link");
+    assert.equal(metaFailKind(IPFS, row.error), "transient", "the public gateways looked (timeouts): no deferral");
     stored.set(IPFS, { ...row, attempts: 3 });
     assert.equal(f.needsFetch(IPFS, row.fetchedAt + META_RETRY_TRANSIENT_MAX_S + 1), true);
     const gone = "https://ipfs.io/ipfs/QmGone";

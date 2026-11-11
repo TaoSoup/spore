@@ -215,11 +215,11 @@ test("IPFS: gateways that say 403 while others answer 429 or 5xx make a temporar
     // the definitive one first: the 429 below pauses ipfs.io, and a paused gateway is itself a temporary answer
     assert.equal(await cache.get("https://ipfs.io/ipfs/QmGone/x.png"), null);
     const gone = cache.failureOf("https://ipfs.io/ipfs/QmGone/x.png");
-    assert.equal(gone.kind, "gone"); assert.equal(gone.error.split("; ").length, 5); assert.ok(gone.error.split("; ").every((s) => s.startsWith("404 ")));
+    assert.equal(gone.kind, "gone"); assert.equal(gone.error.split("; ").length, 7); assert.ok(gone.error.split("; ").every((s) => s.startsWith("404 ")));
     assert.equal(await cache.get("https://ipfs.io/ipfs/QmMixed/mixed.png"), null);
     const mixed = cache.failureOf("https://ipfs.io/ipfs/QmMixed/mixed.png");
     assert.equal(mixed.kind, "temp");
-    assert.match(mixed.error, /^403 pump\.mypinata\.cloud; 429 ipfs\.io; 502 dweb\.link/);
+    assert.match(mixed.error, /^403 pump\.mypinata\.cloud; 502 ipfs\.filebase\.io; 502 4everland\.io; 429 ipfs\.io; 502 dweb\.link/);
   } finally { done(); }
 });
 
@@ -408,7 +408,7 @@ test("a name that does not resolve (repair 2026-11-10): a rotation where every g
   };
   try {
     let f = await step(ipfs, "dns");
-    assert.equal(f.kind, "temp", "five gateways do not vanish together"); assert.equal(f.error.split("; ").length, 5);
+    assert.equal(f.kind, "temp", "seven gateways do not vanish together"); assert.equal(f.error.split("; ").length, 7);
     assert.ok(f.error.split("; ").every((p) => p.startsWith("ENOTFOUND ")));
     assert.equal(cache.isPending(ipfs), true); assert.equal(cache.isDead(ipfs), false);
     f = await step(ipfs, "dns"); assert.equal(f.kind, "temp"); f = await step(ipfs, "dns"); assert.equal(f.kind, "temp", "however often");
@@ -527,14 +527,14 @@ test("one rotation gateway that does not resolve is not our DNS (repair 2026-11-
     const one = "https://ipfs.io/ipfs/QmRetiredGateway/logo.png";
     assert.equal(await cache.get(one), null);
     let f = cache.failureOf(one);
-    assert.equal(f.error, "403 pump.mypinata.cloud; 404 ipfs.io; 404 dweb.link; 404 gateway.pinata.cloud; ENOTFOUND w3s.link");
+    assert.equal(f.error, "403 pump.mypinata.cloud; 404 ipfs.filebase.io; 404 4everland.io; 404 ipfs.io; 404 dweb.link; 404 gateway.pinata.cloud; ENOTFOUND w3s.link");
     assert.equal(f.kind, "gone", "a gateway retired for good does not make the others' answers temporary forever");
     assert.equal(f.retryAt - f.at, IMG_GONE_RETRY_MS[0]); assert.equal(cache.isDead(one), true);
     unresolved = new Set(["gateway.pinata.cloud", "w3s.link"]);
     const two = "https://ipfs.io/ipfs/QmResolverTrouble/logo.png";
     assert.equal(await cache.get(two), null);
     f = cache.failureOf(two);
-    assert.equal(f.error, "403 pump.mypinata.cloud; 404 ipfs.io; 404 dweb.link; ENOTFOUND gateway.pinata.cloud; ENOTFOUND w3s.link");
+    assert.equal(f.error, "403 pump.mypinata.cloud; 404 ipfs.filebase.io; 404 4everland.io; 404 ipfs.io; 404 dweb.link; ENOTFOUND gateway.pinata.cloud; ENOTFOUND w3s.link");
     assert.equal(f.kind, "temp", "two of the rotation's own gateways do not vanish together"); assert.equal(cache.isPending(two), true);
   } finally { done(); }
 });

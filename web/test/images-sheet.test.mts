@@ -1,9 +1,11 @@
 // Logo sheets in the map image loader (src/lib/map/images.ts): the first 64 px load of a registered /api/img source goes in
 // one GET /api/logo-sheet?w=64&m=<mint>,... per batch (newest want first), every cell is cut from the ONE decoded sheet, dead
-// cells fail, pending cells are asked again and then per request, a server without sheets (404, or a 200 without x-sheet) or
-// two transient failures in a row switch sheets off for the page, and the per-request path is untouched for everything a
-// sheet cannot carry. The loader's state is module-global, so every test imports a fresh instance (a ?query on the module
-// URL) after stubbing window, fetch and createImageBitmap.
+// cells fail, pending cells are asked again and then per request, a server without sheets (404 / 501, or a 200 without
+// x-sheet) switches sheets off for the page, a failure of the sheet route itself cools them down for a while (the sources go
+// per request; until 2026-11-10 two transient failures in a row switched them off for the page), and the per-request path is
+// untouched for everything a sheet cannot carry. A sheet that cannot reach the server is the link's failure, not the
+// route's: test/images-link.test.mts. The loader's state is module-global, so every test imports a fresh instance (a ?query
+// on the module URL) after stubbing window, fetch and createImageBitmap.
 //   npx tsx --test test/images-sheet.test.mts
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +22,7 @@ const M = (i: number) => `mint${i}`;
 const nodes = (n: number, from = 0) => Array.from({ length: n }, (_, k) => ({ mint: M(from + k), image: S(from + k) }));
 /// Hex bitmap of an n-cell sheet: byte j bit b = cell 8j + b.
 const hexOf = (n: number, pred: (i: number) => boolean) => {
-  const bytes = new Array<number>(Math.ceil(n / 8)).fill(0);
+  const bytes = Array.from({ length: Math.ceil(n / 8) }, () => 0);
   for (let i = 0; i < n; i++) if (pred(i)) bytes[i >> 3] |= 1 << (i & 7);
   return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
 };
@@ -47,6 +49,8 @@ async function fresh(o: { innerWidth?: number; sheet?: SheetFn; img?: (url: stri
     calls.push(url);
     const u = new URL(url, "http://local.test");
     if (u.pathname === "/api/logo-sheet") return o.sheet ? o.sheet((u.searchParams.get("m") ?? "").split(","), u) : new Response("no", { status: 404 });
+    // the probe of a link that is down: the server answers (JSON)
+    if (u.pathname === "/api/health") return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
     return o.img ? o.img(url) : imgResponse();
   };
   // createImageBitmap(blob): a "sheet" blob decodes to a 1024 x rows*64 bitmap, anything else to a 200 x 200 original;
@@ -190,45 +194,65 @@ for (const [name, sheet] of [
   });
 }
 
-test("transient sheet failures: one 503 (or a bad x-sheet-n) is retried in a new sheet; two in a row switch sheets off; a network error counts too", async () => {
-  // one 503 then a good sheet: sheets stay on
-  let n = 0;
-  let h = await fresh({ sheet: (mints) => (++n === 1 ? new Response("busy", { status: 503 }) : ALL(mints)) });
-  h.m.registerLogoMints(nodes(6));
-  for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
-  await until(() => h.m.imageStats().ready === 6);
-  assert.equal(h.sheetCalls().length, 2);
-  assert.equal(h.imgCalls().length, 0);
-  assert.equal(h.m.imageStats().sheetsOff, false);
-  // an answer whose x-sheet-n disagrees with the batch is a transient failure too
-  n = 0;
-  h = await fresh({ sheet: (mints) => (++n === 1 ? sheetResponse(mints.length + 1, hexOf(mints.length + 1, () => true)) : ALL(mints)) });
-  h.m.registerLogoMints(nodes(6));
-  for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
-  await until(() => h.m.imageStats().ready === 6);
-  assert.equal(h.sheetCalls().length, 2);
-  assert.equal(h.m.imageStats().sheetsOff, false);
-  // two 503s in a row: off, and the sources load per request
-  h = await fresh({ sheet: () => new Response("busy", { status: 503 }) });
-  h.m.registerLogoMints(nodes(6));
-  for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
-  await until(() => h.m.imageStats().ready === 6);
-  assert.equal(h.sheetCalls().length, h.m.SHEET_FAIL_MAX);
-  assert.equal(h.m.imageStats().sheetsOff, true);
-  assert.equal(h.imgCalls().length, 6);
-  assert.equal(h.m.imageStats().e429, 0);
-  // a 429 is counted in e429 like a single load's
-  h = await fresh({ sheet: () => new Response("slow down", { status: 429 }) });
-  h.m.registerLogoMints(nodes(6));
-  for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
-  await until(() => h.m.imageStats().ready === 6);
-  assert.equal(h.m.imageStats().e429, 2);
-  // a thrown fetch (network) is transient as well
-  h = await fresh({ sheet: () => { throw new TypeError("network"); } });
-  h.m.registerLogoMints(nodes(6));
-  for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
-  await until(() => h.m.imageStats().ready === 6);
-  assert.equal(h.m.imageStats().sheetsOff, true);
+// (2026-11-10) this test switched sheets off after SHEET_FAIL_MAX transient failures in a row (a 503, a 429, a network error);
+// no transient failure switches them off now: the route's own failure cools them down, a 429 pauses every start, a network
+// error is the link's (a probe, then the next sheet). Mock clock (setTimeout + Date) for the cooldown, the pause, the probe.
+const T0 = Date.parse("2026-11-10T12:00:00Z");
+test("sheet failures are never final for the page: the API's 500 or 503, a bad x-sheet-n cool sheets down (the sources go per request) until SHEET_COOL_MS; a 429 pauses, a network error is the link's", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: T0 });
+  try {
+    const json = (code: number) => new Response(JSON.stringify({ error: "sheet failed" }), { status: code, headers: { "content-type": "application/json" } });
+    for (const [name, bad] of [
+      ["the API's 500", () => json(500)],
+      ["the API's 503", () => json(503)],
+      ["a bad x-sheet-n", (mints) => sheetResponse(mints.length + 1, hexOf(mints.length + 1, () => true))],
+    ] as [string, SheetFn][]) {
+      let n = 0;
+      const h = await fresh({ sheet: (mints, u) => (++n === 1 ? bad(mints, u) : ALL(mints)) });
+      h.m.registerLogoMints(nodes(12));
+      for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
+      await until(() => h.m.imageStats().ready === 6);
+      assert.equal(h.sheetCalls().length, 1, name);
+      assert.equal(h.imgCalls().length, 6, `${name}: per request while sheets cool down`);
+      let st = h.m.imageStats();
+      assert.equal(st.sheetsOff, false, name); assert.equal(st.sheetCools, 1, name); assert.equal(st.sheetsCoolUntil, T0 + h.m.SHEET_COOL_MS, name);
+      mock.timers.tick(h.m.SHEET_COOL_MS);
+      for (let i = 6; i < 12; i++) h.m.imageFor(S(i), 40);
+      await until(() => h.m.imageStats().ready === 12);
+      assert.equal(h.sheetCalls().length, 2, `${name}: a sheet again after the cooldown`);
+      assert.equal(h.imgCalls().length, 6, name);
+      st = h.m.imageStats();
+      assert.equal(st.sheets, 1, name); assert.equal(st.sheetsOff, false, name); assert.equal(st.e429, 0, name);
+      mock.timers.setTime(T0);
+    }
+    // a 429 is counted in e429 like a single load's and pauses every start (PAUSE_MS, + jitter, without a Retry-After); the
+    // same sheet is asked again after it
+    let n = 0;
+    let h = await fresh({ sheet: (mints) => (++n === 1 ? new Response("slow down", { status: 429 }) : ALL(mints)) });
+    h.m.registerLogoMints(nodes(6));
+    for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
+    await settle();
+    assert.equal(h.m.imageStats().e429, 1);
+    assert.ok(h.m.imageStats().pausedUntil >= T0 + h.m.PAUSE_MS);
+    mock.timers.tick(h.m.PAUSE_MS * 1.25);
+    await until(() => h.m.imageStats().ready === 6);
+    assert.equal(h.sheetCalls().length, 2); assert.equal(h.imgCalls().length, 0);
+    assert.equal(h.m.imageStats().sheetsOff, false);
+    // a thrown fetch (network) is the link's: sheets stay on, the probe (GET /api/health) brings the link back, the next sheet
+    // carries them all
+    n = 0;
+    mock.timers.setTime(T0);
+    h = await fresh({ sheet: (mints) => { if (++n === 1) throw new TypeError("network"); return ALL(mints); } });
+    h.m.registerLogoMints(nodes(6));
+    for (let i = 0; i < 6; i++) h.m.imageFor(S(i), 40);
+    await settle();
+    assert.equal(h.m.imageStats().linkDown, true);
+    assert.equal(h.m.imageStats().sheetsOff, false);
+    mock.timers.tick(h.m.LINK_PROBE_MS * 1.25);
+    await until(() => h.m.imageStats().ready === 6);
+    assert.deepEqual(h.imgCalls(), ["/api/health"], "the probe; no logo one by one"); assert.equal(h.sheetCalls().length, 2);
+    assert.equal(h.m.imageStats().sheetsOff, false); assert.equal(h.m.imageStats().linkDown, false);
+  } finally { mock.timers.reset(); }
 });
 
 test("what never enters a sheet: unregistered sources, non-proxy URLs, sources with &w=, sharper first wants, upgrades, and batches under SHEET_MIN", async () => {
@@ -307,16 +331,21 @@ test("phone (innerWidth 390): SHEET_MAX 64, SHEET_INFLIGHT 2, MAX_INFLIGHT 32; 2
   assert.equal(h.imgCalls().length, 0);
 });
 
+// (mock clock: the sheet that never answers keeps its FETCH_MAX_MS timer, which on the real clock held this file's process
+// open for 5 min after its last test)
 test("a sheet costs one start token, like a single load", async () => {
-  const h = await fresh({ sheet: () => new Promise<Response>(() => { /* never answers: the sheet stays in flight */ }) });
-  const { m } = h;
-  const before = m.imageStats().tokens;
-  m.registerLogoMints(nodes(10));
-  for (let i = 0; i < 10; i++) m.imageFor(S(i), 40);
-  await settle(2);
-  assert.equal(h.sheetCalls().length, 1);
-  assert.equal(m.imageStats().tokens, before - 1);
-  assert.equal(m.imageStats().sheetInflight, 1);
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const h = await fresh({ sheet: () => new Promise<Response>(() => { /* never answers: the sheet stays in flight */ }) });
+    const { m } = h;
+    const before = m.imageStats().tokens;
+    m.registerLogoMints(nodes(10));
+    for (let i = 0; i < 10; i++) m.imageFor(S(i), 40);
+    await settle(2);
+    assert.equal(h.sheetCalls().length, 1);
+    assert.equal(m.imageStats().tokens, before - 1);
+    assert.equal(m.imageStats().sheetInflight, 1);
+  } finally { mock.timers.reset(); }
 });
 
 test("imagesVersion() increments once per sheet and onImageLoaded fires once per sheet", async () => {

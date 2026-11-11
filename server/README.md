@@ -208,24 +208,40 @@ or does not resolve 5 times in a row (`dead_streak` counts that run, any other f
 resets it; `attempts` counts every failure) is asked weekly, and until then on the usual backoff, so a
 local DNS outage costs a few retries, not a week; `metaRetryS` in `lib/meta.mjs`; a resolved image is re-read weekly, a resolved JSON
 without an image daily; a uri that once resolved keeps its image when a later re-read fails). IPFS content (`ipfs://`, any `/ipfs/<cid>` path, or
-`<cid>.ipfs.<gateway>`) goes through the gateway rotation pump.mypinata.cloud → ipfs.io → dweb.link
-→ gateway.pinata.cloud → w3s.link (DESIGN §11.5's four in their order, with pump.fun's own pinata
-gateway in front: measured 2026-10-19 it answers in 0.2 s, 200 for everything pump.fun pinned and a
-definitive 403 otherwise, while the three public gateways answer 429 within seconds of six workers
-and gateway.pinata.cloud needs ~7 s per CID; cf-ipfs.com is dead and never asked; a gateway outside
-the rotation that a creator wrote into the uri is tried first, the content may only be there). A
-403/404/410/5xx, a 429 or a timeout from one gateway moves to the next (a rotation where some
-gateways said 403/404 while others were rate-limited is requeued like a rate-limited fetch, and stored
-when that does not help with a per-gateway summary such as `403 pump.mypinata.cloud; 429 ipfs.io;
-timeout dweb.link` as its error, a temporary failure: pump.fun's pinata answers 403 for whatever it
-did not pin, which says nothing about the public gateways); each attempt has its own
-10 s timeout under a 25 s budget per uri (15 s / 30 s for images); the least-busy gateway is asked
-first so the workers spread over the rotation (200 ms spacing per host, 429 pauses per host as
-before). The image proxy uses the same rotation and allowlist (`dweb.link` / `w3s.link` path form
-included; they redirect to the listed `<cid>.ipfs.*` form). This is HTTP to gateways only, never the
-RPC. `/api/health.meta` reports the coverage over tracked coins, `{ total, withMeta, withImage,
+`<cid>.ipfs.<gateway>`) goes through the gateway rotation pump.mypinata.cloud → ipfs.filebase.io →
+4everland.io → ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link (`IPFS_GATEWAYS`). pump.fun's own
+pinata gateway comes first: measured 2026-10-19 it answers in 0.2 s, 200 for everything pump.fun pinned
+and a definitive 403 otherwise. ipfs.filebase.io and 4everland.io follow it (`GATEWAY_RULE` 2,
+2026-11-10): that day ipfs.io, dweb.link, gateway.pinata.cloud, w3s.link and nftstorage.link answered
+429 to this server on the first request, while both new gateways served every stuck CID probed
+(4everland redirects to `<cidv1>.ipfs.4everland.io`). cf-ipfs.com is dead and never asked; a gateway
+outside the rotation that a creator wrote into the uri is tried first, the content may only be there.
+An `ipfs://` uri goes through the rotation like the others (`isFetchableMetaUri`; until 2026-11-11 the
+queue skipped it, as it does every non-https uri). A 403/404/410/5xx, a 429 or a timeout from one
+gateway moves to the next, and a failed rotation is stored with a per-gateway summary such as
+`403 pump.mypinata.cloud; 429 ipfs.io; timeout dweb.link` as its error. A rotation in which no public
+gateway looked for the file (each one paused, out of the budget, or answering 429 / 408 / 425 / a 5xx
+other than 504 / a network error, while pump.fun's pinata at most said it did not pin it; a public
+gateway that does not resolve is passed over, and two of the rotation's own that do not resolve are our
+DNS, never a deferral) is a *deferral*, not a failed attempt (`isGatewayDeferral`). When a gateway of
+that rotation answered 429 or was paused, the uri is first requeued up to 3 times 10 s apart (not when
+its last failure was already a deferral); otherwise it is stored at once. A run of deferrals counts at
+most 3 on `attempts`, never lowers a count that real failures earned, and waits 10, 20, then 40 min
+plus up to half of that as a jitter fixed per uri, so at most an hour. A rotation in which a public
+gateway looked (a timeout, a 504, an answer) is stored at once and keeps the backoff above: both new
+gateways hang until our timeout on a CID nobody has. Each attempt has its own 10 s timeout under a
+25 s budget per uri (15 s / 30 s for images); the least-busy gateway is asked first so the workers
+spread over the rotation, a host's slot is taken when it is chosen (200 ms spacing per host, kept when
+rotations run side by side), and a 429 pauses that host for 10 s doubling up to 2 min, or for its
+`Retry-After` when that is longer (at most 15 min). A coin page or a young coin lifts its uri to the
+head of the queue even when a sweep already queued it. When the rotation gains a gateway
+(`GATEWAY_RULE`), the next boot gives the old rotation's failures one more try (kv `metaGatewayRule`):
+every failed IPFS row with a temporary error is due at once, and the counts the old rule inflated on
+deferrals come down to 3. The image proxy uses the same rotation and allowlist (`ipfs.filebase.io`,
+`dweb.link`, `w3s.link` and `4everland.io` path form included; all but ipfs.filebase.io redirect). This
+is HTTP to gateways only, never the RPC. `/api/health.meta` reports the coverage over tracked coins, `{ total, withMeta, withImage,
 noUri, failed, queued }` (`failed` = coins whose last fetch failed), plus this process's counters
-under `run: { fetched, failed, failedTransient, rateLimited, rotated, sweeps }`.
+under `run: { fetched, failed, failedTransient, deferred, rateLimited, sweeps, rotated, recheck }`.
 
 **Logo capture** (`ImageCache` in `lib/meta.mjs`, files in `DATA_DIR/img`). A logo is captured the
 first time its url is seen and kept for good:
@@ -258,7 +274,9 @@ first time its url is seen and kept for good:
   gateway pausing, 5xx, timeouts, network errors, IPFS gateways that mixed a no with any of those,
   every gateway or two of the rotation's own not resolving: our DNS; one rotation gateway that does
   not resolve is not enough, it may be gone for good): retried after 1 min, doubling (6 tries within the first
-  hour, then on up to a day, so an unpinned CID is not asked every hour forever); `/api/img` answers
+  hour, then on up to a day, so an unpinned CID is not asked every hour forever); a deferral (no public
+  gateway looked for the file, as for metadata above) counts at most 4 in a run, never lowers a count
+  real failures earned, and waits 1, 2, 4, then 8 min plus up to half of that, never the day; `/api/img` answers
   `503` with `Retry-After` (the wait left, at most 300 s) and `/api/logo-sheet` leaves the cell
   pending, however long the wait. Permanent (404/410 and the other definitive 4xx, not an image, too
   large, a lone host that did not resolve 3 times in a row: before that it is temporary, our DNS may
@@ -269,8 +287,12 @@ first time its url is seen and kept for good:
   failure; a permanent failure counts the permanent failures since the last success
   (`gone_attempts` carries the count across temporary ones in between), so a url that alternates 404
   and 502 still reaches the weekly wait instead of ~330 fetches a week. A logo that downloads but
-  cannot be drawn is a dead sheet cell for a week while `/api/img` keeps serving its original; an
-  animated webp is drawn from its first frame. Rows past their retry time by 30 days are forgotten.
+  cannot be drawn is a dead sheet cell for a week while `/api/img` keeps serving its original, and so
+  is one the image worker died under twice in a row (`THUMB_CRASHES_MAX`; a render that ended with
+  nothing recorded, a worker crash or an original evicted mid-render, leaves the cell pending, not
+  dead); an animated webp is drawn from its first frame. Rows past their retry time by 30 days are
+  forgotten. When the rotation gains a gateway (`GATEWAY_RULE`), the next boot forgets the IPFS
+  failures the old rotation recorded as temporary or with a per-gateway summary (kv `imgGatewayRule`).
 
 `/api/health.images` has the counters plus `thumbFiles`, `slots` (active / background / waiting per
 priority), `fresh` (first-sight queue) and `failing: { gone, temp, nothumb }`.
@@ -308,7 +330,7 @@ first (see the security notes in the fix report).
 
 `node:sqlite`, WAL mode: `coins`, `mints`, `trades` (≤ 2 000 per mint, 24 h volume and candles),
 `meta` (off-chain JSON cache with `attempts` and `dead_streak`; weekly re-read of a resolved image, backoff retries from
-15 min to 24 h, IPFS gateway rotation), `img_fail` (the image proxy's failed urls with kind and next
+15 min to 24 h (10 to 60 min for a gateway deferral, weekly for a dead host), IPFS gateway rotation), `img_fail` (the image proxy's failed urls with kind and next
 retry), `backfill_curves`, `backfill_state`, `kv` (SOL price,
 decoded `Global`, schema version), `api_keys` (partner keys as sha256, usage counters), `agents` and
 `agent_proposals` (root agents: status, profile, run counters; every proposal with its simulation;
@@ -382,7 +404,7 @@ DESIGN §7, plus a few extras that never replace a contract field:
 - `GET /m/:name` → a self-hosted metadata/image file (immutable)
 - `GET /api/events` → SSE `coin | trade | stats`, heartbeat comment every 15 s
 - `GET /api/img?u=[&w=64|128|256]` → cached image proxy for URLs the API itself handed out (the `image` of an indexed coin or a file on our metadata host; anything else is 404 even on an allowed host; allowlist in `lib/meta.mjs`, 4 MB, 24 h, `IMG_CACHE_MB` budget); with `w` a PNG thumbnail (`x-img-thumb`) when one can be drawn, kept for good under `IMG_THUMB_MB`; `503` + `Retry-After` while a temporary failure holds the image back, `404` for a permanent one (see "Logo capture"); `Coin.image` already points here
-- `GET /api/logo-sheet?w=64&m=<mint>,…[&f=webp|png]` → one image of up to 256 mints' 64 px logos, 16 per row; `x-sheet` / `x-sheet-dead` are hex bitmaps of present / dead cells (byte j bit b = cell 8j+b), a cell in neither is pending (still rendering, or a temporary failure: ask again), `x-sheet-pending` counts them (`no-store` while any is pending)
+- `GET /api/logo-sheet?w=64&m=<mint>,…[&f=webp|png]` → one image of up to 256 mints' 64 px logos, 16 per row; `x-sheet` / `x-sheet-dead` are hex bitmaps of present / dead cells (byte j bit b = cell 8j+b), a cell in neither is pending (still rendering, or a temporary failure: ask again), `x-sheet-pending` counts them (`no-store` while any is pending; `private, max-age=60` with a dead cell, a verdict that can change on the server within minutes; `private, max-age=600` for logos only)
 - `POST /api/upload` → `{ metadataUri, imageUri, metadata }` self-hosted (see "Metadata host"; 5 per 10 min per IP, daily quotas → `429 { error, retryAfter }`)
 - `POST /api/rpc` → allow-listed JSON-RPC proxy (no `getProgramAccounts`) on its own RPC lane; batches of at most 5; `getMultipleAccounts` ≤ 32 keys; `getTokenAccountsByOwner` never `jsonParsed`; `sendTransaction` / `simulateTransaction` only for transactions that invoke a pump program (decoded and checked, base64 or base58); relayed answers capped at 2 MB; 60 per minute per IP
 - `GET /api/treasury` → `{ platform, ourCoins, pendingByQuote: [{ quoteMint, symbol, amount, usd, coins }], coins, updatedAt }`: the platform's pending creator-fee share, read from the curve bucket, creator vault and AMM vault of every coin whose sharing config names the platform (DESIGN §11.4); cached 60 s; empty until the first launch

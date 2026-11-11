@@ -102,8 +102,8 @@ test("MetaFetcher dedupes, bounds the queue and stores failures with a retry win
   const f = new MetaFetcher(model, { pacer: new HostPacer({ fetchImpl, sleep: async () => {} }), concurrency: 2 });
   f.request("https://ipfs.io/ipfs/QmA"); f.request("https://ipfs.io/ipfs/QmA"); f.request("https://ipfs.io/ipfs/bad"); f.request("http://ipfs.io/ipfs/QmPlain");
   await new Promise((r) => setTimeout(r, 50));
-  // QmA once; "bad" answers 500 on every gateway of the rotation (5 hosts) before it is recorded.
-  assert.equal(calls, 1 + 5);
+  // QmA once; "bad" answers 500 on every gateway of the rotation (7 hosts) before it is recorded.
+  assert.equal(calls, 1 + 7);
   assert.equal(stored.get("https://ipfs.io/ipfs/QmA").image, "https://ipfs.io/ipfs/QmI");
   assert.equal(stored.get("https://ipfs.io/ipfs/QmA").attempts, 0);
   assert.equal(stored.get("https://ipfs.io/ipfs/bad").ok, false);
@@ -114,41 +114,47 @@ test("MetaFetcher dedupes, bounds the queue and stores failures with a retry win
   assert.equal(f.pendingCount, 0);
 });
 
-test("gatewayCandidates: IPFS content rotates through pump's pinata, then ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link; cf-ipfs.com is dropped; other URLs stand alone", () => {
-  const rotation = ["https://pump.mypinata.cloud/ipfs/QmX/meta.json", "https://ipfs.io/ipfs/QmX/meta.json", "https://dweb.link/ipfs/QmX/meta.json", "https://gateway.pinata.cloud/ipfs/QmX/meta.json", "https://w3s.link/ipfs/QmX/meta.json"];
+test("gatewayCandidates: IPFS content rotates through pump's pinata, then ipfs.filebase.io → 4everland.io → ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link; cf-ipfs.com is dropped; other URLs stand alone", () => {
+  const rotation = ["https://pump.mypinata.cloud/ipfs/QmX/meta.json", "https://ipfs.filebase.io/ipfs/QmX/meta.json", "https://4everland.io/ipfs/QmX/meta.json", "https://ipfs.io/ipfs/QmX/meta.json", "https://dweb.link/ipfs/QmX/meta.json", "https://gateway.pinata.cloud/ipfs/QmX/meta.json", "https://w3s.link/ipfs/QmX/meta.json"];
   assert.deepEqual(gatewayCandidates("https://ipfs.io/ipfs/QmX/meta.json"), rotation);
   assert.deepEqual(gatewayCandidates("https://cf-ipfs.com/ipfs/QmX/meta.json"), rotation, "the dead gateway is never asked");
   assert.deepEqual(gatewayCandidates("https://gateway.pinata.cloud/ipfs/QmX/meta.json"), rotation, "a gateway of the rotation keeps its place");
+  assert.deepEqual(gatewayCandidates("https://ipfs.filebase.io/ipfs/QmX/meta.json"), rotation, "so does a new one");
   assert.deepEqual(gatewayCandidates("https://bafyabc.ipfs.dweb.link/logo.png"), rotation.map((u) => u.replace("QmX/meta.json", "bafyabc/logo.png")), "subdomain form is understood");
+  assert.deepEqual(gatewayCandidates("https://bafyabc.ipfs.4everland.io/logo.png"), rotation.map((u) => u.replace("QmX/meta.json", "bafyabc/logo.png")), "4everland's subdomain form too (its path form redirects there)");
   assert.deepEqual(gatewayCandidates("https://ipfs2.extraction.live/ipfs/B6Qao?x=1").slice(0, 2), ["https://ipfs2.extraction.live/ipfs/B6Qao?x=1", "https://pump.mypinata.cloud/ipfs/B6Qao?x=1"], "a gateway outside the rotation goes first: the content may only be there");
-  assert.equal(gatewayCandidates("https://ipfs2.extraction.live/ipfs/B6Qao?x=1").length, 6);
+  assert.equal(gatewayCandidates("https://ipfs2.extraction.live/ipfs/B6Qao?x=1").length, 8);
   assert.deepEqual(gatewayCandidates("https://m.rapidlaunch.io/m/x"), ["https://m.rapidlaunch.io/m/x"]);
   assert.equal(ipfsPathOf("ipfs://QmX/logo.png"), "QmX/logo.png");
   assert.equal(ipfsPathOf("https://x.y/z"), null);
   assert.ok(isAllowedImageUrl("https://pump.mypinata.cloud/ipfs/QmX"));
   assert.ok(isAllowedImageUrl("https://dweb.link/ipfs/QmX") && isAllowedImageUrl("https://w3s.link/ipfs/QmX"), "path-form entry points of the rotation are allowed");
+  assert.ok(isAllowedImageUrl("https://ipfs.filebase.io/ipfs/QmX") && isAllowedImageUrl("https://4everland.io/ipfs/QmX") && isAllowedMetaUrl("https://ipfs.filebase.io/ipfs/QmX") && isAllowedMetaUrl("https://4everland.io/ipfs/QmX"), "and the two added 2026-11-10");
 });
 
 test("HostPacer: a 429 pauses that host and the next gateway serves the content; spacing is enforced per host", async () => {
   const calls = []; const sleeps = [];
-  const limitedHost = (url) => url.startsWith("https://pump.mypinata.cloud/") || url.startsWith("https://ipfs.io/");
+  const limitedHost = (url) => url.startsWith("https://pump.mypinata.cloud/") || url.startsWith("https://ipfs.filebase.io/");
   const fetchImpl = async (url) => { calls.push(url); return new Response("{}", { status: limitedHost(url) ? 429 : 200, headers: { "content-type": "application/json" } }); };
   const pacer = new HostPacer({ fetchImpl, sleep: async (ms) => { sleeps.push(ms); } });
   const hit = await pacer.fetchAny("https://ipfs.io/ipfs/QmA");
-  assert.equal(hit.url, "https://dweb.link/ipfs/QmA");
-  assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmA", "https://ipfs.io/ipfs/QmA", "https://dweb.link/ipfs/QmA"]);
-  // Both limited hosts are now paused and dweb.link was just used: the least-busy gateway of the rotation serves next, with no wait.
+  assert.equal(hit.url, "https://4everland.io/ipfs/QmA");
+  assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmA", "https://ipfs.filebase.io/ipfs/QmA", "https://4everland.io/ipfs/QmA"]);
+  // Both limited hosts are now paused and 4everland.io was just used: the least-busy gateway of the rotation serves next, with no wait.
   calls.length = 0;
   const again = await pacer.fetchAny("https://ipfs.io/ipfs/QmB");
-  assert.equal(again.url, "https://gateway.pinata.cloud/ipfs/QmB");
-  assert.deepEqual(calls, ["https://gateway.pinata.cloud/ipfs/QmB"]);
+  assert.equal(again.url, "https://ipfs.io/ipfs/QmB");
+  assert.deepEqual(calls, ["https://ipfs.io/ipfs/QmB"]);
   assert.equal(sleeps.length, 0);
   // Every gateway busy within the spacing window: the soonest free one is waited for.
+  for (const [cid, host] of [["QmC", "dweb.link"], ["QmD", "gateway.pinata.cloud"], ["QmE", "w3s.link"]]) {
+    calls.length = 0;
+    await pacer.fetchAny(`https://ipfs.io/ipfs/${cid}`);
+    assert.deepEqual(calls, [`https://${host}/ipfs/${cid}`]);
+  }
+  assert.equal(sleeps.length, 0);
   calls.length = 0;
-  await pacer.fetchAny("https://ipfs.io/ipfs/QmC");
-  assert.deepEqual(calls, ["https://w3s.link/ipfs/QmC"]);
-  calls.length = 0;
-  await pacer.fetchAny("https://ipfs.io/ipfs/QmD");
+  await pacer.fetchAny("https://ipfs.io/ipfs/QmF");
   assert.equal(calls.length, 1);
   assert.ok(sleeps.length === 1 && sleeps[0] > 0 && sleeps[0] <= HOST_SPACING_MS, `spacing wait applied (${sleeps})`);
   // A host with no alternative that is rate-limited yields null (caller retries later).
@@ -157,18 +163,38 @@ test("HostPacer: a 429 pauses that host and the next gateway serves the content;
   assert.equal(await limited.fetchAny("https://m.rapidlaunch.io/m/y"), null, "paused host is skipped without a request");
 });
 
+test("HostPacer (repair 2026-11-11): rotations running side by side keep the per-host spacing (each takes its slot before it waits); one that wakes to a host another just found rate-limited does not ask it", async () => {
+  // six workers that chose one host in the same instant used to sleep the same wait and then fire together
+  const waits = [];
+  const pacer = new HostPacer({ fetchImpl: async () => new Response("{}"), sleep: async (ms) => { waits.push(ms); } });
+  await pacer.fetchAny("https://m.rapidlaunch.io/m/warm");
+  await Promise.all(Array.from({ length: 6 }, (_, i) => pacer.fetchAny(`https://m.rapidlaunch.io/m/${i}`)));
+  waits.sort((a, b) => a - b).forEach((w, k) => assert.ok(w > (k + 1) * HOST_SPACING_MS - 50 && w <= (k + 1) * HOST_SPACING_MS, `waits ${waits}`));
+  // real timers: each request starts at least one spacing after the one before it
+  const at = [];
+  const real = new HostPacer({ fetchImpl: async () => { at.push(Date.now()); return new Response("{}"); }, spacingMs: 30 });
+  await Promise.all(Array.from({ length: 5 }, (_, i) => real.fetchAny(`https://m.rapidlaunch.io/m/r${i}`)));
+  for (let k = 1; k < at.length; k++) assert.ok(at[k] - at[0] >= k * 30 - 2, `starts ${at.map((t) => t - at[0])}`);
+  // the first of three side-by-side rotations meets a 429: the host is paused, and the two that wake after it skip it
+  let n = 0;
+  const limited = new HostPacer({ fetchImpl: async () => (n++ ? new Response("", { status: 429 }) : new Response("{}")), spacingMs: 40 });
+  await limited.fetchAny("https://m.rapidlaunch.io/m/warm");
+  assert.deepEqual(await Promise.all([1, 2, 3].map((i) => limited.fetchAny(`https://m.rapidlaunch.io/m/${i}`))), [null, null, null]);
+  assert.equal(n, 2, "one request after the warm one");
+});
+
 test("HostPacer: a 403/404 from one gateway is not final; the rotation finds the content, or the last answer is returned", async () => {
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(url);
-    if (url.startsWith("https://pump.mypinata.cloud/") || url.startsWith("https://ipfs.io/")) return new Response("forbidden", { status: 403 });
-    if (url.startsWith("https://dweb.link/")) return new Response("nope", { status: 404 });
+    if (url.startsWith("https://pump.mypinata.cloud/") || url.startsWith("https://ipfs.filebase.io/")) return new Response("forbidden", { status: 403 });
+    if (url.startsWith("https://4everland.io/")) return new Response("nope", { status: 404 });
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   const pacer = new HostPacer({ fetchImpl, sleep: async () => {} });
   const hit = await pacer.fetchAny("https://ipfs.io/ipfs/QmA");
-  assert.equal(hit.res.status, 200); assert.equal(hit.url, "https://gateway.pinata.cloud/ipfs/QmA");
-  assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmA", "https://ipfs.io/ipfs/QmA", "https://dweb.link/ipfs/QmA", "https://gateway.pinata.cloud/ipfs/QmA"]);
+  assert.equal(hit.res.status, 200); assert.equal(hit.url, "https://ipfs.io/ipfs/QmA");
+  assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmA", "https://ipfs.filebase.io/ipfs/QmA", "https://4everland.io/ipfs/QmA", "https://ipfs.io/ipfs/QmA"]);
   assert.equal(pacer.stats.rotated, 3);
   // Every gateway says no: the last answer comes back so the caller records a status, not a guess.
   const gone = new HostPacer({ fetchImpl: async () => new Response("", { status: 404 }), sleep: async () => {} });
@@ -177,7 +203,7 @@ test("HostPacer: a 403/404 from one gateway is not final; the rotation finds the
   // A timeout on one gateway moves on too; only when all of them error is the error thrown.
   let n = 0;
   const flaky = new HostPacer({ fetchImpl: async (url) => { n++; if (url.startsWith("https://pump.mypinata.cloud/")) throw new Error("The operation was aborted due to timeout"); return new Response("{}", { status: 200 }); }, sleep: async () => {} });
-  assert.equal((await flaky.fetchAny("https://ipfs.io/ipfs/QmT")).url, "https://ipfs.io/ipfs/QmT"); assert.equal(n, 2);
+  assert.equal((await flaky.fetchAny("https://ipfs.io/ipfs/QmT")).url, "https://ipfs.filebase.io/ipfs/QmT"); assert.equal(n, 2);
   const dead = new HostPacer({ fetchImpl: async () => { throw new Error("ENOTFOUND"); }, sleep: async () => {} });
   await assert.rejects(() => dead.fetchAny("https://ipfs.io/ipfs/QmT"), /ENOTFOUND/);
   await assert.rejects(() => dead.fetchAny("https://m.rapidlaunch.io/m/x"), /ENOTFOUND/, "a single-candidate URL throws as before");
@@ -188,15 +214,15 @@ test("HostPacer: a 403/404 from one gateway is not final; the rotation finds the
   assert.ok(seen.length >= 2 && seen.length < 5, `the budget stopped the rotation after ${seen.length} attempts`);
 });
 
-test("ImageCache: the image proxy uses the same rotation for /ipfs/ URLs (403 on ipfs.io → dweb.link serves)", async () => {
+test("ImageCache: the image proxy uses the same rotation for /ipfs/ URLs (403 on pump's pinata and ipfs.filebase.io → 4everland.io serves)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spore-img-"));
   const calls = [];
-  const fetchImpl = async (url) => { calls.push(url); return url.startsWith("https://ipfs.io/") || url.startsWith("https://pump.mypinata.cloud/") ? new Response("forbidden", { status: 403 }) : new Response(PNG, { headers: { "content-type": "image/png" } }); };
+  const fetchImpl = async (url) => { calls.push(url); return url.startsWith("https://ipfs.filebase.io/") || url.startsWith("https://pump.mypinata.cloud/") ? new Response("forbidden", { status: 403 }) : new Response(PNG, { headers: { "content-type": "image/png" } }); };
   const cache = new ImageCache(dir, { pacer: new HostPacer({ fetchImpl, sleep: async () => {} }) });
   try {
     const hit = await cache.get("https://ipfs.io/ipfs/QmX/logo.png");
     assert.equal(hit.type, "image/png");
-    assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmX/logo.png", "https://ipfs.io/ipfs/QmX/logo.png", "https://dweb.link/ipfs/QmX/logo.png"]);
+    assert.deepEqual(calls, ["https://pump.mypinata.cloud/ipfs/QmX/logo.png", "https://ipfs.filebase.io/ipfs/QmX/logo.png", "https://4everland.io/ipfs/QmX/logo.png"]);
     assert.equal(cache.stats.failed, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -239,6 +265,21 @@ test("MetaFetcher: a rate-limited URI is requeued, not recorded as a failure", a
   assert.equal(f.stats.rateLimited, 1);
   assert.equal(f.attempts.get("https://m.rapidlaunch.io/m/x"), 1);
   f.stop();
+});
+
+test("MetaFetcher (repair 2026-11-11): a front request (a coin page, a young coin) lifts a uri already waiting at the back of the queue to its head", async () => {
+  const order = [];
+  const fetchImpl = async (u) => { order.push(u.split("/ipfs/")[1]); return new Response('{"image":"https://ipfs.io/ipfs/QmI"}', { headers: { "content-type": "application/json" } }); };
+  const meta = new Map();
+  const f = new MetaFetcher({ meta, setMeta: (uri, m) => meta.set(uri, m) }, { concurrency: 1, pacer: new HostPacer({ fetchImpl, sleep: async () => {}, spacingMs: 0 }) });
+  for (let i = 0; i < 50; i++) f.request(`https://ipfs.io/ipfs/QmBacklog${i}`); // a sweep's backlog (the first is in flight at once)
+  f.request("https://ipfs.io/ipfs/QmNew");                                       // queued behind it
+  f.request("https://ipfs.io/ipfs/QmNew", { front: true });                      // then asked for urgently
+  f.request("https://ipfs.io/ipfs/QmBacklog7", { front: true });
+  while (meta.size < 51) await new Promise((r) => setTimeout(r, 5));
+  f.stop();
+  assert.deepEqual(order.slice(0, 3), ["QmBacklog0", "QmBacklog7", "QmNew"]);
+  assert.equal(order.length, 51, "each fetched once");
 });
 
 test("image re-check (META_IMAGE_RULE): resolved rows without an image are due once, gated by kv; rows with an image are never refetched", async () => {

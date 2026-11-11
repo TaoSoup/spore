@@ -9,9 +9,11 @@
 // kept for good (only a disk budget evicts them, least recently served first; on a full budget a new
 // coin's first-sight thumbnail evicts one unused for 30 days, the warm pass none). The browser never
 // loads a creator-supplied URL directly. IPFS content is
-// tried through a gateway rotation (ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link, plus
-// pump.fun's own pinata gateway): one gateway's 403/404/429/timeout is not final, the next may hold
-// the bytes, and the least-busy gateway is asked first so six workers spread over the rotation.
+// tried through a gateway rotation (pump.fun's own pinata gateway, then ipfs.filebase.io → 4everland.io →
+// ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link): one gateway's 403/404/429/timeout is not final, the
+// next may hold the bytes, and the least-busy gateway is asked first so six workers spread over the rotation; a
+// rotation in which no public gateway looked for the file (paused, rate-limited) is a deferral, asked again within
+// the hour, not a failed attempt (isGatewayDeferral).
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, statSync, createReadStream, unlinkSync, readdirSync, renameSync, existsSync, utimesSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -34,11 +36,21 @@ export const META_RETRY_MAX_S = 24 * 3600;
 // public https host, and 5.2k coins (several of the largest roots among them) had lost their logo
 // to the old list. Bump it whenever the rule widens again.
 export const META_IMAGE_RULE = 2;
+// Version of the IPFS gateway rotation (IPFS_GATEWAYS). What failed under an older rotation may have failed only on
+// the old gateways' rate limits, so it is tried once more at boot: metadata rows of IPFS content whose error is
+// temporary become due at once (MetaFetcher.queueGatewayRecheck, kv "metaGatewayRule"), and the image proxy forgets
+// its IPFS failures that were temporary or carry a per-gateway summary (ImageCache, kv "imgGatewayRule"). Rule 2
+// (2026-11-10) added ipfs.filebase.io and 4everland.io, which served all 5 stuck CIDs probed while every old public
+// gateway answered 429 on sight. Bump it whenever the rotation gains a gateway.
+export const GATEWAY_RULE = 2;
 export const IMAGE_TTL_MS = 24 * 3600 * 1000;
 export const IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 export const META_MAX_BYTES = 512 * 1024;
 export const HOST_SPACING_MS = 200;  // minimum gap between two requests to the same host (≈ 5/s per gateway)
 const HOST_PAUSE_MS = 10_000;        // first pause after a 429 from a host (doubles, caps at 2 min)
+// ... or the host's own Retry-After when that is longer, up to this. Measured 2026-11-10: dweb.link answers 429 with
+// Retry-After 900 (w3s.link now redirects there), which the 2-min cap asked again seven times over.
+export const HOST_RETRY_AFTER_MAX_MS = 15 * 60_000;
 
 /** Seconds to wait before retrying a uri that failed `attempts` times in a row (15 min, 30, 1 h, 2 h … 24 h). */
 export const retryAfterS = (attempts) => Math.min(META_RETRY_MAX_S, META_RETRY_S * 2 ** Math.max(0, (attempts ?? 1) - 1));
@@ -53,6 +65,19 @@ export const retryAfterS = (attempts) => Math.min(META_RETRY_MAX_S, META_RETRY_S
 export const META_RETRY_TRANSIENT_MAX_S = 3 * 3600;
 export const META_RETRY_DEAD_S = 7 * 24 * 3600;
 export const META_DEAD_AFTER = 5;
+// A rotation in which no public gateway looked for the file (isGatewayDeferral: each one was paused, out of the budget,
+// said 429 / 408 / 425 / a 5xx other than 504, or failed on the network, while pump's pinata at most said it did not pin
+// it) is a deferral, not a failed attempt: a run of them counts up to META_DEFER_CAP on `attempts` and never takes back
+// what real failures counted (bringing the count down to the cap would restart an unpinned CID's climb on
+// timeouts), and it waits META_DEFER_S, doubling per deferral in a row (10, 20, then 40 min), plus up to half of that as
+// a jitter fixed per uri, so never more than an hour (measured 2026-11-10: 4.9k IPFS rows waited 8-24 h after up to 8
+// such "attempts", in which no public gateway ever looked: pump's 403, w3s.link failing on the network, the rest paused;
+// those counts come down to the cap once, at boot: queueGatewayRecheck; at the cap, a backlog of 5k costs about 1.7 rows
+// a second). A timeout or a
+// 504 is not a deferral: both gateways added that day hang until our timeout on a CID nobody has, so an unpinned CID
+// would be retried within the hour forever, holding a worker ~20 s each time; it keeps the temporary rule above.
+export const META_DEFER_S = 10 * 60;
+export const META_DEFER_CAP = 3;
 
 /** Is an HTTP status a temporary condition (rate limit, timeout, server trouble) rather than an answer about the file? */
 const softStatus = (s) => s === 408 || s === 425 || s === 429 || s >= 500;
@@ -71,9 +96,12 @@ export function isTransientError(text) {
 /**
  * Does a rotation summary say our resolver is in trouble rather than that hosts vanished? Yes when every
  * candidate (more than one) answered "ENOTFOUND", or when at least two of the rotation's own gateways did:
- * those exist, five gateways do not disappear together, a local DNS outage makes them all look gone at once.
+ * those exist, two gateways do not disappear together, a local DNS outage makes them all look gone at once.
  * One rotation gateway alone is not enough (repair 2026-11-10): a gateway that is retired for good would
- * otherwise make every definitive "no" from the others temporary forever.
+ * otherwise make every definitive "no" from the others temporary forever. The rotation has seven gateways since
+ * GATEWAY_RULE 2 (2026-11-10) and the two new ones count like the others; the threshold stays at two, not a share
+ * of the seven: HostGuard keeps a vetted address for 10 min, so in a local outage the gateways asked lately still
+ * answer while the rest fail together, and a rotation cut short by pauses or the budget names only a few.
  * (A lone host that does not resolve says nothing either way: its callers count how often it happens in a row.)
  */
 function dnsTrouble(t) {
@@ -85,8 +113,85 @@ function dnsTrouble(t) {
 }
 /** A lone host's "does not resolve" (an error message, not a rotation summary: that is judged by dnsTrouble). */
 const isDnsMiss = (text) => { const t = String(text ?? ""); return /\bENOTFOUND\b/.test(t) && !t.includes(";"); };
-/** "transient" (isTransientError), "dead" (a non-IPFS uri whose host said 404/410 or does not resolve) or "failed" (anything else). */
+// One note of a rotation summary: what one candidate did, then its host.
+const NOTE_RE = /^(\d{3}|timeout|net|ENOTFOUND|paused|budget) ([a-z0-9.-]+)$/i;
+/**
+ * The notes of a rotation summary as [tag, host] pairs, or null when `text` is not one. A stored error is cut at 200
+ * characters, so a last note cut short is left out rather than taken for a sign that this is no summary.
+ */
+function summaryNotes(text) {
+  const parts = String(text ?? "").split(/;\s*/);
+  if (parts.length < 2) return null;
+  const notes = [];
+  for (let i = 0; i < parts.length; i++) {
+    const m = parts[i].match(NOTE_RE);
+    if (m) notes.push([m[1], m[2].toLowerCase()]);
+    else if (i < parts.length - 1) return null;
+  }
+  return notes.length >= 2 ? notes : null;
+}
+// What a public gateway did when it did not look for the file: never asked (paused, budget), refused (408, 425, 429),
+// failed on the way (net: a reset, TLS, a redirect loop) or failed itself (a 5xx other than 504). A timeout or a 504
+// means it looked for a while and found nothing, which is weak evidence the file is not on the network.
+const NO_LOOK_RE = /^(?:paused|budget|net|408|425|429|50[0-35-9]|5[1-9]\d)$/;
+const deferMemo = new Map(); // summary text -> is it a deferral (a few dozen distinct texts cover thousands of rows)
+function deferralSummary(t) {
+  let v = deferMemo.get(t);
+  if (v !== undefined) return v;
+  v = false;
+  const notes = summaryNotes(t);
+  if (notes && !dnsTrouble(t)) {
+    let noLook = 0;
+    v = true;
+    for (const [tag, host] of notes) {
+      // pump's pinata serves only what pump.fun pinned, a creator's own gateway what it holds: their "no" is about them
+      if (!PUBLIC_GATEWAY_HOSTS.has(host)) continue;
+      if (NO_LOOK_RE.test(tag)) noLook++;
+      else if (tag !== "ENOTFOUND") { v = false; break; } // an answer, or it looked (a lone retired gateway says nothing)
+    }
+    if (noLook === 0) v = false;
+  }
+  if (deferMemo.size >= 4096) deferMemo.clear();
+  deferMemo.set(t, v);
+  return v;
+}
+/**
+ * Is the stored failure `text` of IPFS content `uri` a deferral rather than a failed attempt? Yes when it is a rotation
+ * summary in which no public gateway (the rotation's own, but pump's pinata) gave an answer or looked for the file: each
+ * one of them was paused, out of the budget, said 429 / 408 / 425 / a 5xx other than 504 or failed on the network (one
+ * that does not resolve is passed over), at least one of them that way; and when it is "HTTP 429" or "rate limited",
+ * what is stored when HostPacer.fetchAny answered null (every candidate paused or rate-limited) without a summary, for
+ * IPFS content (a lone host's 429 keeps the temporary rule). Never for a resolver in trouble (dnsTrouble: the temporary
+ * rule backs off). A summary needs no look at `uri`: only IPFS content has more than one candidate (gatewayCandidates),
+ * and the sweep asks this of every failed row each minute.
+ */
+export function isGatewayDeferral(uri, text) {
+  const t = String(text ?? "");
+  if (t === "HTTP 429" || t === "rate limited") return !!ipfsPathOf(uri);
+  return t.includes(";") && deferralSummary(t);
+}
+/**
+ * A fraction in [0, 1) fixed per string, so a wait computed again at every sweep stays the same: FNV-1a, then murmur3's
+ * finalizer (FNV alone spread uris that differ only in their last characters over a third of the range).
+ */
+function jitterOf(s) {
+  let h = 0x811c9dc5;
+  const t = String(s ?? "");
+  for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return (h >>> 0) / 2 ** 32;
+}
+/** Seconds a deferred row of `uri` waits: META_DEFER_S doubling up to META_DEFER_CAP deferrals (10, 20, 40 min), plus up to half of it (jitterOf). */
+export function metaDeferS(uri, attempts) {
+  const a = Math.min(META_DEFER_CAP, Math.max(1, Math.floor(attempts ?? 1)));
+  return Math.round(META_DEFER_S * 2 ** (a - 1) * (1 + jitterOf(uri) / 2));
+}
+/**
+ * "deferred" (isGatewayDeferral), "transient" (isTransientError), "dead" (a non-IPFS uri whose host said 404/410 or does
+ * not resolve) or "failed" (anything else).
+ */
 export function metaFailKind(uri, error) {
+  if (isGatewayDeferral(uri, error)) return "deferred";
   if (isTransientError(error)) return "transient";
   const t = String(error ?? "");
   if (!ipfsPathOf(uri) && (/^HTTP (?:404|410)\b/.test(t) || /\bENOTFOUND\b/.test(t))) return "dead";
@@ -95,10 +200,12 @@ export function metaFailKind(uri, error) {
 /**
  * Seconds a failed metadata row `m` of `uri` waits before the next fetch: retryAfterS(attempts), capped at
  * META_RETRY_TRANSIENT_MAX_S for a transient failure while attempts < META_DEAD_AFTER, weekly for a dead host
- * once `deadStreak` (consecutive dead failures) reached META_DEAD_AFTER.
+ * once `deadStreak` (consecutive dead failures) reached META_DEAD_AFTER, and metaDeferS for a deferral (at most an
+ * hour, whatever the count).
  */
 export function metaRetryS(uri, m) {
   const attempts = m?.attempts ?? 1, kind = metaFailKind(uri, m?.error);
+  if (kind === "deferred") return metaDeferS(uri, attempts);
   if (kind === "dead" && (m?.deadStreak ?? 0) >= META_DEAD_AFTER) return META_RETRY_DEAD_S;
   if (kind === "transient" && attempts < META_DEAD_AFTER) return Math.min(META_RETRY_TRANSIENT_MAX_S, retryAfterS(attempts));
   return retryAfterS(attempts);
@@ -107,17 +214,28 @@ export function metaRetryS(uri, m) {
 // DESIGN §7: ipfs.io, *.pinata.cloud, *.pump.fun, arweave.net, *.arweave.net, cf-ipfs.com and the
 // subdomain-style IPFS gateways (<cid>.ipfs.<gateway>). The gateway list is explicit: a substring
 // rule such as ".ipfs." would also admit a.ipfs.attacker.example, i.e. any host a stranger controls.
-// dweb.link and w3s.link (path form) answer with a redirect to their subdomain form, which is the
-// listed one; both hops pass this allowlist.
+// dweb.link and 4everland.io (path form) answer with a redirect to their subdomain form, which is the
+// listed one (4everland.io turns a CIDv0 into its base32 CIDv1 on the way); w3s.link redirects to dweb.link's
+// path form (2026-11-10). Every hop passes this allowlist and the SSRF guard (lib/net.mjs).
 export const IPFS_SUBDOMAIN_GATEWAYS = ["dweb.link", "nftstorage.link", "w3s.link", "cf-ipfs.com", "4everland.io"];
-// The rotation IPFS content is fetched through (DESIGN §11.5: ipfs.io → dweb.link →
-// gateway.pinata.cloud → w3s.link, in that order), with pump.fun's own pinata gateway in front:
+// The rotation IPFS content is fetched through (DESIGN §11.5: pump.fun's own pinata gateway → ipfs.filebase.io →
+// 4everland.io → ipfs.io → dweb.link → gateway.pinata.cloud → w3s.link, in that order). pump.fun's pinata comes first:
 // measured on 2026-10-19 it answers in 0.2 s, 200 for everything pump.fun pinned (most coins) and a
 // definitive 403 otherwise, while the three public gateways answer 429 within seconds of six
 // workers and gateway.pinata.cloud takes ~7 s to resolve a CID. cf-ipfs.com is dead and never tried,
 // whichever gateway a creator wrote into the metadata.
-export const IPFS_GATEWAYS = ["https://pump.mypinata.cloud/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://gateway.pinata.cloud/ipfs/", "https://w3s.link/ipfs/"];
+// GATEWAY_RULE 2, measured on 2026-11-10 (one request per gateway, 300 ms apart, CIDs whose metadata had failed for
+// hours): ipfs.io, dweb.link, gateway.pinata.cloud, w3s.link and nftstorage.link answered 429 on sight (dweb.link with
+// Retry-After 900), pump.mypinata.cloud 403, while ipfs.filebase.io answered 200 at once in 31-233 ms and 4everland.io
+// with a 301 to <cidv1>.ipfs.4everland.io and then 200, 160-1150 ms in all, for each of the 6 CIDs probed (CIDv0 and
+// CIDv1, the JSON with its image); through this rotation 10 more resolved, 10 of 10, all at filebase. So they come
+// right after pump's pinata, filebase first (faster, no redirect); the old public gateways
+// stay behind them (they may recover; a 429 pauses them, HostPacer). On a CID nobody has, both new ones hang until our
+// timeout (FETCH_TIMEOUT_MS) rather than answer 404: see META_DEFER_S.
+export const IPFS_GATEWAYS = ["https://pump.mypinata.cloud/ipfs/", "https://ipfs.filebase.io/ipfs/", "https://4everland.io/ipfs/", "https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://gateway.pinata.cloud/ipfs/", "https://w3s.link/ipfs/"];
 const ROTATION_HOSTS = new Set(IPFS_GATEWAYS.map((g) => new URL(g).hostname));
+// The rotation's gateways that fetch any CID from the network: all but pump's pinata, which serves only what pump.fun pinned.
+const PUBLIC_GATEWAY_HOSTS = new Set([...ROTATION_HOSTS].filter((h) => h !== "pump.mypinata.cloud"));
 const DEAD_GATEWAYS = new Set(["cf-ipfs.com"]);
 export const FETCH_TIMEOUT_MS = 10_000;  // per gateway attempt
 export const FETCH_BUDGET_MS = 25_000;   // per uri, across the whole rotation
@@ -128,6 +246,7 @@ const ALLOWED_HOSTS = [
   (h) => h === "arweave.net" || h.endsWith(".arweave.net"),
   (h) => h === "cf-ipfs.com",
   (h) => h === "dweb.link" || h === "w3s.link", // path-form entry points of the rotation (they redirect to <cid>.ipfs.<gateway>)
+  (h) => h === "ipfs.filebase.io" || h === "4everland.io", // path-form entry points added 2026-11-10 (filebase answers there, 4everland redirects to <cid>.ipfs.4everland.io)
   (h) => IPFS_SUBDOMAIN_GATEWAYS.some((g) => h.endsWith(`.ipfs.${g}`)),
 ];
 
@@ -186,6 +305,15 @@ export function isAllowedMetaUrl(u) {
   if (!host.includes(".") || host.endsWith(".local") || host.endsWith(".internal") || host === "localhost") return false;
   if (/^[\d.]+$/.test(host) || host.startsWith("[")) return false; // IPv4 / IPv6 literals
   return true;
+}
+/**
+ * A metadata uri the fetcher asks for: an allowed https URL (isAllowedMetaUrl), or IPFS content named by the ipfs://
+ * scheme, fetched through the gateway rotation (gatewayCandidates: every candidate is an https gateway URL, and each hop
+ * passes isAllowedMetaUrl and the SSRF guard). (2026-11-11) Until then an ipfs:// uri was never fetched: 295 coins had
+ * no metadata, so no logo, for that alone.
+ */
+export function isFetchableMetaUri(u) {
+  return isAllowedMetaUrl(u) || (/^\s*ipfs:\/\//i.test(String(u ?? "")) && !!ipfsPathOf(u));
 }
 
 /**
@@ -265,8 +393,10 @@ export async function readBounded(res, max) {
 
 /**
  * Per-host politeness shared by both fetchers: a minimum spacing between requests to one host and a
- * pause (doubling) after it answers 429. `fetchAny` walks the gateway candidates of a URL, asking
- * the gateway whose next free slot comes soonest first (ties keep the rotation order), and returns
+ * pause (doubling, or the host's Retry-After when longer, up to HOST_RETRY_AFTER_MAX_MS) after it answers
+ * 429. `fetchAny` walks the gateway candidates of a URL, asking
+ * the gateway whose next free slot comes soonest first (ties keep the rotation order; a slot is taken when it is
+ * chosen, so rotations running side by side keep the spacing too), and returns
  * the first OK response. A 403/404/410/5xx or a network error from one gateway moves on to the
  * next; when no gateway served, the last answer is returned (the caller records its status);
  * when every gateway errored, the last error is thrown; null means every candidate is paused or
@@ -274,8 +404,10 @@ export async function readBounded(res, max) {
  * went: `limited` (a gateway answered 429 or was paused), `transient` (that, or a 5xx, a timeout, a
  * network error, the spent budget, or names that did not resolve when all candidates or two of the
  * rotation's own gateways failed that way: a "no" from pump's pinata does not mean the public gateways
- * lack the file, and five gateways do not vanish together) and, with more than one candidate, `summary`
- * ("403 pump.mypinata.cloud; 429 ipfs.io; timeout dweb.link"), the text a caller stores as its error.
+ * lack the file, and two gateways do not vanish together) and, with more than one candidate, `summary`
+ * ("403 pump.mypinata.cloud; 429 ipfs.io; timeout dweb.link"), the text a caller stores as its error. A null
+ * answer carries none of that, so a caller that passes `out` (an object) finds `limited`, `transient` and
+ * `summary` there whenever the rotation did not serve.
  */
 export class HostPacer {
   /**
@@ -292,7 +424,7 @@ export class HostPacer {
    * host. Each gateway attempt gets its own `timeoutMs`, the whole rotation shares `budgetMs`, so a
    * slow first gateway does not eat the time of the next one and a worker is never held for long.
    */
-  async fetchAny(url, init = {}, { allow = () => true, timeoutMs = FETCH_TIMEOUT_MS, budgetMs = FETCH_BUDGET_MS } = {}) {
+  async fetchAny(url, init = {}, { allow = () => true, timeoutMs = FETCH_TIMEOUT_MS, budgetMs = FETCH_BUDGET_MS, out = null } = {}) {
     const pending = gatewayCandidates(url).map((candidate) => ({ candidate, host: new URL(candidate).hostname }));
     const deadline = Date.now() + budgetMs;
     const notes = []; // "<status|429|timeout|net|ENOTFOUND|paused|budget> <host>" per candidate, in the order they were asked
@@ -307,13 +439,21 @@ export class HostPacer {
         if (wait < bestWait) { best = i; bestWait = wait; }
       }
       if (best < 0) { limited = true; for (const p of pending) notes.push(`paused ${p.host}`); break; } // every remaining gateway is pausing
-      const { candidate, host } = pending.splice(best, 1)[0];
-      if (bestWait > 0) await this.sleep(bestWait);
+      const [next] = pending.splice(best, 1), { candidate, host } = next;
+      // The slot is taken before the wait (repair 2026-11-11): rotations running side by side (six workers, eight downloads)
+      // that chose this host see it busy and queue behind it or ask another gateway, where they all slept the same wait and
+      // fired together (10-20 requests a second to one gateway, not the 5 HOST_SPACING_MS allows).
+      this.lastAt.set(host, now + bestWait);
+      if (bestWait > 0) {
+        await this.sleep(bestWait);
+        // a rotation beside this one may have met a 429 from it meanwhile: back in line, asked only if its pause ends in time
+        if ((this.pausedUntil.get(host) ?? 0) > Date.now()) { pending.splice(best, 0, next); continue; }
+      }
       const left = deadline - Date.now();
       if (left <= 0) { lastError ??= new Error(`gateway budget of ${budgetMs} ms spent`); soft = true; for (const h of [host, ...pending.map((p) => p.host)]) notes.push(`budget ${h}`); break; }
       const timeout = AbortSignal.timeout(Math.min(timeoutMs, left));
       const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
-      this.lastAt.set(host, Date.now());
+      this.lastAt.set(host, Math.max(this.lastAt.get(host) ?? 0, Date.now())); // a later slot another rotation took stays taken
       let hit;
       try { hit = await guardedFetch(candidate, { ...init, signal }, { allow, guard: this.guard, fetchImpl: this.fetch }); }
       catch (e) {
@@ -323,7 +463,8 @@ export class HostPacer {
       }
       if (hit.res.status === 429) {
         const ms = Math.min(120_000, (this.backoff.get(host) ?? HOST_PAUSE_MS / 2) * 2);
-        this.backoff.set(host, ms); this.pausedUntil.set(host, Date.now() + ms);
+        const asked = Math.min(HOST_RETRY_AFTER_MAX_MS, retryAfterMs(hit.res.headers?.get?.("retry-after")));
+        this.backoff.set(host, ms); this.pausedUntil.set(host, Date.now() + Math.max(ms, asked));
         notes.push(`429 ${host}`); limited = true; continue;
       }
       this.backoff.delete(host);
@@ -339,11 +480,20 @@ export class HostPacer {
     // A name that does not resolve is not soft by itself (a lone dead host; its callers count the repeats), but every
     // candidate failing that way, or two of the rotation's own gateways, is our resolver: temporary (dnsTrouble).
     if (summary && dnsTrouble(summary)) soft = true;
+    if (out) Object.assign(out, { limited, transient: limited || soft, summary });
     if (last) return Object.assign(last, { limited, transient: limited || soft, summary });
     if (limited) return null;
     if (lastError) { try { Object.assign(lastError, { transient: soft, summary }); } catch { /* a frozen reason: thrown as it is */ } throw lastError; }
     return undefined;
   }
+}
+/** A Retry-After header in ms (delta seconds or an HTTP date); 0 when absent, unreadable or past. */
+function retryAfterMs(h, now = Date.now()) {
+  const s = String(h ?? "").trim();
+  if (!s) return 0;
+  if (/^\d+$/.test(s)) return Number(s) * 1000;
+  const at = Date.parse(s);
+  return Number.isFinite(at) ? Math.max(0, at - now) : 0;
 }
 /** How a failed gateway attempt is named in a rotation summary: a timeout, an unresolvable host, or any other network error. */
 function errorTag(e) {
@@ -353,15 +503,20 @@ function errorTag(e) {
 
 /**
  * Metadata fetcher: `request(uri)` enqueues (deduplicated), `concurrency` workers fetch, results
- * land in the model (and sqlite through it). API-driven requests jump the queue so a coin page
- * fills within a second. `start()` adds the background sweep (DESIGN §11.5): every tracked coin
+ * land in the model (and sqlite through it). API-driven requests jump the queue (one already waiting
+ * is lifted to its head) so a coin page fills within a second. `start()` adds the background sweep
+ * (DESIGN §11.5): every tracked coin
  * whose JSON is missing, stale or due for a retry is queued, biggest locked value first, then
  * newest, so the map's labels and logos fill from the top. Failures are stored with an attempt
  * count and retried on a doubling backoff (15 min → 24 h; metaRetryS: at most 3 h for the first
  * temporary failures, weekly for a non-IPFS host that answered 404/410 or did not resolve
  * META_DEAD_AFTER times in a row, counted in `deadStreak`); a rotation
- * whose gateways said no while others were rate-limited is requeued like a rate-limited one, and
- * stored with its per-gateway summary when that does not help. A uri that once resolved keeps its
+ * whose gateways said no while others were rate-limited, and in which no public gateway looked for the
+ * file, is requeued like a rate-limited one, and stored with its per-gateway summary when that does not
+ * help: a deferral (isGatewayDeferral: a run of them counts at most META_DEFER_CAP, asked again within the
+ * hour); one in which a public gateway looked is stored at once, a temporary failure. A uri whose last
+ * failure was a deferral is stored at once (each requeue would ask pump's
+ * pinata again, thousands of times over for a backlog). A uri that once resolved keeps its
  * image when a later re-read fails. Everything here is HTTP to gateways, never the RPC.
  */
 export class MetaFetcher {
@@ -370,8 +525,8 @@ export class MetaFetcher {
     this.pacer = pacer ?? new HostPacer({ fetchImpl });
     this.concurrency = concurrency; this.active = 0;
     this.queue = []; this.head = 0; this.queued = new Set(); this.inFlight = new Set(); this.attempts = new Map();
-    this.recheck = new Set();       // uris due once more whatever their age (META_IMAGE_RULE); each leaves when fetched
-    this.stats = { fetched: 0, failed: 0, failedTransient: 0, rateLimited: 0, sweeps: 0 };
+    this.recheck = new Set();       // uris due once more whatever their age (META_IMAGE_RULE, GATEWAY_RULE); each leaves when fetched
+    this.stats = { fetched: 0, failed: 0, failedTransient: 0, deferred: 0, rateLimited: 0, sweeps: 0 };
     this.stopped = false; this.timer = null; this.coverageCache = null;
   }
   /** Uris waiting in the queue plus the ones being fetched right now. */
@@ -384,7 +539,14 @@ export class MetaFetcher {
     return age > metaRetryS(uri, m);
   }
   request(uri, { front = false } = {}) {
-    if (typeof uri !== "string" || !isAllowedMetaUrl(uri) || this.queued.has(uri) || this.inFlight.has(uri) || !this.needsFetch(uri)) return;
+    if (typeof uri !== "string" || this.inFlight.has(uri)) return;
+    if (this.queued.has(uri)) {
+      // waiting already (a sweep or a plain request put it at the back): an urgent ask (a coin page, a young coin) lifts it
+      // to the head (repair 2026-11-11: behind a restart's backlog of thousands of due retries it waited minutes)
+      if (front) { const i = this.queue.indexOf(uri, this.head); if (i > this.head) { this.queue.splice(i, 1); this.queue.splice(this.head, 0, uri); } }
+      return;
+    }
+    if (!isFetchableMetaUri(uri) || !this.needsFetch(uri)) return;
     this.queued.add(uri);
     if (front) this.queue.splice(this.head, 0, uri); else this.queue.push(uri);
     this.#pump();
@@ -401,13 +563,13 @@ export class MetaFetcher {
     for (const c of this.model.coins.values()) {
       if (!c.tracked) continue;
       const uri = this.model.mints?.get(c.mint)?.uri;
-      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isAllowedMetaUrl(uri) || !this.needsFetch(uri, nowS)) continue;
+      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isFetchableMetaUri(uri) || !this.needsFetch(uri, nowS)) continue;
       cands.push({ uri, locked: d.get(c.mint)?.lockedUsd ?? -1, at: c.createdAt ?? 0 });
     }
     // The listed quote assets the map draws at the top of their families (PUMP, USDC, $baton…) need logos too.
     for (const mint of typeof this.model.assetFamilies === "function" ? this.model.assetFamilies().keys() : []) {
       const uri = this.model.mints?.get(mint)?.uri;
-      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isAllowedMetaUrl(uri) || !this.needsFetch(uri, nowS)) continue;
+      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isFetchableMetaUri(uri) || !this.needsFetch(uri, nowS)) continue;
       cands.push({ uri, locked: Number.MAX_SAFE_INTEGER, at: 0 });
     }
     cands.sort((a, b) => b.locked - a.locked || b.at - a.at);
@@ -434,9 +596,37 @@ export class MetaFetcher {
     db.kvSet("metaImageRule", META_IMAGE_RULE);
     return n;
   }
-  /** Starts the periodic sweep (the first one runs at once, after the one-time image re-check is queued). */
+  /**
+   * One-time re-check after the gateway rotation grew (GATEWAY_RULE): every failed row of IPFS content whose error is
+   * temporary (isTransientError: a rate limit, a pause, a timeout ... under the old rotation, deferrals included) becomes
+   * due at once, in the sweep's usual order, whatever its backoff; a definitive "no" from every gateway keeps its wait.
+   * The old rule counted every rotation in which no public gateway looked as a failed attempt (up to 8 on 2026-11-10):
+   * a row whose error is such a deferral keeps at most META_DEFER_CAP of that count (persisted), so the next real answer
+   * climbs the backoff from there (2 h), not from a day; afterwards a deferral never lowers a count (MetaFetcher fail).
+   * Gated by a kv record like queueImageRecheck. Returns how many uris were queued.
+   */
+  queueGatewayRecheck() {
+    const db = this.model.db;
+    if (typeof db?.kvGet !== "function" || typeof db?.kvSet !== "function") return 0;
+    if (Number(db.kvGet("metaGatewayRule", 1)) >= GATEWAY_RULE) return 0;
+    let n = 0;
+    const inflated = [];
+    for (const [uri, m] of this.model.meta ?? []) {
+      if (!m || m.ok || !ipfsPathOf(uri) || !isTransientError(m.error)) continue;
+      this.recheck.add(uri); n++;
+      if ((m.attempts ?? 0) > META_DEFER_CAP && isGatewayDeferral(uri, m.error)) inflated.push(uri);
+    }
+    const cap = () => { for (const uri of inflated) this.model.setMeta(uri, { ...this.model.meta.get(uri), attempts: META_DEFER_CAP }); };
+    if (inflated.length && typeof this.model.setMeta === "function") { if (typeof db.transaction === "function") db.transaction(cap); else cap(); }
+    this.log.info?.(`meta: gateway recheck queued ${n}`);
+    if (inflated.length) this.log.info?.(`meta: gateway rule ${GATEWAY_RULE}: ${inflated.length} retry counts of rotations no public gateway looked at brought down to ${META_DEFER_CAP}`);
+    db.kvSet("metaGatewayRule", GATEWAY_RULE);
+    return n;
+  }
+  /** Starts the periodic sweep (the first one runs at once, after the one-time re-checks are queued). */
   start({ sweepMs = this.sweepMs } = {}) {
     try { this.queueImageRecheck(); } catch (e) { this.log.warn?.(`meta: image recheck failed: ${e.message}`); }
+    try { this.queueGatewayRecheck(); } catch (e) { this.log.warn?.(`meta: gateway recheck failed: ${e.message}`); }
     try { this.sweep(); } catch (e) { this.log.warn?.(`meta: sweep failed: ${e.message}`); }
     this.timer = setInterval(() => { try { this.sweep(); } catch (e) { this.log.warn?.(`meta: sweep failed: ${e.message}`); } }, sweepMs);
     this.timer.unref?.();
@@ -478,15 +668,18 @@ export class MetaFetcher {
   async #fetchOne(uri) {
     const fetchedAt = Math.floor(this.now() / 1000);
     const fail = (error) => {
-      const prev = this.model.meta.get(uri);
-      const attempts = (prev?.attempts ?? 0) + 1;
+      const prev = this.model.meta.get(uri), kind = metaFailKind(uri, error), had = prev?.attempts ?? 0;
+      // a deferral (no public gateway looked) is no failed attempt: a run of them counts up to META_DEFER_CAP, so it waits
+      // minutes (metaDeferS), and it never takes back what real failures counted (bringing an unpinned CID's timeouts down
+      // to the cap would restart its climb at 2 h); counts the old rule inflated are capped at boot
+      const attempts = kind === "deferred" ? Math.max(had, Math.min(had + 1, META_DEFER_CAP)) : had + 1;
       // consecutive "dead" answers (404/410, does not resolve): the weekly wait needs META_DEAD_AFTER of them in a row
-      const deadStreak = metaFailKind(uri, error) === "dead" ? (prev?.deadStreak ?? 0) + 1 : 0;
+      const deadStreak = kind === "dead" ? (prev?.deadStreak ?? 0) + 1 : 0;
       // A uri that resolved before keeps what it had (the logo stays on the map); only a uri that
       // never resolved is stored empty. Either way the attempt count drives the next retry.
       if (prev?.ok) this.model.setMeta(uri, { ...prev, fetchedAt, error, attempts, deadStreak });
       else this.model.setMeta(uri, { image: null, description: null, twitter: null, telegram: null, website: null, fetchedAt, ok: false, error, attempts, deadStreak });
-      this.stats.failed++; if (isTransientError(error)) this.stats.failedTransient++;
+      this.stats.failed++; if (isTransientError(error)) this.stats.failedTransient++; if (kind === "deferred") this.stats.deferred++;
       this.attempts.delete(uri); this.recheck.delete(uri);
     };
     // Our own metadata host: the file is on disk, so no request (this machine may not even reach the domain).
@@ -500,15 +693,22 @@ export class MetaFetcher {
       } catch { /* unreadable locally: fall through to the network */ }
     }
     try {
-      const hit = await this.pacer.fetchAny(uri, { headers: { accept: "application/json" } }, { allow: isAllowedMetaUrl });
+      const out = {};
+      const hit = await this.pacer.fetchAny(uri, { headers: { accept: "application/json" } }, { allow: isAllowedMetaUrl, out });
       if (hit === null || (hit && !hit.res?.ok && hit.limited)) {
         // Every gateway is pausing, or the ones that answered said no while others were rate-limited (pump's
         // pinata answers 403 for whatever it did not pin; the public gateways may well hold it): retry later,
-        // at the back of the queue, a few times, then store the rotation's summary as a temporary failure.
+        // at the back of the queue, a few times, then store the rotation's summary: a deferral when no public
+        // gateway looked, else a temporary failure. Only a rotation nobody looked in is requeued: a public gateway
+        // that timed out or answered has looked, and asked again 10 s later on a CID nobody has it would hold a
+        // worker ~20 s per rotation, four rotations per stored failure. A uri whose last failure was a
+        // deferral is stored at once.
         this.stats.rateLimited++;
+        const prev = this.model.meta.get(uri), summary = hit?.summary ?? out.summary;
         const n = (this.attempts.get(uri) ?? 0) + 1; this.attempts.set(uri, n);
-        if (n <= 3) { setTimeout(() => { if (!this.stopped && !this.queued.has(uri) && !this.inFlight.has(uri)) { this.queued.add(uri); this.queue.push(uri); this.#pump(); } }, HOST_PAUSE_MS).unref(); return; }
-        return fail(hit?.summary ? hit.summary.slice(0, 200) : "HTTP 429");
+        const unlooked = summary ? isGatewayDeferral(uri, summary) : hit === null;
+        if (n <= 3 && unlooked && !(prev && !prev.ok && metaFailKind(uri, prev.error) === "deferred")) { setTimeout(() => { if (!this.stopped && !this.queued.has(uri) && !this.inFlight.has(uri)) { this.queued.add(uri); this.queue.push(uri); this.#pump(); } }, HOST_PAUSE_MS).unref(); return; }
+        return fail(summary ? summary.slice(0, 200) : "HTTP 429");
       }
       if (!hit?.res?.ok) throw Object.assign(new Error(`HTTP ${hit?.res?.status ?? "?"}`), { summary: hit?.summary ?? null });
       const body = await readBounded(hit.res, META_MAX_BYTES);
@@ -571,12 +771,16 @@ export const SHEET_CELL = 64;
  * with a lone host's "does not resolve" a temporary run of its own. A permanent failure counts apart
  * (`goneAttempts`, repair 2026-11-10): the permanent failures since the last success, which a temporary one in
  * between does not reset, so a url that alternates 404 and 502 still reaches the weekly wait (counted per run it
- * was asked ~330 times a week); three temporary failures and then a 404 are still a first 404 (an hour).
+ * was asked ~330 times a week); three temporary failures and then a 404 are still a first 404 (an hour). A
+ * temporary failure that is a deferral (isGatewayDeferral: no public gateway looked for the file, 2026-11-10)
+ * counts up to IMG_DEFER_CAP in a run of them and never takes back what real failures counted (2026-11-11), and it
+ * waits by the capped count: minutes (1, 2, 4, then 8, plus up to half of that as a jitter fixed per url), never the day.
  */
 export const IMG_TEMP_RETRY_MS = 60_000;
 export const IMG_TEMP_RETRY_MAX_MS = 3600_000;
 export const IMG_TEMP_SHORT_TRIES = 6;
 export const IMG_TEMP_LONG_MAX_MS = 24 * 3600_000;
+export const IMG_DEFER_CAP = 4;
 export const IMG_DNS_GONE_AFTER = 3;
 export const IMG_DNS_RETRY_MS = 15 * 60_000;
 export const IMG_GONE_RETRY_MS = [3600_000, 24 * 3600_000, 7 * 24 * 3600_000];
@@ -589,6 +793,8 @@ export const IMG_RETRY_AFTER_MAX_S = 300;
 export const IMG_FAIL_FORGET_MS = 30 * 24 * 3600_000;
 /** What the thumbnail renderer can draw; "nothumb" rows recorded under an older rule are retried at boot (2: an animated webp gives its first frame). */
 export const THUMB_RULE = 2;
+/** The image worker died this many times in a row rendering one logo: it is recorded as one that cannot be drawn ("nothumb"). */
+export const THUMB_CRASHES_MAX = 2;
 /** First sight (enqueueThumb): at most this many urls wait (the warm pass catches the rest), this many are worked at a time. */
 export const FRESH_MAX = 20_000;
 export const FRESH_CONCURRENCY = 2;
@@ -736,6 +942,7 @@ export class ImageCache {
     this.fresh = new Set(); this.freshBusy = new Set(); this.freshActive = 0; this.freshConcurrency = freshConcurrency; this.freshMax = freshMax; this.closed = false;
     this.stats = { hits: 0, misses: 0, failed: 0, failedTemp: 0, failedGone: 0, staleServed: 0, evicted: 0, bytes: 0, thumbs: 0, thumbHits: 0, thumbFailed: 0, noThumb: 0, thumbBytes: 0, thumbsEvicted: 0, sheets: 0, sheetCells: 0, sheetPending: 0, sheetDead: 0, sheetMs: 0, bgDownloads: 0, freshQueued: 0, freshDropped: 0, freshMade: 0, freshFull: 0, freshEvicted: 0, warmFull: 0 };
     this.thumbInFlight = new Map(); // `${w}:${url}` → { promise, job } of a render
+    this.renderCrashes = new Map(); // url → renders of it the image worker died under, in a row (THUMB_CRASHES_MAX)
     this.#measure();
     this.#loadFails();
   }
@@ -761,6 +968,16 @@ export class ImageCache {
     try {
       // a renderer that learned to draw more (THUMB_RULE) tries again the logos it could not draw before
       if (typeof this.store.kvGet === "function" && Number(this.store.kvGet("imgThumbRule", 1)) < THUMB_RULE) { this.store.imgFailDropKind?.("nothumb"); this.store.kvSet?.("imgThumbRule", THUMB_RULE); }
+      // a rotation that gained gateways (GATEWAY_RULE) tries again, once, the IPFS images the old one failed temporarily
+      // or with a per-gateway summary (the old gateways' "no" is not the new ones'): the next ask or the warm pass fetches
+      // them; what is about the bytes (not an image, too large, cannot be drawn) stays
+      if (typeof this.store.kvGet === "function" && Number(this.store.kvGet("imgGatewayRule", 1)) < GATEWAY_RULE) {
+        const drop = this.store.imgFailAll().filter((f) => ipfsPathOf(f.url) && (f.kind === "temp" || (f.kind === "gone" && summaryNotes(f.error))));
+        const forget = () => { for (const f of drop) this.store.imgFailDelete(f.url); };
+        if (typeof this.store.transaction === "function") this.store.transaction(forget); else forget();
+        this.store.kvSet?.("imgGatewayRule", GATEWAY_RULE);
+        this.log.info?.(`img: gateway rule ${GATEWAY_RULE}: ${drop.length} IPFS failures of the old rotation forgotten`);
+      }
       for (const f of this.store.imgFailAll()) this.fails.set(f.url, f);
     } catch (e) { this.log.warn?.(`img: cannot read the failure memory: ${e?.message ?? e}`); }
   }
@@ -780,10 +997,13 @@ export class ImageCache {
     const prevGone = prev ? (prev.kind === "gone" ? prev.attempts : (prev.goneAttempts ?? 0)) : 0;
     // the others count consecutive failures of one run (failRun): three temporary failures and then a 404 is a first 404 (an
     // hour), not a fourth failure (a week); "cannot be drawn" is about the bytes, not the download, so it counts apart too
-    const run = failRun(kind, text);
-    const attempts = kind === "gone" ? prevGone + 1 : (prev && failRun(prev.kind, prev.error) === run ? prev.attempts : 0) + 1;
+    const run = failRun(kind, text), had = prev && failRun(prev.kind, prev.error) === run ? prev.attempts : 0;
+    // a deferral (no public gateway looked: isGatewayDeferral) is no failed attempt: a run of them counts up to IMG_DEFER_CAP
+    // and never takes back what real failures of its run counted; it waits by the capped count
+    const deferred = kind === "temp" && isGatewayDeferral(url, text);
+    const attempts = kind === "gone" ? prevGone + 1 : deferred ? Math.max(had, Math.min(had + 1, IMG_DEFER_CAP)) : had + 1;
     // a lone host's "does not resolve" waits at least IMG_DNS_RETRY_MS, doubling: a short local DNS outage is not three misses
-    const wait = kind === "temp" ? (run === "dns" ? Math.max(imgTempWaitMs(attempts), IMG_DNS_RETRY_MS * 2 ** (attempts - 1)) : imgTempWaitMs(attempts))
+    const wait = kind === "temp" ? (run === "dns" ? Math.max(imgTempWaitMs(attempts), IMG_DNS_RETRY_MS * 2 ** (attempts - 1)) : deferred ? Math.round(imgTempWaitMs(Math.min(attempts, IMG_DEFER_CAP)) * (1 + jitterOf(url) / 2)) : imgTempWaitMs(attempts))
       : kind === "nothumb" ? IMG_NOTHUMB_RETRY_MS : IMG_GONE_RETRY_MS[Math.min(attempts, IMG_GONE_RETRY_MS.length) - 1];
     const f = { url, kind, error: text, attempts, goneAttempts: kind === "gone" ? attempts : prevGone, at: now, retryAt: now + wait };
     this.fails.set(url, f);
@@ -935,9 +1155,10 @@ export class ImageCache {
     try {
       if (ticket.bg) this.stats.bgDownloads++;
       let hit;
-      try { hit = await this.pacer.fetchAny(url, {}, { allow: isAllowedImageUrl, timeoutMs: 15_000, budgetMs: 30_000 }); }
+      const out = {};
+      try { hit = await this.pacer.fetchAny(url, {}, { allow: isAllowedImageUrl, timeoutMs: 15_000, budgetMs: 30_000, out }); }
       catch (e) { throw failure(thrownKind(e), e?.summary || e?.message || String(e)); }
-      if (hit === null) throw failure("temp", "rate limited");
+      if (hit === null) throw failure("temp", out.summary ?? "rate limited");
       if (!hit) throw failure("gone", "no candidate");
       const { res } = hit;
       // a 429 elsewhere in the rotation, a 5xx or a timeout make a "no" temporary; a definitive 4xx everywhere is not
@@ -988,9 +1209,13 @@ export class ImageCache {
     if (!hit) return null;
     try { const bytes = readFileSync(hit.file); this.stats.thumbHits++; this.#served(hit.file); return bytes; } catch { this.#forgetThumb(hit.file); return null; }
   }
-  /** Known not to yield a w px thumbnail for a while: no url, a permanent download failure, or a logo that could not be drawn (failureOf). A temporary failure is not dead: it is pending. */
+  /**
+   * Known not to yield a w px thumbnail for a while: no url, one the proxy will not fetch, a permanent download failure,
+   * or a logo that could not be drawn (failureOf). A temporary failure is not dead: it is pending; nor is a url with no
+   * failure recorded.
+   */
   isDead(url) {
-    if (!url) return true;
+    if (!url || !isAllowedImageUrl(url)) return true;
     const f = this.failureOf(url);
     return !!f && f.kind !== "temp";
   }
@@ -1021,12 +1246,22 @@ export class ImageCache {
         writeFileSync(tmp, png); renameSync(tmp, out);
         this.#indexThumb(out, png.length); this.stats.thumbs++;
         this.#clearFail(url, ["nothumb"]);
+        this.renderCrashes.delete(url);
         this.#evictThumbs();
         return { file: out, type: "image/png", thumb: w };
       } catch (e) {
         this.stats.thumbFailed++;
         // a worker crash is not the image's fault, nor an original evicted while the job waited: the next ask renders again
-        if (!e?.transient && e?.code !== "ENOENT") this.#fail(url, "nothumb", e);
+        // (a pending sheet cell). Renders run one at a time, so the worker dying THUMB_CRASHES_MAX times in a row on the
+        // same logo is taken as the logo's doing: "cannot be drawn" (a dead cell); asked again within seconds now that the
+        // cell is pending, it would otherwise take the worker down at every ask, and five restarts render inline for good
+        if (e?.code === "ENOENT") return null;
+        if (e?.transient) {
+          const n = (this.renderCrashes.get(url) ?? 0) + 1;
+          if (n < THUMB_CRASHES_MAX) { this.renderCrashes.set(url, n); return null; }
+        }
+        this.renderCrashes.delete(url);
+        this.#fail(url, "nothumb", e);
         return null;
       }
     } };
@@ -1155,7 +1390,7 @@ export class ImageCache {
    * jobs start and the
    * sheet waits for them at most `budgetMs` from the call (`waitMs` when nothing at all landed by then): whatever landed is present, the others are
    * pending (neither bit) and keep running, so the client's next ask finds them on disk; a job that failed
-   * temporarily stays pending too. Composition runs
+   * temporarily stays pending too, and so does one that ended with no failure recorded. Composition runs
    * on the image worker; a thumbnail file that will not decode is dropped and re-made next time.
    */
   async sheet(urls, w = SHEET_CELL, { budgetMs = SHEET_BUDGET_MS, waitMs = SHEET_WAIT_MS, format = "webp" } = {}) {
@@ -1194,7 +1429,10 @@ export class ImageCache {
       if (waitMs > budgetMs && !landed() && started.some(({ job }) => !job.settled)) await waitUntil(waitMs);
       for (const { i, job } of started) {
         if (!job.settled) continue;
-        if (job.value) { files[i] = job.value.file; present[i] = 1; } else if (!this.isPending(urls[i])) dead[i] = 1;
+        // (repair 2026-11-10) no thumbnail is dead only when a failure says so (isDead): a job that ended with nothing
+        // recorded (the image worker crashed, the original was evicted under the render: both transient) is pending like
+        // a temporary failure, where it was dead and the browser refused the logo for 15 min and more
+        if (job.value) { files[i] = job.value.file; present[i] = 1; } else if (this.isDead(urls[i])) dead[i] = 1;
       }
     }
     const cells = await Promise.all(files.map(async (f, i) => { if (!f) return null; try { return await readFile(f); } catch { present[i] = 0; this.#forgetThumb(f); return null; } }));
@@ -1305,7 +1543,12 @@ export class ImageCache {
       res.setHeader("x-sheet-cell", String(w));
       res.setHeader("x-sheet-pending", String(r.pending));
       res.setHeader("x-content-type-options", "nosniff");
-      res.setHeader("cache-control", r.pending ? "no-store" : "private, max-age=600");
+      // a pending cell is asked again soon: not stored. A sheet of logos only is kept 10 min. A dead cell is the part of an
+      // answer that can turn on the server within those 10 min (a mint whose image url is still on its way with its
+      // metadata; a permanent failure whose first wait is an hour; failures a new gateway rule forgot), while the browser
+      // keeps its own dead timer (15 min and more) within a page, so such a sheet is kept a minute: a reload sees the
+      // fresh verdict, a burst of reloads is still absorbed.
+      res.setHeader("cache-control", r.pending ? "no-store" : r.dead.includes(1) ? "private, max-age=60" : "private, max-age=600");
       res.setHeader("access-control-expose-headers", "x-sheet, x-sheet-dead, x-sheet-n, x-sheet-pending");
       res.setHeader("content-length", String(r.bytes.length));
       res.end(r.bytes);

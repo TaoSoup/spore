@@ -81,7 +81,8 @@ test("3 mints present / dead / pending: webp 1024 x 64, bitmaps, pending count, 
     assert.ok(cellOf(d, 1).every((v) => v === 0) && cellOf(d, 2).every((v) => v === 0), "dead and pending cells are fully transparent");
     await sleep(1200); // C's download and render finish meanwhile
     const again = await sheet(`w=64&m=${A},${B},${C}`);
-    assert.equal(again.bits, "05"); assert.equal(again.dead, "02"); assert.equal(again.pending, "0"); assert.equal(again.cc, "private, max-age=600");
+    // B (no image url) is a dead cell: such a sheet is kept a minute (2026-11-10), one of logos only 10 min (the fast path below)
+    assert.equal(again.bits, "05"); assert.equal(again.dead, "02"); assert.equal(again.pending, "0"); assert.equal(again.cc, "private, max-age=60");
     assert.equal(cache.stats.sheets, 3); assert.equal(cache.stats.sheetCells, 9); assert.ok(cache.stats.sheetMs >= 0);
   } finally { await close(); done(); }
 });
