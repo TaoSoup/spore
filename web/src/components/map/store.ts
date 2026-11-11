@@ -12,8 +12,10 @@
 // them together with the indices they belong to.
 import { packSiblings } from "d3";
 import { count as fmtCount } from "../../lib/format";
+import type { HeatIndex } from "../../lib/map/heat";
 import { placeChild } from "../../lib/map/place";
 import type { BubbleNode } from "../../lib/map/types";
+import { coinClass } from "../../lib/map/visibility";
 export { valueOf } from "../../lib/map/sizing";
 
 // Depth palette: root lime, d1 mint, d2 violet, d3+ amber. Same order as the DepthBadge so a colour
@@ -24,7 +26,55 @@ export const colorIdx = (depth: number) => Math.min(depth, COLORS.length - 1);
 /// tint passes colour-blind checks); the active tree is drawn lime instead.
 export const HULL = "#a8c4b0";
 /// F_MATCH is meaningful only while the draw state's `highlight` is on; F_MIG = graduated (PumpSwap).
-export const F_OURS = 1, F_ANC = 2, F_FOCUS = 4, F_FIXED = 8, F_MATCH = 16, F_MIG = 32;
+/// The Key's last-trade filter (lib/map/visibility.ts, BubbleMap `visible`): F_HIDDEN = not drawn, not picked, no label,
+/// no link to its parent, no trade fx (its spot is kept); F_ANCHOR = drawn dim as the ancestor of a shown coin (not the
+/// coin page's F_ANC). Neither is ever set while the filter is off.
+export const F_OURS = 1, F_ANC = 2, F_FOCUS = 4, F_FIXED = 8, F_MATCH = 16, F_MIG = 32, F_HIDDEN = 64, F_ANCHOR = 128;
+/// (the Key's last-trade filter, live) Coin i is shown from now on although the last levels hid it or drew it as an anchor
+/// (a trade while the 30 min bucket is on, a newborn, a class the page's 2 s old levels have not caught up with): its
+/// F_HIDDEN / F_ANCHOR go and every hidden ancestor up its parent chain (to the family top) becomes an F_ANCHOR, so a shown
+/// coin never floats without its lineage. O(depth), bounded against a parent cycle; `cnt` (the draw state's hidden and
+/// anchor counts) follows. Returns whether any bit changed.
+export function revealUp(flags: Uint8Array, parent: Int32Array, i: number, cnt: LevelCounts): boolean {
+  let changed = false;
+  const f = flags[i];
+  if (f & F_HIDDEN) { cnt.hidden--; changed = true; } else if (f & F_ANCHOR) { cnt.anchors--; changed = true; }
+  flags[i] = f & ~(F_HIDDEN | F_ANCHOR);
+  for (let p = parent[i], g = 0; p >= 0 && p !== i && g < 64; p = parent[p], g++) {
+    const fp = flags[p];
+    if (fp & F_HIDDEN) { flags[p] = (fp & ~F_HIDDEN) | F_ANCHOR; cnt.hidden--; cnt.anchors++; changed = true; }
+  }
+  return changed;
+}
+/// The draw state's counts of the two filter bits (draw.ts State.hidden / anchors).
+export type LevelCounts = { hidden: number; anchors: number };
+/// A trade on coin i: it is filed under 30 min at once, so while that bucket is on (bit 0 of `mask`) a coin the levels hide
+/// or anchor is shown now with its lineage (revealUp). Nothing to do for a coin already shown or with that bucket off.
+export const revealOnTrade = (flags: Uint8Array, parent: Int32Array, i: number, mask: number, cnt: LevelCounts): boolean =>
+  (flags[i] & (F_HIDDEN | F_ANCHOR)) !== 0 && (mask & 1) !== 0 && revealUp(flags, parent, i, cnt);
+/// Every node's two filter bits from the page's levels (`visible`, lib/map/visibility.ts visibleLevels: absent = hidden;
+/// null = the filter is off, every bit cleared), `pinned` always shown. The levels are up to 2 s old (the page throttles
+/// them): a coin they hide or anchor whose LIVE class (`heat`, coinClass: a trade since, a newborn) is in `mask` is shown
+/// with its lineage, so a stale map never hides what the trade stream or a birth just showed. O(n) plus O(depth) per such
+/// coin; `cnt` gets the counts.
+export function applyLevels(st: Pick<MapStore, "n" | "ids" | "data" | "flags" | "parent">, visible: ReadonlyMap<string, "shown" | "anchor"> | null, pinned: readonly string[], mask: number, heat: HeatIndex | null, cnt: LevelCounts) {
+  const f = st.flags, ids = st.ids, data = st.data;
+  const pin = visible && pinned.length ? new Set(pinned) : null;
+  const late: number[] = [];
+  let hidden = 0, anchors = 0;
+  for (let i = 0; i < st.n; i++) {
+    let bits = 0;
+    if (visible) {
+      const m = ids[i];
+      const lv = pin?.has(m) ? "shown" : visible.get(m);
+      if (lv !== "shown" && heat && (mask >> coinClass(data[i], heat)) & 1) late.push(i);
+      else if (lv === undefined) { bits = F_HIDDEN; hidden++; } else if (lv === "anchor") { bits = F_ANCHOR; anchors++; }
+    }
+    f[i] = (f[i] & ~(F_HIDDEN | F_ANCHOR)) | bits;
+  }
+  cnt.hidden = hidden; cnt.anchors = anchors;
+  for (const i of late) revealUp(f, st.parent, i, cnt); // after the pass: an ancestor later in it may have been hidden
+}
 /// Hull glows only for this many clusters (the largest); the rest are drawn without a blob.
 export const BIG_CLUSTERS = 60;
 /// Clusters with fewer members than this get no title at overview zoom.

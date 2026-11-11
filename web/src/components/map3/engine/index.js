@@ -3,7 +3,8 @@
 // mountEngine(container, opts) builds the map inside a div the app owns:
 //   layers (in this order): div.m3-stage > canvas.m3-canvas (WebGL2), canvas.m3-leaders, div.m3-labels, div.m3-tip
 //   build (one macrotask between steps; the abort signal is checked after every await):
-//     ingest -> layout + placeDust (+ applyMoved: the coins this mount's viewer dragged keep their place) -> scene -> bubbles
+//     ingest (+ vis.js createVis: the Key's last-trade filter, opts.last) -> layout + placeDust (+ applyMoved: the coins this
+//     mount's viewer dragged keep their place) -> scene -> bubbles
 //     -> links -> dust -> swarm (family-all: material + family texture; the slots come after the first frame) -> labels (font
 //     race <= 1.5 s) -> focus -> motion -> labels.ready() -> motion.start() -> the first rendered frame (callbacks.onFirstFrame,
 //     then the promise resolves)
@@ -27,6 +28,7 @@ import { buildLabels } from "./labels.js";
 import { buildMotion, applyMoved } from "./motion.js";
 import { buildFocus } from "./focus.js";
 import { buildSwarm, DUST0 } from "./swarm.js";
+import { createVis } from "./vis.js";
 
 export { EngineError };
 
@@ -79,7 +81,7 @@ export function engineCounters() { return { live: counters.live, created: counte
 const HEAVY = ["heat", "heatIdx", "sym", "img", "mint", "mintIdx", "par", "gen", "famOf", "kids", "mc", "val", "age", "n24", "crt",
   "fams", "ranked", "planets", "dust", "R", "X", "Y", "TH", "NR", "notable", "planetHulls", "worldGrid", "drag", "api", "engineDebug",
   "gl", "layers", "container", "images", "callbacks", "opts", "debugFns", "gfx", "overview", "bubbles", "links", "labels", "motion", "rad",
-  "swarm"];
+  "swarm", "vis", "seed", "whole"];
 
 export async function mountEngine(container, opts) {
   if (!container || !opts) throw new EngineError("build", "mountEngine needs a container and options");
@@ -144,6 +146,9 @@ export async function mountEngine(container, opts) {
     let tStep = performance.now();
     const mark = (key) => { const n = performance.now(); tm[key] = Math.round(n - tStep); tStep = n; };
     ingest(S, opts); mark("ingestMs");
+    // (the Key's last-trade filter) the levels before anything is built (opts.last): the first frame of a mount or a rebuild
+    // draws exactly what the Key shows, never everything for a frame
+    S.vis = createVis(S, opts.last && typeof opts.last === "object" ? opts.last : null);
     await step(nextTask(), "ingest");
     const pause = () => step(nextTask(), where);
     where = "layout"; await buildLayout(S, pause); mark("layoutStepMs");
@@ -227,6 +232,10 @@ export async function mountEngine(container, opts) {
     selected: guard(() => api.selected(), null),
     hover: guard((m) => api.hover(m)),
     setHighlight: guard((t) => api.setHighlight(t)),
+    // (the Key's last-trade filter, 2026-11-10) see index.d.ts
+    setLastFilter: guard((mask, pinned) => api.setLastFilter(mask, pinned), { shown: 0, anchors: 0, hidden: 0 }),
+    visibility: guard((m) => api.visibility(m), null),
+    lastFilterStats: guard(() => api.lastFilterStats(), { mask: 15, shown: 0, anchors: 0, hidden: 0, byClass: [0, 0, 0, 0] }),
     setHeat: guard((h) => api.setHeat(h)),
     applyEvent: guard((e) => api.applyEvent(e)),
     // a node patch carries `image` when the coin's URL changed: the market cap goes to motion, the URL to the bubbles
@@ -244,6 +253,10 @@ export async function mountEngine(container, opts) {
     swarmFamilies: guard(() => (S.swarm ? S.swarm.families() : []), []),
     topOf: guard((m) => api.topOf(m), null),
     focusedFamily: guard(() => api.focusedFamily(), null),
+    // (compact layout, 2026-11-10) a build made from the Key's filtered set: live reveals, drift, the view's family
+    reveal: guard((m, why) => api.reveal(m, why), "off"),
+    driftStats: guard((wanted) => api.driftStats(wanted), { filtered: false, built: 0, hidden: 0, revealed: 0, missed: 0, full: false, select: false }),
+    viewFamily: guard(() => api.viewFamily(), null),
     familyOrder: guard(() => api.familyOrder(), []),
     camera: guard(() => api.camera(), { x: 0, y: 0, k: 1, k0: 1 }),
     zoom: guard(() => api.zoom(), 1),

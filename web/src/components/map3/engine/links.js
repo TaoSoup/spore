@@ -1,5 +1,5 @@
 // (map3 port) Copied from the prototype. Changed: d3's line/curveBundle come from the app's "d3" package; reduced motion
-// comes from S.motion.reduced only (no media query, no URL); a highlight mask (setHl): a link dims to TOK.dim when its
+// comes from S.motion.reduced only (no media query, no URL); a highlight mask (setVis): a link dims to TOK.dim when its
 // CHILD does not match (160 ms crossfade, the mask rides in the offset texture's free 4th channel); the debug functions
 // go to S.debugFns; every mesh, geometry, material and DataTexture is disposed with the engine.
 // links.js: parent -> child links as HAIRLINE bundled splines, the generation arcs, the (retired) hull ring, and every
@@ -38,7 +38,10 @@
 //                                        zoom (160 ms fade). Expected caller: motion's select(i).
 //     follow(list?, n?), setPositions(list, n)   (r2) optional: "these coins moved, S.X/S.Y hold their new positions";
 //                                        forces an offset sync now. Without calls, links diff S.X/S.Y every frame by itself.
-//     addBornLink(parent, x, y, r) -> id (r2) the link of a newborn that got no spark (reduced motion); -1 if refused
+//     addBornLink(parent, x, y, r, ci?, o?) -> id (r2) the link of a newborn that got no spark (reduced motion); -1 if refused.
+//                                  (compact layout) o.from {x, y, r, gen}: it starts at a coin added live (parent = its nearest
+//                                  built ancestor); o.ageS: the child's age (its heat class at once). setBornAge(ci, ageS)
+//                                  re-dates the link of coin ci (a trade, a heat poll). 512 born links in a compact build.
 //     linkPolyline(c) -> Float32Array|null   world points [x0,y0,...] from the child rim to the parent rim (current positions)
 //     genArcInfo(famId) -> [{gen, r, spans}] generation arcs of a family: r in world u, spans = [[a0, a1], ...]
 //                                        in radians, world frame (0 = east, counter-clockwise, y up; 12 o'clock =
@@ -68,11 +71,16 @@
 //          S.debugFns.linkHdr({pulses})    renders only this lane's layers: pixels > 1.0 (only pulse heads may)
 //          S.debugFns.linkVisible(thr)     (r2) links on screen whose alpha >= thr (default 0.02), by generation
 //          S.debugFns.linkDemo(kind, key)  (r2) 'pulse' | 'flash' | 'spark' | 'drag' on a ticker / coin, for verification
-//   (map3 port) setHl(bitOf(coin) -> 0|1, tSec?, bornBit(childIdx) -> 0|1)  highlight mask by child coin
+//   (map3 port + the Key's last-trade filter, 2026-11-10) setVis(coins | null, tSec = now)  a link's alpha follows the code of its
+//                                CHILD in S.vis.a (vis.js: 0 hidden, 1 dim = an anchor or a coin the ?hl highlight does not
+//                                match, 2 full; the old setHl mask is folded into it); born links follow their newborn. The
+//                                generation arcs and the galaxy orbits read their family TOP's texel: gone when nothing of the
+//                                family is drawn (a hidden top), never dimmed by it.
 import * as THREE from "three";
 import { line, curveBundle } from "d3";
 import { TAU, rnd } from "./util.js";
 import { TOK, heatClass, EASE, DUR } from "./tokens.js";
+import { VIS_ALPHA } from "./vis.js";
 
 const DEG = Math.PI / 180;
 const XY_NET_FRAMES = 30;               // (local perf) safety-net cadence of the moved-coin scan (see syncOffsetsFrame)
@@ -119,7 +127,11 @@ const BUDGET_ZOOM = [4, 4, 40];           // the brood budget of a SMALL brood (
 const budgetOf = (n) => (n <= BUDGET_FULL ? n : BUDGET_FULL + 0.6 * Math.sqrt(n - BUDGET_FULL));
 const PULSE_MAX = 24;                    // lead amendment B (overrides TOK.pulseMax 12): 24 concurrent, oldest evicted
 const FLASH_MAX = 24, FLASH_S = 0.32;    // family flashes: a 320 ms ring ping (alpha (1 - u)^1.5, radius ease-out)
-const BORN_MAX = 128, BORN_PTS = 17;     // links of coins born after load (drawn on by their spark), oldest recycled
+const BORN_MAX_FULL = 128, BORN_PTS = 17;   // links of coins born after load (drawn on by their spark), oldest recycled
+// (compact layout, 2026-11-10) a build made from the Key's filtered set adds coins live (reveals + births) up to bubbles' 512
+// spare instances: one link each, never recycled while the instances last (the offset texture keeps N + 1024 texels, so the
+// born ids OW * OH - 512 >= N + 512 stay above every coin index). A mask-15 build keeps 128.
+const BORN_MAX_COMPACT = 512;
 const SPARK_S = 0.65, SPARK_TAIL = 22;   // birth spark: 650 ms, ease-out (cubic, the shader's draw-on uses the same curve)
 // (integrator, round 2) constant ink for LONG links: a line's weight grows with its length, so the few long single links the
 // units layout keeps (satellite stalks, 240-410 px at 4 k0) outweighed whole broods and read as lone strands. A link longer
@@ -180,6 +192,10 @@ vec2 hairWidth(float wCss, float dpr){ float wd = wCss * dpr, cov = 1.0; if (wd 
 const OFF_GLSL = /* glsl */`
 uniform sampler2D uOff;
 ivec2 offUV(int i){ return ivec2(i - (i / ${OW}) * ${OW}, i / ${OW}); }`;
+// (map3 port + last-trade filter) the alpha a texel's 4th channel carries: w = 4 code + shown (code 0 hidden, 1 dim = dimK,
+// 2 full; shown = the alpha when the crossfade started at t0), 160 ms
+const VIS_GLSL = /* glsl */`
+float visA(float w, float dimK, float t0, float t){ float c = floor(w * 0.25), s = w - 4.0 * c; float to = c < 0.5 ? 0.0 : (c < 1.5 ? dimK : 1.0); return mix(s, to, smoothstep(t0, t0 + 0.16, t)); }`;
 
 // (final fix) pause: optional async yield, as in layout.js: the geometry loop yields every SLICE_MS of work and the build
 // yields between its phases. The computation and its order are unchanged.
@@ -471,9 +487,13 @@ export async function buildLinks(S, pause = null) {
   const X0 = Float32Array.from(X), Y0 = Float32Array.from(Y);     // the designed layout the geometry is baked at
   const OH = Math.ceil((N + 1024) / OW), offData = new Float32Array(OW * OH * 4);
   for (let i = 0; i < N; i++) offData[4 * i + 2] = par[i] >= 0 ? par[i] : i;
-  // (map3 port) the 4th channel carries the highlight mask of the link whose CHILD is this texel: w = 4 * target + shown
-  // (shown = the value when the last crossfade started, 0..1; target 0 | 1). 5 = matches, no crossfade.
-  for (let t = 0; t < OW * OH; t++) offData[4 * t + 3] = 5;
+  // (map3 port + last-trade filter) the 4th channel carries the alpha of the link whose CHILD is this texel: w = 4 code + shown
+  // (code = S.vis.a: 0 hidden, 1 dim, 2 full; shown = the alpha when the last crossfade started). 9 = full, no crossfade.
+  // nonFull = texels whose code is not full (the shaders read the channel only while some are, or a fade runs: uHlOn)
+  for (let t = 0; t < OW * OH; t++) offData[4 * t + 3] = 9;
+  const VA = VIS_ALPHA, VIS0 = S.vis || null;
+  let nonFull = 0;
+  if (VIS0) for (let i = 0; i < N; i++) { const c = VIS0.a[i]; if (c !== 2) { offData[4 * i + 3] = 4 * c + VA[c]; nonFull++; } }
   const offTex = new THREE.DataTexture(offData, OW, OH, THREE.RGBAFormat, THREE.FloatType);
   offTex.magFilter = THREE.NearestFilter; offTex.minFilter = THREE.NearestFilter; offTex.generateMipmaps = false; offTex.needsUpdate = true;
   const offX = new Float32Array(N), offY = new Float32Array(N);  // CPU mirror (world units)
@@ -541,7 +561,8 @@ export async function buildLinks(S, pause = null) {
     // empty dot field where the brood budget or the generation LOD hides its link
     uLitC: { value: litC }, uLitT: { value: litT }, uLitN: { value: 0 },
     // (map3 port) highlight: on while a mask is set or crossfading; start of the last crossfade (s, uTime clock)
-    uHlOn: { value: 0 }, uHlT0: { value: -1e3 },
+    // (last-trade filter) on from the build when the Key hides anything
+    uHlOn: { value: nonFull > 0 ? 1 : 0 }, uHlT0: { value: -1e3 },
   };
   const lMat = premult(new THREE.ShaderMaterial({
     uniforms: lU, defines: { ...galDefines }, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
@@ -558,6 +579,7 @@ attribute vec2 aNrm; attribute vec2 aS; attribute vec3 aHeat; attribute vec4 aIn
 varying vec3 vCol; varying float vA, vSide, vHw, vLive, vT, vRev; varying vec4 vGap;
 ${HAIR_GLSL}
 ${OFF_GLSL}
+${VIS_GLSL}
 // generation LOD by level: 1 always, 2 over uLod.xy, 3 over uLod.zw, 4+ over uLod.w -> 1.5 uLod.w (x k0)
 float lodOf(float lv, float kk){ return lv < 1.5 ? 1.0 : (lv < 2.5 ? smoothstep(uLod.x, uLod.y, kk) : (lv < 3.5 ? smoothstep(uLod.z, uLod.w, kk) : smoothstep(uLod.w, 1.5 * uLod.w, kk))); }
 void main(){
@@ -676,11 +698,8 @@ void main(){
   if (uFocusFam > -0.5 && abs(aInfo.y - uFocusFam) > 0.5 && abs(aInfo.y - uHoverFam) > 0.5) a *= mix(1.0, ${f3(FOCUS_DIM)}, uFocusMix);
   a *= mix(uFadeP, uFadeD, aInfo.x);
   // (map3 port) highlight: the link of a child that does not match dims like the hover dim (constant along the link, so the
-  // per-link cull below still holds)
-  if (uHlOn > 0.5) {
-    float hw = texelFetch(uOff, offUV(int(aCoin + 0.5)), 0).w, hc = step(2.0, hw), hs = hw - 4.0 * hc;
-    a *= mix(uDimK, 1.0, mix(hs, hc, smoothstep(uHlT0, uHlT0 + 0.16, uTime)));
-  }
+  // per-link cull below still holds); (last-trade filter) an anchor's link dims the same, a hidden child's link is gone
+  if (uHlOn > 0.5) a *= visA(texelFetch(uOff, offUV(int(aCoin + 0.5)), 0).w, uDimK, uHlT0, uTime);
 #ifdef GALAXY
   if (uDebugSolid > 0.5) a = hwc.y;
 #else
@@ -829,6 +848,7 @@ uniform float uHlOn, uHlT0;
 attribute vec2 aEnds; attribute vec4 aCtl; attribute vec4 aW; attribute vec4 aMeta; attribute float aDen;
 varying vec3 vCol; varying float vA, vD, vCore, vGl, vT, vRev, vS, vSpd, vLen, vRP, vRC, vDash, vCap;
 ${OFF_GLSL}
+${VIS_GLSL}
 ivec2 posUV(int i){ return ivec2(i - (i / ${VEIN.PW}) * ${VEIN.PW}, i / ${VEIN.PW}); }
 vec3 toLin(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
 void main(){
@@ -876,10 +896,7 @@ void main(){
   if (uHoverFam > -0.5) { if (isHov > 0.5) a *= 1.0 + 1.6 * uDimMix; else a *= mix(1.0, uDimK, uDimMix); }
   // (fixer) galaxy: neighbours do not recede while a family is open (the ref keeps them lit); the pulse dim stays
   a *= mix(uFadeP, uFadeD, dust);
-  if (uHlOn > 0.5) {
-    float hwk = texelFetch(uOff, offUV(ic), 0).w, hc = step(2.0, hwk), hs = hwk - 4.0 * hc;
-    a *= mix(uDimK, 1.0, mix(hs, hc, smoothstep(uHlT0, uHlT0 + 0.16, uTime)));
-  }
+  if (uHlOn > 0.5) a *= visA(texelFetch(uOff, offUV(ic), 0).w, uDimK, uHlT0, uTime);   // (last-trade filter) see the flat links
   // colour: the monolith's continuous heatHex x heatBoost x (live ? 1 : 0.85), linear, HDR
   vec3 hs3 = age <= 1800.0 ? uHeat[0] : (age <= 10800.0 ? mix(uHeat[0], uHeat[1], (age - 1800.0) / 9000.0) : (age <= 86400.0 ? mix(uHeat[1], uHeat[2], (age - 10800.0) / 75600.0) : uHeat[3]));
   float hb = age <= 1800.0 ? 1.9 : (age <= 10800.0 ? 1.0 + 0.5 * (1.0 - (age - 1800.0) / 9000.0) : (age <= 86400.0 ? 0.9 : 0.75));
@@ -984,6 +1001,7 @@ void main(){
   const segsOf = (r, span, coarse = false) => coarse ? 48 : Math.max(2, Math.ceil(span / Math.min(0.035, Math.max(0.005, Math.sqrt(0.05 / r)))));
   for (const [, list] of arcInfo) for (const a of list) for (const [a0, a1] of a.spans) gV += 2 * (segsOf(a.r, a1 - a0, a.coarse) + 1);
   const gPos = new Float32Array(gV * 2), gNrm = new Float32Array(gV * 2), gArc = new Float32Array(gV * 4), gR = new Float32Array(gV * 3);
+  const gTop = new Float32Array(gV);   // (last-trade filter) the family top's texel: no arcs when nothing of the family is drawn
   let gIdxN = 0; for (const [, list] of arcInfo) for (const a of list) for (const [a0, a1] of a.spans) gIdxN += 6 * segsOf(a.r, a1 - a0, a.coarse);
   const gIdx = gV > 65535 ? new Uint32Array(gIdxN) : new Uint16Array(gIdxN);
   { let w = 0, q = 0;
@@ -996,7 +1014,7 @@ void main(){
           for (let sd = 0; sd < 2; sd++, w++) {
             gPos[2 * w] = f.cx + ct * a.r; gPos[2 * w + 1] = f.cy + st * a.r; gNrm[2 * w] = ct; gNrm[2 * w + 1] = st;
             gArc[4 * w] = fid; gArc[4 * w + 1] = a.gen; gArc[4 * w + 2] = th; gArc[4 * w + 3] = endD;
-            gR[3 * w] = a.r; gR[3 * w + 1] = f.Rc; gR[3 * w + 2] = f.planet ? 0 : 1;
+            gR[3 * w] = a.r; gR[3 * w + 1] = f.Rc; gR[3 * w + 2] = f.planet ? 0 : 1; gTop[w] = f.top;
           }
           if (s > 0) { const b = base + 2 * s; gIdx[q++] = b - 2; gIdx[q++] = b - 1; gIdx[q++] = b; gIdx[q++] = b - 1; gIdx[q++] = b + 1; gIdx[q++] = b; }
         }
@@ -1008,6 +1026,7 @@ void main(){
   gGeo.setAttribute("aNrm", new THREE.BufferAttribute(gNrm, 2));
   gGeo.setAttribute("aArc", new THREE.BufferAttribute(gArc, 4));
   gGeo.setAttribute("aR", new THREE.BufferAttribute(gR, 3));
+  gGeo.setAttribute("aTop", new THREE.BufferAttribute(gTop, 1));
   gGeo.setIndex(new THREE.BufferAttribute(gIdx, 1));
   gGeo.boundingSphere = bigSphere();
   const knock = Array.from({ length: 12 }, () => new THREE.Vector4(-1, -1, 0, 0));
@@ -1016,15 +1035,20 @@ void main(){
     uArcA: { value: G ? (T.genArcA ?? 0.16) : TOK.genArcA }, uArcAF: { value: TOK.genArcAFocus }, uArcW: { value: TOK.genArcW }, uDimK: { value: TOK.dim },
     // (r2) arcs follow the tagged family's top while coins move, and fade while the family is deformed (they would no
     // longer sit in the gutter between generations)
-    uArcOff: { value: new THREE.Vector2() }, uArcFade: { value: 1 } };
+    uArcOff: { value: new THREE.Vector2() }, uArcFade: { value: 1 },
+    // (last-trade filter) the top's texel of the offset texture: a family the filter hides whole draws no arcs
+    uOff: { value: offTex }, uHlOn: lU.uHlOn, uHlT0: lU.uHlT0 };
   const gMat = premult(new THREE.ShaderMaterial({
     uniforms: gU, defines: { ...galDefines }, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
     vertexShader: /* glsl */`
 uniform float uPx, uDpr, uHoverFam, uDimMix, uFadeP, uFocusFam, uArcA, uArcAF, uArcW, uDimK, uTagFam, uArcFade; uniform vec2 uArcOff;
 uniform float uGenShow[16]; uniform float uK0, uDustExpand;
-attribute vec2 aNrm; attribute vec4 aArc; attribute vec3 aR;
+uniform float uTime, uHlOn, uHlT0;
+attribute vec2 aNrm; attribute vec4 aArc; attribute vec3 aR; attribute float aTop;
 varying float vA, vSide, vHw, vAng, vRk, vEnd; varying vec2 vFG;
 ${HAIR_GLSL}
+${OFF_GLSL}
+${VIS_GLSL}
 void main(){
   float k = uPx / uDpr;
   vec2 hwc = hairWidth(uArcW, uDpr);
@@ -1044,6 +1068,8 @@ void main(){
   float a = (hot ? uArcAF : 0.0) * hwc.y * smoothstep(220.0, 320.0, aR.y * k) * uFadeP * uArcFade;
   if (uHoverFam > -0.5 && abs(aArc.x - uHoverFam) > 0.5) a *= mix(1.0, uDimK, uDimMix);
 #endif
+  // (last-trade filter) a hidden top = nothing of its family drawn: no arcs (an anchor or a dimmed top keeps them whole)
+  if (uHlOn > 0.5) a *= clamp(visA(texelFetch(uOff, offUV(int(aTop + 0.5)), 0).w, uDimK, uHlT0, uTime) / uDimK, 0.0, 1.0);
   vA = a; vSide = side; vHw = hwc.x; vAng = aArc.z; vRk = aR.x * k; vEnd = aArc.w; vFG = aArc.xy;
   gl_Position = projectionMatrix * viewMatrix * vec4(p, 0.0, 1.0);
   if (a < 0.001) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -1145,18 +1171,24 @@ void main(){ float a = uHullK * uHullA * uFadeP * vCov * clamp(vHw - abs(vSide) 
     oGeo = new THREE.BufferGeometry(); oGeo.setAttribute("position", new THREE.BufferAttribute(oPos, 2)); oGeo.setAttribute("aNrm", new THREE.BufferAttribute(oNrm, 2)); oGeo.setAttribute("aTop", new THREE.BufferAttribute(oTop, 1)); oGeo.setIndex(new THREE.BufferAttribute(oIdx, 1)); oGeo.boundingSphere = bigSphere();
     // (veins lane) orbits follow their family: the top's offset (= f.cx/f.cy - home, as the physics keeps it) from uOff
     oMat = premult(new THREE.ShaderMaterial({
-      uniforms: { ...U, ...galU, uOrbCol: { value: linC(T.orbit ?? 0x5ce0c8) }, uOrbA: { value: T.orbitA ?? 0.10 }, uOff: { value: offTex }, uOffOn: offOn }, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+      uniforms: { ...U, ...galU, uOrbCol: { value: linC(T.orbit ?? 0x5ce0c8) }, uOrbA: { value: T.orbitA ?? 0.10 }, uOff: { value: offTex }, uOffOn: offOn,
+        uHlOn: lU.uHlOn, uHlT0: lU.uHlT0, uDimK: lU.uDimK }, transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
       vertexShader: /* glsl */`
 uniform float uPx, uDpr, uGalT, uFadeP, uOrbA, uOffOn; attribute vec2 aNrm; attribute float aTop;
+uniform float uTime, uHlOn, uHlT0, uDimK;
 varying float vSide, vHw, vA;
 ${HAIR_GLSL}
 ${OFF_GLSL}
+${VIS_GLSL}
 void main(){
   vec2 hwc = hairWidth(0.75, uDpr); float side = hairSide();
-  vec2 off = uOffOn > 0.5 ? texelFetch(uOff, offUV(int(aTop + 0.5)), 0).xy : vec2(0.0);
+  vec4 tt = uOffOn > 0.5 || uHlOn > 0.5 ? texelFetch(uOff, offUV(int(aTop + 0.5)), 0) : vec4(0.0, 0.0, 0.0, 9.0);
+  vec2 off = uOffOn > 0.5 ? tt.xy : vec2(0.0);
   vec2 p = position.xy + off + aNrm * side * hwc.x / uPx;
   vSide = side; vHw = hwc.x; vA = uOrbA * (1.0 - 0.6 * uGalT) * hwc.y * uFadeP;
+  if (uHlOn > 0.5) vA *= clamp(visA(tt.w, uDimK, uHlT0, uTime) / uDimK, 0.0, 1.0);   // (last-trade filter) a hidden family: no orbit
   gl_Position = projectionMatrix * viewMatrix * vec4(p, 0.0, 1.0);
+  if (vA < 0.001) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // constant per orbit: the whole ring culls
 }`,
       fragmentShader: /* glsl */`
 uniform vec3 uOrbCol; varying float vSide, vHw, vA;
@@ -1282,6 +1314,7 @@ void main(){
     return { pl, cum, L, a: -1, b: -1, s0: Math.min(L * 0.45, (A.r || 0) + 0.25), s1: Math.max(L * 0.55, L - (B.r || 0) - 0.25) };
   }
   // ---- links of coins born after load (amendment C): drawn on behind their spark, then a link like any other ----
+  const BORN_MAX = S.opts && S.opts.compact ? BORN_MAX_COMPACT : BORN_MAX_FULL;
   const BV = BORN_MAX * BORN_PTS * 2, bornBase = OW * OH - BORN_MAX;   // offset-texture ids of the born links (texel z = parent)
   const bA = { position: new Float32Array(BV * 2), aNrm: new Float32Array(BV * 2), aS: new Float32Array(BV * 2), aHeat: new Float32Array(BV * 3), aInfo: new Float32Array(BV * 4), aPar: new Float32Array(BV * 4), aRc: new Float32Array(BV * 4), aEmph: new Float32Array(BV), aCoin: new Float32Array(BV), aW: new Float32Array(BV * 2) };
   const bSize = { position: 2, aNrm: 2, aS: 2, aHeat: 3, aInfo: 4, aPar: 4, aRc: 4, aEmph: 1, aCoin: 1, aW: 2 };
@@ -1314,22 +1347,35 @@ void main(){
     const opx = offX[p], opy = offY[p];
     if (opx || opy) for (let k = 0; k < BORN_PTS; k++) { const w = 1 - k / (BORN_PTS - 1); pts[4 * k] -= opx * w; pts[4 * k + 1] -= opy * w; }
     const cr = path.childR || 0;
+    // (compact layout) a link from a coin added live (path.from: its point, radius and generation): no chip floor at its
+    // start, the parent's own radius and generation; path.cls0: the child's heat class at once (a coin revealed live is not new)
+    const fr = path.from || null, g1 = (fr && Number.isFinite(fr.gen) ? fr.gen : gen[p]) + 1, c0 = path.cls0 | 0;
     for (let k = 0; k < BORN_PTS; k++) for (let sd = 0; sd < 2; sd++) {
       const v = (j * BORN_PTS + k) * 2 + sd, s = L * k / (BORN_PTS - 1);
       bA.position[2 * v] = pts[4 * k]; bA.position[2 * v + 1] = pts[4 * k + 1]; bA.aNrm[2 * v] = -pts[4 * k + 3]; bA.aNrm[2 * v + 1] = pts[4 * k + 2];
       bA.aS[2 * v] = s; bA.aS[2 * v + 1] = L - s;
-      bA.aHeat.set([0, 0, -1e4], 3 * v);
-      bA.aInfo.set([f.planet ? 0 : 1, f.id, gen[p] + 1, 1], 4 * v);
-      bA.aPar.set([R[p], 1, cr, p === f.top ? topFloor(f) : 0], 4 * v);
-      bA.aRc.set([f.Rc, 1, gen[p] + 1, 0], 4 * v); bA.aEmph[v] = 0; bA.aCoin[v] = id;
+      bA.aHeat.set([c0, c0, -1e4], 3 * v);
+      bA.aInfo.set([f.planet ? 0 : 1, f.id, g1, 1], 4 * v);
+      bA.aPar.set(fr ? [fr.r || 0, 1, cr, 0] : [R[p], 1, cr, p === f.top ? topFloor(f) : 0], 4 * v);
+      bA.aRc.set([f.Rc, 1, g1, 0], 4 * v); bA.aEmph[v] = 0; bA.aCoin[v] = id;
       { const bw0 = linkW0(cr || 0.55); bA.aW[2 * v] = bw0 + (0.32 * bw0 - bw0) * (k / (BORN_PTS - 1)); bA.aW[2 * v + 1] = 1; }
     }
     for (const k of Object.keys(bAttr)) bAttr[k].needsUpdate = true;
-    // (map3 port) the born link's highlight follows its newborn (path.childIdx, the engine's coin index) when known
-    const ci = Number.isInteger(path.childIdx) ? path.childIdx : -1;
-    offData[4 * id + 3] = ci >= 0 && typeof S.hlBit === "function" && !S.hlBit(ci) ? 0 : 5;
-    born.push({ slot: j, id, p, t0: t, cls: 0, ci }); bornMesh.visible = true; st.born++;
+    // (map3 port) the born link's highlight, (last-trade filter) and visibility, follow its newborn (path.childIdx, the engine's
+    // coin index) when known: motion set the newborn's code before the spark / the link
+    const ci = Number.isInteger(path.childIdx) ? path.childIdx : -1, V = S.vis, bc = ci >= 0 && V && ci < V.a.length ? V.a[ci] : 2;
+    fading.delete(id); writeW(id, bc, VA[bc]); if (bc !== 2) lU.uHlOn.value = 1;
+    born.push({ slot: j, id, p, t0: t - (Number(path.ageS) > 0 ? Math.min(Number(path.ageS), 1e9) : 0), cls: c0, ci }); bornMesh.visible = true; st.born++;
     return id;
+  }
+  // (compact layout) a coin added live traded (ageS 0) or a heat poll dated its last trade: its link takes that age now
+  function setBornAge(ci, ageS) {
+    if (!(ci >= 0)) return false;
+    const b = born.find((x) => x.ci === ci); if (!b) return false;
+    const tNow = performance.now() / 1000, a = Math.max(0, Number(ageS) || 0);
+    b.t0 = tNow - Math.min(a, 1e9);
+    ageBorn(tNow);
+    return true;
   }
   // a born link's heat follows its coin's age (the coin was born live and cools like any other)
   function ageBorn(tNow) {
@@ -1341,9 +1387,14 @@ void main(){
   }
   // public: the link of a coin born after load with NO spark (reduced motion, or a birth found by polling): parent coin ->
   // world point (x, y), child radius r (world u). Returns an id (>= N, private to links) or -1.
-  const bornLink = (p, x, y, r = 0, ci = -1) => {
-    const A = ptOf(p), B = ptOf({ x, y, r }); if (!isCoin(p) || !A || !B) return -1;
+  // (compact layout) o.from {x, y, r, gen}: the link starts at a coin added live (a revealed parent), p stays its nearest
+  // built ancestor (family, offsets); o.ageS: the child's last trade was this long ago (its link takes that heat class at once)
+  const bornLink = (p, x, y, r = 0, ci = -1, o = null) => {
+    const fr = o && o.from && Number.isFinite(o.from.x) && Number.isFinite(o.from.y) ? o.from : null;
+    const A = fr ? ptOf({ x: fr.x, y: fr.y, r: fr.r || 0 }) : ptOf(p), B = ptOf({ x, y, r }); if (!isCoin(p) || !A || !B) return -1;
     const path = pathOfPoints(A, B, Math.round(x * 131 + y * 17)); path.childR = r || 0; path.childIdx = ci;
+    if (fr) path.from = fr;
+    if (o && Number(o.ageS) > 0) { path.ageS = Number(o.ageS); path.cls0 = heatClass(path.ageS); }
     return addBornLink(p, path, U.uTime.value);
   };
   const ptOf = (v) => {
@@ -1622,16 +1673,40 @@ void main(){
   // an explicit mover also wakes the per-frame position scans (bubbles' scanXY, breathCheck), which otherwise run only while
   // the sim steps; 3 frames because motion.js counts it down before those hooks run
   const follow = (list, n) => { S.xyScan = 3; const m = list && list.length ? syncList(list, n == null ? list.length : n) : syncOffsets(); if (m) S.invalidate(); return m; };
-  // (map3 port) highlight mask: bitOf(coin) for the links of built coins (texel = child), born links follow their newborn
-  // (b.ci, bornBit). One 160 ms crossfade from what each link shows now; uHlOn stays on while a mask is set or fading out.
-  let hlActive = false;
-  const setHl = (bitOf, tSec, bornBit) => {
-    const t = Number.isFinite(tSec) ? tSec : U.uTime.value, t0 = lU.uHlT0.value, e = smoothN(t0, t0 + 0.16, t);
-    const put = (tx, cur) => { const w = offData[4 * tx + 3], hc = w >= 2 ? 1 : 0, hs = w - 4 * hc, shown = hs + (hc - hs) * e; offData[4 * tx + 3] = 4 * cur + shown; };
-    let any = false;
-    for (let i = 0; i < N; i++) { const cur = bitOf ? (bitOf(i) ? 1 : 0) : 1; if (!cur) any = true; put(i, cur); }
-    for (const b of born) { const cur = !bitOf ? 1 : b.ci >= 0 && typeof bornBit === "function" ? (bornBit(b.ci) ? 1 : 0) : 1; if (!cur) any = true; put(b.id, cur); }
-    hlActive = any; lU.uHlT0.value = t; lU.uHlOn.value = 1; offTex.needsUpdate = true; S.invalidate();
+  // (map3 port) highlight + (last-trade filter) visibility: texel w = 4 code + shown, code = S.vis.a[child] (born links follow
+  // their newborn b.ci), shown = the alpha when the crossfade started. One clock for every link (uHlT0): a call restarts it,
+  // so the texels still fading are first settled at what they show now (fading: those texels; fadeAll after a full write);
+  // once a fade is over the frame hook normalises them (shown = target, no upload needed), so the next small change (a trade
+  // that reveals a coin) restarts the clock for its own few texels only: O(depth), one texture upload in the frame.
+  // uHlOn stays on while any texel is not full (nonFull) or a fade runs; off (mask 15, no ?hl) the shaders skip the lookup.
+  let fadeAll = false;
+  const fading = new Set();
+  const writeW = (tx, c, shown) => { const o = 4 * tx + 3, oc = Math.floor(offData[o] * 0.25); if (oc !== 2) nonFull--; if (c !== 2) nonFull++; offData[o] = 4 * c + shown; };
+  const settleTx = (tx, e) => { const o = 4 * tx + 3, w = offData[o], c = Math.floor(w * 0.25), s = w - 4 * c; offData[o] = 4 * c + s + (VA[c] - s) * e; };
+  const settleAll = (e) => {
+    if (fadeAll) { for (let i = 0; i < N; i++) settleTx(i, e); for (const b of born) settleTx(b.id, e); }
+    else for (const tx of fading) settleTx(tx, e);
+  };
+  // list = engine coins whose code changed (null: every link); returns the links that changed
+  const setVis = (list, tSec) => {
+    const V = S.vis; if (!V) return 0;
+    // a fade starts now on uTime's clock (performance.now() / 1000: uTime is the last frame's rAF time, same origin)
+    const t = Number.isFinite(tSec) ? tSec : performance.now() / 1000, t0 = lU.uHlT0.value, settled = fadeAll || fading.size > 0;
+    if (settled) settleAll(smoothN(t0, t0 + 0.16, t));
+    let n = 0;
+    const put = (tx, c) => { const w = offData[4 * tx + 3], oc = Math.floor(w * 0.25); if (oc === c) return; writeW(tx, c, w - 4 * oc); if (!fadeAll) fading.add(tx); n++; };
+    const codeOf = (ci) => (ci >= 0 && ci < V.a.length ? V.a[ci] : 2);
+    if (list == null) {
+      for (let i = 0; i < N; i++) put(i, V.a[i]);
+      for (const b of born) put(b.id, codeOf(b.ci));
+      if (n) { fadeAll = true; fading.clear(); }
+    } else for (const c of list) {
+      if (c >= 0 && c < N) put(c, V.a[c]);
+      else if (c >= N) for (const b of born) if (b.ci === c) put(b.id, V.a[c]);
+    }
+    if (n || settled) { lU.uHlT0.value = t; offTex.needsUpdate = true; S.invalidate(); }
+    if (n) lU.uHlOn.value = 1;
+    return n;
   };
   // the feel lane's call (motion.js publishMoved): positions are already in S.X / S.Y. Having this function also switches
   // off motion's fallback that would otherwise move the link vertices a second time.
@@ -1678,9 +1753,11 @@ void main(){
     if (slots.some(Boolean) || flashes.some(Boolean)) { if (updateMarks(now / 1000)) more = true; }
     if (lU.uLitN.value > 0) { const tn = U.uTime.value; if (litT.every((t) => tn - t > DUR.pulse / 1000 + 0.5)) { lU.uLitN.value = 0; litC.fill(-1); } else more = true; }
     if (born.length && (S.frame % 30 === 0)) ageBorn(now / 1000);
-    // (map3 port) highlight crossfade in flight; once a cleared mask has faded back in, the per-vertex lookup switches off
+    // (map3 port) highlight crossfade in flight; once a cleared mask has faded back in, the per-vertex lookup switches off.
+    // (last-trade filter) a finished fade is normalised once (CPU only: the GPU already shows the targets)
+    if ((fadeAll || fading.size) && U.uTime.value >= lU.uHlT0.value + 0.16) { settleAll(1); fadeAll = false; fading.clear(); }
     if (lU.uHlOn.value > 0 && U.uTime.value < lU.uHlT0.value + 0.2) more = true;
-    else if (lU.uHlOn.value > 0 && !hlActive) lU.uHlOn.value = 0;
+    else if (lU.uHlOn.value > 0 && nonFull <= 0) lU.uHlOn.value = 0;
     return more;
   });
 
@@ -1688,7 +1765,8 @@ void main(){
   // 7. EXPORTS + DEBUG
   // ------------------------------------------------------------------------------------------------------------
   const statsOf = () => ({ ...st, live: slots.filter(Boolean).length, liveFlashes: flashes.filter(Boolean).length, cap: PULSE_MAX, flashCap: FLASH_MAX, offsetCoins: offCount, offsetSyncs: offSyncs });
-  Object.assign(S.links, { mesh: G ? veins : links, flatMesh: links, veins, lGeo, setLinkHeat, setEmphasis, setBranch, follow, setPositions, addBornLink: bornLink, linkPolyline, genArcInfo, setHl,
+  Object.assign(S.links, { mesh: G ? veins : links, flatMesh: links, veins, lGeo, setLinkHeat, setEmphasis, setBranch, follow, setPositions, addBornLink: bornLink, setBornAge, linkPolyline, genArcInfo, setVis,
+    visStats: () => ({ nonFull, fadeAll, fading: fading.size, on: lU.uHlOn.value }),
     lod: { g2: LOD_G2.slice(), g3: LOD_G3.slice(), budgetFull: BUDGET_FULL, trunkMin: TRUNK_MIN, pods: pods.length } });   // never onPulseArrive / onSparkArrive (motion's slots)
   // galaxy: light the path from coin i to its family's top (the trade pulse's "vein lighting"): every link on the way takes a
   // lit slot (oldest reused); the GALAXY vertex shader gains it +80 % -> 0 over 1.1 s and turns it lime. No-op in flat.

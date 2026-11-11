@@ -121,6 +121,20 @@ export function registerMap3Debug(ctx: Map3DebugCtx): () => void {
       return e.testHighlight((i) => { const m = e.mintAt(i); const n = m ? byMint.get(m) : undefined; return !!n && pred(n); });
     },
     hl: (mint: string) => { const e = E(); if (!e) return 0; const i = idxOf(e, mint); return i < 0 ? 0 : e.hlBit(i); },
+    /// The Key's last-trade filter in the engine: with a mint, its level ("shown" | "anchor" | "hidden"; null = not on the
+    /// map); without, the counts (mask, shown, anchors, hidden, byClass [30 min, 3 h, 24 h, older]; swarm ghosts are "older")
+    visibility: (mint?: string) => {
+      const h = H(); if (!h) return null;
+      try { return mint == null ? h.lastFilterStats() : h.visibility(mint); } catch { return null; }
+    },
+    /// (QA) set the engine's filter directly, as the page's setLastFilter call: returns its { shown, anchors, hidden }
+    setLastFilter: (mask: number, pinned: string[] = []) => { const h = H(); if (!h) return null; try { return h.setLastFilter(mask, pinned); } catch { return null; } },
+    /// (compact layout) a family's readability at its own fit (EngineCompactProbe: shown members' on-screen radius and rim-to-rim
+    /// link, px; kFit, whether the top's px cap binds); the engine's drift stats; (QA) a live reveal as a selection makes it
+    compact: (key = "PUMP") => { const e = E(); if (!e) return null; try { return e.compact(key); } catch { return null; } },
+    drift: () => H()?.driftStats() ?? null,
+    reveal: (mint: string) => H()?.reveal(mint, "select") ?? null,
+    viewFamily: () => H()?.viewFamily() ?? null,
     xy: (list: string[]) => {
       const e = E(); const out: number[] = [];
       for (const m of list) { const i = e ? idxOf(e, m) : -1; const p = e && i >= 0 ? e.world(i) : null; if (p) out.push(p.x, p.y); else out.push(NaN, NaN); }

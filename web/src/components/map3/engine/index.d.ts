@@ -48,7 +48,52 @@ export type EngineOptions = {
   moved?: EngineMoved;
   /** (family-all) false = no swarm layer at all (the ?swarm=0 A/B switch); absent = on. */
   swarm?: boolean;
+  /** The Key's last-trade filter, applied before the first frame (so a rebuild never flashes every coin); absent = mask 15. */
+  last?: EngineLastFilter;
+  /** (compact layout, 2026-11-10) Present only for a build made from the Key's filtered set (`roots` = the shown coins, their
+   * lineage and the pins): family values, shares, ranks, sizes and ghosts come from the whole families, the layout seeds from
+   * the full build's order, and page coins the build left out are added live (EngineHandle.reveal). Absent = a full build. */
+  compact?: EngineCompact;
 };
+/** One family of the page's FULL node list (adapter.ts familyTotals). */
+export type EngineWholeFamily = { id: number; start: number; locked: number; mcap: number; members: number; kids: number; ghost: number };
+export type EngineCompact = {
+  /** The mask the build was made with (reveals need both it and the Key's current mask). */
+  mask: number;
+  /** A page node by mint (null = not a page coin: a swarm speck, off the map): what a reveal places. */
+  lookup(mint: string): EngineCoin | null;
+  families: ReadonlyMap<string, EngineWholeFamily>;
+  list: readonly EngineWholeFamily[];
+  seed: ReadonlyMap<string, number>;
+  totals: { locked: number; mcap: number };
+  maxShare: { locked: number; mcap: number };
+  coins: number; ghosts: number; familyCount: number;
+};
+/** EngineHandle.reveal's answer: "ok" placed (its missing ancestors first), "known" drawn already, "off" a full build,
+ * "unknown" not a page coin, "family" its family was left out of the build, "parent" its nearest drawn ancestor is a speck,
+ * "capacity" no room left (bubbles' 512 spare instances, or the page-hover budget). "family" (a left-out top) and "parent" hold
+ * for the build's life: the engine answers them again from a cache. */
+export type EngineRevealResult = "ok" | "known" | "off" | "unknown" | "capacity" | "family" | "parent";
+/** A compact build's drift (adapter.ts FilteredDrift); zeros / false on a full build. */
+/** `wanted` only when driftStats was given the sync's wanted list: how many of those are still not drawn and not in `missed`.
+ * `family`: the missed coins whose whole family the build left out (never placed live). */
+export type EngineDriftStats = { filtered: boolean; built: number; hidden: number; revealed: number; missed: number; family: number; full: boolean; select: boolean; wanted?: number };
+/** EngineDebug.compact: a family's readability at its own fit (shown members' on-screen radius and rim-to-rim link, px). */
+export type EngineCompactProbe = { members: number; shown: number; anchors: number; Rc: number; topR: number; kFit: number; kUncapped: number; capBinds: boolean;
+  medRpx: number; p10Rpx: number; p90Rpx: number; share3px: number; medLinkPx: number; p90LinkPx: number; filtered: boolean };
+/** The Key's last-trade filter. mask: bit k = draw heat class k (0 traded within 30 min, 1 within 3 h, 2 within 24 h,
+ * 3 older / never traded / no heat row; an engine coin created within 30 min of heat.at is class 0, as the page's coinClass;
+ * swarm ghosts are class 3); 15 = everything (the filter is off, no extra cost).
+ * pinned: mints always drawn whatever their class (the selected coin and its ancestor chain, ...). A hidden coin keeps its
+ * position (the layout never moves between builds; a mask change rebuilds from the filtered set: EngineOptions.compact): it is not drawn, not hoverable / clickable / draggable, has no label and no live
+ * effect. A not-shown ancestor of a shown coin (up to and including its family top) is an "anchor": drawn dim, clickable. */
+export type EngineLastFilter = { mask: number; pinned?: readonly string[] };
+export type EngineVisibility = "shown" | "anchor" | "hidden";
+export type EngineVisCounts = { shown: number; anchors: number; hidden: number };
+/** byClass: the engine's coins (built + born; swarm specks not included) per class 0..3 the filter files them under, whatever
+ * the mask: the heat class, except that a coin created within 30 min of the heat clock (heat.at) is class 0, exactly as
+ * lib/map/visibility.ts coinClass (so the Key's counts and the drawn coins agree). */
+export type EngineLastFilterStats = EngineVisCounts & { mask: number; byClass: [number, number, number, number] };
 /** A page of a capped family's coins: the same shape as lib/map/family-types FamilyChunk. */
 export type EngineSwarmChunk = { top: string; from: number; n: number; mints: string[]; symbols: (string | null)[]; mcapUsd: Float64Array; lockedUsd: Float64Array; createdAt: Float64Array; migrated: Uint8Array; children: Uint32Array };
 export type EngineSwarmFamily = { top: string; ghost: number; slots: number; real: number; cap: number };
@@ -68,6 +113,8 @@ export type EngineDebug = {
   lastTrade(i: number): number; t1h(i: number): number; fx(): number;
   titles(): number[]; taggedTitles(): number[]; labelCount(): number; drawnCount(): number; logoPx(i: number): number;
   hlBit(i: number): number; testHighlight(test: ((i: number) => boolean) | null): number;
+  /** (last-trade filter) engine coin i: 0 hidden, 1 anchor, 2 shown, -1 no such coin; visCode = its alpha code (0, 1 dim, 2 full). */
+  visLevel(i: number): number; visCode(i: number): number;
   allXY(): { n: number; x: Float32Array; y: Float32Array };
   drag(): { i: number; top: number; rigid: boolean } | null;
   renders(): number; resetFrames(): void; sim(): { ticks: number; tickMs: number; alpha: number; active: boolean };
@@ -90,12 +137,22 @@ export type EngineDebug = {
   focusState(): { i: number; t: number; dim: number; rPx: number; k: number; label: boolean } | null;
   /** (family-all) the swarm layer: tier, slots, ghosts shown, real specks, queue and slice timings. */
   swarm(): EngineSwarmStats;
+  /** (compact layout) a family's readability at its own fit (null: no such family); the drift stats. */
+  compact(key: string): EngineCompactProbe | null;
+  drift(): EngineDriftStats;
 };
 export type EngineHandle = {
   fit(): void; flyToFamily(mint: string): boolean; flyToCoin(mint: string): boolean;
   zoomBy(factor: number): void; panBy(dx: number, dy: number): void;
   select(mint: string | null, opts?: { fly?: boolean }): boolean; selected(): string | null;
   hover(mint: string | null): void; setHighlight(test: ((mint: string) => boolean) | null): void;
+  /** The Key's last-trade filter (see EngineLastFilter). Idempotent and cheap when nothing changed; a new mask is one O(N)
+   * pass, a pin change O(depth). Returns the engine coins' levels now. The engine also keeps its own selection, focus pulse
+   * and page-hovered coin drawn. Never rebuilds, never moves a coin. */
+  setLastFilter(mask: number, pinned?: readonly string[]): EngineVisCounts;
+  /** Where a mint stands under the filter now; null = not on this map. */
+  visibility(mint: string): EngineVisibility | null;
+  lastFilterStats(): EngineLastFilterStats;
   setHeat(heat: EngineHeat): void; applyEvent(e: EngineEvent): void;
   /** Market caps (tooltip and callout numbers); an entry with `image` also sets that coin's logo URL (patchImages). */
   patchCoins(p: readonly { mint: string; mcapUsd: number | null; image?: string | null }[]): void;
@@ -114,6 +171,15 @@ export type EngineHandle = {
   /** (family-all) The ghosted families of this engine (the page replays their loaded chunks after every rebuild). */
   swarmFamilies(): EngineSwarmFamily[];
   focusedFamily(): string | null; familyOrder(): string[];
+  /** (compact layout) A page coin the build left out, placed next to its parent now (no new-pair fanfare); "off" on a full
+   * build. why: "select" (default), "hover", "node" (the sync's node pass), "pin". */
+  reveal(mint: string, why?: "select" | "hover" | "node" | "pin"): EngineRevealResult;
+  /** (compact layout) What makes a compact build drift from what the page shows (the sync's re-compact rule). `wanted`: the
+   * sync's last node pass's wanted unknown mints, counted once against `missed` (the answer's `wanted`). */
+  driftStats(wanted?: readonly string[]): EngineDriftStats;
+  /** The family the view is on, for a rebuild's camera: the focused one, else the drawn family nearest the view's centre
+   * once zoomed in (null at the overview). */
+  viewFamily(): string | null;
   camera(): { x: number; y: number; k: number; k0: number }; zoom(): number;
   worldRadius(mcapUsd: number): number; chipRadius(share: number): number; maxShare(): number;
   frameStats(): EngineFrameStats;

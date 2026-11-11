@@ -68,6 +68,7 @@ export function buildFocus(S) {
     if (S.dead || !(i >= 0)) return;
     coin = i;
     U.uFocusCoin.value = i;
+    try { S.motion.visPin?.("foc", i); } catch { /* motion not built */ }   // (last-trade filter) the pulsing coin is drawn
     t0 = performance.now();
     U.uFocusT.value = Math.max(U.uFocusT.value, 0.001);
     S.lastInputAt = performance.now();
@@ -78,6 +79,7 @@ export function buildFocus(S) {
   function stop() {
     t0 = -1;
     U.uFocusT.value = 0; U.uFocusDim.value = 0; U.uFocusCoin.value = -1;
+    try { S.motion.visPin?.("foc", -1); } catch { /* motion gone */ }
     setLabelDim(0);
   }
 

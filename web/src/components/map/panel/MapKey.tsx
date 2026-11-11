@@ -7,10 +7,16 @@
 // a family's chip = its share of value (true chip sizes from the engine), coins = market cap at this
 // zoom, the rim's bright arc = trades in 24 h, and the live motion. `look="galaxy"` (behind ?look=galaxy; the flat
 // plate is the default) swaps the trade classes for the galaxy palette and the rim row for the ring; `look="flat"` is the key above.
+// The "Last trade" scale is also the map's visibility filter (`?last=`, lib/map/visibility.ts): each bucket is a toggle with
+// its coin count under it, a hidden bucket's coins are not drawn (the classic map hides them in place; the WebGL map is
+// rebuilt around what is shown), at least one bucket stays on, and the
+// collapsed dock pill draws a hidden bucket's dot hollow with a short tag ("≤ 24 h"). The classic map's key has the same
+// toggles under its depth colours. Without the heat sidecar the scale is the colour legend only.
 import { useState, type CSSProperties } from "react";
-import { usd } from "../../../lib/format";
+import { count, usd } from "../../../lib/format";
 import { sharePct } from "../../../lib/map/dominance";
 import { SIZE_MODE_LINE } from "../../../lib/map/sizing";
+import { LAST_ALL, LAST_DEFAULT, LAST_SHORT, lastKeysOf, lastMask, lastShownOf, lastTag, type LastCounts } from "../../../lib/map/visibility";
 import type { SizeMode } from "../../../lib/map/types";
 import { COLORS } from "../store";
 import { useCamK, type CamStore } from "./cam";
@@ -67,7 +73,8 @@ const TRADE: { c: string; t: string }[] = [
   { c: "#666c8b", t: "within 24 h" },
   { c: "#4a514e", t: "older" },
 ];
-const Dot = ({ c }: { c: string }) => <i className="map-key-sw" style={{ background: c }} />;
+/// A trade dot of the collapsed pill; `off` (its bucket is hidden) draws it hollow.
+const Dot = ({ c, off = false }: { c: string; off?: boolean }) => <i className={off ? "map-key-sw off" : "map-key-sw"} style={off ? { background: "transparent", boxShadow: `inset 0 0 0 1.5px ${c}` } : { background: c }} />;
 /// The galaxy look's last-trade classes (the engine's GAL palette): lit spheres by recency; the live one glows.
 const GAL_TRADE: { c: string; t: string; glow?: boolean }[] = [
   { c: "#b6ff5c", t: "traded < 30 min", glow: true },
@@ -75,19 +82,52 @@ const GAL_TRADE: { c: string; t: string; glow?: boolean }[] = [
   { c: "#7f68c4", t: "quiet < 24 h" },
   { c: "#4a4466", t: "cold" },
 ];
+/// The Key's last-trade filter: the buckets shown (4-bit mask, bit k = heat class k), the writer, the coins per bucket
+/// (drawn + the asset families' undrawn ones in "older"; null until the heat is in) and whether the heat sidecar answered.
+/// `onLast` takes a mask, or a function of the current one (a bucket toggle: a quick second click must not read a stale mask).
+export type LastProps = { last?: number; onLast?: ((next: number | ((cur: number) => number)) => void) | null; counts?: LastCounts | null; heatOn?: boolean };
+const LAST_DEF = lastMask(LAST_DEFAULT);
+
 /// The last-trade classes drawn as a recency filament: one hairline from the freshest colour to the coldest,
 /// a node per class (the live one with its halo), the words under each node. Same colours as the engine.
-function TradeScale({ items, label }: { items: { c: string; t: string; glow?: boolean }[]; label: string }) {
+/// With the heat sidecar on and a writer, each node is a toggle (aria-pressed) with its coin count: a bucket switched off
+/// is not drawn (its node hollow, its words faint); the last one on cannot be switched off. Under the scale: "showing N
+/// of M coins" and the way back (show all · reset to the default).
+function TradeScale({ items, label, last = LAST_ALL, onLast = null, counts = null, heatOn = false }: { items: { c: string; t: string; glow?: boolean }[]; label: string } & LastProps) {
   const grad = `linear-gradient(90deg, ${items.map((x) => x.c).join(", ")})`;
+  const toggles = heatOn && !!onLast;
+  const mask = last & LAST_ALL;
+  const total = counts ? counts[0] + counts[1] + counts[2] + counts[3] : 0;
+  const set = (m: number | ((cur: number) => number)) => { if (onLast) onLast(m); };
+  // a bucket flips against the mask as it is now (at least one bucket stays on)
+  const flip = (i: number) => set((cur) => { const m = (cur & LAST_ALL) ^ (1 << i); return m === 0 ? cur : m; });
   return (
-    <ol className="map-key-scale" aria-label={label} style={{ "--scale": grad } as CSSProperties}>
-      {items.map((x, i) => (
-        <li key={x.c} className={i === 0 ? "hot" : ""} style={{ "--c": x.c } as CSSProperties}>
-          <i className="map-key-node" aria-hidden="true" />
-          <span>{x.t}</span>
-        </li>
-      ))}
-    </ol>
+    <>
+      <ol className={`map-key-scale ${toggles ? "toggles" : ""}`} aria-label={toggles ? `${label}: each bucket hides or shows its coins` : label} style={{ "--scale": grad } as CSSProperties}>
+        {items.map((x, i) => {
+          const on = !toggles || ((mask >> i) & 1) === 1;
+          const only = toggles && mask === 1 << i;
+          const body = <><i className="map-key-node" aria-hidden="true" /><span>{x.t}</span>{toggles && <b className="map-key-n">{counts ? count(counts[i]) : "—"}</b>}</>;
+          return (
+            <li key={x.c} className={[i === 0 ? "hot" : "", on ? "" : "off"].filter(Boolean).join(" ") || undefined} style={{ "--c": x.c } as CSSProperties}>
+              {toggles
+                ? <button type="button" aria-pressed={on} aria-disabled={only || undefined} data-last={i}
+                    title={only ? "At least one bucket stays on" : `${on ? "Hide" : "Show"} the coins whose last trade is ${x.t}`}
+                    onClick={() => { if (!only) flip(i); }}>{body}</button>
+                : body}
+            </li>
+          );
+        })}
+      </ol>
+      {toggles && (
+        <p className="map-key-last">
+          {counts ? <>showing <b>{count(lastShownOf(counts, mask))}</b> of {count(total)} coins</> : "counting coins…"}
+          {mask !== LAST_ALL && <> · <button type="button" className="linkish" data-last="all" onClick={() => set(LAST_ALL)}>show all</button></>}
+          {mask !== LAST_DEF && <> · <button type="button" className="linkish" data-last="reset" onClick={() => set(LAST_DEF)} title="Every coin that traded in the last 24 h">reset</button></>}
+        </p>
+      )}
+      {!heatOn && onLast && <p className="map-key-note">trade times are not in yet: every coin is shown</p>}
+    </>
   );
 }
 const CHIP_SHARES = [0.25, 0.05, 0.01];
@@ -151,10 +191,15 @@ function ThreeSizeKey({ mode, cam, worldRadius, chipRadius }: { mode: SizeMode; 
 /// `variant="dock"`: the collapsible card at the bottom left of a wide map. `variant="pop"`: the body only,
 /// for the phone popover the page opens from its "Key" pill. `renderer` picks which map it explains;
 /// `chipRadius` (the WebGL map's planet-chip radius for a share, CSS px) draws the chip sizes.
-export default function MapKey({ mode, cam, worldRadius, variant = "dock", defaultOpen = false, renderer = "classic", chipRadius = null, look = "flat" }: { mode: SizeMode; cam: CamStore; worldRadius: ((v: number) => number) | null; variant?: "dock" | "pop"; defaultOpen?: boolean; renderer?: "classic" | "three"; chipRadius?: ((share: number) => number) | null; look?: "galaxy" | "flat" }) {
+/// `last` / `onLast` / `counts` / `heatOn`: the last-trade filter (LastProps); without `onLast` the scale is a legend only.
+export default function MapKey({ mode, cam, worldRadius, variant = "dock", defaultOpen = false, renderer = "classic", chipRadius = null, look = "flat", last = LAST_ALL, onLast = null, counts = null, heatOn = false }: { mode: SizeMode; cam: CamStore; worldRadius: ((v: number) => number) | null; variant?: "dock" | "pop"; defaultOpen?: boolean; renderer?: "classic" | "three"; chipRadius?: ((share: number) => number) | null; look?: "galaxy" | "flat" } & LastProps) {
   const [open, setOpen] = useState(defaultOpen);
   const three = renderer === "three";
   const galaxy = three && look === "galaxy";
+  const filter: LastProps = { last, onLast, counts, heatOn };
+  // what the filter hides right now (the pill's hollow dots and its tag): nothing until the heat is in
+  const mask = heatOn && onLast ? last & LAST_ALL : LAST_ALL;
+  const tag = lastTag(lastKeysOf(mask));
   const keys = (
     <section className="map-key-sec">
       <h4>Keys</h4>
@@ -165,6 +210,7 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
         <dt>L</dt><dd>launch under it</dd>
         <dt>F</dt><dd>frame its tree</dd>
         <dt>0 · + · −</dt><dd>whole map · zoom</dd>
+        {heatOn && onLast && <><dt>K</dt><dd>last trade: 24 h · all</dd></>}
         <dt>Esc</dt><dd>clear</dd>
       </dl>
     </section>
@@ -193,7 +239,7 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
     <div className="map-key-body" id="map-key-body">
       <section className="map-key-sec">
         <h4>Last trade <span>fresh → cold</span></h4>
-        <TradeScale items={TRADE} label="Colour by last trade" />
+        <TradeScale items={TRADE} label="Colour by last trade" {...filter} />
       </section>
       <ThreeSizeKey mode={mode} cam={cam} worldRadius={worldRadius} chipRadius={chipRadius} />
       <section className="map-key-sec">
@@ -211,7 +257,7 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
     <div className="map-key-body" id="map-key-body">
       <section className="map-key-sec">
         <h4>Last trade <span>fresh → cold</span></h4>
-        <TradeScale items={GAL_TRADE} label="Colour by last trade" />
+        <TradeScale items={GAL_TRADE} label="Colour by last trade" {...filter} />
       </section>
       <section className="map-key-sec">
         <h4>Rings</h4>
@@ -234,6 +280,12 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
           <li><Swatch d={2} /> d2 · paired under a d1</li>
         </ul>
       </section>
+      {onLast && (
+        <section className="map-key-sec">
+          <h4>Last trade <span>show · hide</span></h4>
+          <TradeScale items={TRADE} label="Coins by last trade" {...filter} />
+        </section>
+      )}
       <section className="map-key-sec">
         <h4>Rings</h4>
         <ul className="map-key-list">
@@ -259,8 +311,9 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
   return (
     <div className={`map-key dock ${open ? "open" : ""}`}>
       <button type="button" className="map-key-toggle" aria-expanded={open} aria-controls="map-key-body" onClick={() => setOpen((o) => !o)}>
-        <span className="map-key-sws" aria-hidden="true">{three ? (galaxy ? GAL_TRADE : TRADE).map((x) => <Dot key={x.c} c={x.c} />) : <><Swatch d={0} /><Swatch d={1} /><Swatch d={2} /></>}</span>
+        <span className="map-key-sws" aria-hidden="true">{three ? (galaxy ? GAL_TRADE : TRADE).map((x, i) => <Dot key={x.c} c={x.c} off={!((mask >> i) & 1)} />) : <><Swatch d={0} /><Swatch d={1} /><Swatch d={2} /></>}</span>
         Key
+        {tag && <span className="map-key-tag" title={`Last trade: showing ${lastKeysOf(mask).map((k) => LAST_SHORT[k]).join(", ")}`}>{tag}</span>}
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d={open ? "M2 3.5 5 6.5 8 3.5" : "M2 6.5 5 3.5 8 6.5"} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
       </button>
       {open && body}

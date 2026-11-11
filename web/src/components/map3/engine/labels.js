@@ -17,6 +17,9 @@
 //     on 'loadingdone'.
 //   - the live child label class is 'lv' (the app has a global .live); highlight: a child label of a coin that does not
 //     match, and a planet label / gen tag / callout of a family with no match, get .dim.
+//   - (2026-11-10) the Key's last-trade filter (S.vis, vis.js): a hidden coin has no label, is no obstacle and is not counted
+//     as drawn; a family with nothing drawn has no title, chip, colony, generation tags or callout; an anchor's child label
+//     is .dim like its disc.
 //
 // EXPORTS
 //   fmtTicker(sym)        '$' + symbol with any leading '$' stripped, cut at 14 chars with '…'
@@ -64,6 +67,10 @@ export async function buildLabels(S) {
   // (layout.js sets f.bandOut under the galaxy); undefined (an engine without S.look) = flat, every flat string unchanged
   const G = S.look === "galaxy";
   const life = S.life;
+  // (last-trade filter) the levels motion.js keeps (vis.js); the gates read them only while something is not shown
+  const V = S.vis || null;
+  const hidI = (i) => !!(V && V.on && i >= 0 && V.level[i] === 0);
+  const hidF = (id) => !!(V && V.on && id >= 0 && V.famVis[id] === 0);
 
   // fonts first: every width below is measured with the real faces (1.5 s race), remeasured on fonts.ready.
   // (map3 port) the site's Geist / Geist Mono; index.html already loads them, so this usually resolves at once
@@ -253,6 +260,8 @@ export async function buildLabels(S) {
     return false;
   };
   const hardHit = (b, own) => query(grid, items, b, PAD, (it) => own < 0 || it.own !== own);
+  // (compact layout, 2026-11-10) ... with the coins of family `fam` not counted (its focused title may sit over its own children)
+  const hardHitBut = (b, own, fam) => query(grid, items, b, PAD, (it) => (own < 0 || it.own !== own) && !(it.kind === "bub" && it.own >= 0 && it.own < N && famOf[it.own] === fam));
   // density: a child label may not blanket a seed head; it is refused when it covers >= 2 small bubbles (2.5-6 px)
   const small = [], smallGrid = new Map();
   const dense = (b, own) => { let n = 0; query(smallGrid, small, b, 0, (it) => it.own !== own && ++n >= 2); return n >= 2; };
@@ -320,7 +329,8 @@ export async function buildLabels(S) {
   };
   // place L around anchor (ax, ay, radius r); returns true when shown. L.w/L.h must be current. colFam >= 0: the label of
   // that family's planet (foreign colonies are obstacles for its box and its leader).
-  function tryPlace(L, ax, ay, r, dirs, o, w, h, useDense = false, colFam = -1) {
+  // overFam >= 0: that family's own coins are not obstacles (the focused title of a compact build, second try)
+  function tryPlace(L, ax, ay, r, dirs, o, w, h, useDense = false, colFam = -1, overFam = -1) {
     const Wd = W(), Hd = H();
     // (integration) an anchor under the HUD (title, legend, stats ...) gets no label: its leader would run through the chrome
     for (const q of hudRects) if (ax >= q.x0 && ax <= q.x1 && ay >= q.y0 && ay <= q.y1) return false;
@@ -333,7 +343,7 @@ export async function buildLabels(S) {
       if (b.x0 < 2 || b.y0 < 2 || b.x1 > Wd - 2 || b.y1 > Hd - 2) continue;
       let ld = null;
       if (s.disp > 0) { ld = leaderFor(ax, ay, r, b); if (ld === false) continue; }
-      if (hardHit(b, L.own) || (useDense && dense(b, L.own))) continue;
+      if ((overFam >= 0 ? hardHitBut(b, L.own, overFam) : hardHit(b, L.own)) || (useDense && dense(b, L.own))) continue;
       if (colFam >= 0 && (boxInColony(b, colFam) || (ld && pathInColony(ld, colFam)))) continue;
       if (softHit(b, L)) { if (!softBlocked) softBlocked = { s, b, ld }; continue; }
       commit(L, s, b, ld); L.want = 0; return true;
@@ -396,6 +406,7 @@ export async function buildLabels(S) {
   // (map3 port) highlight: S.hlOn with S.hlBit(coin) and S.hlFam(famId) (motion.js setHighlight). A child label dims when
   // its coin does not match; a family's label (planet, gen tag, callout) when the family has no match; a toast by its coin
   const hlDimmed = (L) => {
+    if (L.kind === "kid" && V && V.on && V.level[L.i] === 1) return true;   // (last-trade filter) an anchor is quiet, its name too
     if (!S.hlOn) return false;
     if (L.kind === "kid") return !S.hlBit(L.i);
     if (L.kind === "evt") return L.own >= 0 ? !S.hlBit(L.own) : false;
@@ -410,7 +421,7 @@ export async function buildLabels(S) {
   function toast(who, text, ms = 2000) {
     if (!readyDone) return false;
     const i = Number.isInteger(who) ? who : -1, at = i < 0 && who && Number.isFinite(who.x) ? who : null;
-    if (i < 0 && !at) return false;
+    if ((i < 0 && !at) || hidI(i)) return false;   // (last-trade filter) never about a coin the Key hides
     const s = i >= 0 ? sym[i] : who.sym || "";
     const html = `<div class="t">${text.startsWith("new") ? `<span class="ev">${esc(text)}</span> ${tickerHTML(s)}` : `${tickerHTML(s)} <span class="ev">${esc(text)}</span>`}</div>`;
     const L = { kind: "evt", fam: -3, own: i, e: mk("kid evt", html), on: false, slot: null, want: 0, o: 1 };
@@ -436,7 +447,9 @@ export async function buildLabels(S) {
   const normCounts = (c) => Array.isArray(c) ? c : c && typeof c === "object" ? [c.live ?? c[0] ?? 0, c.cooling ?? c.cool ?? c[1] ?? 0, c.quiet ?? c[2] ?? 0, c.cold ?? c[3] ?? 0] : null;
   function renderStats() {
     const c = stats.counts || [0, 0, 0, 0], cv = S.layers.canvas;
-    if (cv) cv.setAttribute("aria-label", `Spore map: ${fmtN(N + (S.ghostTotal || 0))} coins in ${fmtN(fams.length)} families; ${fmtN(c[0])} traded in the last 30 minutes`);
+    // (compact layout) a build made from the Key's filtered set still announces the whole map (S.whole, data.js)
+    const W0 = S.whole, nCoins = W0 ? W0.coins + W0.ghosts : N + (S.ghostTotal || 0), nFams = W0 ? W0.families : fams.length;
+    if (cv) cv.setAttribute("aria-label", `Spore map: ${fmtN(nCoins)} coins in ${fmtN(nFams)} families; ${fmtN(c[0])} traded in the last 30 minutes`);
   }
   const updateStats = (counts, heatAt, status) => {
     const c = normCounts(counts);
@@ -469,12 +482,14 @@ export async function buildLabels(S) {
 
     // focused family: the family under the screen centre that fills >= 30 % of the short side (the gen-tag fallback)
     let focusF = null;
-    if (k >= 1.3 * k0) { let best = Infinity; for (const f of fams) { if (f.cx === undefined || f.Rc * k < 0.3 * minWH) continue; const d = Math.hypot(f.cx - S.cam.x, f.cy - S.cam.y) / f.Rc; if (d < 1 && d < best) { best = d; focusF = f; } } }
+    if (k >= 1.3 * k0) { let best = Infinity; for (const f of fams) { if (f.cx === undefined || f.Rc * k < 0.3 * minWH || hidF(f.id)) continue; const d = Math.hypot(f.cx - S.cam.x, f.cy - S.cam.y) / f.Rc; if (d < 1 && d < best) { best = d; focusF = f; } } }
 
-    // planet chips (hard obstacles) + which planets are on screen
+    // planet chips (hard obstacles) + which planets are on screen; (last-trade filter) a family with nothing drawn has no
+    // chip, no title, no colony
     const chipR = new Float32Array(planets.length), chipX = new Float32Array(planets.length), chipY = new Float32Array(planets.length), chipOn = new Uint8Array(planets.length);
     const chips = [];
     planets.forEach((f, j) => {
+      if (hidF(f.id)) return;
       const [sx, sy] = toS(f.cx, f.cy);
       const r = Math.max(R[f.top] * k, TOK.chipR(f.share, maxShare, ph));
       const ro = r + (r >= TOK.arcMinR && n24[f.top] > 0 ? TOK.arcGap + 2 : 0);
@@ -485,6 +500,7 @@ export async function buildLabels(S) {
     });
     colonies.length = 0;
     planets.forEach((f, j) => {
+      if (hidF(f.id)) return;
       const cr = visR(f) * k; if (!(cr > chipR[j] + 4)) return;   // a colony no larger than its chip: the chip is the obstacle
       const [cx, cy] = toS(X[f.top], Y[f.top]);
       if (cx + cr < 0 || cy + cr < 0 || cx - cr > Wd || cy - cr > Hd) return;
@@ -506,6 +522,7 @@ export async function buildLabels(S) {
     const visit = (i) => {
       const f = fams[famOf[i]];
       if (f.planet ? i === f.top : !showDust) return;
+      if (hidI(i)) return;   // (last-trade filter) not drawn: no obstacle, no label, not counted
       const x = X[i], y = Y[i]; if (x < wx0 || x > wx1 || y < wy0 || y > wy1) return;
       const r = drawnR(i, f);
       if (r >= 1 && (typeof sR !== "function" || sR(i) >= 1)) drawn++;
@@ -587,7 +604,10 @@ export async function buildLabels(S) {
       if (overview && !ph && L.f.rank >= (G ? 64 : 32 + 8)) { hideL(L); continue; }
       setCls(L, "tierc", "t" + tier); setCls(L, "stc", st ? "st" : "");
       L.w = w; L.h = h;
-      if (tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id)) { nP++; setO(L, 1); applyDim(L); } else hideL(L);
+      // (compact layout) a build made from the Key's filtered set packs a family's shown children tight around its chip: at the
+      // family's own fit (focused) every slot next to the chip can touch a child, so its title may sit over its own children
+      // rather than be dropped (a full build's looser tree keeps the first try)
+      if (tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id) || (S.filtered && L.f.Rc * k >= 0.3 * minWH && tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id, L.f.id))) { nP++; setO(L, 1); applyDim(L); } else hideL(L);
     }
 
     // ---- 2. generation tags: on the arc at the occupied angle nearest 12 o'clock, sliding +-36 deg ----
@@ -597,7 +617,7 @@ export async function buildLabels(S) {
       // (final polish) generation arcs and tags belong to the focused (or hovered) family only
       const tagFam = (dimState.on && dimState.fam >= 0) ? dimState.fam : U.uFocusFam.value >= 0 ? U.uFocusFam.value : focusF ? focusF.id : -1;
       // (galaxy) every family whose disc is >= 220 px gets its tags (rings are drawn on every planet at every zoom); flat: the focused one
-      for (const f of fams) { if (!G && f.id !== tagFam) continue; if (f.cx === undefined || !f.bandIn || f.bandIn.length < 2 || f.Rc * k < 220) continue; const [sx, sy] = toS(f.cx, f.cy); const rr = f.Rc * k; if (sx + rr < 0 || sy + rr < 0 || sx - rr > Wd || sy - rr > Hd) continue; famsG.push({ f, d: Math.hypot(sx - Wd / 2, sy - Hd / 2) / rr }); }
+      for (const f of fams) { if (!G && f.id !== tagFam) continue; if (f.cx === undefined || !f.bandIn || f.bandIn.length < 2 || f.Rc * k < 220 || hidF(f.id)) continue; const [sx, sy] = toS(f.cx, f.cy); const rr = f.Rc * k; if (sx + rr < 0 || sy + rr < 0 || sx - rr > Wd || sy - rr > Hd) continue; famsG.push({ f, d: Math.hypot(sx - Wd / 2, sy - Hd / 2) / rr }); }
       famsG.sort((a, b) => a.d - b.d);
       for (const { f } of famsG) {
         if (knocks.length >= 12) break;
@@ -646,7 +666,7 @@ export async function buildLabels(S) {
     if (kidsOK || hov >= 0) {
       const live = (i) => S.age[i] <= 1800;
       const pri = (i) => mc[i] * (1 + 1.5 * live(i));
-      if (hov >= 0) { const f = fams[famOf[hov]]; if (!(f.planet && hov === f.top) && (f.planet || showDust) && R[hov] * k >= 1 && !cand.includes(hov)) cand.push(hov); }
+      if (hov >= 0 && !hidI(hov)) { const f = fams[famOf[hov]]; if (!(f.planet && hov === f.top) && (f.planet || showDust) && R[hov] * k >= 1 && !cand.includes(hov)) cand.push(hov); }
       cand.sort((a, b) => (b === hov) - (a === hov) || pri(b) - pri(a) || n24[b] - n24[a]);
       const budget = ph ? 16 : kB > 4 ? 64 : 40, two = kB > 4;   // (look fix) keyed to the frame fit (kB), see above
       const top = cand.slice(0, Math.min(cand.length, budget * 6));
@@ -755,6 +775,8 @@ export async function buildLabels(S) {
           list.push({ f: big, l1: "Largest family", l2: `${esc(fmtUsd(famMc(big)))} combined market cap` });
           if (active) list.push({ f: active.f, l1: "Most active in the last hour", l2: `${fmtN(active.n)} trades` });
         }
+        // (last-trade filter) no callout points at a family the Key hides whole
+        for (let q = list.length - 1; q >= 0; q--) if (hidF(list[q].f.id)) list.splice(q, 1);
       }
       const [ccx] = toS(0, 0), clR = (S.Rcl || 0) * k;
       const usedY = [];
@@ -909,6 +931,7 @@ export async function buildLabels(S) {
   });
   const showTip = (i, sx, sy) => {
     if (!tip || i < 0 || (i >= N && !(i >= DUST0 && S.swarm && S.swarm.mintAt(i))) || S.dead) return;
+    if (i < N && hidI(i)) { hideTip(); return; }   // (last-trade filter) never a card for a coin that is not drawn
     // (map3 port) never for the selected coin: the app's panel shows it
     if (S.motion.selected && S.motion.selected() === i) { hideTip(); return; }
     const ph = phone();

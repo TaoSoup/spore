@@ -77,24 +77,55 @@ export function ingest(S, opts) {
     }
   }
   const N = sym.length;
+  // (compact layout, 2026-11-10) a build made from the Key's filtered set (opts.compact, adapter.ts familyTotals): every family's
+  // value, share, rank, size and ghosts are those of the WHOLE family in the page's node list, so no chip, rank or label moves
+  // when a bucket is toggled; S.seed / f.seed are the coins' pre-order index and the family id in the FULL build, so the layout's
+  // per-coin jitter and the family rotation stay put across filtered builds. Absent: the code below runs as it always did.
+  const C = opts.compact && typeof opts.compact === "object" && opts.compact.families instanceof Map && opts.compact.totals ? opts.compact : null;
+  let seed = null;
+  if (C) {
+    seed = new Int32Array(N);
+    const sm = C.seed instanceof Map ? C.seed : null;
+    for (let i = 0; i < N; i++) { const s = sm ? sm.get(mint[i]) : undefined; seed[i] = s === undefined ? (1 << 24) + i : s; }
+    const list = Array.isArray(C.list) ? C.list : [];
+    // the whole family of a compact family: by its top mint, else (a cycle broken elsewhere) the one holding its top's seed
+    const byStart = (s) => { let lo = 0, hi = list.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1, w = list[m]; if (s < w.start) hi = m - 1; else if (s >= w.start + w.members) lo = m + 1; else return w; } return null; };
+    for (const f of fams) {
+      const byTop = C.families.get(mint[f.top]), w = byTop || byStart(seed[f.top]);
+      f.seed = w ? w.id : (1 << 20) + f.id;
+      if (!w) continue;
+      f.valueL = Number(w.locked) || 0; f.valueM = Number(w.mcap) || 0; f.membersAll = Number(w.members) || f.members.length;
+      if (byTop) f.ghostAll = Number(w.ghost) || 0;
+    }
+  }
   // (family-all, DESIGN-FAMILY-ALL.md §2) a listed-asset top carries its TRUE child count (children); the server draws a
   // capped slice. ghost = the undrawn coins (asset tops only: a SOL family is drawn whole), size = the family's true size
   // (members + ghost = 1 + top.descendants: undrawn coins are leaves). Family VALUE stays the drawn slice.
+  // (compact) coins the filter left out are NOT ghosts: they are page coins (revealed live), so ghost = children - WHOLE kids
   let ghostTotal = 0;
   for (const f of fams) {
     const c = roots[f.id] && roots[f.id].coin, ch = c ? Number(c.children) : 0;
-    f.ghost = c && c.asset === true && Number.isFinite(ch) ? Math.max(0, Math.floor(ch) - kids[f.top].length) : 0;
-    f.size = f.members.length + f.ghost;
+    f.ghost = f.ghostAll !== undefined ? f.ghostAll : c && c.asset === true && Number.isFinite(ch) ? Math.max(0, Math.floor(ch) - kids[f.top].length) : 0;
+    f.size = (f.membersAll ?? f.members.length) + f.ghost;
     ghostTotal += f.ghost;
   }
   let total = 0;
   for (const f of fams) { let v = 0, a = Infinity, t = 0; for (const i of f.members) { v += val[i]; if (age[i] < a) a = age[i]; t += n24[i]; } f.value = v; f.age = a; f.n24 = t; total += v; }
+  // (compact) the whole family's value in the current mode, over the whole map's total (dropped families included)
+  if (C) {
+    const mcapMode = opts.mode === "mcap";
+    for (const f of fams) if (f.membersAll !== undefined) f.value = mcapMode ? f.valueM : f.valueL;
+    total = Number(mcapMode ? C.totals.mcap : C.totals.locked) || 0;
+  }
   for (const f of fams) f.share = total > 0 ? f.value / total : 0;
   // (size modes) both modes' shares and ranks; the family order is min(rankL, rankM) so it is the same in both modes
   let totL = 0, totM = 0;
   for (const f of fams) { totL += f.valueL; totM += f.valueM; }
+  if (C) { totL = Number(C.totals.locked) || 0; totM = Number(C.totals.mcap) || 0; }
   for (const f of fams) { f.shareL = totL > 0 ? f.valueL / totL : 0; f.shareM = totM > 0 ? f.valueM / totM : 0; }
-  const tie = (a, b) => b.members.length - a.members.length || (mint[a.top] < mint[b.top] ? -1 : mint[a.top] > mint[b.top] ? 1 : 0);
+  const tie = C
+    ? (a, b) => (b.membersAll ?? b.members.length) - (a.membersAll ?? a.members.length) || (mint[a.top] < mint[b.top] ? -1 : mint[a.top] > mint[b.top] ? 1 : 0)
+    : (a, b) => b.members.length - a.members.length || (mint[a.top] < mint[b.top] ? -1 : mint[a.top] > mint[b.top] ? 1 : 0);
   fams.slice().sort((a, b) => b.valueL - a.valueL || tie(a, b)).forEach((f, r) => { f.rankL = r; });
   fams.slice().sort((a, b) => b.valueM - a.valueM || tie(a, b)).forEach((f, r) => { f.rankM = r; });
   let ranked = fams.slice().sort((a, b) => Math.min(a.rankL, a.rankM) - Math.min(b.rankL, b.rankM) || Math.max(a.rankL, a.rankM) - Math.max(b.rankL, b.rankM) || tie(a, b));
@@ -104,11 +135,20 @@ export function ingest(S, opts) {
     const prev = new Map(); opts.order.forEach((m, k) => { if (typeof m === "string" && !prev.has(m)) prev.set(m, k); });
     const at = new Map(ranked.map((f, k) => [f, k]));
     const key = (f) => { const k = prev.get(mint[f.top]); return k === undefined ? Infinity : k; };
-    ranked = ranked.slice().sort((a, b) => key(a) - key(b) || at.get(a) - at.get(b));
+    if (C) {
+      // (compact) the previous engine held only the families its own filtered set kept: one it did not list (its first trade
+      // came after that build) keeps its computed place, the listed ones keep their previous order in the places they hold
+      const listed = ranked.filter((f) => prev.has(mint[f.top])).sort((a, b) => key(a) - key(b) || at.get(a) - at.get(b));
+      let j = 0;
+      ranked = ranked.map((f) => (prev.has(mint[f.top]) ? listed[j++] : f));
+    } else ranked = ranked.slice().sort((a, b) => key(a) - key(b) || at.get(a) - at.get(b));
   }
   ranked.forEach((f, r) => { f.rank = r; f.planet = r < S.N_PLANETS; });
   const planets = ranked.slice(0, S.N_PLANETS), dust = ranked.slice(S.N_PLANETS);
   let maxShare = 0; for (const f of planets) if (f.share > maxShare) maxShare = f.share;
+  // (compact) the whole map's largest share in this mode (its family always ranks first in a full build, so this IS the full
+  // build's maxShare): the chip scale does not move when the build leaves families out
+  if (C && C.maxShare) { const m = Number(opts.mode === "mcap" ? C.maxShare.mcap : C.maxShare.locked); if (m > 0) maxShare = m; }
   const mintIdx = new Map(); for (let i = 0; i < N; i++) mintIdx.set(mint[i], i);
   const bare = (s) => String(s || "").replace(/^\$+/, "").toLowerCase();
   const famBy = (s) => {
@@ -124,6 +164,10 @@ export function ingest(S, opts) {
     dustShare: dust.reduce((s, f) => s + f.share, 0),
     maxShare: maxShare || 1,
     famBy,
+    // (compact) the full build's seeds (null = the index itself), the whole map's counts (labels' aria label)
+    seed, filtered: !!C,
+    whole: C ? { coins: Number(C.coins) || N, ghosts: Number(C.ghosts) || 0, families: Number(C.familyCount) || fams.length } : null,
   });
   Object.assign(S.debug.map, { coins: N, families: fams.length, planets: planets.length, dust: dust.length, ghosts: ghostTotal });
+  if (C) S.debug.map.compact = 1;
 }

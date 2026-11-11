@@ -25,7 +25,10 @@ const GLYPH: Record<HlKey, ReactNode> = {
 /// The predicate for BubbleMap and the per-key counts for the chips. The context's clock ticks once a
 /// minute (only the "new" keys read it); `active` follows the heat index; `since` the previous visit.
 /// Base counts recompute at most every 2 s as the nodes change; the `active` count walks only the heat rows.
-export function useHighlight(nodes: BubbleNode[], byMint: Map<string, BubbleNode>, keys: HlKey[], seenAtMs: number | null, heat: HeatIndex | null) {
+/// `lit` (the Key's last-trade filter, lib/map/visibility.ts litTest; null = everything lights up): a chip counts only the
+/// coins a highlight can light up (shown ones and the pins; an anchor is drawn dim even when it matches), so its number is
+/// still what lights up; the page's levels behind it are throttled (2 s).
+export function useHighlight(nodes: BubbleNode[], byMint: Map<string, BubbleNode>, keys: HlKey[], seenAtMs: number | null, heat: HeatIndex | null, lit: ((mint: string) => boolean) | null = null) {
   const [minute, setMinute] = useState(() => Math.floor(Date.now() / 60_000));
   useEffect(() => { const t = setInterval(() => setMinute(Math.floor(Date.now() / 60_000)), 15_000); return () => clearInterval(t); }, []);
   const seenAtS = seenAtMs != null ? Math.floor(seenAtMs / 1000) : null;
@@ -41,13 +44,13 @@ export function useHighlight(nodes: BubbleNode[], byMint: Map<string, BubbleNode
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [keyStr, seenAtS, wantsActive ? heat?.version : -1, wantsClock ? minute : -1]);
   const counted = useThrottled(nodes, 2_000);
-  const base = useMemo(() => hlCounts(counted, { nowS: minute * 60, seenAtS, heat: null }), [counted, minute, seenAtS]);
+  const base = useMemo(() => hlCounts(lit ? counted.filter((n) => lit(n.mint)) : counted, { nowS: minute * 60, seenAtS, heat: null }), [counted, minute, seenAtS, lit]);
   const active = useMemo(() => {
     if (!heat) return 0;
     let k = 0;
-    for (const mint of heat.rows.keys()) { const n = byMint.get(mint); if (n && hlTest("active", n, ctx)) k++; }
+    for (const mint of heat.rows.keys()) { const n = byMint.get(mint); if (n && (!lit || lit(mint)) && hlTest("active", n, ctx)) k++; }
     return k;
-  }, [heat, byMint, ctx]);
+  }, [heat, byMint, ctx, lit]);
   const counts = useMemo(() => ({ ...base, active }), [base, active]);
   return { predicate, counts, ctx };
 }

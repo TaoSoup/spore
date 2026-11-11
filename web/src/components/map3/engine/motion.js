@@ -13,11 +13,18 @@
 //   - selection is persistent (ring + links.setBranch) and owned by the page; no pinned tooltip; fit() keeps it.
 //   - every listener, timer and frame goes through S.life; the tick stops on destroy or context loss.
 //   - frame stats (CPU time of frame(), settling vs settled), onCamera relay (<= 4 Hz while moving + settle + first frame).
+//   - (2026-11-10) the Key's last-trade filter (setLastFilter / visibility / lastFilterStats): see the visibility section.
+//     Hidden coins keep their positions; they are not drawn, not picked, not labelled and show no live effect.
+//   - (compact layout, 2026-11-10) a build made from the Key's filtered set (S.opts.compact): page coins it left out are added
+//     live next to their parent (reveal: trades, heat polls, node passes, selections, page hovers, a new pair's parent), with
+//     no new-pair fanfare; driftStats() tells the sync when to re-compact. Everything here is skipped on a mask-15 build.
 import { smooth, rnd, GOLDEN } from "./util.js";
 import { TOK, heatClass, coreBoost, EASE, DUR } from "./tokens.js";
 import { validHeat } from "./data.js";
 // (family-all) the swarm's dust index space (DUST0 + global slot): a loaded real speck of a capped asset family
 import { DUST0 } from "./swarm.js";
+// (the Key's last-trade filter, 2026-11-10) which coins are drawn: SHOWN / ANCHOR / HIDDEN (see the visibility section)
+import { classShown, cleanMask, createVis, visClassOf, visLevels, visSet, visVirt, visGrow, visCounts, VIS_NAMES, NEWBORN_S } from "./vis.js";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -90,6 +97,30 @@ export function buildMotion(S) {
   const isPlanetTop = new Uint8Array(N); for (const f of planets) isPlanetTop[f.top] = 1;
   let Rmax = 0; for (let i = 0; i < N; i++) if (!isPlanetTop[i] && R[i] > Rmax) Rmax = R[i];
   const panR = () => (S.RoutMax || S.Rout || S.Rcl || 1000) * 1.1;
+  // (the Key's last-trade filter, 2026-11-10) the levels index.js computed before the build (vis.js createVis), owned here
+  // from now on (the visibility section below). The CPU gates read them only while something is not shown (V.on): with the
+  // mask at 15 every coin is shown and the gates cost nothing. A hidden coin keeps its place: never filtered out, no rebuild.
+  const V = S.vis || (S.vis = createVis(S, S.opts.last));
+  const pinAuto = { sel: -1, foc: -1, hov: -1 };   // the engine's own pins: selection, focus pulse, a page-hovered coin
+  // (compact layout, 2026-11-10) a build made from the Key's filtered set (EngineOptions.compact): the page's nodes the build
+  // left out are added live (reveal, the births section) when they come into view; null on a mask-15 build, where every branch
+  // that reads it is skipped. buildMask = the mask the build was made with: an engine whose mask the Key has already changed
+  // (a rebuild for the new mask is on its way) reveals only what both masks show. hidden0 = built coins hidden at the build
+  // under the BUILD's mask: an engine that starts while the Key is narrower (a toggle during the prep) takes it from one scratch
+  // pass, since a toggle back within the settle keeps this engine and its ageing must still count (driftStats counts hidden
+  // only while the Key's mask is the build's; hiddenAt keeps the last count).
+  const C = S.opts.compact && typeof S.opts.compact.lookup === "function" ? S.opts.compact : null;
+  const lookup = (m) => { if (!C || typeof m !== "string" || !m) return null; try { const n = C.lookup(m); return n && typeof n === "object" && n.mint === m ? n : null; } catch { return null; } };
+  const buildMask = C ? cleanMask(C.mask) : 15;
+  let hidden0 = V.st.cnt[0], hiddenAt = 0;
+  if (C && V.mask !== buildMask) {
+    const virt = Int32Array.from(V.virt), pins = [...V.pins], s0 = S.mintIdx.get(S.opts.select);
+    if (S.opts.swarm !== false) for (const f of fams) if (f.ghost > 0 && f.top >= 0 && f.top < N) virt[f.top] = buildMask & 8 ? 1 : 0;
+    if (s0 !== undefined) pins.push(s0);
+    hidden0 = visLevels(V.par, V.cls, buildMask, pins, V.fam, fams.length, { n: V.st.n, virt }).cnt[0];
+  }
+  const hid = (i) => V.on && V.level[i] === 0;            // engine coin i is not drawn
+  const famHid = (id) => V.on && V.famVis[id] === 0;      // nothing of family id is drawn
 
   // world grid of coins (labels uses it for obstacles; hover uses it for the hit-test)
   const CELLW = 24, grid = new Map();
@@ -152,9 +183,11 @@ export function buildMotion(S) {
     return { x: cx - (mx - w / 2) / k, y: cy + (my - h / 2) / k, k };
   }
   // zoom that frames a family: f.Rc * 1.06 into 94 % of the inset rect's short side. Tiny families stop where their top is
-  // 64 px in radius.
+  // 64 px in radius. (compact layout) a compact family of 10 or more built coins stops only where its top is 30 % of the inset
+  // rect's short side: the family laid out around what the Key shows is small in world units and must fill the view.
   const insetMin = () => { const ir = S.insetRect(); return Math.max(40, Math.min(ir.x1 - ir.x0, ir.y1 - ir.y0)); };
-  const famK = (f) => clampK(Math.min((insetMin() * 0.94) / (2 * f.Rc * 1.06), 64 / Math.max(R[f.top], 0.05)));
+  const famTopCapPx = (f) => (C && f.members.length >= 10 ? Math.max(64, 0.3 * insetMin()) : 64);
+  const famK = (f) => clampK(Math.min((insetMin() * 0.94) / (2 * f.Rc * 1.06), famTopCapPx(f) / Math.max(R[f.top], 0.05)));
   const famTarget = (f) => frameCircle(f.cx, f.cy, f.Rc * 1.06, famK(f));
   // (map3 port) a coin too small in its family's framing is centred at 14 px in the inset rect's centre
   function coinTarget(i) {
@@ -177,6 +210,7 @@ export function buildMotion(S) {
     const ir = S.insetRect(), [vx, vy] = toW((ir.x0 + ir.x1) / 2, (ir.y0 + ir.y1) / 2);
     let best = -1, bs = Infinity;
     const test = (f) => {
+      if (famHid(f.id)) return;   // (last-trade filter) a family the filter hides never owns the view (it would dim the rest)
       const d = Math.hypot(f.cx - vx, f.cy - vy); if (d > f.Rc + 4 / kk) return;
       if (f.Rc * kk >= 0.3 * m || kk >= 0.6 * famK(f)) { const s = d / Math.max(f.Rc, 1e-3); if (s < bs) { bs = s; best = f.id; } }
     };
@@ -220,7 +254,8 @@ export function buildMotion(S) {
   function endFlight() {
     const f = flight; flight = null; if (!f) return;
     cam.x = f.x; cam.y = f.y; cam.k = f.k; Object.assign(tgt, cam); S.dirty = true;
-    focusedFam = f.kind === "fam" ? f.fam : familyAtCentre();
+    // (last-trade filter) a family the filter hides entirely never owns the view (the rest would recede around nothing)
+    focusedFam = f.kind === "fam" && !famHid(f.fam) ? f.fam : familyAtCentre();
     pointer.dirty = true; labelsDirty = true;
     if (f.onEnd) f.onEnd();
     if (f.kind !== "overview") keepSelectedVisible();   // (map3 port) e.g. the phone sheet rose while the flight ran
@@ -238,7 +273,7 @@ export function buildMotion(S) {
   // (map3 port) fit() keeps the selection (the prototype's flyOverview cleared it)
   const flyOverview = () => { const t = S.overview.overviewTarget(); return startFlight(t.x, t.y, t.k, { kind: "overview" }); };
   const fitAll = (snap = true) => { if (!snap) return flyOverview(); const t = S.overview.overviewTarget(); setCam(t.x, t.y, t.k, true); focusedFam = -1; };
-  const focus = (s, snap = true) => { const f = famByKey(s); if (!f) return; if (!snap) return flyToFamily(f); const t = famTarget(f); setCam(t.x, t.y, t.k, true); focusedFam = f.id; };
+  const focus = (s, snap = true) => { const f = famByKey(s); if (!f) return; if (!snap) return flyToFamily(f); const t = famTarget(f); setCam(t.x, t.y, t.k, true); focusedFam = famHid(f.id) ? familyAtCentre() : f.id; };
   const focusKey = (f) => { const t = (sym[f.top] || "").replace(/^\$+/, ""); return t && S.famBy(t) === f ? t : mint[f.top]; };
 
   // ---------- selection (map3 port: owned by the page; persistent ring + selected branch, never a tooltip) ----------
@@ -247,6 +282,7 @@ export function buildMotion(S) {
     if (!(i >= 0)) i = -1;
     if (i === selected) return;
     selected = i;
+    visPin("sel", i);   // (last-trade filter) the selection is drawn whatever the filter (and its chain anchors it)
     S.bubbles.selectCoin(i); S.invalidate();
     if (S.swarm && S.swarm.on) S.swarm.select(i);   // (family-all) a selected speck wears its ring
     if (typeof S.links.setBranch === "function") S.links.setBranch(i >= 0 && i < N ? i : -1);   // (round 2) the selected branch draws at any zoom
@@ -274,10 +310,12 @@ export function buildMotion(S) {
   let tipShownFor = -1, tipDue = 0, labelsDirty = false, focusedFam = -1, hullFam = -1, focusWant = -1;
   const hideTipNow = () => { tipDue = 0; if (tipShownFor >= 0) { S.labels.hideTip(); tipShownFor = -1; } };
   // (map3 port) via: 'chip' | 'coin' | 'speck' | 'colony' | 'none' (EngineDebug.pick reports it)
+  // (last-trade filter) a hidden coin, chip, speck or colony is never a target (anchors are: they are drawn, dim)
   function hitTest(sx, sy, touch) {
     const k = cam.k, [wx, wy] = toW(sx, sy), ph = phone(), slop = touch ? 10 : 4;
     let best = -1, bs = Infinity, via = "none";
     for (const f of planets) {
+      if (hid(f.top)) continue;
       const i = f.top, cr = Math.max(R[i] * k, TOK.chipR(f.share, maxShare, ph));
       const d = Math.hypot(X[i] - wx, Y[i] - wy) * k, hr = Math.max(cr + slop, ph || touch ? 22 : 10);
       if (d < hr) { const s = d < cr ? d - 1e3 : d - cr; if (s < bs) { bs = s; best = i; via = "chip"; } }
@@ -288,34 +326,42 @@ export function buildMotion(S) {
     // position first (the grid holds their homes until the commit re-buckets them)
     const hasDrawn = G && typeof S.bubbles.drawnPx === "function", hitR = (i) => Math.max(hasDrawn ? drawnR(i) : R[i] * k, notable[i] ? 1.5 : 0);
     if (ropeOrd.length) for (const i of ropeOrd) {
-      if (isPlanetTop[i] || (!showDust && !fams[famOf[i]].planet)) continue;
+      if (isPlanetTop[i] || (!showDust && !fams[famOf[i]].planet) || hid(i)) continue;
       const rp = hitR(i); if (rp < 1) continue;
       const d = Math.hypot(X[i] - wx, Y[i] - wy) * k; if (d >= rp + slop) continue;
       const s = d - rp; if (s < bs) { bs = s; best = i; via = "coin"; }
     }
     forEachIn(wx - reach, wy - reach, wx + reach, wy + reach, (i) => {
-      if (isPlanetTop[i] || inRope[i] || (!showDust && !fams[famOf[i]].planet)) return;
+      if (isPlanetTop[i] || inRope[i] || (!showDust && !fams[famOf[i]].planet) || hid(i)) return;
       const rp = hitR(i); if (rp < 1) return;   // sub-pixel stipple is not a target
       const d = Math.hypot(X[i] - wx, Y[i] - wy) * k; if (d >= rp + slop) return;
       const s = d - rp; if (s < bs) { bs = s; best = i; via = "coin"; }
     });
+    // (compact layout) coins added live (reveals, births) are targets too: at most bubbles' 512 spare instances, tested only
+    // in a compact build (a mask-15 build keeps today's behaviour: a newborn is selected through the page)
+    if (C && bornIdx.size) for (const b of bornIdx.values()) {
+      if (hid(b.idx) || (!showDust && b.fam >= 0 && !fams[b.fam].planet)) continue;
+      const [bx, by] = bornXY(b), rp = Math.max(b.r * k, 0); if (rp < 1) continue;
+      const d = Math.hypot(bx - wx, by - wy) * k; if (d >= rp + slop) continue;
+      const s = d - rp; if (s < bs) { bs = s; best = b.idx; via = "coin"; }
+    }
     if (best >= 0) return { i: best, dust: false, via };
     // (family-all) a real speck of a capped asset family (chip > drawn coin > real speck > dust-field speck > colony); the
     // swarm answers only when the slot spacing is >= 3 px on screen; ghosts are never targets
     if (S.swarm && S.swarm.on) { const d = S.swarm.pick(sx, sy, touch); if (d >= DUST0) return { i: d, dust: false, via: "dust" }; }
     if (!showDust) {                                           // a dust speck = one small family
       const dr = (touch ? 14 : 6) / k; let bd = Infinity, bf = null;
-      forEachDust(wx - dr, wy - dr, wx + dr, wy + dr, (f) => { const d = Math.hypot(f.cx - wx, f.cy - wy); if (d < dr && d < bd) { bd = d; bf = f; } });
+      forEachDust(wx - dr, wy - dr, wx + dr, wy + dr, (f) => { if (famHid(f.id)) return; const d = Math.hypot(f.cx - wx, f.cy - wy); if (d < dr && d < bd) { bd = d; bf = f; } });
       if (bf) return { i: bf.top, dust: true, via: "speck" };
     }
-    if (k <= 1.3 * k0()) for (const f of planets) if (Math.hypot(f.cx - wx, f.cy - wy) < f.Rc) return { i: f.top, dust: false, via: "colony" };   // the colony itself
+    if (k <= 1.3 * k0()) for (const f of planets) if (!famHid(f.id) && Math.hypot(f.cx - wx, f.cy - wy) < f.Rc) return { i: f.top, dust: false, via: "colony" };   // the colony itself
     return { i: -1, dust: false, via: "none" };
   }
   const emphList = (i) => { if (!(i >= 0 && i < N)) return []; const out = []; for (let c = i; c >= 0 && par[c] >= 0 && out.length < 64; c = par[c]) out.push(c); for (const c of kids[i]) { if (out.length >= 1500) break; out.push(c); } return out; };
   // (map3 port) src: 'pointer' (the pointer over the canvas: onHover is called on a change), 'page' (the page's hover(mint):
   // pinned until hover(null) or the next pointermove, no echo), 'engine' (flights, grabs, pinches: onHover only when they
   // end a pointer hover). noTip: the page pinned a coin that is off screen.
-  let hoverSrc = null, pinnedHover = false, noTip = false;
+  let hoverSrc = null, pinnedHover = false, noTip = false, hovSwap = false;
   function setHover(i, sx = hovX, sy = hovY, isDust = false, immediateTip = false, src = "engine", tipOff = false) {
     const now = performance.now();
     if (i === hovI) {
@@ -328,6 +374,9 @@ export function buildMotion(S) {
     }
     const prevSrc = hoverSrc;
     hoverSrc = i >= 0 ? src : null; pinnedHover = src === "page" && i >= 0; noTip = i >= 0 && tipOff;
+    // (last-trade filter) the page's hover ended; this call replaces the hover, so the unpinned coin it may hide is not dropped
+    // a second time from inside it (dropHiddenHover)
+    if (hoverSrc !== "page" && pinAuto.hov >= 0) { hovSwap = true; try { visPin("hov", -1); } finally { hovSwap = false; } }
     if (src === "pointer" || (src === "engine" && prevSrc === "pointer")) call("onHover", i >= 0 ? mintOf(i) : null);
     hovI = i; S.hoverI = i; hovDust = isDust; hovX = sx; hovY = sy; labelsDirty = true;
     if (i >= N && i < DUST0) {   // (map3 port) a newborn (page hover): its ring only, no family dim, no card
@@ -363,6 +412,10 @@ export function buildMotion(S) {
   // screen point (none when the coin is off screen); null clears a page hover
   function hoverMint(m) {
     const i = m == null ? -1 : idxOf(m);
+    // (compact layout) a page coin the build left out (a side-panel row of a hidden child) is revealed after a short dwell,
+    // within a per-build budget (hoverReveal); until then, and when it cannot be, the hover is the page's alone
+    if (C) { if (i < 0 && m != null) hoverReveal(m); else hoverWant = null; }
+    visPin("hov", i);   // (last-trade filter) a coin the page points at is drawn whatever the filter, while it points
     if (i < 0) { if (hovI >= 0 && hoverSrc === "page") setHover(-1, hovX, hovY, false, false, "page"); pinnedHover = false; return; }
     const p = posOf(i); if (!p) return;
     const [sx, sy] = toS(p[0], p[1]), r = i < N && typeof S.bubbles.screenR === "function" ? S.bubbles.screenR(i) : i >= DUST0 && S.swarm ? Math.max(2, S.swarm.screenR(i)) : 4;
@@ -574,6 +627,7 @@ export function buildMotion(S) {
     const reach = (cr) => Math.max(cr + slop, cr >= 2.5 ? reachMin : reachMin - 2);
     let best = -1, bs = Infinity;
     for (const f of planets) {
+      if (hid(f.top)) continue;   // (last-trade filter) nothing hidden is held
       const i = f.top, cr = typeof sR === "function" ? sR(i) : Math.max(R[i] * k, TOK.chipR(f.share, maxShare, ph));
       if (!(cr >= minPx)) continue;
       const d = Math.hypot(X[i] - wx, Y[i] - wy) * k; if (d < reach(cr) && d - cr < bs) { bs = d - cr; best = i; }
@@ -581,7 +635,7 @@ export function buildMotion(S) {
     if (best >= 0) return best;
     const showDust = S.dustExpand >= 0.5, rch = Rmax + (Math.max(slop, reachMin) + 2) / k;
     const dustTopsOn = !!S.bubbles.drawsDustTops;   // (flat fix) both looks: bubbles.js draws every family top, so it is pickable
-    const skip = (i) => !showDust && !fams[famOf[i]].planet && !(dustTopsOn && fams[famOf[i]].top === i);
+    const skip = (i) => hid(i) || (!showDust && !fams[famOf[i]].planet && !(dustTopsOn && fams[famOf[i]].top === i));
     // (galaxy physics) coins on the rope first, by their live position
     if (ropeOrd.length) for (const i of ropeOrd) {
       if (isPlanetTop[i] || skip(i)) continue;
@@ -738,7 +792,7 @@ export function buildMotion(S) {
     // newborns under a moved parent: bake their offset (it is measured against X0, which is about to change)
     if (born.size) for (const b of born.values()) {
       if (!(b.p >= 0 && b.p < N) || !inRope[b.p]) continue;
-      b.x += X[b.p] - X0[b.p]; b.y += Y[b.p] - Y0[b.p]; b.ox = 0; b.oy = 0;
+      b.x += X[b.p] - X0[b.p]; b.y += Y[b.p] - Y0[b.p]; b.ox = 0; b.oy = 0; bornGridMove(b);
       if (b.idx >= 0 && typeof S.bubbles.moveCoin === "function") S.bubbles.moveCoin(b.idx, b.x, b.y);
     }
     for (const id of ropeFams) {
@@ -1177,7 +1231,10 @@ export function buildMotion(S) {
   const liveEnds = [];   // end times (ms) of the visual events in flight
   const famFlashT = new Float64Array(nF).fill(-1e9), sseT = new Float64Array(N).fill(-Infinity);
   const L = { events: 0, trades: 0, tradesMapped: 0, coins: 0, pairs: 0, stats: 0, fired: 0, flashes: 0, rims: 0, refused: 0, merged: 0, dropped: 0, expired: 0,
-    culled: { small: 0, offscreen: 0, dust: 0, drag: 0, flight: 0, short: 0, rm: 0 }, births: { seen: 0, placed: 0, spark: 0, fade: 0, noSlot: 0, skipped: 0, polled: 0 },
+    culled: { small: 0, offscreen: 0, dust: 0, drag: 0, flight: 0, short: 0, rm: 0, hidden: 0 }, births: { seen: 0, placed: 0, spark: 0, fade: 0, noSlot: 0, skipped: 0, polled: 0, hidden: 0, unwanted: 0, unplaced: 0 },
+    // (compact layout) coins added live: added (hover ones included), hover, chains (more than one coin placed), refusals, by why;
+    // cached: lasting refusals answered again from the cache (not counted in refused)
+    reveals: { added: 0, hover: 0, chains: 0, refused: { unknown: 0, family: 0, parent: 0, capacity: 0 }, cached: 0, why: {} },
     lat: [], evT: [], visT: [], feedUp: 0, reconnects: 0 };
   const ring = (a, v, n) => { a.push(v); if (a.length > n) a.splice(0, a.length - n); };
   // (map3 port) start times (ms) of the visual events that are not pulses (flashes, rims, pings, births): EngineDebug.fx()
@@ -1200,6 +1257,7 @@ export function buildMotion(S) {
   };
   // decide what one trade looks like right now; true = something was drawn
   function fireOne(i, now, tr, v = null, buy = null) {
+    if (hid(i)) { L.culled.hidden++; return false; }   // (last-trade filter) a hidden coin shows no live effect, whales included
     const f = fams[famOf[i]], kk = cam.k, w = W(), h = H(), tS = now / 1000;
     const mark = { size: sizeOf(v), sell: buy === false };
     // (round 2 final) a whale (>= $10k) also gets a ring at the coin and a 2 s label '$TICKER +$12k' (wherever it is drawn)
@@ -1296,7 +1354,12 @@ export function buildMotion(S) {
     S.age[i] = 0; S.n24[i] += 1;
     const f = fams[famOf[i]]; f.age = 0; f.n24 += 1;
     const b = coreBoost(0), tS = now / 1000;
-    if (cls[i] !== 0) { S.bubbles.setCoinHeat(i, 0, b, tS); if (par[i] >= 0) S.links.setLinkHeat(i, 0, tS); cls[i] = 0; boost[i] = b; animUntil = Math.max(animUntil, now + DUR.xl + 100); statsDirty = true; }
+    if (cls[i] !== 0) {
+      S.bubbles.setCoinHeat(i, 0, b, tS); if (par[i] >= 0) S.links.setLinkHeat(i, 0, tS); cls[i] = 0; boost[i] = b; animUntil = Math.max(animUntil, now + DUR.xl + 100); statsDirty = true;
+      // (last-trade filter) the coin is live now: a hidden one whose new class the Key shows appears at once, its chain
+      // anchored (O(depth); the pulse below fires after it)
+      V.cls[i] = 0; visOne(i, tS);
+    }
     else if (boost[i] !== b) { S.bubbles.setCoinHeat(i, 0, b, tS); boost[i] = b; }
     if (!f.planet && famCls[f.id] !== 0) { S.overview.setDustHeat(f.id, 0); famCls[f.id] = 0; }
     else if (f.planet) famCls[f.id] = 0;
@@ -1308,10 +1371,21 @@ export function buildMotion(S) {
       L.trades++;
       const i = d && S.mintIdx.get(d.mint);
       if (i === undefined) {
-        const b = d && born.get(d.mint);
-        if (b) { b.lastT = Math.max(b.lastT || 0, Number(d.time) || Date.now() / 1000); if (!rm && b.idx >= 0) { S.bubbles.flashRim(b.idx, now / 1000); fxMark(now); animUntil = Math.max(animUntil, now + 400); } }
-        // (family-all) a loaded real speck: dust.js's flash on the speck, live class
-        else if (d && S.swarm && S.swarm.on && S.swarm.trade(d.mint, Number(d.time) || Date.now() / 1000)) { L.specks = (L.specks || 0) + 1; if (!rm) fxMark(now); }
+        let b = d && born.get(d.mint);
+        // (compact layout) a page coin the build left out traded: it is live (class 0) now, so when both the build's mask and the
+        // Key show class 0 it comes in next to its parent (its chain first), without fanfare; a speck stays the swarm's
+        if (!b && C && d && classShown(buildMask & V.mask, 0) && !(S.swarm && S.swarm.on && S.swarm.indexOf(d.mint) >= DUST0) && reveal(d.mint, "trade") === "ok") b = born.get(d.mint);
+        if (b) {
+          b.lastT = Math.max(b.lastT || 0, Number(d.time) || Date.now() / 1000);
+          // (compact layout) a coin added live wears its heat: live again
+          if (b.reveal && b.idx >= 0 && b.hc !== 0) { S.bubbles.setCoinHeat(b.idx, 0, coreBoost(0), now / 1000); try { S.links.setBornAge?.(b.idx, 0); } catch (e) { if (errors++ < 3) console.error(e); } b.hc = 0; }
+          // (last-trade filter) a newborn past its first 30 min is filed under its heat class (applyHeat): a trade makes it live
+          if (b.idx >= 0 && b.idx < V.st.n && V.cls[b.idx] !== 0) { V.cls[b.idx] = 0; visOne(b.idx, now / 1000); }
+          if (!rm && b.idx >= 0 && !hid(b.idx)) { S.bubbles.flashRim(b.idx, now / 1000); fxMark(now); animUntil = Math.max(animUntil, now + 400); }
+        }
+        // (family-all) a loaded real speck: dust.js's flash on the speck, live class. (last-trade filter) swarm.trade answers
+        // 2 for a speck drawn after the trade, 1 for one the filter keeps hidden (its flash is not drawn: no fx)
+        else if (d && S.swarm && S.swarm.on) { const st = S.swarm.trade(d.mint, Number(d.time) || Date.now() / 1000); if (st) { L.specks = (L.specks || 0) + 1; if (!rm && st !== 1) fxMark(now); } }
         return;
       }
       L.tradesMapped++; tradeNow(i, Number(d.time) || Date.now() / 1000, now, Number(d.valueUsd) > 0 ? Number(d.valueUsd) : null, typeof d.isBuy === "boolean" ? d.isBuy : null);
@@ -1341,32 +1415,64 @@ export function buildMotion(S) {
   function idxOf(m) { if (m == null) return -1; const i = S.mintIdx.get(m); if (i !== undefined) return i; const b = born.get(m); if (b && b.idx >= 0) return b.idx; const d = S.swarm && S.swarm.on ? S.swarm.indexOf(m) : -1; return d >= DUST0 ? d : -1; }
   function famIdOf(i) { if (i >= 0 && i < N) return famOf[i]; const f = famOfIdx(i); return f ? f.id : -1; }
   function posOf(i) { if (i >= 0 && i < N) return [X[i], Y[i], R[i]]; if (i >= DUST0) return S.swarm ? S.swarm.pos(i) : null; const b = bornAt(i); if (!b) return null; const [x, y] = bornXY(b); return [x, y, b.r]; }
+  // (compact layout) the born coins by world cell (CELLW), so a free-spot test costs O(local) with up to 512 of them (births +
+  // reveals); a mask-15 build keeps the plain scan over its handful of newborns
+  const bgridB = C ? new Map() : null; let bornRmax = 0;
+  const bornCell = (b) => gkey(Math.floor(b.x / CELLW), Math.floor(b.y / CELLW));
+  function bornGridAdd(b) { if (!bgridB) return; b.gk = bornCell(b); let a = bgridB.get(b.gk); if (!a) bgridB.set(b.gk, (a = [])); a.push(b); if (b.r > bornRmax) bornRmax = b.r; }
+  function bornGridMove(b) {
+    if (!bgridB || b.gk === undefined) return;
+    const k = bornCell(b); if (k === b.gk) return;
+    const a = bgridB.get(b.gk); if (a) { const j = a.indexOf(b); if (j >= 0) a.splice(j, 1); if (!a.length) bgridB.delete(b.gk); }
+    bornGridAdd(b);
+  }
   const clearAt = (x, y, r, skip = -1) => {   // free disc? (coins at their current positions + earlier births)
     let ok = true; const e = r + 0.9 + Rmax;
     forEachIn(x - e, y - e, x + e, y + e, (j) => { if (ok && j !== skip && Math.hypot(X[j] - x, Y[j] - y) < R[j] + r + 0.9) ok = false; });
-    if (ok) for (const b of born.values()) if (Math.hypot(b.x - x, b.y - y) < b.r + r + 0.9) { ok = false; break; }
+    if (!ok) return false;
+    if (bgridB) {
+      const eb = r + 0.9 + bornRmax;
+      for (let gx = Math.floor((x - eb) / CELLW); gx <= Math.floor((x + eb) / CELLW); gx++) for (let gy = Math.floor((y - eb) / CELLW); gy <= Math.floor((y + eb) / CELLW); gy++) {
+        const a = bgridB.get(gkey(gx, gy)); if (a) for (const b of a) if (Math.hypot(b.x - x, b.y - y) < b.r + r + 0.9) return false;
+      }
+      return true;
+    }
+    for (const b of born.values()) if (Math.hypot(b.x - x, b.y - y) < b.r + r + 0.9) { ok = false; break; }
     return ok;
   };
-  function placeNear(p, r) {
-    const f = fams[famOf[p]], ks = kids[p];
-    let dist = R[p] + 3 * r + 2;
-    if (ks.length) { const ds = ks.map((c) => Math.hypot(X[c] - X[p], Y[c] - Y[p])).sort((a, b) => a - b); dist = Math.max(dist, ds[ds.length >> 1]); }
-    const base = par[p] < 0 ? GOLDEN * (ks.length + born.size) : Math.atan2(Y[p] - f.cy, X[p] - f.cx);
+  // a free spot for a coin of radius r next to the parent point (px, py, pr) of family f: ds = its children's distances (their
+  // median is the distance to try first), isRoot = the parent is the family top, skip = the parent's index in the world grid
+  function placeAround(px, py, pr, r, f, isRoot, ds, nKids, skip) {
+    let dist = pr + 3 * r + 2;
+    if (ds.length) { ds.sort((a, b) => a - b); dist = Math.max(dist, ds[ds.length >> 1]); }
+    const base = isRoot ? GOLDEN * (nKids + born.size) : Math.atan2(py - f.cy, px - f.cx);
     // (round 2 final) a newborn lands on the parent's OUTWARD side (within +-52 deg of the bearing from the family top through
     // the parent, then +-92 deg), stepping out in radius before it ever turns inward, and never closer to the family top
     // than its parent: it used to land between $COCKROACH and the $PUMP top and read as the top's child
-    const t0x = X[f.top], t0y = Y[f.top], dP = Math.hypot(X[p] - t0x, Y[p] - t0y);
-    const outward = (x, y) => par[p] < 0 || Math.hypot(x - t0x, y - t0y) >= dP + 0.5 * r;
+    const t0x = X[f.top], t0y = Y[f.top], dP = Math.hypot(px - t0x, py - t0y);
+    const outward = (x, y) => isRoot || Math.hypot(x - t0x, y - t0y) >= dP + 0.5 * r;
     for (const spread of [0.9, 1.6]) for (const sc of [1, 1.3, 1.65, 2.1, 2.7]) for (let t = 0; t <= 2 * Math.ceil(spread / 0.13); t++) {
       const a = base + (t % 2 ? 1 : -1) * Math.ceil(t / 2) * 0.13; if (Math.abs(a - base) > spread) continue;
-      const x = X[p] + Math.cos(a) * dist * sc, y = Y[p] + Math.sin(a) * dist * sc;
-      if (outward(x, y) && clearAt(x, y, r, p)) return [x, y];
+      const x = px + Math.cos(a) * dist * sc, y = py + Math.sin(a) * dist * sc;
+      if (outward(x, y) && clearAt(x, y, r, skip)) return [x, y];
     }
     for (const sc of [1, 1.25, 0.8, 1.55]) for (let t = 0; t < 24; t++) {
-      const a = base + (t % 2 ? 1 : -1) * Math.ceil(t / 2) * 0.26, x = X[p] + Math.cos(a) * dist * sc, y = Y[p] + Math.sin(a) * dist * sc;
-      if (clearAt(x, y, r, p)) return [x, y];
+      const a = base + (t % 2 ? 1 : -1) * Math.ceil(t / 2) * 0.26, x = px + Math.cos(a) * dist * sc, y = py + Math.sin(a) * dist * sc;
+      if (clearAt(x, y, r, skip)) return [x, y];
     }
-    return [X[p] + Math.cos(base) * dist * 1.8, Y[p] + Math.sin(base) * dist * 1.8];
+    return [px + Math.cos(base) * dist * 1.8, py + Math.sin(base) * dist * 1.8];
+  }
+  function placeNear(p, r) {
+    const ks = kids[p], ds = ks.map((c) => Math.hypot(X[c] - X[p], Y[c] - Y[p]));
+    // (compact layout) the coins already added live under p count as its children too
+    if (C) for (const b of born.values()) if (b.par === p) ds.push(Math.hypot(b.x - X[p], b.y - Y[p]));
+    return placeAround(X[p], Y[p], R[p], r, fams[famOf[p]], par[p] < 0, ds, ks.length, p);
+  }
+  // (compact layout) next to a coin that was itself added live (a revealed parent)
+  function placeNearBorn(pb, r) {
+    const f = pb.fam >= 0 ? fams[pb.fam] : null; if (!f) return placeFree(r);
+    const ds = []; for (const b of born.values()) if (b.par === pb.idx) ds.push(Math.hypot(b.x - pb.x, b.y - pb.y));
+    return placeAround(pb.x, pb.y, pb.r, r, f, false, ds, ds.length, -1);
   }
   function placeFree(r) {
     const R0 = (S.Rcl || 300) * 1.04;
@@ -1382,47 +1488,240 @@ export function buildMotion(S) {
     L.births.seen++;
     const ageS = Date.now() / 1000 - Number(v.createdAt || 0);
     if (!(v.createdAt > 0) || ageS > 900) { L.births.skipped++; return null; }   // an old coin the feed re-announces is not a birth
-    const pm = v.parent && v.parent.mint, p = pm ? S.mintIdx.get(pm) : undefined;
+    // (compact layout) a new pair the Key does not show (class 0 off) is not placed: it is a page node, the next build has it
+    if (C && !classShown(V.mask, 0)) { L.births.unwanted++; return null; }
+    const pm = v.parent && v.parent.mint;
+    let p = pm ? S.mintIdx.get(pm) : undefined, pb = null;
+    // (compact layout) a parent the build left out comes in first (silently, its chain too); a parent whose whole family the
+    // build left out is not placed as an orphan at the rim: the new pair waits for the next build (counted as missed)
+    if (C && pm && p === undefined) {
+      let j = idxOf(pm);
+      if (j < 0 && lookup(pm)) {
+        if (reveal(pm, "parent") !== "ok") {
+          // the new pair shares its parent's lasting refusal (driftStats counts it as a coin of a left-out family)
+          const h = hard.get(pm); if (h && hard.size < HARD_MAX) hard.set(v.mint, h);
+          noteMissed(v.mint); L.births.unplaced++; return null;
+        }
+        j = idxOf(pm);
+      }
+      if (j >= N && j < DUST0) pb = bornAt(j);
+    }
     const r = typeof S.rad === "function" ? S.rad(Number(v.mcapUsd) || 0) : 0.55;
-    const [x, y] = p !== undefined ? placeNear(p, r) : placeFree(r);
+    const [x, y] = pb ? placeNearBorn(pb, r) : p !== undefined ? placeNear(p, r) : placeFree(r);
+    const famId = pb ? pb.fam : p !== undefined ? famOf[p] : -1, hasPar = p !== undefined || !!pb;
     const idx = nextBorn, cap = S.bubbles.capacity || N;
     const tS = now / 1000;
     // (map3 port) the newborn's highlight bit is known before anything draws it (bubbles.addCoin, the born link read it)
-    if (idx < hlMask.length) { let m = 1; if (hlTest) { try { m = hlTest(v.mint) ? 1 : 0; } catch { m = 0; } } hlMask[idx] = m; if (m && p !== undefined) famMatch[famOf[p]]++; }
+    if (idx < hlMask.length) { let m = 1; if (hlTest) { try { m = hlTest(v.mint) ? 1 : 0; } catch { m = 0; } } hlMask[idx] = m; if (m && famId >= 0) famMatch[famId]++; }
+    // (last-trade filter) a newborn is class 0: drawn when the Key shows class 0; else it is placed and linked unseen (no
+    // spark, ring or label) and appears with the filter. Its alpha code is set before bubbles.addCoin / the born link read it
+    const shownB = idx < V.cap && classShown(V.mask, 0) === 1;
+    if (idx < V.cap) V.a[idx] = shownB ? (S.hlOn && idx < hlMask.length && !hlMask[idx] ? 1 : 2) : 0;
     let tArrive = tS, sparked = false;
-    if (p !== undefined && !rm && typeof S.links.pulses.spark === "function") {
+    // the spark runs along a built parent's link only (under a parent added live the newborn gets its link at once)
+    if (p !== undefined && !rm && shownB && typeof S.links.pulses.spark === "function") {
       try { const res = S.links.pulses.spark(p, { x, y, r, ci: idx }, tS); if (res) { sparked = true; tArrive = typeof res === "number" && res > tS ? res : tS + 0.65; } } catch (e) { if (errors++ < 3) console.error(e); }
     }
     let added = -1;
     if (idx < cap && typeof S.bubbles.addCoin === "function") {
-      try { added = S.bubbles.addCoin(idx, { x, y, r, fam: p !== undefined ? famOf[p] : -1, age: 0, n24: 0, sym: v.symbol || v.name || String(v.mint).slice(0, 4), img: v.image || null, mint: v.mint }); } catch (e) { if (errors++ < 3) console.error(e); }
+      try { added = S.bubbles.addCoin(idx, { x, y, r, fam: famId, age: 0, n24: 0, sym: v.symbol || v.name || String(v.mint).slice(0, 4), img: v.image || null, mint: v.mint }); } catch (e) { if (errors++ < 3) console.error(e); }
     }
     // no spark (reduced motion, or links without spark): the newborn still gets its link
-    if (p !== undefined && !sparked && typeof S.links.addBornLink === "function") { try { S.links.addBornLink(p, x, y, r, idx); } catch (e) { if (errors++ < 3) console.error(e); } }
+    if (!sparked && typeof S.links.addBornLink === "function") {
+      try {
+        if (p !== undefined) S.links.addBornLink(p, x, y, r, idx);
+        else if (pb && pb.p >= 0) S.links.addBornLink(pb.p, x, y, r, idx, { from: { x: pb.x, y: pb.y, r: pb.r, gen: pb.gen } });
+      } catch (e) { if (errors++ < 3) console.error(e); }
+    }
     if (added >= 0) {
-      nextBorn++; S.bubbles.birth?.(idx, tArrive, p !== undefined ? "scale" : "fade");
+      nextBorn++; S.bubbles.birth?.(idx, tArrive, hasPar ? "scale" : "fade");
+      // (last-trade filter) the newborn joins the levels (its parent chain anchors it when it is shown)
+      if (idx < V.cap) { V.par[idx] = pb ? pb.idx : p ?? -1; V.fam[idx] = famId; V.cls[idx] = 0; visGrow(V.st, idx + 1); visOne(idx, tS); }
+      if (!shownB) L.births.hidden++;
       // (round 2 final) the birth is the headline event: a ring on arrival and a 4 s 'new · $TICKER' label
-      if (!rm) {
-        const fam = p !== undefined ? famOf[p] : -1, ms = Math.max(0, tArrive * 1000 - now);
+      if (!rm && shownB) {
+        const fam = famId, ms = Math.max(0, tArrive * 1000 - now);
         life.timeout(() => { try { S.links.pulses.flashCoin?.(idx, tArrive, { at: { x, y, r, fam }, scale: 2, alpha: 0.75, dur: 0.6 }); } catch (e) { if (errors++ < 3) console.error(e); } }, ms);
         fxMark(now + ms);
         try { S.labels.toast?.({ x, y, r, sym: v.symbol || v.name || "" }, "new ·", 4000 + ms); } catch (e) { if (errors++ < 3) console.error(e); }
       }
     }
     else L.births.noSlot++;
-    const entry = { idx: added >= 0 ? idx : -1, x, y, r, p: p ?? -1, fam: p !== undefined ? famOf[p] : -1, sym: v.symbol || "", t: now, sparked, mint: v.mint };
-    born.set(v.mint, entry); if (added >= 0) bornIdx.set(idx, entry);
-    L.births.placed++; if (sparked) L.births.spark++; if (p === undefined) L.births.fade++;
+    // crt: creation time (s), the filter's newborn rule (applyHeat files it under its heat class 30 min after it)
+    // p: the nearest BUILT ancestor (drag offsets, links), par: the parent's engine index (a coin added live under C), gen
+    const entry = { idx: added >= 0 ? idx : -1, x, y, r, p: pb ? pb.p : p ?? -1, par: pb ? pb.idx : p ?? -1, gen: pb ? pb.gen + 1 : p !== undefined ? S.gen[p] + 1 : 0, fam: famId, sym: v.symbol || "", t: now, sparked, mint: v.mint, crt: Number(v.createdAt) > 0 ? Number(v.createdAt) : 0 };
+    born.set(v.mint, entry); if (added >= 0) { bornIdx.set(idx, entry); bornGridAdd(entry); }
+    if (C) { missed.delete(v.mint); hard.delete(v.mint); }
+    // (compact layout) a parentless coin drawn now may be a top the build left out: the lasting refusals may not hold any more
+    if (C && !hasPar && added >= 0) hard.clear();
+    L.births.placed++; if (sparked) L.births.spark++; if (!hasPar) L.births.fade++;
     animUntil = Math.max(animUntil, tArrive * 1000 + 700); S.invalidate();
-    S.emit("birth", { mint: v.mint, idx: added >= 0 ? idx : -1, parent: p ?? -1, x, y, r });
-    return { idx: added >= 0 ? idx : -1, parent: p ?? -1, x, y, r, sparked };
+    S.emit("birth", { mint: v.mint, idx: added >= 0 ? idx : -1, parent: pb ? pb.idx : p ?? -1, x, y, r });
+    return { idx: added >= 0 ? idx : -1, parent: pb ? pb.idx : p ?? -1, x, y, r, sparked };
+  }
+
+  // ---------- (compact layout, 2026-11-10) reveals: page coins the filtered build left out, added live ----------
+  // A build made from the Key's filtered set (EngineOptions.compact) holds the shown coins, their lineage and the pins. A page
+  // coin that comes into view later (a trade, a heat poll, a node pass, a selection, a page hover, a parent of a new pair) is
+  // placed next to its parent through the births' placement (its missing ancestors first, top-down), WITHOUT the new pair's
+  // fanfare (no spark, ring or "new" label: a 500 ms fade-in), wearing its real heat; a coin that ages out of the mask fades in
+  // place (the levels). The room is bubbles' 512 spare instances (shared with births); a coin whose family the build left
+  // out, or that finds no room, is not placed and counts as `missed`; ThreeMap / the sync re-compact the map when idle
+  // (driftStats). Nothing here runs per frame: every path is event-driven, each placement is O(chain x local candidates).
+  const REVEAL_ROOM = 8;          // spare instances kept free for a chain: `full` below this
+  const HOVER_MAX = 32;           // page-hover reveals per build (a pointer sweeping a side-panel list must not fill the room)
+  const HOVER_DWELL_MS = 150;     // a page hover reveals only after it stayed this long
+  const MISSED_MAX = 4096;        // mints the view wants that could not be placed
+  const REVEAL_HEAT_MAX = 64;     // reveals per heat poll (most recent trades first); the rest wait as missed
+  const REVEAL_SLICE_MS = 2;      // heat reveals run in slices of this budget, one macrotask apart
+  const HARD_MAX = 16384;         // lasting refusals kept (below)
+  const missed = new Set();
+  // lasting refusals, mint -> "family" | "parent": the coin's family top is a page coin the build left out (or its chain loops),
+  // or its nearest drawn ancestor is a speck. They hold for this build's life (a parentless birth, the one way a left-out top
+  // can become drawn, clears them), so a reveal answers them at once and the heat polls' and node passes' budgets skip them
+  // (a run of such coins must not starve a placeable one behind it). A chain that breaks at a parent the page does not hold
+  // yet is not kept: the page may get it.
+  const hard = new Map();
+  let hoverWant = null;
+  const revealQ = []; let revealDue = false;
+  // refusals that count as missed (a new pair's parent: the pair itself is counted by maybeBirth)
+  const countsMiss = (why) => why === "trade" || why === "heat" || why === "node";
+  function noteMissed(m) { if (C && typeof m === "string" && missed.size < MISSED_MAX) missed.add(m); }
+  const roomLeft = () => Math.min(S.bubbles.capacity || N, V.cap) - nextBorn;
+  // a page coin v under the engine coin q (built, or added live): returns its engine index or -1 (no room)
+  function placeReveal(v, q, now) {
+    const pb = q >= N ? bornAt(q) : null; if (q >= N && !pb) return -1;
+    const idx = nextBorn;
+    if (roomLeft() <= 0 || typeof S.bubbles.addCoin !== "function") return -1;
+    const mcv = Number(v.mcapCapUsd) > 0 ? Number(v.mcapCapUsd) : Number(v.mcapUsd) > 0 ? Number(v.mcapUsd) : 0;
+    const r = typeof S.rad === "function" ? S.rad(mcv) : 0.55;
+    const [x, y] = pb ? placeNearBorn(pb, r) : placeNear(q, r);
+    const famId = pb ? pb.fam : famOf[q], a = pb ? pb.p : q, g = pb ? pb.gen + 1 : S.gen[q] + 1, tS = now / 1000;
+    const hr = S.heatIdx ? S.heatIdx.get(v.mint) : undefined, last = hr !== undefined && S.heat ? Number(S.heat.last[hr]) || 0 : 0;
+    const ageS = last > 0 && heatAt > 0 ? Math.max(0, heatAt - last) : Infinity, crt = Number(v.createdAt) > 0 ? Number(v.createdAt) : 0;
+    if (idx < hlMask.length) { let m = 1; if (hlTest) { try { m = hlTest(v.mint) ? 1 : 0; } catch { m = 0; } } hlMask[idx] = m; if (m && famId >= 0) famMatch[famId]++; }
+    V.a[idx] = 0;   // hidden until the levels below say otherwise (visOne crossfades it in)
+    let added = -1;
+    try { added = S.bubbles.addCoin(idx, { x, y, r, fam: famId, age: ageS, n24: hr !== undefined && S.heat && S.heat.n24 ? Number(S.heat.n24[hr]) || 0 : 0, sym: v.symbol || v.name || String(v.mint).slice(0, 4), img: v.image || null, mint: v.mint }); } catch (e) { if (errors++ < 3) console.error(e); }
+    if (added < 0) return -1;
+    nextBorn++;
+    try { if (typeof S.links.addBornLink === "function") S.links.addBornLink(a, x, y, r, idx, { from: pb ? { x: pb.x, y: pb.y, r: pb.r, gen: pb.gen } : null, ageS }); } catch (e) { if (errors++ < 3) console.error(e); }
+    S.bubbles.birth?.(idx, tS, "fade");
+    const entry = { idx, x, y, r, p: a, par: q, gen: g, fam: famId, sym: v.symbol || "", t: now, sparked: false, mint: v.mint, crt, lastT: last > 0 ? last : 0, reveal: true, hc: heatClass(ageS) };
+    born.set(v.mint, entry); bornIdx.set(idx, entry); bornGridAdd(entry);
+    V.par[idx] = q; V.fam[idx] = famId; V.cls[idx] = visClassOf(ageS, crt, heatAt > 0 ? heatAt : 0); visGrow(V.st, idx + 1); visOne(idx, tS);
+    animUntil = Math.max(animUntil, now + 700); S.invalidate();
+    S.emit("reveal", { mint: v.mint, idx, parent: q, x, y, r });
+    return idx;
+  }
+  // EngineHandle.reveal: "ok" (placed, its missing ancestors first), "known" (the engine draws it already), "off" (a mask-15
+  // build), "unknown" (not a page coin: a speck, off the map), "family" (its family was left out of the build, or its chain
+  // breaks), "parent" (its nearest drawn ancestor is a speck), "capacity" (no room: the spare instances, or the hover budget)
+  function reveal(m, why = "node") {
+    if (!C) return "off";
+    if (typeof m !== "string" || !m) return "unknown";
+    const hr = hard.get(m);
+    if (hr) { L.reveals.cached++; if (countsMiss(why)) noteMissed(m); return hr; }
+    if (idxOf(m) >= 0) return "known";
+    let cur = lookup(m); if (!cur) return "unknown";
+    const chain = [], seen = new Set();
+    let a = -1, res = null, lasting = false;
+    while (cur) {
+      if (seen.has(cur.mint)) { res = "family"; lasting = true; break; }
+      seen.add(cur.mint); chain.push(cur);
+      const pm = cur.parentMint;
+      if (!pm || pm === cur.mint) { res = "family"; lasting = true; break; }
+      const j = idxOf(pm);
+      if (j >= 0) { a = j; break; }
+      cur = lookup(pm);
+      if (!cur) { res = "family"; break; }
+    }
+    if (!res && a >= DUST0) { res = "parent"; lasting = true; }
+    // a lasting refusal holds for the whole chain (they share its top, or its speck)
+    if (lasting) for (const c of chain) { if (hard.size >= HARD_MAX) break; hard.set(c.mint, res); }
+    if (!res && chain.length > roomLeft() - (why === "hover" || why === "node" || why === "heat" ? REVEAL_ROOM : 0)) res = "capacity";
+    if (!res && why === "hover" && L.reveals.hover + chain.length > HOVER_MAX) res = "capacity";
+    if (res) { L.reveals.refused[res]++; if (countsMiss(why)) noteMissed(m); return res; }
+    const now = performance.now();
+    for (let k = chain.length - 1; k >= 0; k--) {
+      const idx = placeReveal(chain[k], a, now);
+      if (idx < 0) { L.reveals.refused.capacity++; if (countsMiss(why)) noteMissed(m); return "capacity"; }
+      a = idx;
+      L.reveals.added++; if (why === "hover") L.reveals.hover++;
+      L.reveals.why[why] = (L.reveals.why[why] || 0) + 1;
+      missed.delete(chain[k].mint);
+      // a page pin the engine could not draw before (it is a coin now): pinned like the others
+      const pj = V.pinMints.indexOf(chain[k].mint);
+      if (pj >= 0) { V.pinMints.splice(pj, 1); V.pins.add(idx); visOne(idx); }
+    }
+    if (chain.length > 1) L.reveals.chains++;
+    return "ok";
+  }
+  // a page hover on a coin the build left out: revealed after HOVER_DWELL_MS if the page still points at it
+  function hoverReveal(m) {
+    if (hoverWant === m) return;
+    hoverWant = m;
+    if (!lookup(m)) return;
+    life.timeout(() => { if (S.dead || hoverWant !== m) return; hoverWant = null; if (reveal(m, "hover") === "ok") hoverMint(m); }, HOVER_DWELL_MS);
+  }
+  // heat-poll reveals, in REVEAL_SLICE_MS slices (a busy poll never becomes one long task)
+  function queueReveals(list) {
+    for (const m of list) revealQ.push(m);
+    if (!revealDue && revealQ.length) { revealDue = true; life.timeout(drainReveals, 0); }
+  }
+  function drainReveals() {
+    revealDue = false;
+    if (S.dead) return;
+    const t0 = performance.now();
+    while (revealQ.length && performance.now() - t0 < REVEAL_SLICE_MS) { const m = revealQ.shift(); if (idxOf(m) < 0) reveal(m, "heat"); }
+    if (revealQ.length) { revealDue = true; life.timeout(drainReveals, 16); }
+  }
+  // EngineHandle.driftStats (O(born + wanted)): what makes a compact build drift from what the page shows; zeros on a mask-15
+  // build. `wanted` (optional): the page coins the sync's last node pass counted as wanted and unknown; the answer then says how
+  // many of them are still not drawn AND not already counted in `missed` (a coin both a node pass and a heat poll wanted, in a
+  // family the build left out, counts once)
+  function driftStats(wanted) {
+    if (!C) return { filtered: false, built: N, hidden: 0, revealed: 0, missed: 0, family: 0, full: false, select: false };
+    // hidden: built coins aged out under the build's own mask (a narrower Key hides more, for a rebuild that is on its way)
+    if (V.mask === buildMask) { let hb = 0; for (const b of bornIdx.values()) if (b.idx < V.st.n && V.level[b.idx] === 0) hb++; hiddenAt = Math.max(0, V.st.cnt[0] - hb - hidden0); }
+    let fam = 0; for (const m of missed) if (hard.get(m) === "family") fam++;
+    const sb = selected >= N && selected < DUST0 ? bornAt(selected) : null;
+    const out = { filtered: true, built: N, hidden: hiddenAt, revealed: Math.max(0, L.reveals.added - L.reveals.hover), missed: missed.size, family: fam, full: roomLeft() < REVEAL_ROOM, select: !!(sb && sb.reveal) };
+    if (Array.isArray(wanted)) { let w = 0; for (const m of wanted) if (!missed.has(m) && idxOf(m) < 0) w++; out.wanted = w; }
+    return out;
   }
   // apply one heat payload: ages, classes (crossfades), newly-live rim flashes, dust colours, pulses for real trades
   function applyHeat(p, opts = {}) {
     if (!p || !Array.isArray(p.mint) || !(p.at > 0)) return null;
     const now = performance.now(), tS = now / 1000, at = p.at, prevAt = heatAt, spread = opts.spreadMs ?? pollMs();
     const newLast = new Float64Array(N).fill(-Infinity), newN24 = new Float64Array(N), heatIdx = new Map();
-    for (let r = 0; r < p.mint.length; r++) { heatIdx.set(p.mint[r], r); const i = S.mintIdx.get(p.mint[r]); if (i === undefined) continue; newLast[i] = p.last[r]; newN24[i] = (p.n24 && p.n24[r]) || 0; }
+    // (compact layout) the rows of page coins the build left out whose class both the build's mask and the Key show: reveal
+    // candidates (not a speck, a page node; most recent trades first, REVEAL_HEAT_MAX per poll, the rest counted as missed)
+    const cand = C ? [] : null, mk = buildMask & V.mask;
+    const candOf = (r) => {
+      const m = p.mint[r]; if (born.has(m)) return;
+      const lt = Number(p.last[r]) || 0;
+      let ok = classShown(mk, lt > 0 ? heatClass(Math.max(0, at - lt)) : 3) === 1;
+      if (!ok && (mk & 1)) { const n = lookup(m); ok = !!n && Number(n.createdAt) > 0 && Number(n.createdAt) >= at - NEWBORN_S; }
+      if (!ok) { if (missed.size) missed.delete(m); return; }
+      if (hard.has(m)) { noteMissed(m); return; }   // a lasting refusal: still wanted, never queued again (it would take a slot)
+      if (S.swarm && S.swarm.on && S.swarm.indexOf(m) >= DUST0) return;
+      if (lookup(m)) cand.push([m, lt]);
+    };
+    for (let r = 0; r < p.mint.length; r++) { heatIdx.set(p.mint[r], r); const i = S.mintIdx.get(p.mint[r]); if (i === undefined) { if (cand) candOf(r); continue; } newLast[i] = p.last[r]; newN24[i] = (p.n24 && p.n24[r]) || 0; }
+    if (cand) {
+      // a missed coin without a row this poll is class 3: no longer wanted unless the masks show class 3
+      if (missed.size && !(mk & 8)) for (const m of missed) {
+        if (heatIdx.has(m) || born.has(m)) continue;
+        const n = lookup(m);   // a new pair the page does not hold yet stays; one created within 30 min is class 0
+        if (n && !((mk & 1) && Number(n.createdAt) > 0 && Number(n.createdAt) >= at - NEWBORN_S)) missed.delete(m);
+      }
+      if (cand.length) {
+        cand.sort((x, y) => y[1] - x[1]);
+        queueReveals(cand.slice(0, REVEAL_HEAT_MAX).map((x) => x[0]));
+        for (let q = REVEAL_HEAT_MAX; q < cand.length; q++) noteMissed(cand[q][0]);
+      }
+    }
     const traded = [];
     for (let i = 0; i < N; i++) {
       const seen = sseT[i];   // the stream already pulsed (and lit) this trade
@@ -1432,16 +1731,36 @@ export function buildMotion(S) {
       S.age[i] = nl > -Infinity ? Math.max(0, at - nl) : Infinity; S.n24[i] = newN24[i];
     }
     for (const f of fams) { let a = Infinity, t = 0; for (const i of f.members) { if (S.age[i] < a) a = S.age[i]; t += S.n24[i]; } f.age = a; f.n24 = t; }
-    let changed = 0, flashed = 0, dustChanged = 0, scheduled = 0;
+    let changed = 0, flashed = 0, dustChanged = 0, scheduled = 0, visCross = false;
+    const newlyLive = [], crt = S.crt;
+    // (last-trade filter) the filter's class (vis.js visClassOf: the heat class, or 0 for a coin created within 30 min of
+    // this payload's clock, as the page files it); a change across the Key's line costs one full recompute below
+    const visCls = (j, vc) => { if (vc === V.cls[j]) return; if (classShown(V.mask, vc) !== classShown(V.mask, V.cls[j])) visCross = true; V.cls[j] = vc; };
     for (let i = 0; i < N; i++) {
       const c = coinClass(i), b = coinBoost(i);
       if (c !== cls[i]) {
         S.bubbles.setCoinHeat(i, c, b, tS);
         if (par[i] >= 0) S.links.setLinkHeat(i, c, tS);   // planet tops have no parent link
-        if (c === 0 && cls[i] > 0 && !rm && prevAt > 0) { S.bubbles.flashRim(i, tS); flashed++; }
+        if (c === 0 && cls[i] > 0 && !rm && prevAt > 0) newlyLive.push(i);
         cls[i] = c; boost[i] = b; changed++;
       } else if (b !== boost[i]) { S.bubbles.setCoinHeat(i, c, b, tS); boost[i] = b; }
+      visCls(i, visClassOf(S.age[i], crt ? crt[i] : 0, at));
     }
+    // newborns: their own trades (stream + this payload's row), the same rule
+    for (const bb of bornIdx.values()) {
+      if (!(bb.idx >= 0 && bb.idx < V.st.n)) continue;
+      const r = heatIdx.get(bb.mint), last = Math.max(r !== undefined ? Number(p.last[r]) || -Infinity : -Infinity, bb.lastT || -Infinity);
+      visCls(bb.idx, visClassOf(last > -Infinity ? Math.max(0, at - last) : Infinity, bb.crt, at));
+      // (compact layout) a coin added live wears its real heat (colour, rim, boost and its link), as a built coin does
+      if (bb.reveal) {
+        const ag = last > 0 ? Math.max(0, at - last) : Infinity, hc = heatClass(ag);
+        if (hc !== bb.hc) { S.bubbles.setCoinHeat(bb.idx, hc, coreBoost(ag), tS); try { S.links.setBornAge?.(bb.idx, ag); } catch (e) { if (errors++ < 3) console.error(e); } bb.hc = hc; }
+      }
+    }
+    // (last-trade filter) coins that crossed the mask's boundary: one full recompute (O(N)), then the rim flashes of the
+    // newly-live coins that are drawn
+    if (visCross) visFull(tS);
+    for (const i of newlyLive) if (!hid(i)) { S.bubbles.flashRim(i, tS); flashed++; }
     for (const f of dust) { const c = heatClass(f.age); if (c !== famCls[f.id]) { S.overview.setDustHeat(f.id, c); famCls[f.id] = c; dustChanged++; } }
     for (const f of planets) famCls[f.id] = heatClass(f.age);
     Object.assign(S, { heat: p, nowS: at, heatIdx });
@@ -1658,9 +1977,9 @@ export function buildMotion(S) {
       for (const b of bornIdx.values()) { let m = 0; try { m = byIdx(b.idx) ? 1 : 0; } catch { m = 0; } hlMask[b.idx] = m; if (m) { n++; if (b.fam >= 0) famMatch[b.fam]++; } }
     }
     S.hlOn = !!byIdx;
-    try { S.bubbles.setHl?.((i) => hlMask[i], tS); } catch (e) { if (errors++ < 3) console.error(e); }
-    try { S.links.setHl?.(byIdx ? (i) => hlMask[i] : null, tS, (ci) => hlMask[ci]); } catch (e) { if (errors++ < 3) console.error(e); }
-    try { S.overview.setDustHlAll?.((id) => !byIdx || famMatch[id] > 0, tS); } catch (e) { if (errors++ < 3) console.error(e); }
+    // (last-trade filter) the highlight and the filter's levels share one alpha code per coin: visPush writes the coins whose
+    // code changed to bubbles / links / dust (each crossfades 160 ms from what it shows now)
+    try { visPush(null, tS); } catch (e) { if (errors++ < 3) console.error(e); }
     try { S.swarm?.setHl?.(byIdx ? hlTest : null); } catch (e) { if (errors++ < 3) console.error(e); }   // (family-all) ghosts dim, specks by mint
     try { S.labels.setHl?.(); } catch (e) { if (errors++ < 3) console.error(e); }
     labelsDirty = true; S.invalidate();
@@ -1668,6 +1987,136 @@ export function buildMotion(S) {
   }
   const setHighlight = (test) => { hlTest = typeof test === "function" ? test : null; return applyHl(hlTest ? (i) => { const m = mintOf(i); return m != null && hlTest(m); } : null); };
   const testHighlight = (test) => { hlTest = typeof test === "function" ? (m) => { const i = idxOf(m); return i >= 0 && !!test(i); } : null; return applyHl(typeof test === "function" ? test : null); };
+
+  // ---------- (the Key's last-trade filter, 2026-11-10) visibility: levels (vis.js), pins, alpha codes, GPU writes ----------
+  // The Key shows the coins by last-trade recency (heat classes 0-3, a 4-bit mask); the layout never moves between builds (a
+  // mask change rebuilds from the filtered set in ThreeMap: the reveals section above adds what comes in), so a coin the
+  // filter hides keeps its place and is simply not drawn (no rebuild, nothing filtered out of the node lists). Levels (vis.js):
+  // SHOWN (class in the mask, or pinned: the page's pins, the selection, the focus pulse, a page-hovered coin), ANCHOR (an
+  // ancestor of a shown coin: dim, clickable, its link kept), HIDDEN. One alpha CODE per coin (V.a: 0 hidden, 1 dim, 2 full)
+  // folds the levels and the ?hl highlight together: HIDDEN -> 0, ANCHOR or not matched -> TOK.dim, else 1; one per family
+  // (V.fa) for the family-wide layers (dust speck, nebula: 0 when nothing of the family is drawn, dim when a highlight matches
+  // none of it). A change goes out as the coins whose code changed: bubbles (aHl, 160 ms per instance; coronas by their top),
+  // links (offset texture w: the link of the child; generation arcs and orbits by their top), dust (specks + nebula by
+  // family), labels (re-dim, re-layout); the swarm gets the mask and its pins (setVis / setPins) and answers with the families
+  // whose loaded specks are shown (visSpeck: they anchor their top). Costs: a filter change or a heat poll that moves coins
+  // across the mask's line = one O(N) pass; a trade, a pin or a birth = O(depth); per frame: nothing.
+  const VLIST_MAX = 4096;   // more changed coins than this: one full write per module instead of a list
+  const vch = [];           // scratch: the coins whose level changed
+  // a capped asset family's ghosts are class 3 (vis.js virt: they anchor the top while bit 3 is on)
+  const ghostTops = S.opts.swarm === false ? [] : fams.filter((f) => f.ghost > 0 && f.top >= 0 && f.top < N);
+  const codeOf = (i) => { const l = V.level[i]; return l === 0 ? 0 : l === 1 || (S.hlOn && i < hlMask.length && !hlMask[i]) ? 1 : 2; };
+  const famCodeOf = (f) => (V.famVis[f] === 0 ? 0 : S.hlOn && famMatch[f] === 0 ? 1 : 2);
+  const isPinned = (i) => V.pins.has(i) || i === pinAuto.sel || i === pinAuto.foc || i === pinAuto.hov;
+  const wantShown = (i) => classShown(V.mask, V.cls[i]) === 1 || isPinned(i);
+  const pinList = () => { const out = [...V.pins]; for (const i of [pinAuto.sel, pinAuto.foc, pinAuto.hov]) if (i >= 0 && i < DUST0) out.push(i); return out; };
+  // fade starts (s) are on uTime's clock: frame() sets uTime from the rAF timestamp, which shares performance.now()'s origin.
+  // uTime itself is the LAST frame's time (stale while the tab is hidden, or a frame late for a Key click), so a fade must not
+  // start at it: the shaders would find it over before it is drawn
+  const visNow = () => performance.now() / 1000;
+  // list = the coins whose LEVEL may have changed (null: every coin and family); returns how many codes changed
+  function visPush(list, tS = visNow()) {
+    const out = [], famCh = [];
+    if (list == null) {
+      for (let i = 0; i < V.st.n; i++) { const c = codeOf(i); if (c !== V.a[i]) { V.a[i] = c; out.push(i); } }
+      for (let f = 0; f < nF; f++) { const c = famCodeOf(f); if (c !== V.fa[f]) { V.fa[f] = c; famCh.push(f); } }
+    } else for (const i of list) {
+      const c = codeOf(i); if (c !== V.a[i]) { V.a[i] = c; out.push(i); }
+      const f = V.fam[i]; if (f >= 0) { const fc = famCodeOf(f); if (fc !== V.fa[f]) { V.fa[f] = fc; famCh.push(f); } }
+    }
+    V.on = V.st.cnt[2] < V.st.n;   // anything not shown: the CPU gates engage
+    if (out.length) {
+      const l2 = out.length > VLIST_MAX ? null : out;
+      try { S.bubbles.setVis?.(l2, tS); } catch (e) { if (errors++ < 3) console.error(e); }
+      try { S.links.setVis?.(l2, tS); } catch (e) { if (errors++ < 3) console.error(e); }
+    }
+    if (famCh.length) { try { S.overview.setDustVis?.(famCh, tS); } catch (e) { if (errors++ < 3) console.error(e); } }
+    if (out.length || famCh.length) { try { S.labels.setHl?.(); } catch (e) { if (errors++ < 3) console.error(e); } labelsDirty = true; S.invalidate(); }
+    // a family the filter now hides entirely does not keep the view (familyAtCentre skips it); a hovered coin it hides (the
+    // pointer's tip, the phone's docked card) loses the hover. O(1) unless one of them just went
+    if (focusedFam >= 0 && famHid(focusedFam)) { focusedFam = familyAtCentre(); labelsDirty = true; S.invalidate(); }
+    dropHiddenHover();
+    return out.length;
+  }
+  // the hovered coin or speck is not drawn any more (a filter change, a heat poll, a trade, a pin that went; swarm.js calls
+  // it when a speck's alpha target changes): the hover goes, as when the pointer leaves it. A page hover is pinned (drawn)
+  function dropHiddenHover() {
+    if (hovI < 0 || hoverSrc === "page" || hovSwap) return false;
+    const gone = hovI >= DUST0 ? !!S.swarm && typeof S.swarm.isShown === "function" && !S.swarm.isShown(hovI) : hovI < V.st.n && hid(hovI);
+    if (!gone) return false;
+    setHover(-1, hovX, hovY, false, false, "engine");
+    return true;
+  }
+  // the mask changed (or a heat poll moved coins across it): every level again, O(N)
+  function visFull(tS) {
+    visLevels(V.par, V.cls, V.mask, pinList(), V.fam, nF, { n: V.st.n, into: V.st });
+    return visPush(null, tS);
+  }
+  // one coin's SHOWN flag again (a trade, a pin, a birth): O(depth)
+  function visOne(i, tS = visNow()) {
+    if (!(i >= 0 && i < V.st.n)) return 0;
+    vch.length = 0;
+    if (!visSet(V.st, i, wantShown(i), vch)) return 0;
+    return visPush(vch, tS);
+  }
+  // the speck mints the swarm keeps drawn: the page's pins it does not know as coins + the engine's own speck pins
+  const speckPinSet = () => {
+    const ms = new Set(V.pinMints);
+    for (const i of [pinAuto.sel, pinAuto.foc, pinAuto.hov]) if (i >= DUST0) { const m = mintOf(i); if (m) ms.add(m); }
+    return ms;
+  };
+  const speckPins = () => { try { S.swarm?.setPins?.(speckPinSet()); } catch (e) { if (errors++ < 3) console.error(e); } };
+  // the engine's own pins (slot 'sel' | 'foc' | 'hov'): engine index, -1 = none
+  function visPin(slot, i) {
+    if (!(i >= 0)) i = -1;
+    const o = pinAuto[slot]; if (o === i) return;
+    pinAuto[slot] = i;
+    if (o >= 0 && o < DUST0) visOne(o);
+    if (i >= 0 && i < DUST0) visOne(i);
+    if (o >= DUST0 || i >= DUST0) speckPins();
+  }
+  // the swarm: family fid has loaded real specks that are shown (on) or none any more; they anchor its top
+  function visSpeck(fid, on) {
+    const f = fams[fid], v = on ? 1 : 0; if (!f || V.speck[fid] === v) return;
+    V.speck[fid] = v;
+    vch.length = 0; visVirt(V.st, f.top, v ? 1 : -1, vch); visPush(vch);
+  }
+  // EngineHandle.setLastFilter: idempotent; the same mask and pins cost one pass over the pins
+  function setLastFilter(mask, pinned) {
+    const m = cleanMask(mask), idx = new Set(), other = [];
+    if (pinned && typeof pinned[Symbol.iterator] === "function") for (const p of pinned) {
+      if (typeof p !== "string" || !p) continue;
+      let i = idxOf(p);
+      // (compact layout) a pinned page coin the build left out (a new selection's lineage) comes in now
+      if (i < 0 && C && lookup(p) && reveal(p, "pin") === "ok") i = idxOf(p);
+      if (i >= 0 && i < DUST0) idx.add(i); else other.push(p);
+    }
+    const tS = visNow(), sameOther = other.length === V.pinMints.length && other.every((x, j) => x === V.pinMints[j]);
+    if (m !== V.mask) {
+      V.mask = m; V.pins = idx; V.pinMints = other;
+      for (const f of ghostTops) V.virt[f.top] = ((m & 8) ? 1 : 0) + V.speck[f.id];
+      visFull(tS);
+      try { S.swarm?.setVis?.(m, speckPinSet()); } catch (e) { if (errors++ < 3) console.error(e); }
+    } else {
+      const old = V.pins; V.pins = idx; vch.length = 0;
+      for (const i of old) if (!idx.has(i)) visSet(V.st, i, wantShown(i), vch);
+      for (const i of idx) if (!old.has(i)) visSet(V.st, i, wantShown(i), vch);
+      if (vch.length) visPush(vch, tS);
+      V.pinMints = other;
+      if (!sameOther) speckPins();
+    }
+    return visCounts(V.st);
+  }
+  const visibility = (m) => {
+    const i = idxOf(m); if (i < 0) return null;
+    if (i >= DUST0) return S.swarm && typeof S.swarm.isShown === "function" && !S.swarm.isShown(i) ? "hidden" : "shown";
+    return i < V.st.n ? VIS_NAMES[V.level[i]] : null;
+  };
+  const lastFilterStats = () => {
+    const byClass = [0, 0, 0, 0];
+    for (let i = 0; i < V.st.n; i++) byClass[V.cls[i] & 3]++;
+    return { mask: V.mask, ...visCounts(V.st), byClass };
+  };
 
   // ---------- the page's updates (map3 port) ----------
   function applyEvent(e) {
@@ -1706,7 +2155,7 @@ export function buildMotion(S) {
       setCam(t.x, t.y, t.k, true); focusedFam = famOf[i0]; select(i0);
       if (S.focus && typeof S.focus.pulse === "function") life.raf(() => life.raf(() => { try { S.focus.pulse(i0); } catch (e) { if (errors++ < 3) console.error("map3", e); } }));
     }
-    else if (f0) { const t = famTarget(f0); setCam(t.x, t.y, t.k, true); focusedFam = f0.id; }
+    else if (f0) { const t = famTarget(f0); setCam(t.x, t.y, t.k, true); focusedFam = famHid(f0.id) ? familyAtCentre() : f0.id; }
     else fitAll(true);
   }
 
@@ -1727,6 +2176,9 @@ export function buildMotion(S) {
     home: (i) => [X0[i], Y0[i]], live: () => liveStats(),
     // (map3 port) the phone card's buttons; (final fix) the docked card keeps its coin visible
     tapAction, clearHover, keepAbove,
+    // (last-trade filter) focus.js pins its pulsing coin ('foc'); swarm.js reports the families whose loaded specks are shown,
+    // and asks whether the hovered speck is still drawn once its specks' alpha targets changed
+    visPin, visSpeck, dropHiddenHover,
   });
   setRm(rm);
 
@@ -1742,7 +2194,10 @@ export function buildMotion(S) {
     panBy: woke((dx, dy) => { panBy(Number(dx) || 0, -(Number(dy) || 0)); }),
     select: (m, opts) => {
       if (m == null) { select(-1); return true; }
-      const i = idxOf(m); if (i < 0) return false;
+      let i = idxOf(m);
+      // (compact layout) a page coin the build left out comes in first (a stand-in: driftStats().select re-compacts with it built)
+      if (i < 0 && C && reveal(m, "select") === "ok") i = idxOf(m);
+      if (i < 0) return false;
       S.lastInputAt = performance.now();
       select(i);
       if (opts && opts.fly) { if ((i < N || i >= DUST0) && S.focus && typeof S.focus.fly === "function") S.focus.fly(i); else flyToCoin(i); }   // (galaxy physics) focus lane's fly + pulse
@@ -1751,11 +2206,27 @@ export function buildMotion(S) {
     selected: () => (selected >= 0 ? mintOf(selected) : null),
     hover: (m) => { if (m != null) S.lastInputAt = performance.now(); hoverMint(m); },
     setHighlight: (test) => { setHighlight(test); },
+    // (the Key's last-trade filter) mask bit k = show heat class k; pinned mints are always drawn (their chain anchored)
+    setLastFilter: (mask, pinned) => setLastFilter(mask, pinned), visibility, lastFilterStats,
     setHeat: (p) => { setHeat(p); },
     applyEvent, patchCoins, setInset, resize, setFeed,
     setReducedMotion: (on) => setRm(!!on),
     knows: (m) => idxOf(m) >= 0, topOf,
     focusedFamily: () => (focusedFam >= 0 && fams[focusedFam] ? mint[fams[focusedFam].top] : null),
+    // (compact layout) EngineHandle.reveal / driftStats (see the reveals section); viewFamily: the family the view is on for a
+    // rebuild's camera (the focused one, else the drawn family nearest the inset rect's centre once zoomed past 1.3 k0)
+    reveal: (m, why) => reveal(m, why === "hover" || why === "node" || why === "pin" ? why : "select"),
+    driftStats: (wanted) => driftStats(wanted),
+    viewFamily: () => {
+      if (focusedFam >= 0 && fams[focusedFam]) return mint[fams[focusedFam].top];
+      if (cam.k < 1.3 * k0()) return null;
+      const ir = S.insetRect(), [vx, vy] = toW((ir.x0 + ir.x1) / 2, (ir.y0 + ir.y1) / 2);
+      let best = null, bd = Infinity;
+      const test = (f) => { if (famHid(f.id)) return; const d = Math.max(0, Math.hypot(f.cx - vx, f.cy - vy) - f.Rc); if (d < bd) { bd = d; best = f; } };
+      for (const f of planets) test(f);
+      const rr = maxDustRc + insetMin() / cam.k; forEachDust(vx - rr, vy - rr, vx + rr, vy + rr, test);
+      return best && bd * cam.k < insetMin() ? mint[best.top] : null;
+    },
     familyOrder: () => (Array.isArray(S.ranked) ? S.ranked.map((f) => mint[f.top]) : []),
     camera: () => ({ x: cam.x, y: cam.y, k: cam.k, k0: k0() }),
     zoom: () => cam.k / k0(),
@@ -1773,13 +2244,14 @@ export function buildMotion(S) {
     return { feed: feedState, spreadMs: pollMs(), eventsPerSec: +(ev10 / 10).toFixed(2), events: L.events, trades: L.trades, tradesMapped: L.tradesMapped, coins: L.coins, pairs: L.pairs,
       visualPerMin: vis60, fired: L.fired, flashes: L.flashes, pings: L.pings || 0, whales: L.whales || 0, rims: L.rims, merged: L.merged, refused: L.refused, culled: { ...L.culled }, dropped: L.dropped, expired: L.expired,
       queued: pq.length, inFlight: liveEnds.filter((t) => t > now).length, cap: PULSE_CAP, latency: { n: lat.length, p50: q(0.5), p95: q(0.95), max: lat.length ? Math.round(lat[lat.length - 1]) : null },
-      births: { ...L.births, born: born.size }, feedUp: L.feedUp, reconnects: L.reconnects, reduced: rm };
+      births: { ...L.births, born: born.size }, feedUp: L.feedUp, reconnects: L.reconnects, reduced: rm,
+      reveals: { ...L.reveals, refused: { ...L.reveals.refused }, why: { ...L.reveals.why }, missed: missed.size, queued: revealQ.length, room: roomLeft(), compact: !!C } };
   }
   const galHzNow = () => { const now = performance.now(); let n = 0; for (const t of galT) if (now - t <= 1000) n++; return n; };
   const motionStats = () => ({ renders, skips, why: { ...whyN }, flight: !!flight, tween: !!tween, inertia: !!inertia, hoverI: hovI, hoverSrc, dim: +U.uDimMix.value.toFixed(3), hoverT: +U.uHoverT.value.toFixed(3),
     fadeP: U.uFadeP.value, fadeD: U.uFadeD.value, selected, focusedFam, focusKey: focusedFam >= 0 ? focusKey(fams[focusedFam]) : null, hull: hullFam, emph: emphOn,
     pulses: { fired: L.fired, flashes: L.flashes, rims: L.rims, culled: Object.values(L.culled).reduce((a, b) => a + b, 0), refused: L.refused, queued: pq.length, live: liveEnds.filter((t) => t > performance.now()).length },
-    heat: { at: heatAt, status: heatStatus }, feed: feedState, drag: { held: drag.i, pcFams: pcFams.length, bodies: bodies.length, alpha: +drag.alpha.toFixed(3), simMs: +drag.simMs.toFixed(2) },
+    heat: { at: heatAt, status: heatStatus }, feed: feedState, vis: { mask: V.mask, on: V.on, ...visCounts(V.st), pins: V.pins.size, sel: pinAuto.sel, foc: pinAuto.foc, hov: pinAuto.hov }, drag: { held: drag.i, pcFams: pcFams.length, bodies: bodies.length, alpha: +drag.alpha.toFixed(3), simMs: +drag.simMs.toFixed(2) },
     reduced: rm, k: cam.k, k0: k0(), breathing: S.bubbles.breathState ? S.bubbles.breathState() : null,
     // (galaxy) galHz = renders the galaxy hook asked for over the last second (0 in flat, asleep and under reduced motion)
     look: S.look, galHz: galHzNow(), galaxy: G ? { awake: galAwake, animT: +(U.uAnimT ? U.uAnimT.value : 0).toFixed(2), galT: +(U.uGalT ? U.uGalT.value : 0).toFixed(3), flow: U.uFlow ? U.uFlow.value : 1 } : null,
@@ -1936,7 +2408,7 @@ export function buildMotion(S) {
     settled: () => !flight && !tween && !inertia && !anchor && drag.i < 0 && !pcFams.length && !bodies.length && !ropeOrd.length && Math.abs(Math.log(tgt.k / cam.k)) < 1e-4 && Math.hypot(tgt.x - cam.x, tgt.y - cam.y) * cam.k < 0.05 && performance.now() - lastMoveT >= 120,
     selected: () => selected, hovered: () => hovI,
     hoverTop: () => { const f = U.uHoverFam.value >= 0 ? fams[U.uHoverFam.value] : null; return hovI >= 0 && f ? f.top : -1; },
-    children: (i) => { const out = i >= 0 && i < N ? kids[i].slice() : []; for (const b of bornIdx.values()) if (b.p === i) out.push(b.idx); return out; },
+    children: (i) => { const out = i >= 0 && i < N ? kids[i].slice() : []; for (const b of bornIdx.values()) if ((b.par ?? b.p) === i) out.push(b.idx); return out; },
     members: (i) => { const f = famOfIdx(i); if (!f) return i >= N && bornAt(i) ? [i] : []; const out = f.members.slice(); for (const b of bornIdx.values()) if (b.fam === f.id) out.push(b.idx); return out; },
     topOf: (i) => { const f = famOfIdx(i); return f ? f.top : bornAt(i) ? i : -1; },
     families: (n = 10) => S.ranked.slice(0, Math.max(0, n | 0)).map((f) => ({ top: f.top, count: f.members.length, size: f.size ?? f.members.length, value: f.value, share: f.share, rank: f.rank, planet: !!f.planet, cx: f.cx, cy: f.cy, Rc: f.Rc, title: "$" + String(sym[f.top] || "").replace(/^\$+/, "") })),
@@ -1948,6 +2420,8 @@ export function buildMotion(S) {
     labelCount: () => (S.labels.labelCount ? S.labels.labelCount() : 0), drawnCount: () => (S.labels.drawnCount ? S.labels.drawnCount() : 0),
     logoPx: (i) => (S.bubbles.logoPx ? S.bubbles.logoPx(i) : 0),
     hlBit: (i) => S.hlBit(i), testHighlight: (test) => testHighlight(test),
+    // (last-trade filter) engine coin i: 0 hidden, 1 anchor, 2 shown (-1 = no such coin); its alpha code (0 / 1 dim / 2 full)
+    visLevel: (i) => (i >= 0 && i < V.st.n ? V.level[i] : -1), visCode: (i) => (i >= 0 && i < V.st.n ? V.a[i] : -1),
     allXY: () => ({ n: N, x: Float32Array.from(X), y: Float32Array.from(Y) }),
     drag: () => (drag.i >= 0 ? { i: drag.i, top: fams[famOf[drag.i]].top, rigid: !!drag.rigid } : null),
     renders: () => renders, resetFrames,
@@ -1962,6 +2436,7 @@ export function buildMotion(S) {
     live: () => liveStats(), motion: () => motionStats(), labels: fn("labels"),
     overlapCheck: fn("overlapCheck"), dustCheck: fn("dustCheck"), limeShare: fn("limeShare"), hdrCheck: fn("hdrCheck"), linkMaxPx: fn("linkMaxPx"),
     veinShare: fn("veinShare"),
+    compact: fn("compact"), drift: () => driftStats(),
     swarm: () => (S.swarm ? S.swarm.stats() : null),   // (family-all) EngineSwarmStats   // (galaxy) scene.js: share of lit vein pixels inside the focused family's disc; null until it lands / in flat
     hover: (key) => {
       if (key == null) { hoverMint(null); return null; }
@@ -1983,6 +2458,28 @@ export function buildMotion(S) {
   };
   S.debugFns.moved = () => movedMints.size;
   S.debugFns.ropeTunables = RP;
+  // (compact layout) how readable a family is at its own fit (famTarget), without moving the camera: over its members (built +
+  // added live) that are SHOWN, the on-screen radius and the rim-to-rim link length to the parent (px); kFit = the fit's zoom
+  // / k0, kUncapped = the zoom the family's size alone asks for, capBinds = the top's px cap stopped the fit earlier
+  S.debugFns.compact = (key) => {
+    const f = famByKey(key); if (!f) return null;
+    const t = famTarget(f), kU = clampK((insetMin() * 0.94) / (2 * f.Rc * 1.06)), kCap = famTopCapPx(f) / Math.max(R[f.top], 0.05);
+    const mem = f.members.slice(); for (const b of bornIdx.values()) if (b.fam === f.id) mem.push(b.idx);
+    const rs = [], ls = []; let shown = 0, anchors = 0;
+    for (const i of mem) {
+      const lv = i < V.st.n ? V.level[i] : 0; if (lv === 1) anchors++; if (lv !== 2) continue;
+      shown++;
+      const pp = posOf(i); if (!pp) continue;
+      rs.push(pp[2] * t.k);
+      const q = i < N ? par[i] : (bornAt(i) || { par: -1 }).par; if (!(q >= 0)) continue;
+      const pq = posOf(q); if (!pq) continue;
+      ls.push(Math.max(0, (Math.hypot(pp[0] - pq[0], pp[1] - pq[1]) - pp[2] - pq[2]) * t.k));
+    }
+    const qt = (a, p) => { if (!a.length) return 0; return +a[Math.min(a.length - 1, Math.floor(p * (a.length - 1)))].toFixed(2); };
+    rs.sort((a, b) => a - b); ls.sort((a, b) => a - b);
+    return { members: mem.length, shown, anchors, Rc: +f.Rc.toFixed(2), topR: +R[f.top].toFixed(2), kFit: +(t.k / k0()).toFixed(3), kUncapped: +(kU / k0()).toFixed(3), capBinds: kCap < kU,
+      medRpx: qt(rs, 0.5), p10Rpx: qt(rs, 0.1), p90Rpx: qt(rs, 0.9), share3px: rs.length ? +(rs.filter((r) => r >= 3).length / rs.length).toFixed(3) : 0, medLinkPx: qt(ls, 0.5), p90LinkPx: qt(ls, 0.9), filtered: !!C };
+  };
 }
 
 // (galaxy physics) persistence across rebuilds. index.js calls this right after placeDust, before the scene: it keeps the

@@ -19,7 +19,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LOOK, MOCK_ES, RAF_PROBE, SETTLED_JS, cli, launchChrome, mapReadyJs, rafStatsJs, sleep, withDebug, type Browser, type GpuMode, type Page, type RafStats } from "./map3-cdp.mts";
+import { LOOK, MOCK_ES, RAF_PROBE, SETTLED_JS, cli, launchChrome, mapReadyJs, rafStatsJs, sleep, withDebug, withLast, type Browser, type GpuMode, type Page, type RafStats } from "./map3-cdp.mts";
 
 const { opt, has } = cli();
 const BASE = opt("--url", "http://127.0.0.1:5260")!.replace(/\/$/, "");
@@ -52,7 +52,8 @@ async function openMap(p: Page, path = "/map", timeoutMs = 120_000) {
   await p.waitFor(mapReadyJs("three"), timeoutMs, `three map on ${path}`);
 }
 const settle = async (p: Page, ms = 30_000) => { await p.waitFor(SETTLED_JS, ms, "settle").catch(() => null); await sleep(400); };
-const spa = (p: Page, path: string) => p.evalJs(`(history.pushState({}, "", ${J(u(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
+/// (an SPA navigation does not go through page.navigate: it carries last=all itself, so the whole map is measured)
+const spa = (p: Page, path: string) => p.evalJs(`(history.pushState({}, "", ${J(withLast(u(path)))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
 async function measureAll(p: Page, label: string) {
   const out: Record<string, Measure | null> = {};
   for (const mode of ["idle", "pan", "zoom", "hover"] as const) {

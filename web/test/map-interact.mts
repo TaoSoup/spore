@@ -1,6 +1,8 @@
 // map3 (2026-10-21): /map now renders the Three.js map by default; this script measures the classic
 // Canvas renderer, so every /map URL it loads carries renderer=classic (Chrome keeps --disable-gpu, which
 // would also force the classic fallback). The WebGL renderer has its own scripts: map3-qa/perf/shots.
+// The Key's last-trade filter (2026-11-10) hides the coins with no trade in 24 h by default: every /map URL here also
+// carries last=all, so the script keeps measuring the whole map.
 // Interaction and data checks of the /map page (DESIGN §11.5 "Map v2") through Chrome's DevTools
 // protocol, no puppeteer (same harness as map-perf.mts), against a dev server on the full dataset:
 //   (a) cold open starts at the fit: k at first paint within ×1.3 of the settled fit, never a k ≈ 1 frame
@@ -119,7 +121,7 @@ try {
   const onScreen = `(p) => p && p.x >= 0 && p.y >= 0 && p.x <= innerWidth && p.y <= innerHeight`;
 
   // ---------------------------------------------------------------- (a) cold open starts at the fit
-  await send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic` }, S);
+  await send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic&last=all` }, S);
   await mapReady();
   await settle("cold layout to settle");
   {
@@ -183,7 +185,7 @@ try {
 
   // ---------------------------------------------------------------- (d) a trade draws an effect
   if (want("d")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic&last=all"); dispatchEvent(new PopStateEvent("popstate"))`);
     await evalJs("__sporeMap.fit()");
     await waitFor("!__sporeMap.flying()", 4000, "fit").catch(() => null);
     // a root that is a bubble target at the fit (≥ 3 px), so its tooltip can be checked afterwards
@@ -245,7 +247,7 @@ try {
       await evalJs(`history.pushState({}, "", "/"); dispatchEvent(new PopStateEvent("popstate"))`);
       await waitFor("!window.__sporeMap", 5000, "map to unmount").catch(() => null);
       result.idbClear = await clearIdb();
-      await fresh(() => send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic&focus=${leaf}` }, S));
+      await fresh(() => send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic&last=all&focus=${leaf}` }, S));
       await mapReady();
       await settle("cold deep link to settle");
       await waitFor("!__sporeMap.flying()", 5000, "landing").catch(() => null);
@@ -261,7 +263,7 @@ try {
 
   // ---------------------------------------------------------------- (h) logos: budget + sharpness
   if (want("h")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic&last=all"); dispatchEvent(new PopStateEvent("popstate"))`);
     const roots = await evalJs<string[]>("__sporeMap.clusters(3).map((c) => c.root)");
     for (const m of roots) { await evalJs(`__sporeMap.zoomTo(${JSON.stringify(m)}, 2.2)`); await sleep(2500); }
     const stats = await evalJs<{ ready: number; failed: number; inflight: number; queued: number; pixels: number; budget: number }>("__sporeMap.images()");
@@ -284,7 +286,7 @@ try {
 
   // ---------------------------------------------------------------- (i) family tops: biggest, central, outside; drag
   if (want("i")) {
-    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.replaceState({}, "", "/map?roots=all&renderer=classic&last=all"); dispatchEvent(new PopStateEvent("popstate"))`);
     await settle("settle before the family-top checks", 120_000).catch(() => null);
     // one family's numbers: top radius, largest member, member centres inside / rims over the top's disc
     await evalJs(`window.__fam = (root) => { const M = __sporeMap, mem = M.members(root), t = M.node(root); let inside = 0, overlap = 0, maxC = 0; for (const m of mem) { if (m === root) continue; const d = M.node(m); const dist = Math.hypot(d.x - t.x, d.y - t.y); if (dist < t.r) inside++; if (dist < t.r + d.r) overlap++; if (d.r > maxC) maxC = d.r; } return { n: mem.length, topR: t.r, maxC, ratio: maxC ? t.r / maxC : Infinity, inside, overlap }; }; true`);
@@ -350,7 +352,7 @@ try {
       await waitFor("!window.__sporeMap", 5000, "map to unmount").catch(() => null);
       result.idbClear = await clearIdb();
       await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, S);
-      await fresh(() => send("Page.navigate", { url: `${BASE}/map?renderer=classic&focus=${gta}` }, S));
+      await fresh(() => send("Page.navigate", { url: `${BASE}/map?renderer=classic&last=all&focus=${gta}` }, S));
       await mapReady();
       await sleep(3000);
       const r = await evalJs<{ roots: string | null; sel: string | null; nodes: number; total: number }>("({ roots: new URLSearchParams(location.search).get('roots'), sel: __sporeMap.selected(), nodes: __sporeMap.nodes(), total: __sporeMapPage.total() })");
@@ -365,7 +367,7 @@ try {
 
   // ---------------------------------------------------------------- (f) production build: one since= request on an SPA reopen
   if (PROD && want("f")) {
-    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?roots=all&renderer=classic&debug` }, S);
+    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?roots=all&renderer=classic&last=all&debug` }, S);
     await mapReady();
     await settle("production layout to settle");
     await sleep(3000); // the full cache write, then the "full" stamp
@@ -373,7 +375,7 @@ try {
     await waitFor("!window.__sporeMap", 5000, "map to unmount (prod)");
     await sleep(800);
     await evalJs("performance.clearResourceTimings()");
-    await evalJs(`history.pushState({}, "", "/map?roots=all&renderer=classic&debug"); dispatchEvent(new PopStateEvent("popstate"))`);
+    await evalJs(`history.pushState({}, "", "/map?roots=all&renderer=classic&last=all&debug"); dispatchEvent(new PopStateEvent("popstate"))`);
     await mapReady(60_000);
     await sleep(4000);
     const reqs = await evalJs<string[]>(`performance.getEntriesByType("resource").filter((e) => /\\/api\\/map(\\?|$)/.test(e.name)).map((e) => e.name.replace(/^.*\\/api\\/map/, "/api/map"))`);

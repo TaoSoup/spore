@@ -1,6 +1,8 @@
 // map3 (2026-10-21): /map now renders the Three.js map by default; this script measures the classic
 // Canvas renderer, so every /map URL it loads carries renderer=classic (Chrome keeps --disable-gpu, which
 // would also force the classic fallback). The WebGL renderer has its own scripts: map3-qa/perf/shots.
+// The Key's last-trade filter (2026-11-10) hides the coins with no trade in 24 h by default: every /map URL here also
+// carries last=all, so the script keeps measuring the whole map.
 // Headless measurement of the /map page (DESIGN §11.5 budgets) through Chrome's DevTools protocol, no
 // puppeteer (same pattern as tools/shot.mjs). It loads the map on a dev server, waits for the first
 // bubbles and for the layout to settle, samples frame times in both phases, injects one synthetic
@@ -121,7 +123,7 @@ try {
   })()`);
 
   if (PROD) {
-    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?renderer=classic` }, S);
+    await send("Page.navigate", { url: `${PROD.replace(/\/$/, "")}/map?renderer=classic&last=all` }, S);
     await sleep(8000);
     const info = await evalJs<{ title: string; worker: number; canvas: boolean; assets: number }>(`JSON.stringify({ title: document.title, worker: performance.getEntriesByType("resource").filter((e) => /layout\\.worker/.test(e.name)).length, canvas: !!document.querySelector(".bm-canvas"), assets: performance.getEntriesByType("resource").length })`).then((s) => JSON.parse(s as unknown as string));
     result.prod = info;
@@ -129,7 +131,7 @@ try {
     check(info.worker >= 1, "production build did not load the layout worker (CSP worker-src?)");
     result.shot = await shot("map-prod-1440.png");
   } else {
-    const url = `${BASE}/map?roots=${ROOTS}&renderer=classic${STRESS ? `&stress=${STRESS}` : ""}`;
+    const url = `${BASE}/map?roots=${ROOTS}&renderer=classic&last=all${STRESS ? `&stress=${STRESS}` : ""}`;
     // ---- cold open (fresh profile = empty IndexedDB)
     await send("Page.navigate", { url }, S);
     await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0)", 120_000, "first paint");

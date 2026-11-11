@@ -3,7 +3,11 @@
 //   (a) search results paint above the controls under them and a click selects without touching ?roots
 //   (b) the magnifier paints above the search input
 //   (c) with /api/coin answering ours-mode zeros, the side panel shows the map node's locked value and children
-//   (d) ?hl= chips (pressed state, counts), ?hl updates, ?size=mcap survives a reload
+//   (d) ?hl= chips (pressed state, counts), ?hl updates, ?size=mcap survives a reload; the Key's last-trade filter (every
+//       other check runs with last=all, which u() appends): no ?last = the default once the heat is in (the toggles read
+//       on,on,on,off, the dock pill tags "≤ 24 h", the ours chip counts what the renderer lights up), each bucket, "show all"
+//       and "reset" write ?last=; (WebGL) 24 h off rebuilds once (builds() + 1, lastBuild() reason "last", filtered) and a
+//       coin in both builds moves, reset rebuilds once more; without heat the scale has no toggles
 //   (e) arrow keys walk the tree, 0 fits, the aria-live text follows the selection
 //   (f) a pasted pump.fun link selects a mapped coin; an unknown mint offers Open / Launch
 //   (g) 390×844: no horizontal overflow, the sheet's peek keeps both actions on screen, the handle
@@ -42,7 +46,10 @@ const RENDERER = opt("--renderer", "three");
 if (RENDERER !== "three" && RENDERER !== "classic") throw new Error(`--renderer must be three or classic, not ${RENDERER}`);
 /// classic: every /map URL carries renderer=classic
 const withRenderer = (path: string) => (RENDERER === "classic" && /^\/map(\?|#|$)/.test(path) ? `${path}${path.includes("?") ? "&" : "?"}renderer=classic` : path);
-const u = (path: string) => { const p = withRenderer(path); return PROD ? `${p}${p.includes("?") ? "&" : "?"}debug` : p; };
+/// The Key's last-trade filter hides the coins with no trade in 24 h by default (lib/map/visibility.ts): every /map URL gets
+/// last=all (the whole map these checks were written for) unless it names its own last= or `all` is false ((d)'s filter checks).
+const withLast = (path: string) => (/^\/map(\?|#|$)/.test(path) && !/[?&]last=/.test(path) ? `${path}${path.includes("?") ? "&" : "?"}last=all` : path);
+const u = (path: string, all = true) => { const p = withRenderer(all ? withLast(path) : path); return PROD ? `${p}${p.includes("?") ? "&" : "?"}debug` : p; };
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const port = 9222 + Math.floor(Math.random() * 500);
@@ -120,7 +127,7 @@ try {
   };
   const go = async (path: string) => { await send("Page.navigate", { url: `${BASE}${u(path)}` }, S); await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0 && window.__sporeMapPage)", 120_000, `map on ${path}`); await assertRenderer(path); };
   const settle = async () => { await waitFor("window.__sporeMap && __sporeMap.settled() && !__sporeMap.flying()", 120_000, "layout + camera to settle").catch(() => { /* a live stream keeps nudging; the checks below tolerate it */ }); await sleep(400); };
-  const spa = (path: string) => evalJs(`(history.pushState({}, "", ${JSON.stringify(u(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
+  const spa = (path: string, all = true) => evalJs(`(history.pushState({}, "", ${JSON.stringify(u(path, all))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
   const overlaps = async (label: string) => {
     const sels = [".map-overlay > .map-panel", ".map-search", ".map-hl", ".map-rails", ".map-key", ".map-side", ".bm-controls", ".bm-size"];
     const rs = await evalJs<(Rect & { sel: string })[]>(`${JSON.stringify(sels)}.map((s) => { const el = document.querySelector(s); if (!el) return null; const r = el.getBoundingClientRect(); return { sel: s, x: r.left, y: r.top, w: r.width, h: r.height }; }).filter(Boolean)`);
@@ -281,6 +288,97 @@ try {
   const sizeReload = await evalJs<{ param: string | null; buttons: number }>(`({ param: new URLSearchParams(location.search).get("size"), buttons: document.querySelectorAll(".bm-size button").length })`);
   check(sizeReload.param === null && sizeReload.buttons === 2, `(d) the size pill and no ?size after a reload: ${JSON.stringify(sizeReload)}`);
   result.d = { chip, expectOurs, hlAfter, sizeReload };
+  // (d) the Key's last-trade filter: no ?last = the default ("older" hidden) once the heat is in; the buckets write ?last=
+  const lastOn = await waitFor(`window.__sporeMapPage && typeof __sporeMapPage.last === "function" && __sporeMapPage.last().counts !== null`, 8000, "heat for the Key's filter").then(() => true, () => false);
+  const lastParam = () => param("last");
+  // the URL changes before the page re-renders: also wait for the page's own filter (its keys), so the next click or DOM
+  // read sees the Key that matches the URL
+  const lastKeys = (v: string | null) => (v === null ? "30m,3h,24h" : v === "all" ? "30m,3h,24h,old" : v);
+  const lastIs = (v: string | null, what: string) => waitFor(`new URLSearchParams(location.search).get("last") === ${JSON.stringify(v)} && (__sporeMapPage.last() || { keys: [] }).keys.join(",") === ${JSON.stringify(lastKeys(v))}`, 3000, what).then(() => true, () => false);
+  await spa("/map", false);
+  await sleep(300);
+  const keyWasOpen = await evalJs<boolean>(`!!document.querySelector(".map-key.open")`);
+  if (!keyWasOpen) await clickSel(".map-key-toggle");
+  await sleep(300);
+  const dLast: Record<string, unknown> = { heat: lastOn };
+  if (lastOn) {
+    const eff = await waitFor(`__sporeMapPage.last().eff === 7`, 4000, "the default filter").then(() => true, () => false);
+    check(eff, `(d) no ?last: the page's filter is ${JSON.stringify(await evalJs("__sporeMapPage.last()"))}, not the default (mask 7)`);
+    dLast.pressed = await evalJs<string[]>(`[...document.querySelectorAll(".map-key-scale button[data-last]")].map((b) => b.getAttribute("aria-pressed"))`);
+    check((dLast.pressed as string[]).join(",") === "true,true,true,false", `(d) the default's toggles read ${(dLast.pressed as string[]).join(",")}`);
+    dLast.line = await evalJs<string>(`(document.querySelector(".map-key-last") || {}).textContent || ""`);
+    check(/^showing [\d,.KMB]+ of [\d,.KMB]+ coins/.test(String(dLast.line)), `(d) the Key's line reads "${dLast.line}"`);
+    dLast.tag = await evalJs<string | null>(`(document.querySelector(".map-key-toggle .map-key-tag") || {}).textContent || null`);
+    check(dLast.tag === "≤ 24 h", `(d) the dock pill's tag reads ${JSON.stringify(dLast.tag)} at the default`);
+    // a chip counts what lights up: the coins the RENDERER draws lit (its own levels: "shown", the pins included; a dim
+    // anchor is not counted), not the page's copy of the levels (recomputed at most every 2 s: waited out first)
+    await spa("/map?hl=ours", false);
+    await sleep(2500);
+    const oursDrawn = await evalJs<{ chip: number; drawn: number; anchors: number }>(`(() => { const on = ${JSON.stringify(oursOnMap)}.map((m) => __sporeMap.visibility(m)); return { chip: __sporeMapPage.hlCounts().ours, drawn: on.filter((v) => v === "shown").length, anchors: on.filter((v) => v === "anchor").length }; })()`);
+    dLast.ours = oursDrawn;
+    check(oursDrawn.chip === oursDrawn.drawn, `(d) under the default filter the ours chip counts ${oursDrawn.chip}, the renderer lights ${oursDrawn.drawn} ours coins (${oursDrawn.anchors} more as dim anchors)`);
+    await spa("/map", false);
+    await sleep(300);
+    result.shotKeyLast = await shot("ui-1440-key-last.png");
+    // (compact layout, WebGL only) a bucket toggle rebuilds the map once from the filtered set, and the shown coins move;
+    // reset rebuilds once more (the classic map hides in place: no builds() there)
+    type B = { reason: string; mask: number; filtered: boolean; built: number; all: number } | null;
+    const three = RENDERER === "three";
+    const waitBuild = (m: number, what: string) => waitFor(`(() => { const b = __sporeMap.lastBuild(); return !!b && b.mask === ${m}; })()`, 20_000, what).then(() => evalJs<B>("__sporeMap.lastBuild()"), () => null);
+    if (three) await waitBuild(7, "(d) the default's build");
+    const db0 = three ? await evalJs<number>("__sporeMap.builds()") : 0;
+    // a sample of the default build's coins: the ones the mask-3 build holds too sit elsewhere in its compact layout
+    const probe = three ? await evalJs<string[]>("__sporeMap.sample(600).map((p) => p.mint)") : [];
+    const xyA = probe.length ? await evalJs<number[]>(`__sporeMap.xy(${JSON.stringify(probe)})`) : null;
+    await clickSel('.map-key-scale button[data-last="2"]');
+    check(await lastIs("30m,3h", "24 h off"), `(d) 24 h off wrote ?last=${await lastParam()}`);
+    if (three) {
+      const b3 = await waitBuild(3, "(d) the 24 h off build");
+      const db1 = await evalJs<number>("__sporeMap.builds()");
+      dLast.build3 = b3;
+      // a coin that traded within 2 h is in both builds: the compact layout of mask 3 put it elsewhere
+      const xy3 = probe.length ? await evalJs<number[]>(`__sporeMap.xy(${JSON.stringify(probe)})`) : null;
+      let both = 0, moved = 0;
+      if (xyA && xy3) for (let i = 0; i < xyA.length; i += 2) if (Number.isFinite(xyA[i]) && Number.isFinite(xy3[i])) { both++; if (Math.hypot(xy3[i] - xyA[i], xy3[i + 1] - xyA[i + 1]) > 1e-3) moved++; }
+      dLast.moved = { both, moved };
+      if (both) check(moved > 0.5 * both, `(d) only ${moved} of the ${both} sampled coins in both builds moved between the default's build and 24 h off's`);
+      check(db1 === db0 + 1 && !!b3 && b3.reason === "last" && b3.filtered, `(d) 24 h off: ${db1 - db0} builds, ${JSON.stringify(b3)} (expected one filtered "last" build)`);
+      await clickSel('.map-key-last button[data-last="reset"]');
+      check(await lastIs(null, "reset after 24 h off"), `(d) reset left ?last=${await lastParam()}`);
+      await waitBuild(7, "(d) the default's build again");
+      check((await evalJs<number>("__sporeMap.builds()")) === db1 + 1, "(d) reset did not rebuild once");
+      await clickSel('.map-key-scale button[data-last="2"]');
+      await lastIs("30m,3h", "24 h off again");
+    }
+    await clickSel('.map-key-scale button[data-last="3"]');
+    check(await lastIs("30m,3h,old", "older on"), `(d) older on wrote ?last=${await lastParam()}`);
+    await clickSel('.map-key-last button[data-last="all"]');
+    check(await lastIs("all", "show all"), `(d) show all wrote ?last=${await lastParam()}`);
+    check(!(await evalJs<boolean>(`!!document.querySelector(".map-key-toggle .map-key-tag")`)), "(d) the dock pill keeps a tag with every bucket on");
+    await clickSel('.map-key-last button[data-last="reset"]');
+    check(await lastIs(null, "reset"), `(d) reset left ?last=${await lastParam()}`);
+    // two clicks on one bucket before the page re-renders cancel out (each flips the URL's mask as it is, not the render's)
+    await evalJs(`(() => { const b = () => document.querySelector('.map-key-scale button[data-last="2"]'); b().click(); b().click(); return true; })()`);
+    await sleep(600);
+    check(await lastIs(null, "a quick double click"), `(d) a quick double click on 24 h left ?last=${await lastParam()}`);
+    // the last bucket on stays on
+    await spa("/map?last=old", false);
+    // (compact layout) the Key's toggles rebuild the WebGL map once they settled: wait for the page to render "older only" (a
+    // build's first frame can hold the main thread for a few hundred ms) before testing the last bucket
+    await waitFor(`(window.__sporeMapPage && __sporeMapPage.last && (__sporeMapPage.last() || {}).mask) === 8`, 5000, "the page at older only").catch(() => null);
+    await sleep(300);
+    await clickSel('.map-key-scale button[data-last="3"]');
+    await sleep(300);
+    check((await lastParam()) === "old", `(d) switching off the only bucket wrote ?last=${await lastParam()}`);
+  } else {
+    // no heat sidecar: the scale is the colour legend only, nothing is hidden
+    dLast.toggles = await evalJs<number>(`document.querySelectorAll(".map-key-scale button[data-last]").length`);
+    dLast.eff = await evalJs("window.__sporeMapPage && __sporeMapPage.last ? __sporeMapPage.last().eff : null");
+    check(dLast.toggles === 0, `(d) without heat the Key shows ${dLast.toggles} last-trade toggles`);
+    check(dLast.eff === null || dLast.eff === 15, `(d) without heat the filter in force is ${dLast.eff}, not 15`);
+  }
+  result.dLast = dLast;
+  if (!keyWasOpen && (await evalJs<boolean>(`!!document.querySelector(".map-key.open")`))) await clickSel(".map-key-toggle");
   await spa("/map");
   await settle();
   check(!!(await waitFor(`document.querySelectorAll(".map-rails .map-rail-row").length > 0`, 6000, "rails after reload").catch(() => null)), "the New rail is empty after a reload");

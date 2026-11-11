@@ -57,6 +57,17 @@ export function withLook(url: string, look: string = LOOK): string {
   return `${p}${p.includes("?") ? "&" : "?"}look=${look}${h !== undefined ? `#${h}` : ""}`;
 }
 
+/// The Key's last-trade filter hides the coins with no trade in 24 h by default (lib/map/visibility.ts, `?last=`). Every
+/// /map URL a page navigates to gets `last=all` (page.navigate → withLast), so the existing checks and the pixel-exact
+/// shots keep the whole map; a URL that already has `last=` keeps it (the scripts that test the filter pass their own).
+/// SPA navigations inside the app do not carry it: a script's own spa() helper must (map3-qa's u() does).
+export function withLast(url: string, last = "all"): string {
+  const [p, h] = url.split("#", 2);
+  const path = p.replace(/^[a-z]+:\/\/[^/]+/i, "");
+  if (!/^\/map(\?|$)/.test(path) || /[?&]last=/.test(p)) return url;
+  return `${p}${p.includes("?") ? "&" : "?"}last=${last}${h !== undefined ? `#${h}` : ""}`;
+}
+
 /// EventSource mock (same as map-interact / map-perf): every instance in window.__es, dispatch(type, json)
 /// feeds the page's lib/events listeners. Never errors, so the page's one stream stays the only one.
 export const MOCK_ES = `(() => {
@@ -253,7 +264,7 @@ export async function launchChrome(o: LaunchOpts = {}): Promise<Browser> {
     const page: Page = {
       sid, errors, netErrors, warnings, logs, requests, responses, send,
       on: (method, fn) => { let set = extra.get(method); if (!set) extra.set(method, (set = new Set())); set.add(fn); return () => { set!.delete(fn); }; }, evalJs, waitFor, viewport, setTouch, mouse, touch,
-      navigate: (url, timeoutMs = 60_000) => fresh(() => send("Page.navigate", { url: withLook(url) }), timeoutMs),
+      navigate: (url, timeoutMs = 60_000) => fresh(() => send("Page.navigate", { url: withLook(withLast(url)) }), timeoutMs),
       reload: (timeoutMs = 60_000) => fresh(() => send("Page.reload", {}), timeoutMs),
       shot: async (file, so = {}) => { const r = await send<{ data: string }>("Page.captureScreenshot", { format: so.format ?? "png", quality: so.quality }); writeFileSync(file, Buffer.from(r.data, "base64")); return file; },
       hover: async (x, y) => { await mouse("mouseMoved", x - 12, y + 9); await sleep(40); await mouse("mouseMoved", x, y); },

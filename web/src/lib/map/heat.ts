@@ -3,6 +3,9 @@
 // "Hot" rails and the "Traded 1h" filter stay live without a request per trade. A server that predates the
 // route answers 404: the hook then returns null (callers hide what depends on it) and asks again every
 // 5 min, without logging anything. The returned object changes identity at most once per second.
+// Warm reopen: the last index published is kept across mounts (warmHeat), and a hook mounted within WARM_HEAT_MS
+// starts from it instead of null, so /map reopened in the same tab has its heat (the Key's filter, its counts, the
+// chips, the WebGL engine's first build) from the first render; the fresh poll follows at once and replaces it.
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api, type HeatResponse, type Trade } from "../api";
 import { useEvents } from "../events";
@@ -14,6 +17,18 @@ export const HEAT_POLL_MS = 60_000, HEAT_RETRY_MS = 300_000;
 const BUMP_MS = 1_000, REPLAY_S = 180;
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+/// (warm reopen) How long the last published index stays a valid start for the next mount. The page and ThreeMap both
+/// read it through this hook (one heat: the last-trade filter the page reports is the one the engine applies), and the
+/// engine's first build need not wait for the first poll.
+export const WARM_HEAT_MS = 120_000;
+/// One reference, replaced by every publish: nothing accumulates. A 404 (no heat route) forgets it.
+let warm: { heat: HeatIndex; seenAt: number } | null = null;
+const clockMs = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+/// The last index published, while it is younger than WARM_HEAT_MS (by the page clock); else null.
+export const warmHeat = (now = clockMs()): HeatIndex | null => (warm && now - warm.seenAt < WARM_HEAT_MS ? warm.heat : null);
+/// Keeps (or with null forgets) the index the next mount may start from.
+export const rememberHeat = (heat: HeatIndex | null, now = clockMs()) => { warm = heat ? { heat, seenAt: now } : null; };
 
 /// The wire's parallel arrays as a Map. Rows with a malformed mint are skipped; a short array reads as 0.
 export function indexHeat(res: HeatResponse): Map<string, HeatRow> {
@@ -39,13 +54,14 @@ export function applyTrade(rows: Map<string, HeatRow>, t: Pick<Trade, "mint" | "
   if (time > r.last) r.last = time;
 }
 
-/// Polls the heat sidecar and keeps it current from the trade stream. Null until the first answer, and
-/// while the server does not have the route.
+/// Polls the heat sidecar and keeps it current from the trade stream. Null until the first answer (or, on a warm
+/// reopen, the previous mount's index until then: warmHeat), and while the server does not have the route.
 export function useMapHeat(enabled = true): HeatIndex | null {
-  const [heat, setHeat] = useState<HeatIndex | null>(null);
-  const rows = useRef<Map<string, HeatRow> | null>(null);
-  const at = useRef(0);
-  const version = useRef(0);
+  // a warm start continues the cached index as if this hook had published it: live trades bump its rows, versions go on
+  const [heat, setHeat] = useState<HeatIndex | null>(() => (enabled ? warmHeat() : null));
+  const rows = useRef<Map<string, HeatRow> | null>(heat?.rows ?? null);
+  const at = useRef(heat?.at ?? 0);
+  const version = useRef(heat?.version ?? 0);
   const lastPublish = useRef(0);
   const bumpTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Trades seen recently, replayed onto a fresh poll whose snapshot predates them (the server caches 15 s).
@@ -57,7 +73,9 @@ export function useMapHeat(enabled = true): HeatIndex | null {
     if (!alive.current || !rows.current) return;
     lastPublish.current = Date.now();
     version.current++;
-    setHeat({ at: at.current, version: version.current, rows: rows.current });
+    const next = { at: at.current, version: version.current, rows: rows.current };
+    rememberHeat(next);
+    setHeat(next);
   };
   const schedule = () => {
     if (bumpTimer.current) return;
@@ -97,7 +115,7 @@ export function useMapHeat(enabled = true): HeatIndex | null {
         polledAt = Date.now();
         if (e instanceof ApiError && e.status === 404) {
           // an older server: nothing to show, ask again later (never an error on the console)
-          unsupported = true; rows.current = null; setHeat(null);
+          unsupported = true; rows.current = null; rememberHeat(null); setHeat(null);
           next(HEAT_RETRY_MS);
         } else next(HEAT_POLL_MS);
       } finally { busy = false; }

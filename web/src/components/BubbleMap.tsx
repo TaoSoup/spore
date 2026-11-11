@@ -50,7 +50,17 @@
 //   its family's centre); the settled positions then go to the cache. Below CLICK_PX it is a click.
 // - Live: `live` subscribes to SSE trades and pushes ripples/comets into map/fx.ts (fixed slot ring,
 //   only while the map is visible); `heat` (the /api/map/heat sidecar) seeds each node's last trade
-//   and hourly count; `highlight` writes a match bit per node that dims the rest without moving it.
+//   and hourly count; `highlight` writes a match bit per node that dims the rest without moving it;
+//   `visible` (the Key's last-trade filter) writes a hide bit and an anchor bit per node: a hidden coin keeps its spot
+//   and is skipped by the draw, the picking, the labels and the trade fx, an anchor is drawn dim (map/draw.ts). The
+//   page's levels are up to 2 s old, so the bits run ahead of them as the WebGL engine does: a trade while the 30 min
+//   bucket is on, a newborn, any coin whose live class (`heat`, lib/map/visibility.ts coinClass) is in `last` is shown
+//   at once with its lineage (map/store.ts revealOnTrade / applyLevels), its ripple and grow-in included.
+//   (compact layout, 2026-11-10) Unlike the WebGL map, which is rebuilt from the filtered set on a mask change, this map
+//   stays alpha-only on purpose: it keeps survivors' positions (store records, the IndexedDB layout cache via
+//   onLayout / persistPositions), so compaction would need a cold d3-force relayout per toggle written into the same cache
+//   the full map paints from, and its family-top radii come from familyWeights of the nodes it is given (whole-family
+//   weights would have to be plumbed in). It is the fallback renderer (no WebGL2, failures): not worth that cost and risk.
 // - Data changes are diffs: a handful of new nodes is appended in place (links, cluster, draw order:
 //   store.addLinks / addToClusters / insertOrder) and each is put next to its parent by one
 //   deterministic rule (lib/map/place.ts: rings around the parent, outward from the family's top, the
@@ -70,6 +80,7 @@ import { ago, count, usd } from "../lib/format";
 import { imageFor, imageStats, onImageLoaded } from "../lib/map/images";
 import { DEBUG_HOOKS } from "../lib/map/debug";
 import type { HeatIndex } from "../lib/map/heat";
+import { LAST_ALL } from "../lib/map/visibility";
 import type { BubbleNode, SizeMode } from "../lib/map/types";
 import { coinMcap, coinRadius, familyRadii, familyWeights, families, rangeFor, topMaxWeight } from "../lib/map/sizing";
 import { ErrorBox, Skeleton, nameOf, sym } from "./Bits";
@@ -77,7 +88,7 @@ import { ANIM_MOTION, clusterAt, draw, fitFor, hitTest, invalidate, makeState, s
 import { cancelFlight, contextTarget, flyTo } from "./map/camera";
 import { clearFx, pushTrade } from "./map/fx";
 import { hexA } from "./map/sprites";
-import { COLORS, F_ANC, F_FIXED, F_FOCUS, F_MATCH, F_MIG, F_OURS, MapStore, colorIdx, valueOf } from "./map/store";
+import { COLORS, F_ANC, F_ANCHOR, F_FIXED, F_FOCUS, F_HIDDEN, F_MATCH, F_MIG, F_OURS, MapStore, applyLevels, colorIdx, revealOnTrade, valueOf } from "./map/store";
 import "./bubblemap.css";
 
 export type { BubbleNode, SizeMode } from "../lib/map/types";
@@ -112,6 +123,10 @@ export type BubbleMapHandle = {
 /// `titleTags` (family top mint → text, the family's dominance on /map) is appended to each tree's title,
 /// `titleTagsCompact` instead on narrow screens (defaults to titleTags); `clusterInfo` adds rows to the
 /// hovered tree's tooltip (by its top's mint).
+/// `visible` (the Key's last-trade filter, lib/map/visibility.ts visibleLevels; null = everything drawn): a coin absent
+/// from it is hidden (not drawn, not picked, unlabelled, no trade fx; its spot is kept), an "anchor" is drawn dim;
+/// `pinned` (the selection's lineage) is always drawn; `last` (the mask the levels were made for, bit k = heat class k,
+/// 15 = all) lets a coin whose live class is in it show before the next levels arrive.
 type Props = {
   nodes: BubbleNode[]; focus?: string; select?: string | null; onSelect?: (n: BubbleNode | null) => void; height: number | string; mode?: SizeMode; onModeChange?: (m: SizeMode) => void;
   /// false hides the locked-value UI (the size toggle and the locked tooltip rows).
@@ -119,7 +134,9 @@ type Props = {
   ref?: Ref<BubbleMapHandle>; className?: string; inset?: Inset; fresh?: Set<string>; onLayout?: (pos: { mint: string; x: number; y: number }[]) => void;
   highlight?: ((n: BubbleNode) => boolean) | null; live?: boolean; heat?: HeatIndex | null; hideLegend?: boolean; onCamera?: (c: { k: number }) => void;
   titleTags?: ReadonlyMap<string, string> | null; titleTagsCompact?: ReadonlyMap<string, string> | null; clusterInfo?: (topMint: string) => ReactNode;
+  visible?: ReadonlyMap<string, "shown" | "anchor"> | null; pinned?: readonly string[]; last?: number;
 };
+const NO_PINS: readonly string[] = [];
 
 /// Flatten /api/tree: the focus coin's ancestors (nearest first) become a chain of nodes above it,
 /// so the map can show where the coin hangs from, not only what hangs from it.
@@ -248,7 +265,7 @@ function eventPoint(ev: Event, cv: HTMLCanvasElement): [number, number] {
 /// grab offset (world units, pointer minus node) once it did.
 type Grab = { i: number; x: number; y: number; active: boolean; ox: number; oy: number };
 
-export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, height, mode: modeProp = "locked", onModeChange, lockedUi = true, ref, className = "", inset, fresh, onLayout, highlight = null, live = false, heat = null, hideLegend = false, onCamera, titleTags = null, titleTagsCompact, clusterInfo }: Props) {
+export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, height, mode: modeProp = "locked", onModeChange, lockedUi = true, ref, className = "", inset, fresh, onLayout, highlight = null, live = false, heat = null, hideLegend = false, onCamera, titleTags = null, titleTagsCompact, clusterInfo, visible = null, pinned = NO_PINS, last = LAST_ALL }: Props) {
   const nav = useNavigate();
   const box = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -293,6 +310,9 @@ export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, 
   const persistSoon = useCallback(() => { layoutDirty.current = true; if (persistTimer.current) return; persistTimer.current = setTimeout(() => { persistTimer.current = null; if (st.current.store.settled) persistLayout(); }, PERSIST_SOON_MS); }, [persistLayout]);
   useEffect(() => () => { if (persistTimer.current) { clearTimeout(persistTimer.current); persistTimer.current = null; } }, []);
   const onCameraRef = useRef(onCamera); onCameraRef.current = onCamera;
+  // the last-trade filter's live part (read by the trade stream and the levels effect; neither re-runs on a heat publish)
+  const lastRef = useRef(last); lastRef.current = last;
+  const heatRef = useRef(heat); heatRef.current = heat;
   const camNotify = useRef<{ last: number; timer: ReturnType<typeof setTimeout> | null }>({ last: 0, timer: null });
 
   /// d3-zoom keeps its own copy of the transform: every programmatic jump goes through it.
@@ -450,7 +470,7 @@ export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, 
         if (store.data[i] !== d) {
           if (store.data[i].image !== d.image) store.gen[i]++;
           store.data[i] = d;
-          store.flags[i] = (store.flags[i] & (F_FIXED | F_MATCH)) | flagsOf(d);
+          store.flags[i] = (store.flags[i] & (F_FIXED | F_MATCH | F_HIDDEN | F_ANCHOR)) | flagsOf(d);
           if (store.parent[i] < 0 || d.depth > 0) { store.depth[i] = Math.min(255, d.depth); store.color[i] = colorIdx(d.depth); } // a family member under a listed asset keeps its generation (store.applyGenerations)
         }
         if (Math.abs(store.rT[i] - r) > 0.25) { store.r0[i] = store.r[i]; store.rT[i] = r; store.rt0[i] = now; changedR.push(i); }
@@ -607,6 +627,21 @@ export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, 
     invalidate(s);
   }, [highlight, nodes]);
 
+  // ---- the Key's last-trade filter: a hide bit and an anchor bit per node, nothing moves (after the data effect: a
+  // store rebuild re-applies it, and a coin it just appended, a live newborn, gets its bits before any frame). O(n) per
+  // change of the levels, the pins or the nodes; the frame only reads the bits. The levels are up to 2 s old: a coin they
+  // hide or anchor whose live class is in the mask (a trade since, a newborn) is shown with its lineage (store.applyLevels).
+  useEffect(() => {
+    const s = st.current, store = s.store, f = store.flags;
+    if (!visible && s.hidden === 0 && s.anchors === 0) return; // the filter is off and no bit is set: nothing to do
+    applyLevels(store, visible, pinned, lastRef.current, heatRef.current, s);
+    // a hover on a coin that just went (not the side panel's pinned hover) is dropped, and a hovered family gone whole
+    if (s.hover >= 0 && s.pinned < 0 && f[s.hover] & F_HIDDEN) { store.setRelated(s.hover, -1); s.hover = -1; setHover(-1); }
+    const hc = s.hoverCluster >= 0 ? store.clusters[s.hoverCluster] : undefined;
+    if (hc && hc.root >= 0 && f[hc.root] & F_HIDDEN) { s.hoverCluster = -1; setHoverCluster(-1); }
+    invalidate(s);
+  }, [visible, pinned, nodes]);
+
   // ---- title tags (the family's dominance on /map): one string per tree, by its top's mint. After the
   // data effect, so trees it just created get theirs in the same commit; a changed tag rebuilds that one
   // title's bitmap (draw.ts keys it on title + tag). Nothing moves and nothing is measured.
@@ -647,9 +682,15 @@ export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, 
     return subscribe({
       trade: (t) => {
         const s = st.current;
-        if (!s.visible || document.hidden || !t?.mint) return;
+        if (!t?.mint) return;
         const i = s.store.idx.get(t.mint);
         if (i === undefined) return;
+        // a trade files the coin under 30 min at once: while that bucket is on, a coin the (up to 2 s old) levels hide or
+        // anchor is shown now with its lineage (off screen or in a hidden tab too), and gets its ripple, as on the WebGL map
+        const f = s.store.flags;
+        if (revealOnTrade(f, s.store.parent, i, lastRef.current, s)) invalidate(s);
+        if (!s.visible || document.hidden) return;
+        if (f[i] & F_HIDDEN && i !== s.selected) return; // a coin the Key's filter hides: no ripple
         pushTrade(s.fx, s.store, i, !!t.isBuy, typeof t.valueUsd === "number" ? t.valueUsd : null, t.sig ?? "", performance.now());
         // a ripple off screen needs no frame (the draw loop is asleep on a static map)
         const { x, y, r } = s.store, tr = s.t, sx = x[i] * tr.k + tr.x, sy = y[i] * tr.k + tr.y, m = r[i] * tr.k + 40;
@@ -903,6 +944,14 @@ export default function BubbleMap({ nodes, focus, select: selectProp, onSelect, 
         for (let i = 0; i < store.n; i++) { if (pred(store.data[i])) { f[i] |= F_MATCH; m++; } else f[i] &= ~F_MATCH; }
         s.highlight = true;
         return m;
+      },
+      /// the Key's last-trade filter: a coin's level ("shown" | "anchor" | "hidden"; null = not on the map), or without a
+      /// mint the counts (shown, anchors, hidden), as the frame reads the bits
+      visibility: (mint?: string) => {
+        const store = s.store;
+        if (mint == null) return { shown: store.n - s.hidden - s.anchors, anchors: s.anchors, hidden: s.hidden };
+        const i = store.idx.get(mint);
+        return i === undefined ? null : store.flags[i] & F_HIDDEN ? "hidden" : store.flags[i] & F_ANCHOR ? "anchor" : "shown";
       },
       children: (mint: string) => { const i = s.store.idx.get(mint); if (i === undefined) return []; const out: string[] = []; for (let k = s.store.childStart[i]; k < s.store.childStart[i + 1]; k++) out.push(s.store.ids[s.store.childList[k]]); return out; },
       selected: () => (s.selected >= 0 ? s.store.ids[s.selected] : null),

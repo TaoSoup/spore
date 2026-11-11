@@ -242,6 +242,21 @@ main.map-main { padding: 0; }
 .map-key-scale li.hot span { color: var(--ink-2); }
 .map-key-node { position: relative; width: 11px; height: 11px; margin: 2px 0; border-radius: 50%; background: var(--c); box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 0 0 3px var(--bg-0), 0 0 0 4px color-mix(in srgb, var(--c) 45%, transparent); }
 .map-key-scale li.hot .map-key-node { box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 3px var(--bg-0), 0 0 0 4px color-mix(in srgb, var(--c) 60%, transparent), 0 0 14px 2px color-mix(in srgb, var(--c) 55%, transparent); }
+/* the last-trade filter (?last=): each bucket a toggle, its coin count under the words; an off bucket's node is a hollow ring */
+.map-key-scale.toggles::before { top: 11px; }
+.map-key-scale li > button { display: grid; grid-template-rows: auto 1fr auto; justify-items: center; align-content: start; gap: 6px; width: 100%; margin: 0; padding: 4px 2px 5px; border: 0; border-radius: 9px; background: transparent; color: inherit; font: inherit; text-align: center; cursor: pointer; transition: background var(--dur-2), transform var(--dur-1) var(--ease-out); }
+.map-key-scale li > button:hover { background: rgba(255,255,255,.045); }
+.map-key-scale li > button:active { transform: scale(.96); }
+.map-key-scale li > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.map-key-scale li > button[aria-disabled="true"] { cursor: default; }
+.map-key-scale li > button[aria-disabled="true"]:active { transform: none; }
+.map-key-n { font-family: var(--mono); font-size: 10.5px; font-weight: 500; line-height: 1; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.map-key-scale li.off .map-key-node { background: var(--bg-0); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--c) 80%, transparent), 0 0 0 3px var(--bg-0); }
+.map-key-scale li.off span, .map-key-scale li.off .map-key-n { color: var(--faint); opacity: .7; }
+.map-key-last { margin: 0; font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.5; color: var(--muted); }
+.map-key-last b { font-weight: 500; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.map-key-last .linkish { color: var(--accent); font: inherit; cursor: pointer; }
+.map-key-tag { display: inline-flex; align-items: center; height: 18px; margin-left: -2px; padding: 0 7px; border-radius: 999px; background: rgba(var(--accent-rgb), .12); color: var(--accent); font-size: 10.5px; letter-spacing: 0; text-transform: none; white-space: nowrap; }
 .map-key-size circle { fill: rgba(182,255,92,.04); stroke: var(--ink-2); stroke-opacity: .5; stroke-width: 1; }
 .map-key-size path { fill: none; stroke: var(--faint); stroke-width: .75; }
 .map-key-size text { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
@@ -362,6 +377,9 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-spark-none { display: grid; place-items: center; height: 42px; border-radius: 8px; border: 1px dashed var(--line-soft); font-family: var(--mono); color: var(--faint); font-size: var(--fs-2xs); }
 .map-side-heat { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 .map-side-heat b { color: var(--ink-2); font-weight: 500; }
+/* the selected coin's last-trade bucket is off in the Key: drawn only because it is selected */
+.map-side-hidden { margin: -4px 0 0; font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.5; color: var(--muted); }
+.map-side-hidden .linkish { color: var(--accent); font: inherit; cursor: pointer; }
 /* the four numbers: an instrument grid between hairlines, no boxes */
 .map-side-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-top: 1px solid var(--line-soft); }
 .map-side-stats div { display: grid; gap: 2px; min-width: 0; padding: 8px 0; }

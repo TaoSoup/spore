@@ -25,5 +25,17 @@ export type ThreeMapProps = {
   /** The engine's look, fixed per page load: "galaxy" (the default) or "flat" (?look=flat, the 2.5D colony plate). */
   look?: "galaxy" | "flat";
   /** The family loader (lib/map/family.ts); null or absent = ghosts only. */ families?: FamilyStore | null;
+  /** The Key's last-trade filter (lib/map/visibility.ts, `?last=`): bit k = draw the coins of heat class k (30 min, 3 h,
+   * 24 h, older); 15 = all, the filter off. The page sends 15 until its heat has answered. (compact layout) A change of mask
+   * rebuilds the map from the filtered set (buildSet: shown + lineage + pins; reason "last"), so each family is laid out
+   * compactly around what is shown; between builds the engine hides in place (EngineHandle.setLastFilter) and a rebuild
+   * starts with it (EngineOptions.last). */
+  last: number;
+  /** The mask the reader asked for, heat or not (Map.tsx lastWant): while it is not 15 the first build waits longer for the
+   * heat, so it is built filtered once. Absent = `last`. */
+  lastWant?: number;
+  /** Mints always shown whatever their bucket: the selection and its ancestor chain (one array per selection). Never a
+   * rebuild: a pinned coin the build left out is added live (EngineHandle.reveal). */
+  pinned: readonly string[];
   ref?: Ref<BubbleMapHandle>;
 };

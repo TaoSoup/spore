@@ -9,7 +9,7 @@
 // dust.js: the overview field. Dust placement (the ~2,170 small families), the single member-offset loop,
 // and the dust Points (one draw).
 // (map3 port) Copied from the prototype. Changed: debug functions go to S.debugFns (dustCheck, dustFlash); a highlight
-// mask per speck (setDustHl / setDustHlAll: a speck dims to TOK.dim when its family has no match, 160 ms crossfade);
+// mask per speck (setDustVis: a speck dims to TOK.dim when its family has no match, 160 ms crossfade);
 // the geometry and material are disposed with the engine.
 // OWNER: OVERVIEW lane (with scene.js). Spec: "SPORE MAP: GRAPHITE INSTRUMENT" R7 + overview lane 4/5.
 //
@@ -29,7 +29,10 @@
 //                    "over"-blended and <= 0.9 linear (never HDR). Same meaning and colour as links' planet-chip ping.
 //                  (integrator, round 2) S.overview.setPositions(famIds, n)  specks follow dust families that the drag
 //                    simulation floats (motion calls it every frame something moved; the frame hook lands them home).
-//                  (map3 port) S.overview.setDustHl(famId, anyMatch, tSec?), setDustHlAll(matchOf(famId) -> bool, tSec?)
+//                  (map3 port + the Key's last-trade filter, 2026-11-10) S.overview.setDustVis(famIds | null, tSec = now): a speck's
+//                    alpha follows its family's code in S.vis.fa (vis.js: 0 = nothing of the family drawn, 1 = dim: a
+//                    highlight matches none of it, 2 = full), the galaxy nebula blob its family's (0 or 1), each crossfading
+//                    160 ms from what it shows now (per speck / blob: a family a trade reveals fades in alone)
 //   Debug: S.debugFns.dustCheck() -> {dustDust, dustHull, minDustGap, minHullGap, n}
 //          S.debug.obj.dustPts, .nebula, .ambient (= .ambPts); obj.glows is NOT written here (bubbles' coronas);
 //          S.debug.map.{Rout, dustField}
@@ -48,6 +51,7 @@
 import * as THREE from "three";
 import { GOLDEN, rnd } from "./util.js";
 import { TOK, GAL, heatClass } from "./tokens.js";
+import { VIS_ALPHA } from "./vis.js";
 
 // (final polish) a tighter field: the halo hugs the colonies (clearance 8 u, pad 2.2 u) and no longer thins its outer
 // 30 % by skipping slots; the overview fade (buildDust) does the dissolving, so the field reads as a halo whose
@@ -124,7 +128,8 @@ export async function placeDust(S, pause = null) {
   const slotXY = (kk, jr, j2) => { const r = c * Math.sqrt(kk) * (1 + jr), th = kk * GOLDEN + j2 * 0.7 * c / r; return [Math.cos(th) * r * ax, Math.sin(th) * r / ax]; };
   const accept = (f, x, y, rc) => { f.cx = x; f.cy = y; const key = gk(Math.floor(x / cell), Math.floor(y / cell)); let a = grid.get(key); if (!a) grid.set(key, (a = [])); a.push({ x, y, r: rc }); };
   const placeOne = (f, idx) => {
-    const rc = f.Rc + PAD, jr = (rnd(f.id, 41) - 0.5) * 0.12, j2 = rnd(f.id, 42) - 0.5;
+    // (compact layout) f.seed: the family's id in the full build (data.js), so its jitter is the same in every filtered build
+    const fsd = f.seed ?? f.id, rc = f.Rc + PAD, jr = (rnd(fsd, 41) - 0.5) * 0.12, j2 = rnd(fsd, 42) - 0.5;
     const u = idx / Math.max(1, dust.length - 1), pSkip = u > 1 - EDGE ? 0.8 * ((u - (1 - EDGE)) / EDGE) ** 1.5 : 0;
     for (let q = 0; q < free.length && q < 24; q++) {
       const [x, y] = slotXY(free[q], jr, j2); tries++;
@@ -217,11 +222,13 @@ export function buildDust(S) {
   const aEAttr = new THREE.BufferAttribute(aE, 4); aEAttr.setUsage(THREE.DynamicDrawUsage);
   g.setAttribute("aE", aEAttr);
   g.setAttribute("aG", new THREE.BufferAttribute(aG, 4));   // (galaxy) unused under flat
-  // (map3 port) highlight mask per speck: (shown value when the last crossfade started, target) 1 = match, 0 = dimmed
-  const aHl = new Float32Array(n * 2).fill(1);
-  const aHlAttr = new THREE.BufferAttribute(aHl, 2); aHlAttr.setUsage(THREE.DynamicDrawUsage);
+  // (map3 port) highlight, (last-trade filter) and visibility, per speck: alpha (shown when its crossfade started, target,
+  // start s on the uTime clock); target VIS_ALPHA[S.vis.fa[family]] = 0 (nothing of the family drawn), TOK.dim, 1
+  const V = S.vis || null, famA = (id) => VIS_ALPHA[V && id < V.fa.length ? V.fa[id] : 2];
+  const aHl = new Float32Array(n * 3);
+  dust.forEach((f, k) => { aHl[k * 3] = aHl[k * 3 + 1] = famA(f.id); aHl[k * 3 + 2] = -1e3; });
+  const aHlAttr = new THREE.BufferAttribute(aHl, 3); aHlAttr.setUsage(THREE.DynamicDrawUsage);
   g.setAttribute("aHl", aHlAttr);
-  const uHlT0 = { value: -1e3 };
 
   const view = new THREE.Vector2(S.W(), S.H());
   const mat = new THREE.ShaderMaterial({
@@ -242,17 +249,16 @@ export function buildDust(S) {
       uView: { value: view },
       uRvis: S.overview.uRvis,                                                // overview field radius (scene.js overviewTarget keeps it current)
       uRout: { value: S.Rout }, uRoutMax: { value: S.RoutMax }, uRcl: { value: S.Rcl },                                                  // CSS px viewport (drift in clip space)
-      uHlT0,
     },
     vertexShader: /* glsl */`
-uniform float uPx, uDpr, uTime, uDustExpand, uHoverFam, uDimMix, uFadeD, uDrift, uDim, uK0, uRvis, uRout, uRoutMax, uFocusFam, uFocusMix, uRcl, uHlT0;
+uniform float uPx, uDpr, uTime, uDustExpand, uHoverFam, uDimMix, uFadeD, uDrift, uDim, uK0, uRvis, uRout, uRoutMax, uFocusFam, uFocusMix, uRcl;
 uniform vec2 uView;
 uniform vec3 uRim[4], uPulse, uMuted;
 uniform float uDustA[4];
 uniform float uAnimT, uFlow; uniform float uHeatK[4]; uniform vec2 uCam; uniform float uFocusDim;
 attribute vec4 aD;
 attribute vec4 aE;
-attribute vec2 aHl;
+attribute vec3 aHl;
 #ifdef GALAXY
 attribute vec4 aG;
 #endif
@@ -285,8 +291,9 @@ void main(){
 #endif
   if (uHoverFam > -0.5 && abs(aE.y - uHoverFam) > 0.5) vis *= mix(1.0, uDim, uDimMix);
   if (uFocusFam > -0.5 && abs(aE.y - uFocusFam) > 0.5) vis *= mix(1.0, 0.42, uFocusMix);
-  // (map3 port) highlight: a family with no matching coin dims like the hover dim (160 ms crossfade)
-  vis *= mix(uDim, 1.0, mix(aHl.x, aHl.y, smoothstep(uHlT0, uHlT0 + 0.16, uTime)));
+  // (map3 port) highlight: a family with no matching coin dims like the hover dim (160 ms crossfade); (last-trade filter) a
+  // family with nothing drawn has no speck (vis 0: culled below, the flash ring scales with vis too)
+  vis *= mix(aHl.x, aHl.y, smoothstep(aHl.z, aHl.z + 0.16, uTime));
 #ifdef GALAXY
   float a = (cls == 0 ? 1.0 : cls < 3 ? 0.8 : 0.5) * cov * vis;
 #else
@@ -357,7 +364,7 @@ void main(){
 
   // ---------- (galaxy) nebula blobs: 12 % of the small families (rnd(f.id, 7) < 0.12) get a soft additive glow, r = 6 Rc + 40 u,
   // teal when the family traded within 3 h, else purple, alpha 0.05; dissolves with the field (same edge as the specks)
-  let nebula = null, ambPts = null;
+  let nebula = null, ambPts = null, aNV = null, aNVAttr = null;
   const glowFS = /* glsl */`
 varying vec2 vP; varying vec3 vCol; varying float vA;
 void main(){
@@ -385,6 +392,10 @@ void main(){
       });
       const aNAttr = new THREE.InstancedBufferAttribute(aN, 4); aNAttr.setUsage(THREE.DynamicDrawUsage);
       nGeo.setAttribute("aN", aNAttr); nGeo.setAttribute("aNC", new THREE.InstancedBufferAttribute(aNC, 3));
+      // (last-trade filter) per blob (shown when its crossfade started, target, start s): 0 when nothing of its family is drawn
+      aNV = new Float32Array(neb.length * 3);
+      neb.forEach((f, q) => { const v = famA(f.id) > 0 ? 1 : 0; aNV.set([v, v, -1e3], q * 3); });
+      aNVAttr = new THREE.InstancedBufferAttribute(aNV, 3); aNVAttr.setUsage(THREE.DynamicDrawUsage); nGeo.setAttribute("aNV", aNVAttr);
       // (look lane) the nebula follows drags: on every "positions" event the blob centres re-read f.cx/f.cy (a few hundred compares)
       S.on("positions", () => {
         let any = false;
@@ -398,14 +409,15 @@ void main(){
       const nMat = new THREE.ShaderMaterial({
         uniforms: { ...U, uRvis: S.overview.uRvis, uRout: mat.uniforms.uRout, uRoutMax: mat.uniforms.uRoutMax, uRcl: mat.uniforms.uRcl },
         vertexShader: /* glsl */`
-uniform float uPx, uDpr, uDustExpand, uFadeD, uK0, uRcl, uRout, uRoutMax, uFocusDim;
-attribute vec4 aN; attribute vec3 aNC;
+uniform float uPx, uDpr, uDustExpand, uFadeD, uK0, uRcl, uRout, uRoutMax, uFocusDim, uTime;
+attribute vec4 aN; attribute vec3 aNC; attribute vec3 aNV;
 varying vec2 vP; varying vec3 vCol; varying float vA;
 void main(){
   float open = smoothstep(1.3 * uK0, 2.2 * uK0, uPx / uDpr);
   float fin = mix(1.0 * uRcl, 0.80 * uRout, open), fout = mix(max(1.6 * uRcl, 1.0 * uRcl + 1.0), uRoutMax + 1.0, open);
   float e0 = mix(1.0, 1.0 - smoothstep(fin, max(fout, fin + 1.0), aN.w), open);   // (lead) the halo is whole at the overview; the field edge only bites as a family opens
   float a = ${f3(GNEB.a)} * e0 * (1.0 - 0.7 * uDustExpand) * uFadeD * (1.0 - 0.6 * uFocusDim);
+  a *= mix(aNV.x, aNV.y, smoothstep(aNV.z, aNV.z + 0.16, uTime));   // (last-trade filter) a family with nothing drawn: no nebula
   vCol = aNC; vA = a; vP = position.xy;
   float rN = max(aN.z, ${f3(GNEB.rMinPx || 0)} * uDpr / uPx);   // (look lane) world radius 6 Rc + 40 (monolith); optional px floor
   gl_Position = projectionMatrix * viewMatrix * vec4(aN.xy + position.xy * rN, 0.0, 1.0);
@@ -467,6 +479,7 @@ void main(){
     attr.needsUpdate = true;
   };
   for (const at of [posAttr, aEAttr, aHlAttr]) at.onUpload(() => full.delete(at));
+  const fullUp = (attr) => { attr.clearUpdateRanges(); full.add(attr); attr.needsUpdate = true; };
   const setDustHeat = (famIdx, cls) => {
     const k = kOf[famIdx]; if (k < 0) return;
     if (aE[k * 4] === cls) return;
@@ -515,11 +528,12 @@ void main(){
     const k = S.cam.k, W = S.W(), H = S.H(), fr = S.fitRect ? S.fitRect() : { x0: 0, y0: 0, x1: W, y1: H }, dpr = S.DPR || 1;
     const A = mat.uniforms.uDustA.value, t = U.uTime.value, vis0 = (1 - (U.uDustExpand.value || 0)) * (U.uFadeD ? U.uFadeD.value : 1);
     const al = [], byCls = [0, 1, 2, 3].map(() => ({ n: 0, onScreen: 0, minA: Infinity }));
-    let onScreen = 0, inRect = 0, edgeMinA = Infinity, edgeN = 0, dMin = Infinity, dMax = 0;
+    let onScreen = 0, inRect = 0, edgeMinA = Infinity, edgeN = 0, dMin = Infinity, dMax = 0, hidden = 0;
     for (let q = 0; q < n; q++) {
       const cls = aE[q * 4] | 0, dDev = aD[q * 4] * dpr, cov = Math.min(1, dDev);
-      const e = Math.max(0, Math.min(1, (t - uHlT0.value) / 0.16)), hl = aHl[q * 2] + (aHl[q * 2 + 1] - aHl[q * 2]) * e * e * (3 - 2 * e);
-      const a = A[cls] * cov * vis0 * (TOK.dim + (1 - TOK.dim) * hl);
+      const hl = hlShown(q, t);   // (map3 port + last-trade filter) the speck's own alpha factor
+      if (aHl[q * 3 + 1] === 0) hidden++;
+      const a = A[cls] * cov * vis0 * hl;
       const sx = (pos[q * 3] - S.cam.x) * k + W / 2, sy = H / 2 - (pos[q * 3 + 1] - S.cam.y) * k;
       const b = byCls[cls] || byCls[3]; b.n++;
       if (sx < -2 || sy < -2 || sx > W + 2 || sy > H + 2) continue;
@@ -534,24 +548,31 @@ void main(){
     al.sort((x, y) => x - y);
     const fin = (v) => (Number.isFinite(v) ? +v.toFixed(3) : null);
     for (const b of byCls) b.minA = fin(b.minA);
-    return { n, onScreen, inRect, visible: dustPts.visible, drawsDustTops: !!(S.bubbles && S.bubbles.drawsDustTops), dustExpand: fin(S.dustExpand || 0),
+    return { n, onScreen, inRect, hidden, visible: dustPts.visible, drawsDustTops: !!(S.bubbles && S.bubbles.drawsDustTops), dustExpand: fin(S.dustExpand || 0),
       minA: fin(al[0]), p10A: fin(al[Math.floor(al.length * 0.1)]), p50A: fin(al[al.length >> 1]), edgeN, edgeMinA: fin(edgeMinA), dCssMin: fin(dMin), dCssMax: fin(dMax), byCls, k, k0: U.uK0.value, look: G ? "galaxy" : "flat" };
   };
-  // (map3 port) highlight mask: anyMatch false = the family has no matching coin, its speck dims. setDustHlAll runs one
-  // crossfade for every speck (motion's setHighlight); setDustHl changes one speck at once
-  const hlShown = (k, t) => { const e = Math.max(0, Math.min(1, (t - uHlT0.value) / 0.16)), s = e * e * (3 - 2 * e); return aHl[k * 2] + (aHl[k * 2 + 1] - aHl[k * 2]) * s; };
-  const setDustHl = (famId, anyMatch) => {
-    const k = kOf[famId]; if (!(k >= 0)) return;
-    const v = anyMatch ? 1 : 0; if (aHl[k * 2] === v && aHl[k * 2 + 1] === v) return;
-    aHl[k * 2] = v; aHl[k * 2 + 1] = v; touch(aHlAttr, k * 2, 2); S.invalidate();
+  // (map3 port) highlight + (last-trade filter) visibility: these families (null: every small family) take their code's alpha
+  // (S.vis.fa: motion.js), each speck crossfading 160 ms from what it shows now; the galaxy nebula blob of a family follows
+  // whether anything of it is drawn
+  const fadeAt = (arr, o, t) => { const z = arr[o + 2], e = Math.max(0, Math.min(1, (t - z) / 0.16)), s = e * e * (3 - 2 * e); return arr[o] + (arr[o + 1] - arr[o]) * s; };
+  const hlShown = (k, t) => fadeAt(aHl, k * 3, t);
+  const setDustVis = (famIds, tSec) => {
+    const t = tSec == null ? performance.now() / 1000 : tSec;   // a fade starts now (uTime is the last frame's time)
+    let ns = 0, nn = 0;
+    const one = (id) => {
+      const k = id >= 0 && id < kOf.length ? kOf[id] : -1; if (!(k >= 0)) return;
+      const to = Math.fround(famA(id)), o = k * 3;
+      if (aHl[o + 1] !== to) { aHl[o] = fadeAt(aHl, o, t); aHl[o + 1] = to; aHl[o + 2] = t; if (famIds != null) touch(aHlAttr, o, 3); ns++; }
+      const q = aNV ? nebOf[id] : -1;
+      if (q >= 0) { const tv = to > 0 ? 1 : 0, p = q * 3; if (aNV[p + 1] !== tv) { aNV[p] = fadeAt(aNV, p, t); aNV[p + 1] = tv; aNV[p + 2] = t; nn++; } }
+    };
+    if (famIds == null) { for (const f of dust) one(f.id); if (ns) fullUp(aHlAttr); }
+    else for (const id of famIds) one(id);
+    if (nn) aNVAttr.needsUpdate = true;
+    if (ns || nn) { flashUntil = Math.max(flashUntil, t + 0.2); S.invalidate(); }
+    return ns + nn;
   };
-  const setDustHlAll = (matchOf, tSec) => {
-    const t = tSec == null ? U.uTime.value : tSec;
-    for (let k = 0; k < n; k++) { const v = matchOf(dust[k].id) ? 1 : 0; aHl[k * 2] = hlShown(k, t); aHl[k * 2 + 1] = v; }
-    uHlT0.value = t; flashUntil = Math.max(flashUntil, t + 0.2);
-    aHlAttr.clearUpdateRanges(); aHlAttr.needsUpdate = true; S.invalidate();
-  };
-  Object.assign(S.overview, { setDustHeat, flashDust, setPositions, setDustHl, setDustHlAll });
+  Object.assign(S.overview, { setDustHeat, flashDust, setPositions, setDustVis });
   // (look lane) debug: show/hide the look's own layers (QA isolates their share of a shot); returns what is visible now
   S.debugFns.lookLayers = (o = {}) => {
     if (nebula && typeof o.nebula === "boolean") nebula.visible = o.nebula;

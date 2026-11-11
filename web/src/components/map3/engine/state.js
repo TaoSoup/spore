@@ -190,6 +190,9 @@ export function createState(container, layers, opts, life = createLife()) {
     // ---- highlight mask (map3 port; motion.js setHighlight fills it; 1 = matches, 0 = dimmed) ----
     hlOn: false,
     hlBit: () => 1,
+    // ---- (the Key's last-trade filter, 2026-11-10) vis.js createVis: the levels every module reads (index.js sets it right
+    // after ingest; motion.js owns it from then on). null = everything drawn ----
+    vis: null,
 
     // ---- shared uniforms (declared here only) ----
     U: {
@@ -211,9 +214,9 @@ export function createState(container, layers, opts, life = createLife()) {
 
     // ---- module APIs: stubs now, filled by each module's build (Object.assign onto these objects) ----
     gfx: { renderer: null, scene: null, camera: null, composer: null, bloom: null, render: noop, resize: noop },
-    overview: { k0: 1, overviewTarget: () => ({ x: 0, y: 0, k: 1 }), setDustHeat: noop, setDustHl: noop },
-    bubbles: { mesh: null, setCoinHeat: noop, flashRim: noop, selectCoin: noop, setHl: noop },
-    links: { mesh: null, setLinkHeat: noop, setEmphasis: noop, linkPolyline: () => null, genArcInfo: () => [], setHl: noop,
+    overview: { k0: 1, overviewTarget: () => ({ x: 0, y: 0, k: 1 }), setDustHeat: noop, setDustVis: noop },
+    bubbles: { mesh: null, setCoinHeat: noop, flashRim: noop, selectCoin: noop, setVis: noop },
+    links: { mesh: null, setLinkHeat: noop, setEmphasis: noop, linkPolyline: () => null, genArcInfo: () => [], setVis: noop,
              genArcs: { mesh: null, setKnockouts: noop }, hull: { show: noop }, pulses: { spawn: () => false },
              onPulseArrive: noop },
     labels: { layoutLabels: noop, readHud: noop, showTip: noop, hideTip: noop, updateStats: noop, ready: noop, setTags: noop, setHl: noop },

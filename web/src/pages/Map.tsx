@@ -7,6 +7,7 @@ import { useMapData } from "../lib/map/use-map-data";
 import { assetTopIn, coinNode, softwareGl, undrawnByTop, useFamilyNode, useFamilyStore, type FamilyTier } from "../lib/map/family";
 import { useMapHeat } from "../lib/map/heat";
 import { formatHl, parseHl, type HlKey } from "../lib/map/highlight";
+import { LAST_ALL, LAST_DEFAULT, coinClass, formatLast, lastCounts, lastKeysOf, lastMask, lastTag, litTest, parseLast, visibleLevels, type LastCounts } from "../lib/map/visibility";
 import { sinceDigest } from "../lib/map/rails";
 import { DEBUG_HOOKS } from "../lib/map/debug";
 import { rootCmp } from "../lib/map/nodes";
@@ -63,11 +64,20 @@ const countOrDash = (n: number | null | undefined) => (n == null ? "—" : count
 /// The map's COINS figure, exact at every size (289,168, never "289K"): it is the headline number once the asset
 /// families are in, and it sits beside the site's exact count.
 const exact = (n: number | null | undefined) => (n == null || !Number.isFinite(n) ? "—" : Math.round(n).toLocaleString("en-US"));
-/// The phone pills' glyphs (12-unit, hairline, currentColor): filters as three tapering rules, the key as the trade dots.
+/// The phone pills' glyphs (12-unit, hairline, currentColor): filters as three tapering rules (the key's: keyGlyph).
 const PILL_GLYPH = {
   filters: <svg className="map-pill-glyph" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 3h9M3 6h6M4.6 9h2.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>,
-  key: <svg className="map-pill-glyph" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="3" cy="6" r="1.9" fill="#aaef56" /><circle cx="7" cy="6" r="1.6" fill="#4d98b9" /><circle cx="10.4" cy="6" r="1.2" fill="#666c8b" /></svg>,
 };
+/// The Key pill's glyph: one dot per last-trade bucket (the Key's colours), a hidden bucket's dot drawn hollow.
+const KEY_DOTS = [{ c: "#aaef56", x: 1.9, r: 1.7 }, { c: "#4d98b9", x: 5, r: 1.45 }, { c: "#666c8b", x: 7.9, r: 1.2 }, { c: "#4a514e", x: 10.5, r: 1 }];
+const keyGlyph = (mask: number) => (
+  <svg className="map-pill-glyph" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+    {KEY_DOTS.map((d, i) => ((mask >> i) & 1 ? <circle key={i} cx={d.x} cy="6" r={d.r} fill={d.c} /> : <circle key={i} cx={d.x} cy="6" r={Math.max(0.8, d.r - 0.35)} fill="none" stroke={d.c} strokeWidth="0.8" />))}
+  </svg>
+);
+/// The Key pill's badge while the last-trade filter hides something: "≤ 24 h" for a prefix of the buckets, else "2/4".
+const keyBadge = (mask: number) => { const keys = lastKeysOf(mask), t = lastTag(keys); return t && t.startsWith("≤") ? t.replace(/ /g, "") : `${keys.length}/4`; };
+const NO_PINS: readonly string[] = [];
 
 /// The centred hint: fades out after the first gesture on the map, and while zoomed in past k 1.2.
 function MapHint({ cam, gone, renderer }: { cam: CamStore; gone: boolean; renderer: "three" | "classic" }) {
@@ -84,7 +94,13 @@ function MapHint({ cam, gone, renderer }: { cam: CamStore; gone: boolean; render
 /// The whole pump.fun pair ecosystem as one map (DESIGN §11.5): every root with a tracked child and every
 /// descendant, rendered from the IndexedDB cache first and patched by `since=` deltas and live events.
 /// URL state: `?focus=<mint>` selects a coin (the camera flies to it with its parent and children),
-/// `?size=mcap` sizes by market cap instead of locked value (the on-map size pill; no param or `?size=locked` = locked), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys. The left column
+/// `?size=mcap` sizes by market cap instead of locked value (the on-map size pill; no param or `?size=locked` = locked), `?roots=all|200|60` picks how many root clusters are drawn, `?hl=<keys>` dims everything that does not match the highlight keys,
+/// `?last=<buckets>|all` picks which last-trade buckets are drawn (the Key's toggles, lib/map/visibility.ts: `30m,3h,24h,old`;
+/// no param = the default, every coin that traded in 24 h, "older" hidden; `all` = the filter off). nodes and byMint are
+/// never filtered: a hidden coin is only not drawn and not pickable (the classic map hides it in place; the WebGL map is
+/// rebuilt from the shown set, lib/map/visibility.ts buildSet), the ancestors of a shown coin stay as dim anchors, and the
+/// selected coin and its ancestor chain are always shown. While the
+/// heat sidecar has not answered (or the server has none) nothing is hidden. The left column
 /// holds the counters, search, highlight chips and live rails; the selected coin opens a side panel
 /// (a bottom sheet on phones). Arrow keys walk the tree; Esc clears. Each family's share of the whole map
 /// (lib/map/dominance.ts, both size modes) rides on its title, its tooltip, the side panel and the
@@ -135,6 +151,10 @@ export default function MapPage() {
   const mode: SizeMode = params.get("size") === "mcap" ? "mcap" : "locked";
   const hlParam = params.get("hl");
   const keys = useMemo(() => parseHl(hlParam), [hlParam]);
+  // The Key's last-trade filter (`?last=`, lib/map/visibility.ts): the buckets the reader wants, as the 4-bit mask the
+  // engine takes (bit k = heat class k). Not `?show=`: the server's SHOW env means something else.
+  const lastParam = params.get("last");
+  const lastWant = useMemo(() => lastMask(parseLast(lastParam)), [lastParam]);
   const stress = import.meta.env.DEV ? Math.min(100_000, Number(params.get("stress")) || 0) : 0;
   const map = useRef<BubbleMapHandle>(null);
   const data = useMapData({ stress });
@@ -201,7 +221,35 @@ export default function MapPage() {
   const selTop = offMap ? families.familyOf(offMap) ?? pending?.parentMint ?? null : null;
   useEffect(() => { families.want(selTop ? [selTop] : [], "select"); families.seek(selTop ? offMap : null, selTop); }, [families, selTop, offMap]);
   const kids = useMemo(() => (selected ? kidsOf(selected.mint) : []), [selected, kidsOf]);
-  const hl = useHighlight(nodes, byMint, keys, data.seenAt, heat);
+  // The selected coin's lineage, itself first and its family top last (the family block's top, and the filter's pins).
+  const lineage = useMemo(() => {
+    if (!selected) return null;
+    const out = [selected];
+    let cur = selected;
+    for (let hops = 0; cur.parentMint && hops < 16; hops++) { const p = allByMint.get(cur.parentMint); if (!p || p === cur) break; out.push(p); cur = p; }
+    return out;
+  }, [selected, allByMint]);
+  const famTop = lineage ? lineage[lineage.length - 1] : null;
+
+  // ---- the last-trade filter. The effective mask is all four (the filter off) until the heat sidecar has answered, so
+  // the map never goes blank. Pins: the selected coin and its ancestor chain, always shown; one array per selection
+  // (keyed on the mints, not on the node objects that change with every data version), so the engine is told once.
+  const lastEff = heat ? lastWant : LAST_ALL;
+  const pinKey = lineage ? lineage.map((n) => n.mint).join(",") : focus ?? "";
+  const pinned = useMemo(() => (pinKey ? pinKey.split(",") : NO_PINS), [pinKey]);
+  // The page's own copy of the levels (the classic map draws from it; the arrow walk, the chip counts and the Key read it),
+  // at most every 2 s as the nodes and the heat change, and at once on a filter change; the pins are applied on top (the
+  // classic map's bits, the arrow walk), so a selection costs no O(n) pass here. The WebGL engine keeps its own levels,
+  // live per trade (setLastFilter).
+  const visNodes = useThrottled(nodes, 2_000);
+  const visHeat = useThrottled(heat, 2_000);
+  const visByMint = useThrottled(byMint, 2_000); // a new Map per version under a roots limit
+  const levels = useMemo(() => visibleLevels(visNodes, visByMint, lastEff, visHeat), [visNodes, visByMint, lastEff, visHeat]);
+  // the highlight chips count what lights up: shown coins and the pins (an anchor is drawn dim even when it matches)
+  const lit = useMemo(() => litTest(levels, pinned), [levels, pinned]);
+  // Bucket counts for the Key (the drawn coins, plus every asset family's undrawn ones, which have no heat: "older").
+  const lastCnt = useMemo<LastCounts | null>(() => (visHeat ? lastCounts(visNodes, visHeat) : null), [visNodes, visHeat]);
+  const hl = useHighlight(nodes, byMint, keys, data.seenAt, heat, lit);
 
   // Counts from what is actually drawn, so the numbers match the picture; "new pairs" from the same set. `total` is the
   // map's true size: the drawn coins plus every asset family's undrawn ones (familyTotal = nodes + Σ ghost, the server's
@@ -223,6 +271,9 @@ export default function MapPage() {
     return { roots, total, coins: total - assets, assets, ghost, fresh24, locked };
   }, [nodes, byMint, ghosts]);
   const coinsTitle = `${exact(drawn.coins)} pump.fun coins on the map: ${exact(drawn.coins - drawn.ghost)} drawn and ${exact(drawn.ghost)} more in the listed assets' families${drawn.assets > 0 ? `; the ${exact(drawn.assets)} listed assets drawn as family tops (USDC, WBTC, …) are not counted` : ""}`;
+  const keyCounts = useMemo<LastCounts | null>(() => (lastCnt ? [lastCnt[0], lastCnt[1], lastCnt[2], lastCnt[3] + drawn.ghost] : null), [lastCnt, drawn.ghost]);
+  // the selected coin's own bucket is off (it is drawn only because it is selected): the side panel says so
+  const selHidden = !!selected && !!heat && lastEff !== LAST_ALL && !((lastEff >> coinClass(selected, heat)) & 1);
   const tradesPerMin = useMemo(() => { if (!heat) return null; let t = 0; for (const r of heat.rows.values()) t += r.t1h; return t / 60; }, [heat]);
   // Dominance: every family's share of the whole map (all roots, whatever the roots limit draws), both
   // modes, from one family pass (~3 ms at 17 k coins), at most once a second while the stream patches.
@@ -232,12 +283,6 @@ export default function MapPage() {
   const firstborn = useMemo(() => firstborns(data.nodes), [data.nodes]);
   const tags = useMemo(() => titleTags(dom?.[mode]), [dom, mode]);
   const tagsCompact = useMemo(() => titleTags(dom?.[mode], COMPACT_TAG_MIN), [dom, mode]);
-  const famTop = useMemo(() => {
-    if (!selected) return null;
-    let cur = selected;
-    for (let hops = 0; cur.parentMint && hops < 16; hops++) { const p = allByMint.get(cur.parentMint); if (!p || p === cur) break; cur = p; }
-    return cur;
-  }, [selected, allByMint]);
   const family = useMemo(() => (famTop && dom ? { top: famTop, locked: dom.locked.byTop.get(famTop.mint) ?? null, mcap: dom.mcap.byTop.get(famTop.mint) ?? null, families: dom.locked.ranked.length, ghost: ghosts.get(famTop.mint) ?? 0 } : null), [famTop, dom, ghosts]);
   const clusterInfo = useCallback((top: string) => {
     const m = shareOf(dom?.[mode].byTop.get(top));
@@ -274,6 +319,14 @@ export default function MapPage() {
   const setMode = useCallback((m: SizeMode) => setParams((p) => { const n = new URLSearchParams(p); if (m === "mcap") n.set("size", "mcap"); else n.delete("size"); return n; }, { replace: true }), [setParams]);
   const setKeys = useCallback((ks: HlKey[]) => setParams((p) => { const n = new URLSearchParams(p); const v = formatHl(ks); if (v) n.set("hl", v); else n.delete("hl"); return n; }, { replace: true }), [setParams]);
   const toggleKey = useCallback((k: HlKey) => setKeys(keys.includes(k) ? keys.filter((x) => x !== k) : [...keys, k]), [keys, setKeys]);
+  // The Key's last-trade buckets: the default deletes the param, all four write `last=all` (formatLast). A function gets the
+  // mask in the URL as it is now, not the render's: a second click or K before the page re-rendered toggles from the first
+  // one's result (the router's functional update reads the render's params; BrowserRouter writes the URL synchronously).
+  const setLast = useCallback((next: number | ((cur: number) => number)) => setParams((p) => {
+    const mask = typeof next === "function" ? next(lastMask(parseLast(new URLSearchParams(window.location.search).get("last")))) : next;
+    const n = new URLSearchParams(p); const v = formatLast(lastKeysOf(mask & LAST_ALL)); if (v) n.set("last", v); else n.delete("last"); return n;
+  }, { replace: true }), [setParams]);
+  const showAllLast = useCallback(() => setLast(LAST_ALL), [setLast]);
   const onSelect = useCallback((n: BubbleNode | null) => select(n?.mint ?? null), [select]);
   const [pop, setPop] = useState<Pop>(null);
   // A pick (a pasted mint, a search result, a rail row) of the coin already in ?focus flies and highlights it again: the
@@ -344,8 +397,10 @@ export default function MapPage() {
   const fitInset = useMemo(() => (wide ? { left: edge + 12, top: 16, bottom: 16, right: 16 } : { top: edge + 8, bottom: 56 }), [wide, edge]);
 
   // ---- keyboard: walk the tree, open, launch, frame; zoom and pan without a selection
-  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus });
-  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus };
+  // The last-trade filter's part: ↓ ← → step only onto coins the map draws (shown, anchors, the pins); ↑ may climb to a
+  // hidden parent, which the selection then pins. K toggles the filter between the default and everything.
+  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus, levels, pinned, lastWant, heatOn: !!heat });
+  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus, levels, pinned, lastWant, heatOn: !!heat };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = keyState.current;
@@ -355,16 +410,19 @@ export default function MapPage() {
       const tag = (e.target as HTMLElement | null)?.tagName;
       const onControl = tag === "BUTTON" || tag === "A";
       const n = s.selected;
+      const lv = s.levels;
+      const drawnCoin = (x: BubbleNode) => !lv || x === n || lv.has(x.mint) || s.pinned.includes(x.mint);
       let handled = true;
       if (e.key === "0") m?.fit();
       else if (e.key === "+" || e.key === "=") m?.scaleBy(1.5);
       else if (e.key === "-" || e.key === "_") m?.scaleBy(1 / 1.5);
+      else if ((e.key === "k" || e.key === "K") && s.heatOn) setLast((cur) => (cur === LAST_ALL ? lastMask(LAST_DEFAULT) : LAST_ALL));
       else if (n) {
         const siblings = () => (n.parentMint && s.byMint.has(n.parentMint) ? s.kidsOf(n.parentMint) : s.nodes.filter((x) => isRoot(x, s.byMint)).sort(rootWalkCmp));
         if (e.key === "ArrowUp") { if (n.parentMint && s.byMint.has(n.parentMint)) select(n.parentMint); }
-        else if (e.key === "ArrowDown") { const k = s.kidsOf(n.mint)[0]; if (k) select(k.mint); }
+        else if (e.key === "ArrowDown") { const k = s.kidsOf(n.mint).find(drawnCoin); if (k) select(k.mint); }
         else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-          const sib = siblings(); const i = sib.findIndex((x) => x.mint === n.mint);
+          const all = siblings(), sib = lv ? all.filter(drawnCoin) : all; const i = sib.findIndex((x) => x.mint === n.mint);
           if (sib.length > 1 && i >= 0) select(sib[(i + (e.key === "ArrowRight" ? 1 : sib.length - 1)) % sib.length].mint);
         }
         else if (e.key === "Enter" && !onControl) nav(`/c/${n.mint}`);
@@ -381,12 +439,13 @@ export default function MapPage() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [select, nav]);
+  }, [select, nav, setLast]);
   const announce = selected ? `${nameOf(selected)}, ${sym(selected)}, ${depthWord(selected.depth)}, ${count(selected.children)} ${selected.children === 1 ? "child" : "children"}` : "";
 
   // ---- debug hooks for the headless QA scripts
-  const dbg = useRef({ counts: hl.counts, inset, keys, dom, total: drawn.total, coins: drawn.coins, indexed: data.indexed, families, renders: 0 });
-  dbg.current = { counts: hl.counts, inset, keys, dom, total: drawn.total, coins: drawn.coins, indexed: data.indexed, families, renders: dbg.current.renders + 1 };
+  const lastDbg = { want: lastWant, eff: lastEff, counts: keyCounts, levels, pinned };
+  const dbg = useRef({ counts: hl.counts, inset, keys, dom, total: drawn.total, coins: drawn.coins, indexed: data.indexed, families, renders: 0, last: lastDbg });
+  dbg.current = { counts: hl.counts, inset, keys, dom, total: drawn.total, coins: drawn.coins, indexed: data.indexed, families, renders: dbg.current.renders + 1, last: lastDbg };
   useEffect(() => {
     if (!DEBUG_HOOKS) return;
     const w = window as unknown as { __sporeMapPage?: unknown };
@@ -401,7 +460,19 @@ export default function MapPage() {
       /// the family store: wants, families held, pages, evictions, per-page ms
       families: () => dbg.current.families.stats(),
       /// how often this page rendered (QA: a family's pages must not re-render it)
-      renders: () => dbg.current.renders };
+      renders: () => dbg.current.renders,
+      /// the Key's last-trade filter as the page sees it: the buckets asked for (keys, mask), the mask in force (15 until
+      /// the heat answers), the bucket counts [30 min, 3 h, 24 h, older] (+ the undrawn asset coins in "older"), the
+      /// shown / anchor / hidden counts of the page's own levels (null levels = nothing hidden) and the pins
+      last: () => {
+        const l = dbg.current.last, lv = l.levels;
+        let shown = 0, anchors = 0;
+        if (lv) for (const v of lv.values()) { if (v === "shown") shown++; else anchors++; }
+        const total = dbg.current.total;
+        return { keys: lastKeysOf(l.want), mask: l.want, eff: l.eff, counts: l.counts, levels: lv ? { shown, anchors, hidden: Math.max(0, total - shown - anchors) } : null, pinned: [...l.pinned] };
+      },
+      /// the page's level of one coin under the filter in force ("shown" | "anchor" | "hidden"; pins count as shown)
+      level: (mint: string) => { const l = dbg.current.last; if (!l.levels || l.pinned.includes(mint)) return "shown"; return l.levels.get(mint) ?? "hidden"; } };
     w.__sporeMapPage = hooks;
     return () => { if (w.__sporeMapPage === hooks) delete w.__sporeMapPage; };
   }, [mountedAt, data.source, data.total, data.cacheInfo, data.generatedAt, data.reload, data.seenAt]);
@@ -425,7 +496,11 @@ export default function MapPage() {
   const worldRadius = useCallback((v: number) => map.current?.worldRadius(v) ?? 0, []);
   const chipRadius = useCallback((s: number) => (map.current as Partial<ThreeMapHandle> | null)?.chipRadius?.(s) ?? 0, []);
   const keyChip = renderer === "three" ? chipRadius : null;
-  const panelProps = selected ? { node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families } : null;
+  const panelProps = selected ? { node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast } : null;
+  // the lead's one line on the filter (only while it hides something): the default reads as "no trade in 24 h"
+  const lastOn = !!heat && lastWant !== LAST_ALL;
+  const lastLead = lastOn ? (lastWant === lastMask(LAST_DEFAULT) ? " Coins with no trade in 24 h are hidden by default; the Key brings them back." : " Some last-trade buckets are hidden; the Key brings them back.") : "";
+  const keyProps = { mode, cam, worldRadius, renderer, chipRadius: keyChip, look, last: lastWant, onLast: setLast, counts: keyCounts, heatOn: !!heat };
 
   return (
     <div ref={pageRef} className={`map-page ${selected ? "has-side" : ""} ${wide ? "wide" : "narrow"}`}>
@@ -435,11 +510,11 @@ export default function MapPage() {
       {nodes.length > 0 && (renderer === "three" ? (
         <MapBoundary onError={(d) => onFallback("mount-error", d)}><Suspense fallback={<div className="bm bm-full" aria-busy="true" />}>
           <ThreeMap ref={map} nodes={nodes} byMint={byMint} limit={limit} source={data.source} mode={mode} onModeChange={setMode} inset={inset} fitInset={fitInset} select={focus} onSelect={onSelect}
-            fresh={data.fresh} highlight={hl.predicate} heat={heat} streamStatus={status} onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} onFallback={onFallback} look={look} families={families} />
+            fresh={data.fresh} highlight={hl.predicate} heat={heat} streamStatus={status} onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} onFallback={onFallback} look={look} families={families} last={lastEff} lastWant={lastWant} pinned={pinned} />
         </Suspense></MapBoundary>
       ) : (
         <BubbleMap ref={map} nodes={nodes} height="100%" mode={mode} onModeChange={setMode} className="bm-full" inset={inset} select={focus} onSelect={onSelect}
-          fresh={data.fresh} onLayout={data.persistPositions} highlight={hl.predicate} live heat={heat} hideLegend onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} clusterInfo={clusterInfo} />
+          fresh={data.fresh} onLayout={data.persistPositions} highlight={hl.predicate} live heat={heat} hideLegend onCamera={cam.set} titleTags={tags} titleTagsCompact={tagsCompact} clusterInfo={clusterInfo} visible={levels} last={lastEff} pinned={pinned} />
       ))}
       <div className="map-overlay" ref={overlayRef}>
         {wide ? (
@@ -450,8 +525,8 @@ export default function MapPage() {
             </div>
             <h1>Ecosystem <em>map</em></h1>
             {renderer === "three"
-              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of {mode === "locked" ? "locked value" : "market cap"}; the coins inside are sized by {mode === "locked" ? "the value they lock" : "market cap"}. Colour is the last trade, lime within 30 min; the rim's bright arc counts trades in 24 h. A pulse runs along a link when a coin trades and a ring marks a new pair. Drag a coin and the map flows around it.</p>
-              : <p className="lead">Clusters are root coins and every pair under them. The big bubble in the middle is the root: its size is the whole family. Every other bubble is sized by {mode === "locked" ? "the value it locks" : "its own market cap"}. Rings flash on trades; dots flow on pairs that traded in the last 30 min. Lime ring = launched on Spore.</p>}
+              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of {mode === "locked" ? "locked value" : "market cap"}; the coins inside are sized by {mode === "locked" ? "the value they lock" : "market cap"}. Colour is the last trade, lime within 30 min; the rim's bright arc counts trades in 24 h. A pulse runs along a link when a coin trades and a ring marks a new pair. Drag a coin and the map flows around it.{lastLead}</p>
+              : <p className="lead">Clusters are root coins and every pair under them. The big bubble in the middle is the root: its size is the whole family. Every other bubble is sized by {mode === "locked" ? "the value it locks" : "its own market cap"}. Rings flash on trades; dots flow on pairs that traded in the last 30 min. Lime ring = launched on Spore.{lastLead}</p>}
             <div className="map-stats">
               <div><em>roots</em><strong><LiveNumber value={ready ? drawn.roots : null} format={countOrDash} kind="count" /></strong></div>
               <div><em>coins</em><strong title={ready ? coinsTitle : undefined}><LiveNumber value={ready ? drawn.coins : null} format={exact} kind="count" /></strong></div>
@@ -476,17 +551,17 @@ export default function MapPage() {
           <div className="map-pills" role="group" aria-label="Map panels">
             <button type="button" className="map-pill" aria-expanded={pop === "live"} onClick={() => setPop((p) => (p === "live" ? null : "live"))}><LiveDot short /> Live</button>
             <button type="button" className="map-pill" aria-expanded={pop === "filters"} onClick={() => setPop((p) => (p === "filters" ? null : "filters"))}>{PILL_GLYPH.filters}Filters{keys.length > 0 && <b>{keys.length}</b>}</button>
-            <button type="button" className="map-pill" aria-expanded={pop === "key"} onClick={() => setPop((p) => (p === "key" ? null : "key"))}>{PILL_GLYPH.key}Key</button>
+            <button type="button" className="map-pill" aria-expanded={pop === "key"} onClick={() => setPop((p) => (p === "key" ? null : "key"))} title={lastOn ? `Key · last trade: ${lastKeysOf(lastWant).length} of 4 buckets shown` : undefined}>{keyGlyph(heat ? lastWant : LAST_ALL)}Key{lastOn && <b>{keyBadge(lastWant)}</b>}</button>
           </div>
         )}
         {!wide && pop && (
           <div className={`map-pop card is-${pop}`} role="dialog" aria-label={pop === "live" ? "Live rails" : pop === "filters" ? "Filters" : "Key"}>
             <button type="button" className="map-pop-close" aria-label="Close" onClick={() => setPop(null)}>×</button>
-            {pop === "live" ? <>{ready && heatLine}{rails("pop")}</> : pop === "filters" ? <>{digestChip}{highlights}</> : <MapKey mode={mode} cam={cam} worldRadius={worldRadius} variant="pop" renderer={renderer} chipRadius={keyChip} look={look} />}
+            {pop === "live" ? <>{ready && heatLine}{rails("pop")}</> : pop === "filters" ? <>{digestChip}{highlights}</> : <MapKey {...keyProps} variant="pop" />}
           </div>
         )}
       </div>
-      {wide && <MapKey mode={mode} cam={cam} worldRadius={worldRadius} renderer={renderer} chipRadius={keyChip} look={look} />}
+      {wide && <MapKey {...keyProps} />}
       {panelProps && (wide
         ? <aside ref={sideRef} className="map-side card" aria-label={`${nameOf(panelProps.node)} details`}><SidePanel {...panelProps} /></aside>
         : <Sheet state={sheet} onState={setSheet} onClose={() => select(null)} onHeight={onSheetHeight} label={`${nameOf(panelProps.node)} details`}><SidePanel {...panelProps} peek={sheet === "peek"} /></Sheet>)}

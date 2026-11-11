@@ -25,7 +25,10 @@
 //     directly, and the hovered/selected/focused ones (at most three) take the slow path (gradients,
 //     clipping, dashed rings). A family top keeps its logo (or letter) down to 6 px and carries a
 //     subtle ring in its depth colour (batched per colour). Under a highlight each group runs twice:
-//     dimmed non-matches, then matches;
+//     dimmed non-matches, then matches. The Key's last-trade filter (store F_HIDDEN / F_ANCHOR, BubbleMap `visible`):
+//     a hidden coin is skipped everywhere (bubbles, its link to its parent, picking, labels; a family whose top is hidden
+//     has no hull, title or cluster hit) unless it is the hovered or selected one; an anchor is drawn with the dimmed
+//     group, like a highlight non-match. With the filter off no flag is set and the frame is today's;
 //  7. Spore beacons (lime ring + breathing halo, never smaller than 4 px), cluster titles at overview
 //     zoom (two-tone cached bitmaps, culled on an estimated width before they are built; on /map each
 //     then gets its family's dominance tag after its text where that strip is free), then node labels
@@ -38,7 +41,7 @@ import { imageFor } from "../../lib/map/images";
 import type { SizeMode } from "../../lib/map/types";
 import { stepCamera, type Flight } from "./camera";
 import { drawFx, fxDrawn, makeFx, type Fx } from "./fx";
-import { COLORS, F_ANC, F_FOCUS, F_MATCH, F_MIG, F_OURS, HULL, MapStore, type Cluster } from "./store";
+import { COLORS, F_ANC, F_ANCHOR, F_FOCUS, F_HIDDEN, F_MATCH, F_MIG, F_OURS, HULL, MapStore, type Cluster } from "./store";
 import { GLOW, MAX_SPRITE_R, MONO, SB_ANC, SB_MIG, TITLE_TAG_PAD, bucketR, drawCap, gridPattern, labelOf, letterKey, letterSprite, makeSprites, renderBody, renderLabel, sharedSprite, titleSprite, titleTagSprite, type SpriteSet } from "./sprites";
 
 export { centerOn, fitFor } from "./camera";
@@ -120,6 +123,8 @@ export type State = {
   flight: Flight | null; lastFrameAt: number; zoomingUntil: number;
   /// hovered cluster (index into store.clusters, -1 none); highlight on = non-F_MATCH nodes dim
   hoverCluster: number; highlight: boolean;
+  /// the Key's last-trade filter: how many nodes are F_HIDDEN and F_ANCHOR right now (BubbleMap writes both with the flags)
+  hidden: number; anchors: number;
   /// live trade effects
   fx: Fx;
   /// camera internals: the reusable flight record, and "s.t jumped, sync d3 on the next frame"
@@ -134,7 +139,7 @@ export function makeState(init: { mode: SizeMode; focus: string | undefined; ins
     store: new MapStore(), sprites: makeSprites(), mode: init.mode, t: zoomIdentity, zoom: null, w: 0, h: 0, dpr: 1,
     hover: -1, pinned: -1, selected: -1, focusIdx: -1, follow: null, raf: 0, visible: true, autoFit: true, focus: init.focus, static: init.static, inset: init.inset,
     onSelect: undefined, tweenUntil: 0, hullTick: 0, labelRects: new Float32Array(RECTS * 4), perf: makePerf(), hPx: 600, hasAnc: false,
-    flight: null, lastFrameAt: 0, zoomingUntil: 0, hoverCluster: -1, highlight: false, fx: makeFx(),
+    flight: null, lastFrameAt: 0, zoomingUntil: 0, hoverCluster: -1, highlight: false, hidden: 0, anchors: 0, fx: makeFx(),
     dirty: true, anim: 0, wake: null,
   };
 }
@@ -148,6 +153,7 @@ function ensureState(s: State) {
   if (a.zoomingUntil === undefined) a.zoomingUntil = 0;
   if (a.hoverCluster === undefined) a.hoverCluster = -1;
   if (a.highlight === undefined) a.highlight = false;
+  if (a.hidden === undefined) { a.hidden = 0; a.anchors = 0; }
   if (a.dirty === undefined) { a.dirty = true; a.anim = 0; a.wake = null; }
   const p = s.perf as Partial<Perf>;
   if (!p.titleIdx) { p.titleIdx = new Int32Array(64); p.titles = 0; p.fx = 0; p.built = 0; p.beacons = 0; }
@@ -202,6 +208,10 @@ const letterFont = (px: number) => { let f = fontCache.get(px); if (!f) { f = `6
 // ---- per-frame scratch (module level: a frame allocates nothing per node)
 let K = 1, TX = 0, TY = 0, W = 0, H = 0, NOW = 0, DPR = 1, STILL = false;
 let HOV = -1, SEL = -1, DIMMING = false, HL = false;
+/// A bubble of the dimmed level: an anchor of the last-trade filter, or a non-match while a highlight is on.
+const dimOf = (fl: number, hl: boolean) => (fl & F_ANCHOR) !== 0 || (hl && (fl & F_MATCH) === 0);
+/// Labels of anchors (the engine's TOK.labelDim).
+const ANCHOR_LABEL_A = 0.35;
 let curAlpha = 1, drawnN = 0, logoWant = 0, logoLoaded = 0, logoDrawn = 0;
 /// animation bits of the frame being drawn (State.anim at the end)
 let ANIM = 0;
@@ -240,7 +250,7 @@ const spend = () => { builds++; if (builds >= buildLimit || performance.now() - 
 const effR = (s: State, i: number, sr: number) => {
   const fl = s.store.flags[i];
   if (fl & F_OURS) return sr < BEACON_R ? BEACON_R : sr;
-  if (s.highlight && fl & F_MATCH) return sr < SPECK_R ? SPECK_R : sr;
+  if (s.highlight && (fl & (F_MATCH | F_ANCHOR)) === F_MATCH) return sr < SPECK_R ? SPECK_R : sr;
   return sr;
 };
 
@@ -252,7 +262,7 @@ export function screenR(s: State, i: number): number {
 }
 
 /// Topmost bubble under a screen point (draw order is small-first, so scan from the end), or -1.
-/// Bubbles still growing in (under half size) are not hit.
+/// Bubbles still growing in (under half size) and coins the last-trade filter hides are not hit.
 export function hitTest(s: State, sx: number, sy: number): number {
   const st = s.store, t = s.t, k = t.k;
   const wx = (sx - t.x) / k, wy = (sy - t.y) / k, slack = 4 / k;
@@ -264,7 +274,8 @@ export function hitTest(s: State, sx: number, sy: number): number {
     const dx = x[i] - wx, dy = y[i] - wy;
     let rr = r[i];
     const fl = flags[i];
-    if (fl & F_OURS) { if (rr < minOurs) rr = minOurs; } else if (hl && fl & F_MATCH && rr < minMatch) rr = minMatch;
+    if (fl & F_HIDDEN) continue;
+    if (fl & F_OURS) { if (rr < minOurs) rr = minOurs; } else if (hl && (fl & (F_MATCH | F_ANCHOR)) === F_MATCH && rr < minMatch) rr = minMatch;
     rr += slack;
     if (dx * dx + dy * dy > rr * rr) continue;
     if (born[i] && growOf(born[i], now, still) < 0.5) continue;
@@ -274,12 +285,13 @@ export function hitTest(s: State, sx: number, sy: number): number {
 }
 
 /// Smallest cluster whose screen circle contains the point, among clusters 6–240 px across in radius; or -1.
+/// A family whose top the last-trade filter hides (then every member is hidden) is not a target.
 export function clusterAt(s: State, sx: number, sy: number): number {
   const st = s.store, cl = st.clusters, t = s.t, k = t.k;
   let best = -1, bestR = Infinity;
   for (let ci = 0; ci < cl.length; ci++) {
     const c = cl[ci];
-    if (!c.anchored) continue;
+    if (!c.anchored || (c.root >= 0 && st.flags[c.root] & F_HIDDEN)) continue;
     const cr = c.cr * k;
     if (cr < 6 || cr > 240 || cr >= bestR) continue;
     const dx = c.ccx * k + t.x - sx, dy = c.ccy * k + t.y - sy;
@@ -337,6 +349,8 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   const dragging = st.dragging;
   const dimming = hov >= 0 && !dragging;
   const hl = !!s.highlight;
+  // some bubbles draw dim this frame (a highlight's non-matches, the last-trade filter's anchors): the groups run twice
+  const dims = hl || s.anchors > 0;
   HOV = hov; SEL = s.selected; DIMMING = dimming; HL = hl;
   const clusters = st.clusters;
   const hcRaw = dragging && st.dragCluster >= 0 ? st.dragCluster : s.hoverCluster >= 0 ? s.hoverCluster : hov >= 0 ? st.cluster[hov] : -1;
@@ -356,7 +370,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
     if (fadeK > 0) {
       for (let ci = 0; ci < clusters.length; ci++) {
         const c = clusters[ci];
-        if (!c.big) continue;
+        if (!c.big || (c.root >= 0 && flags[c.root] & F_HIDDEN)) continue;
         const hull = c.hull, hn = c.hullN;
         if (hn === 0) continue;
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -417,6 +431,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   for (let l = 0; l < m; l++) {
     const a = lsrc[l], b = ldst[l];
     if (dimming && (a === hov || onPath[b] === 1)) continue; // lit: litLinks draws it
+    if (flags[b] & F_HIDDEN) continue; // the last-trade filter hides the child: its link goes with it
     const ga = growOf(born[a], now, STILL), gb = growOf(born[b], now, STILL);
     if (ga <= 0 || gb <= 0) continue;
     const rb = r[b] * k * gb;
@@ -432,11 +447,11 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
     const ux = dx / len, uy = dy / len;
     const x0 = ax + ux * ra, y0 = ay + uy * ra, x1 = bx - ux * rb, y1 = by - uy * rb;
     const ci = color[a];
-    const faint = dimming || (hl && !(flags[a] & F_MATCH) && !(flags[b] & F_MATCH));
+    const faint = dimming || (dims && dimOf(flags[a], hl) && dimOf(flags[b], hl));
     let p: Path2D | null = null;
     if (childStart[a + 1] - childStart[a] > HUB_FAN) {
       let sl = hubSlot[a];
-      if (sl < 0 && hubN < HUB_SLOTS) { sl = hubN++; hubSlot[a] = sl; hubNode[sl] = a; hubPaths[sl] = new Path2D(); hubKey[sl] = dimming || (hl && !(flags[a] & F_MATCH)) ? 4 : cls; hubRa[sl] = ra; hubLen[sl] = 0; hubCnt[sl] = 0; }
+      if (sl < 0 && hubN < HUB_SLOTS) { sl = hubN++; hubSlot[a] = sl; hubNode[sl] = a; hubPaths[sl] = new Path2D(); hubKey[sl] = dimming || (dims && dimOf(flags[a], hl)) ? 4 : cls; hubRa[sl] = ra; hubLen[sl] = 0; hubCnt[sl] = 0; }
       if (sl >= 0) { p = hubPaths[sl]; hubLen[sl] += inner; hubCnt[sl]++; }
     }
     if (!p) { const pk = faint ? 12 + ci : cls === 2 ? 8 : cls * 4 + ci; p = linkPaths[pk]; if (!p) { p = new Path2D(); linkPaths[pk] = p; } }
@@ -475,13 +490,13 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   if (fxDrawn() > 0 && !s.static) ANIM |= ANIM_AMBIENT;
 
   // ---- bubbles: everything but the family tops, then the tops, each smallest first so big bubbles
-  // and their labels sit on top; the hovered / selected / focused ones last. Under a highlight the
-  // dimmed non-matches go first and the matches over them (two globalAlpha levels per frame).
+  // and their labels sit on top; the hovered / selected / focused ones last. Under a highlight (or with the last-trade
+  // filter's anchors) the dimmed ones go first and the rest over them (two globalAlpha levels per frame).
   curAlpha = 1; ctx.globalAlpha = 1;
   drawnN = 0; beaconN = 0; specN = 0; ringN = 0; ringKeys = 0; logoWant = 0; logoLoaded = 0; logoDrawn = 0;
   for (let q = 0; q < 16; q++) speckPaths[q] = null;
   const ts = st.topStart <= n ? st.topStart : n;
-  if (hl) { bubblePass(ctx, s, 1, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 1, ts, n); fillSpecks(ctx); bubblePass(ctx, s, 2, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 2, ts, n); fillSpecks(ctx); }
+  if (dims) { bubblePass(ctx, s, 1, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 1, ts, n); fillSpecks(ctx); bubblePass(ctx, s, 2, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 2, ts, n); fillSpecks(ctx); }
   else { bubblePass(ctx, s, 0, 0, ts); fillSpecks(ctx); bubblePass(ctx, s, 0, ts, n); fillSpecks(ctx); }
   for (let q = 0; q < specN; q++) {
     const i = specI[q], a = specA[q];
@@ -528,17 +543,19 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
   while (labelsN < MAX_LABELS && (oa >= 0 || ob >= ts)) {
     const i = ob >= ts && (oa < 0 || rTs[order[ob]] >= rTs[order[oa]]) ? order[ob--] : order[oa--];
     if (i === hov || i === SEL || i === s.focusIdx) continue;
-    if (hl && !(flags[i] & F_MATCH)) continue;
+    const fl = flags[i];
+    if (fl & F_HIDDEN || (hl && !(fl & F_MATCH))) continue;
+    const la = fl & F_ANCHOR ? ANCHOR_LABEL_A : 1;                 // an anchor of the last-trade filter: a dim label
     const srT = st.rT[i] * k;
-    const special = (s.focusIdx >= 0 && parent[i] === s.focusIdx) || ((flags[i] & F_ANC) !== 0 && srT >= 6);
+    const special = (s.focusIdx >= 0 && parent[i] === s.focusIdx) || ((fl & F_ANC) !== 0 && srT >= 6);
     if (st.rT[i] < minWorldR && !special) {
       if (srT < 3) break;                                          // biggest-first: everything after is smaller
       if (labelsN >= always) { if (srT < 6) break; continue; }
-      if (!supp[i]) putLabel(ctx, s, i, false, false, 1);          // one of the biggest on screen: named anyway
+      if (!supp[i]) putLabel(ctx, s, i, false, false, la);         // one of the biggest on screen: named anyway
       continue;
     }
     if (supp[i]) continue;                                         // its tree's title names it
-    putLabel(ctx, s, i, false, false, special ? 1 : Math.min(1, Math.max(0, (srT - (LABEL_R - 3)) / 6)));
+    putLabel(ctx, s, i, false, false, la * (special ? 1 : Math.min(1, Math.max(0, (srT - (LABEL_R - 3)) / 6))));
   }
   for (let q = 0; q < suppN; q++) supp[suppList[q]] = 0;
   for (let q = 0; q < pathN; q++) onPath[pathList[q]] = 0;
@@ -576,7 +593,7 @@ export function draw(ctx: CanvasRenderingContext2D, s: State, tip: HTMLDivElemen
 /// most HOT_DOTS dots spread over them. Then its ancestor path up to the top of the family, the only
 /// lines drawn bright (≤ 16 gradients).
 function litLinks(ctx: CanvasRenderingContext2D, s: State, hov: number, speed: number) {
-  const st = s.store, { x, y, r, born, color, parent, childStart, childList, lseed } = st;
+  const st = s.store, { x, y, r, born, color, parent, childStart, childList, lseed, flags } = st;
   const k = K, tx = TX, ty = TY, now = NOW, w = W, h = H, sl = lseed.length || 1;
   for (let q = 0; q < 12; q++) litDots[q] = null;
   const dot = (ci: number, x0: number, y0: number, x1: number, y1: number, seed: number, d: number, nd: number) => {
@@ -596,7 +613,7 @@ function litLinks(ctx: CanvasRenderingContext2D, s: State, hov: number, speed: n
     let path: Path2D | null = null, dots = 0, sum = 0, cnt = 0;
     for (let q = c0; q < c1; q++) {
       const b = childList[q], gb = growOf(born[b], now, STILL);
-      if (gb <= 0) continue;
+      if (gb <= 0 || flags[b] & F_HIDDEN) continue;
       const bx = x[b] * k + tx, by = y[b] * k + ty;
       if ((ax < -40 && bx < -40) || (ay < -40 && by < -40) || (ax > w + 40 && bx > w + 40) || (ay > h + 40 && by > h + 40)) continue;
       const dx = bx - ax, dy = by - ay, len = Math.sqrt(dx * dx + dy * dy);
@@ -671,23 +688,25 @@ function fillSpecks(ctx: CanvasRenderingContext2D) {
   for (let key = 0; key < 16; key++) { const p = speckPaths[key]; if (p) { ctx.fillStyle = SPECK_STYLE[key]; ctx.fill(p); speckPaths[key] = null; } }
 }
 
-/// One pass over order[from, to). which: 0 every node, 1 highlight non-matches (dimmed), 2 matches.
+/// One pass over order[from, to). which: 0 every node, 1 the dimmed ones (highlight non-matches, last-trade anchors),
+/// 2 the rest. Coins the last-trade filter hides are skipped (the hovered or selected one excepted).
 /// The hovered / selected / focused bubbles are only recorded (specI…), for the caller to draw last.
 function bubblePass(ctx: CanvasRenderingContext2D, s: State, which: 0 | 1 | 2, from: number, to: number) {
   const st = s.store;
   const { x, y, r, order, flags, color, rel, born, pulse, gen, top } = st;
-  const k = K, tx = TX, ty = TY, w = W, h = H, now = NOW, hov = HOV, sel = SEL;
+  const k = K, tx = TX, ty = TY, w = W, h = H, now = NOW, hov = HOV, sel = SEL, hl = HL;
   const sprites = s.sprites, tops = !s.focus;
   for (let oi = from; oi < to; oi++) {
     const i = order[oi];
     const fl = flags[i];
-    if (which !== 0 && ((fl & F_MATCH) !== 0) !== (which === 2)) continue;
+    if (fl & F_HIDDEN && i !== hov && i !== sel) continue;
+    if (which !== 0 && dimOf(fl, hl) !== (which === 1)) continue;
     const g = growOf(born[i], now, STILL);
     if (g < 1) ANIM |= ANIM_MOTION;
     if (g <= 0) continue;
     let sr = r[i] * k * g;
     const ours = (fl & F_OURS) !== 0;
-    if (ours) { if (sr < BEACON_R) sr = BEACON_R; } else if (which === 2 && sr < SPECK_R) sr = SPECK_R;
+    if (ours) { if (sr < BEACON_R) sr = BEACON_R; } else if (which === 2 && hl && sr < SPECK_R) sr = SPECK_R;
     const sx = x[i] * k + tx, sy = y[i] * k + ty;
     const ext = sr * GLOW + 2;
     if (sx + ext < 0 || sy + ext < 0 || sx - ext > w || sy - ext > h) continue;
@@ -900,7 +919,7 @@ function titlePass(ctx: CanvasRenderingContext2D, s: State, hc: number): number 
   let shown = 0;
   const one = (ci: number, active: boolean) => {
     const c = cl[ci];
-    if (!c || !c.anchored || c.root < 0 || c.root >= st.n) return;
+    if (!c || !c.anchored || c.root < 0 || c.root >= st.n || st.flags[c.root] & F_HIDDEN) return; // a family the last-trade filter hides whole: no title
     const scr = c.cr * K;
     const rootR = st.r[c.root] * K;
     let a: number;

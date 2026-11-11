@@ -13,8 +13,15 @@
 //   S.swarm                 { on, DUST0, isDust(i), add(chunk) -> rows queued, drop(top), families() -> EngineSwarmFamily[],
 //                             indexOf(mint) -> i | -1, mintAt(i), pos(i) -> [x, y, rWorld] | null, famOf(i) -> f | null,
 //                             screenR(i) (CSS px), spacing(i) (world u), tip(i) -> data | null, pick(sx, sy, touch) -> i | -1,
-//                             select(i), trade(mint, tSec) -> bool, setHl(testByMint | null), stats(),
-//                             ghosted(famId) -> bool, setMask(rects: number[] (x0, y0, x1, y1 world, flat), n) }
+//                             select(i), trade(mint, tSec) -> 0 | 1 | 2, setHl(testByMint | null), stats(),
+//                             ghosted(famId) -> bool, setMask(rects: number[] (x0, y0, x1, y1 world, flat), n),
+//                             (the Key's last-trade filter, 2026-11-10) setVis(mask, pinnedMints), setPins(pinnedMints),
+//                             isShown(i) }
+//   LAST-TRADE FILTER: ghosts are class 3 (drawn while mask bit 3 is on); a real speck is drawn when its own heat class is in
+//   the mask or its mint is pinned (motion.js: the page's pins it does not know as coins, a selected / focused / hovered
+//   speck). Hidden specks are not picked and their trade flash is not drawn; trade() answers 0 (not loaded), 1 (loaded, the
+//   filter hides it), 2 (drawn). A family whose loaded specks are drawn tells motion.js (S.motion.visSpeck(famId, on)): they
+//   anchor the family top. The ghosts' and each real speck's alpha (aF y / z, uSwHlA / B) fold the filter and the highlight.
 //   S.debugFns.swarm(), swarmCheck() -> {outside, onDrawn, overlaps, hash, slots}, swarmSynth(top, n) -> rows queued,
 //   swarmTune({aDot, sigMin, aReal, kReal}) (live look knobs), swarmShow(bool), swarmMask() (the label rects in force)
 //
@@ -82,8 +89,8 @@ function stubSwarm(on) {
   const none = () => null;
   return {
     on, DUST0, isDust: (i) => i >= DUST0, add: () => 0, drop: () => {}, families: () => [], indexOf: () => -1, mintAt: none, pos: none,
-    famOf: none, screenR: () => 0, spacing: () => 0, tip: none, pick: () => -1, select: () => {}, trade: () => false, setHl: () => {},
-    ghosted: () => false, setMask: () => {},
+    famOf: none, screenR: () => 0, spacing: () => 0, tip: none, pick: () => -1, select: () => {}, trade: () => 0, setHl: () => {},
+    ghosted: () => false, setMask: () => {}, setVis: () => {}, setPins: () => {}, isShown: () => false,
     stats: () => ({ tier: "desktop", families: 0, slots: 0, ghostVisible: 0, real: 0, queued: 0, genMs: 0, genSliceMaxMs: 0, addSliceMaxMs: 0, overlaps: 0, drops: 0, byFamily: [] }),
   };
 }
@@ -125,6 +132,7 @@ export function buildSwarm(S) {
       cx: f.cx, cy: f.cy, mem, ancBase: NA, dispAny: false, dispV: 0, anchor: null,
       ghostSlots: Math.min(ghost, n), ghostCap: TI.ghostFam, tau: 1, ghostShown: 0, spacing: 0, spacingMean: 0, p: 1, overlaps: 0, built: false, x: null, y: null,
       cap: TI.realFam, real: 0, realOnGhost: 0, next: 0, ht: null, hmask: 0, mints: null, sym: null, mc: null, lk: null, crt: null, lastT: null,
+      shownReal: 0,   // (last-trade filter) loaded real specks the filter draws (their alpha target > 0)
       grid: null, gridAt: 0, gridV: -1, drops: 0, genMs: 0, r95: 0,
     };
     list.push(sf); sfOfFam[f.id] = sf.id; byTop.set(sf.topMint, sf);
@@ -163,7 +171,11 @@ export function buildSwarm(S) {
   const sigMin0 = () => Math.max(SIG_MIN[0], SIG_MIN[1] * (S.DPR || 1));
   const uSwK = { value: new THREE.Vector4(A_DOT, sigMin0(), A_REAL, K_REAL) };   // the look knobs (debug: swarmTune)
   let sigMinTuned = false;
-  const uSwFade = { value: 0 }, uSwHlA = { value: 1 }, uSwHlB = { value: 1 }, uSwHlT0 = { value: -1e4 }, uSwSel = { value: -1 };
+  // (last-trade filter) the Key's mask (vis.js, motion.js keeps it) and the speck mints drawn whatever their class
+  let vMask = S.vis ? S.vis.mask : 15, vPins = new Set(S.vis && Array.isArray(S.vis.pinMints) ? S.vis.pinMints : []);
+  // ghost alpha (shown when the crossfade started, target): 0 while bit 3 is off, TOK.dim under a highlight, else 1
+  const ghostA0 = (vMask & 8) ? 1 : 0;
+  const uSwFade = { value: 0 }, uSwHlA = { value: ghostA0 }, uSwHlB = { value: ghostA0 }, uSwHlT0 = { value: -1e4 }, uSwSel = { value: -1 };
   const uSwLab = { value: Array.from({ length: LAB_MAX }, () => new THREE.Vector4(0, 0, 0, 0)) }, uSwLabN = { value: 0 }, uSwLabPad = { value: 1 };
   U.uFocusCoin ??= { value: -1 }; U.uFocusT ??= { value: 0 }; U.uFocusDim ??= { value: 0 };
   const heatK = (T.heatK || GAL.heatK).slice();
@@ -186,7 +198,7 @@ uniform vec4 uSwLab[${LAB_MAX}]; uniform int uSwLabN; uniform float uSwLabPad;  
 uniform vec3 uRim[4], uMuted, uPulse, uFocusCol, uRingCol; uniform float uHeatK[4];
 attribute vec4 aS;   // swarm family index, slot j in the family, thinning rank [0, 1), anchor texel
 attribute vec4 aR;   // real (0 ghost, 1 real), crossfade start (s, uTime clock), heat class, size t (0 floor .. 1 = 2 CSS px)
-attribute vec3 aF;   // trade flash start (s), highlight (shown when the crossfade started, target)
+attribute vec3 aF;   // trade flash start (s), alpha (shown when the crossfade started, target): 0 hidden by the Key, TOK.dim, 1
 varying vec3 vCol, vRingC; varying float vA, vRad, vAdd, vSize, vRingR, vRingW, vRingA;
 const float DUST0 = ${f3(DUST0)};
 // the zoom share qz shows every rank under qz fully and fades ranks qz .. 1.25 qz in (no pop); past the cap all are full
@@ -229,8 +241,9 @@ void main(){
 #ifdef GALAXY
   vis *= isF > 0.5 ? 1.0 : 1.0 - 0.6 * uFocusDim;
 #endif
+  // highlight + (last-trade filter) visibility: alpha factors (a ghost: uSwHlA -> B, a real speck: its own aF.y -> z)
   float hlT = smoothstep(uSwHlT0, uSwHlT0 + ${f3(HL_S)}, uTime);
-  vis *= mix(uDim, 1.0, mix(mix(uSwHlA, uSwHlB, hlT), mix(aF.y, aF.z, hlT), real));
+  vis *= mix(mix(uSwHlA, uSwHlB, hlT), mix(aF.y, aF.z, hlT), real);
   // labels placed over the family: no speck between their words (a soft edge of uSwLabPad)
   float lm = 1.0;
   for (int q = 0; q < ${LAB_MAX}; q++) {
@@ -456,14 +469,38 @@ void main(){
   };
   const clsOf = (last) => heatClass(last > -Infinity ? Math.max(0, (S.nowS || Date.now() / 1000) - last) : Infinity);
   const hlOf = (m) => { if (!hlTest) return 1; try { return hlTest(m) ? 1 : 0; } catch { return 0; } };
+  // (last-trade filter) a real speck's alpha: 0 when the Key hides its class (and it is not pinned), else the highlight's
+  // 1 / TOK.dim; ghosts are class 3. Float32 targets (aF) compare against Math.fround
+  const alphaOf = (m, c) => (((vMask >> (c >= 0 && c <= 3 ? c : 3)) & 1) || vPins.has(m) ? (hlOf(m) ? 1 : TOK.dim) : 0);
+  const ghostTarget = () => ((vMask & 8) ? (hlTest ? TOK.dim : 1) : 0);
+  // a speck's alpha target changed between hidden and drawn: the family's count; crossing 0 tells motion (the top anchors it)
+  const countShown = (sf, was, now) => {
+    if ((was > 0) === (now > 0)) return;
+    sf.shownReal += now > 0 ? 1 : -1;
+    if (sf.shownReal === (now > 0 ? 1 : 0)) { try { S.motion.visSpeck?.(sf.f.id, sf.shownReal > 0); } catch (e) { console.error("map3", e); } }
+  };
+  // specks' alpha targets changed (a filter / highlight pass, a heat class, a pin, a trade): a hovered speck the filter now
+  // hides (the pointer's tip, the phone's docked card) loses the hover (motion.js decides; a page hover is pinned, drawn)
+  const hoverCheck = () => { if (S.hoverI >= DUST0) { try { S.motion.dropHiddenHover?.(); } catch (e) { console.error("map3", e); } } };
+  // one speck's alpha at once (no crossfade): a trade, a heat class change, a pin
+  const snapAlpha = (sf, g, m, c) => {
+    const a = Math.fround(alphaOf(m, c)), was = aF[g * 3 + 2];
+    if (was === a && aF[g * 3 + 1] === a) return false;
+    aF[g * 3 + 1] = a; aF[g * 3 + 2] = a; touch("f", g); countShown(sf, was, a);
+    return true;
+  };
   // (fix round) size by MARKET CAP, not by rank: ~99 % of a family sits at the curve floor, rank sizes invented differences
   // and brightened the family core. t = 0 up to MC_FLOOR, 1 at MC_FLOOR x MC_SPAN (log); the shader maps t to 1 device px .. 2 CSS px
   const LOG_SPAN = Math.log(MC_SPAN);
+  const compactLookup = S.opts && S.opts.compact && typeof S.opts.compact.lookup === "function" ? S.opts.compact.lookup : null;
   const sizeT = (mc) => (mc > MC_FLOOR ? Math.min(1, Math.log(mc / MC_FLOOR) / LOG_SPAN) : 0);
   function fillRow(sf, ch, r, t) {
     const m = ch.mints[r];
     if (typeof m !== "string" || !m) return;
     if (S.mintIdx && S.mintIdx.has(m)) return;            // the engine draws it already
+    // (compact layout) a page coin the filtered build left out is never a speck (it would take a ghost's slot): it is added
+    // as a coin when it comes into view (motion.js reveal)
+    if (compactLookup) { let n = null; try { n = compactLookup(m); } catch { n = null; } if (n) return; }
     let j = htGet(sf, m);
     const mc = Number(ch.mcapUsd && ch.mcapUsd[r]) || 0;
     if (j < 0) {
@@ -475,7 +512,7 @@ void main(){
       const last = heatOf(m);
       sf.lastT[j] = last;
       aR[g * 4] = 1; aR[g * 4 + 1] = t; aR[g * 4 + 2] = clsOf(last); aR[g * 4 + 3] = sizeT(mc);
-      const h = hlOf(m); aF[g * 3 + 1] = h; aF[g * 3 + 2] = h;
+      const h = Math.fround(alphaOf(m, aR[g * 4 + 2])); aF[g * 3 + 1] = h; aF[g * 3 + 2] = h; countShown(sf, 0, h);   // (last-trade filter)
       touch("r", g); touch("f", g);
       if (ghostShownAt(sf, j)) sf.realOnGhost++; else pushIdx(g);
       sf.grid = null;
@@ -525,6 +562,7 @@ void main(){
     const sel = S.motion && typeof S.motion.selected === "function" ? S.motion.selected() : -1;
     if (sel >= DUST0 && famIdxOfSlot(sel - DUST0) === sf.id) { try { S.motion.select(-1); } catch { /* ignore */ } }
     if (S.hoverI >= DUST0 && famIdxOfSlot(S.hoverI - DUST0) === sf.id) { try { S.motion.clearHover?.(false); } catch { /* ignore */ } }
+    if (sf.shownReal > 0) { sf.shownReal = 0; try { S.motion.visSpeck?.(sf.f.id, false); } catch (e) { console.error("map3", e); } }   // (last-trade filter)
     totalReal -= sf.real; sf.real = 0; sf.realOnGhost = 0; sf.next = 0; sf.ht = null;
     sf.mints = null; sf.sym = null; sf.mc = null; sf.lk = null; sf.crt = null; sf.lastT = null; sf.grid = null;
     flush();
@@ -545,10 +583,12 @@ void main(){
         if (m) {
           if (jb.kind === "heat") {
             const last = Math.max(sf.lastT[j], heatOf(m)); sf.lastT[j] = last;
-            const c = clsOf(last); if (aR[g * 4 + 2] !== c) { aR[g * 4 + 2] = c; touch("r", g); }
-          } else {
-            const e = Math.max(0, Math.min(1, (jb.t - jb.t0) / HL_S)), s = e * e * (3 - 2 * e);
-            aF[g * 3 + 1] = aF[g * 3 + 1] + (aF[g * 3 + 2] - aF[g * 3 + 1]) * s; aF[g * 3 + 2] = hlOf(m); touch("f", g);
+            // (last-trade filter) a class that crosses the Key's line: the speck appears / goes at once
+            const c = clsOf(last); if (aR[g * 4 + 2] !== c) { aR[g * 4 + 2] = c; touch("r", g); if (vMask !== 15) snapAlpha(sf, g, m, c); }
+          } else {   // "hl": the highlight or the filter changed (one crossfade for every speck, from what it shows now)
+            const e = Math.max(0, Math.min(1, (jb.t - jb.t0) / HL_S)), s = e * e * (3 - 2 * e), was = aF[g * 3 + 2];
+            aF[g * 3 + 1] = aF[g * 3 + 1] + (was - aF[g * 3 + 1]) * s; aF[g * 3 + 2] = alphaOf(m, aR[g * 4 + 2]); touch("f", g);
+            countShown(sf, was, aF[g * 3 + 2]);
           }
         }
         if ((++n & 127) === 0 && nowMs() > dl) break;
@@ -557,21 +597,46 @@ void main(){
       if (nowMs() > dl) break;
     }
     flush();
+    hoverCheck();
     const d = nowMs() - t0; if (d > addSliceMax) addSliceMax = d; if (d > jobMax) jobMax = d;
     return true;
   }
   S.on("heat", () => { for (let q = jobs.length - 1; q >= 0; q--) if (jobs[q].kind === "heat") jobs.splice(q, 1); for (const sf of realFams()) jobs.push({ kind: "heat", sf, j: 0 }); });
   let hlT0Prev = -1e4;
-  function setHl(test) {
-    hlTest = typeof test === "function" ? test : null;
-    const t = tSec(), e = Math.max(0, Math.min(1, (t - uSwHlT0.value) / HL_S)), s = e * e * (3 - 2 * e);
-    uSwHlA.value = uSwHlA.value + (uSwHlB.value - uSwHlA.value) * s; uSwHlB.value = hlTest ? 0 : 1;
+  // a new crossfade for the ghosts (uniforms) and every real speck (an "hl" pass): the highlight, or the Key's filter, changed
+  // (last-trade filter) the crossfade starts NOW on uTime's clock (performance.now() / 1000: frame() sets uTime from the rAF
+  // timestamp, same origin, but uTime is the LAST frame's time: stale on a hidden tab, so a Key toggle's fade would be over)
+  function restartAlpha() {
+    const t = nowMs() / 1000, e = Math.max(0, Math.min(1, (t - uSwHlT0.value) / HL_S)), s = e * e * (3 - 2 * e);
+    uSwHlA.value = uSwHlA.value + (uSwHlB.value - uSwHlA.value) * s; uSwHlB.value = ghostTarget();
     hlT0Prev = uSwHlT0.value; uSwHlT0.value = t;
     for (let q = jobs.length - 1; q >= 0; q--) if (jobs[q].kind === "hl") jobs.splice(q, 1);
     for (const sf of realFams()) jobs.push({ kind: "hl", sf, j: 0, t, t0: hlT0Prev });
     animUntil = Math.max(animUntil, nowMs() + HL_S * 1000 + 50);
     S.invalidate();
   }
+  function setHl(test) {
+    hlTest = typeof test === "function" ? test : null;
+    restartAlpha();
+  }
+  // (last-trade filter) the Key's mask and the pinned speck mints (motion.js)
+  function setVis(mask, pins) {
+    const m = typeof mask === "number" && Number.isFinite(mask) ? (mask | 0) & 15 : 15;
+    if (m === vMask) { setPins(pins); return; }   // the pins alone
+    vPins = pins instanceof Set ? new Set(pins) : new Set(Array.isArray(pins) ? pins : []);
+    vMask = m; restartAlpha();
+  }
+  // the pinned speck mints changed (a selected / hovered / focused speck, the page's pins): only those specks, at once
+  function setPins(pins) {
+    const next = pins instanceof Set ? new Set(pins) : new Set(Array.isArray(pins) ? pins : []);
+    const diff = []; for (const m of vPins) if (!next.has(m)) diff.push(m); for (const m of next) if (!vPins.has(m)) diff.push(m);
+    vPins = next;
+    if (!aR || genState !== "done") return;
+    let any = false;
+    for (const m of diff) { const o = slotOf(indexOf(m)); if (o && aR[o.g * 4] > 0.5 && snapAlpha(o.sf, o.g, m, aR[o.g * 4 + 2])) any = true; }
+    if (any) { flush(); S.invalidate(); hoverCheck(); }
+  }
+  const isShown = (i) => { const o = realAt(i); return !!o && aF[o.g * 3 + 2] > 0; };
 
   // ---------- the label mask (labels.js: the rects of the labels placed over a ghosted family) ----------
   // called by every label layout pass (each moving frame): no allocation, a redraw only when a rect changed
@@ -656,7 +721,7 @@ void main(){
       const rx = wx - sf.cx, ry = wy - sf.cy;
       if (!sf.dispAny && Math.hypot(rx, ry) > sf.r1 + reach) continue;
       const grid = pickGrid(sf);
-      const j = nearestInGrid(grid, rx, ry, reach, (jj) => aR[(sf.base + jj) * 4] > 0.5);
+      const j = nearestInGrid(grid, rx, ry, reach, (jj) => aR[(sf.base + jj) * 4] > 0.5 && aF[(sf.base + jj) * 3 + 2] > 0);   // (last-trade filter) drawn specks only
       if (j < 0) continue;
       const d = Math.hypot(grid.x[j] - rx, grid.y[j] - ry);
       if (d < bd) { bd = d; best = DUST0 + sf.base + j; }
@@ -664,15 +729,20 @@ void main(){
     return best;
   }
   const select = (i) => { uSwSel.value = i >= DUST0 ? i - DUST0 : -1; S.invalidate(); };
+  // (last-trade filter) 0 = not a loaded speck, 1 = loaded but the Key hides it (even live now), 2 = drawn; a hidden speck
+  // whose new class (live) the Key shows appears at once
   function trade(m, tS) {
-    const i = indexOf(m); if (i < 0) return false;
+    const i = indexOf(m); if (i < 0) return 0;
     const o = slotOf(i); const { sf, j, g } = o;
     sf.lastT[j] = Math.max(sf.lastT[j], Number(tS) || Date.now() / 1000);
-    if (aR[g * 4 + 2] !== 0) { aR[g * 4 + 2] = 0; touch("r", g); }
-    if (!reduced()) { aF[g * 3] = tSec(); touch("f", g); }
+    let snapped = false;
+    if (aR[g * 4 + 2] !== 0) { aR[g * 4 + 2] = 0; touch("r", g); snapped = snapAlpha(sf, g, m, 0); }
+    const shown = aF[g * 3 + 2] > 0;
+    if (!reduced() && shown) { aF[g * 3] = tSec(); touch("f", g); }
     flush();
-    animUntil = Math.max(animUntil, nowMs() + 420);
-    return true;
+    if (snapped && !shown) hoverCheck();   // live now, but the Key hides 'within 30 min'
+    if (shown) animUntil = Math.max(animUntil, nowMs() + 420);
+    return shown ? 2 : 1;
   }
 
   // ---------- want: the families the page should load ----------
@@ -796,7 +866,8 @@ void main(){
 
   // index.js calls start() once the first frame is on screen (build time and first frame stay what they are)
   const start = () => { if (genState === "wait" && !S.dead) S.life.timeout(startGen, 0); };
-  S.swarm = { on: true, DUST0, isDust: (i) => i >= DUST0, start, add, drop, families, indexOf, mintAt, pos, famOf, screenR, spacing, tip, pick, select, trade, setHl, stats, ghosted, setMask, ready: () => genState === "done" };
+  S.swarm = { on: true, DUST0, isDust: (i) => i >= DUST0, start, add, drop, families, indexOf, mintAt, pos, famOf, screenR, spacing, tip, pick, select, trade, setHl, stats, ghosted, setMask,
+    setVis, setPins, isShown, ready: () => genState === "done" };
   Object.assign(S.debug.obj, { swarm: points });
   S.debug.map.swarmPlan = { tier, families: nSF, slots: M };
 }

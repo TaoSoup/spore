@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pngjs from "pngjs";
-import { INSET_RECT_JS, RAF_PROBE, SETTLED_JS, cli, launchChrome, mapReadyJs, rafStatsJs, sleep, withDebug, type Browser, type Page } from "./map3-cdp.mts";
+import { INSET_RECT_JS, RAF_PROBE, SETTLED_JS, cli, launchChrome, mapReadyJs, rafStatsJs, sleep, withDebug, withLast, type Browser, type Page } from "./map3-cdp.mts";
 
 const { opt, has } = cli();
 const BASE = opt("--url", "http://127.0.0.1:5471")!.replace(/\/$/, "");
@@ -269,7 +269,8 @@ async function gLook(br: Browser) {
   gateNum("G12", "p95 frame @overview (measure)", p95o, (v) => v <= 16.8, "≤ 16.8 ms", "measure failed");
   gateNum("G12", "p95 frame @4× (measure)", p954, (v) => v <= 16.8, "≤ 16.8 ms", "measure failed");
   // ---- G12 leak: 5 SPA cycles
-  const spa = (path: string) => p.evalJs(`(history.pushState({}, "", ${J(u(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
+  // (an SPA navigation does not go through page.navigate: it carries last=all itself, so the whole map is measured)
+  const spa = (path: string) => p.evalJs(`(history.pushState({}, "", ${J(withLast(u(path)))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
   const cyc: unknown[] = [];
   for (let c = 0; c < 5; c++) {
     await spa("/"); await sleep(800);

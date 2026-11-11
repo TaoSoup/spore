@@ -143,6 +143,11 @@ const SLICE_MS = 40;
 export async function buildLayout(S, pause = null) {
   const tStart = performance.now();
   const { N, fams, planets, kids, mc, age, n24 } = S;
+  // (compact layout, 2026-11-10) the jitter and rotation seeds: a coin's pre-order index and its family's id in the FULL build
+  // (data.js S.seed / f.seed, set only for a build made from the Key's filtered set), so a family looks the same in every
+  // filtered build that keeps the same coins of it; a mask-15 build seeds by the index itself, exactly as before
+  const SEED = S.seed || null;
+  const sd = SEED ? (i) => SEED[i] : (i) => i, fs = (f) => (f.seed ?? f.id);
 
   // ---------- sizes: market cap on a log scale, floor + cap ($2k = 1 u, $10k ≈ 2.1 u, $40k ≈ 3 u, $400k ≈ 4.5 u, cap 7 u) ----------
   const rad = (m) => !(m > 0) ? 0.55 : m < 2000 ? 0.55 + 0.45 * clamp01(Math.log(m / 300) / Math.log(2000 / 300)) : Math.min(7, 1 + 1.54 * Math.log10(m / 2000));
@@ -171,7 +176,7 @@ export async function buildLayout(S, pause = null) {
     let c0 = 1;
     for (;; c0++) { let s = 0; for (let j = 0; j < m; j++) s += capOf(c0, j); if (s >= n) break; }
     b.rows = []; let k = 0;
-    const flip = rnd(b.p, 33) < 0.5, offSign = rnd(b.p, 34) < 0.5 ? 1 : -1;
+    const flip = rnd(sd(b.p), 33) < 0.5, offSign = rnd(sd(b.p), 34) < 0.5 ? 1 : -1;
     for (let j = 0; j < m && k < n; j++) {
       const cap = capOf(c0, j), mem = b.ch.slice(k, k + cap); k += cap;
       const s = new Array(mem.length); let L = 0, Rr = 0;
@@ -192,7 +197,7 @@ export async function buildLayout(S, pause = null) {
 
   // small broods (1-3 children) step out by up to ~1 slot, deterministic per parent: generations stay
   // banded but singletons no longer line up into a bead ring
-  const stagger = (b, slotAvg) => b.ch.length <= 3 ? rnd(b.p, 35) * 1.0 * slotAvg : b.ch.length <= 7 ? rnd(b.p, 35) * 0.5 * slotAvg : 0;
+  const stagger = (b, slotAvg) => b.ch.length <= 3 ? rnd(sd(b.p), 35) * 1.0 * slotAvg : b.ch.length <= 7 ? rnd(sd(b.p), 35) * 0.5 * slotAvg : 0;
 
   // pack circles {t (target angle), rad, w (priority), st (radial step-out)} outside the edge radius eIn with gutters;
   // each as close as possible to the point straight out at its target angle; returns centres. Biggest first, unless
@@ -307,12 +312,12 @@ export async function buildLayout(S, pause = null) {
     const ord = ch.slice().sort((a, b) => ((crt ? crt[a] : 0) - (crt ? crt[b] : 0)) || mc[b] - mc[a] || a - b);
     const g0 = SEED_GAP, r0 = R[p] + g0, rho0 = (c) => U[c] + g0 / 2;
     const totA = ord.reduce((s, c) => s + hexA(rho0(c)), 0), Rout = Math.sqrt(r0 * r0 + totA / Math.PI);
-    const ph1 = rnd(p, 65) * TAU, ph2 = rnd(p, 66) * TAU, a0 = corridor ? 0 : rnd(p, 61) * TAU;
+    const ph1 = rnd(sd(p), 65) * TAU, ph2 = rnd(sd(p), 66) * TAU, a0 = corridor ? 0 : rnd(sd(p), 61) * TAU;
     const items = []; let cum = 0;
     ord.forEach((c, j) => {
       const A0 = hexA(rho0(c)), rg = Math.sqrt(r0 * r0 + (cum + 0.5 * A0) / Math.PI); cum += A0;
       const u = clamp01((rg - r0) / Math.max(1e-6, Rout - r0));
-      const a = a0 + j * GOLDEN + (rnd(c, 63) - 0.5) * 0.9 * (2 * rho0(c)) / Math.max(rg, 1);
+      const a = a0 + j * GOLDEN + (rnd(sd(c), 63) - 0.5) * 0.9 * (2 * rho0(c)) / Math.max(rg, 1);
       const gm = 1 + 0.17 * Math.sin(2 * a + 6.5 * u + ph1) + 0.08 * Math.sin(5 * a - 10 * u + ph2);
       items.push({ c, a, rg, rho: U[c] + 0.5 * g0 * gm });
     });
@@ -387,7 +392,7 @@ export async function buildLayout(S, pause = null) {
     if (isRoot) {
       const core = ch.filter((c) => kids[c].length <= SAT_MIN).sort((a, b) => mc[b] - mc[a] || U[b] - U[a] || a - b);
       const sat = ch.filter((c) => kids[c].length > SAT_MIN).sort((a, b) => U[b] - U[a] || mc[b] - mc[a] || a - b);
-      const a0 = rnd(p, 67) * TAU, GUT = 1.4, m = new Map();
+      const a0 = rnd(sd(p), 67) * TAU, GUT = 1.4, m = new Map();
       let med = 1; if (core.length) { const r = core.map((c) => U[c]).sort((x, y) => x - y); med = r[r.length >> 1]; }
       const grid = circleGrid(Math.max(1.5, 2 * (med + GUT / 2)));
       if (core.length) {   // the core grows like a seed head: by market cap, golden-angle targets, smallest free radius
@@ -418,7 +423,7 @@ export async function buildLayout(S, pause = null) {
     const half = Math.min(A, 0.5 * need), step = n > 1 ? 2 * half / (n - 1) : 0;
     const slots = []; for (let q = 0; q < n; q++) slots.push(-half + q * step);
     slots.sort((x, y) => Math.abs(x) - Math.abs(y) || x - y);
-    const flip = rnd(p, 68) < 0.5 ? -1 : 1;
+    const flip = rnd(sd(p), 68) < 0.5 ? -1 : 1;
     const cen = packTier(ord.map((c, k) => ({ t: flip * slots[k], rad: U[c], w: mc[c] })), R[p] + EG, EG);
     const m = new Map(); ord.forEach((c, k) => m.set(c, cen[k]));
     return ch.map((c) => m.get(c));
@@ -550,8 +555,8 @@ export async function buildLayout(S, pause = null) {
       // ---- deterministic jitter (crowns + root ring), whole units: radius +-a*slot (inner row outward only), angle +-0.2*step ----
       for (const [i, slot, inner, a] of jit) {
         const r0 = Math.hypot(X[i], Y[i]), t0 = Math.atan2(Y[i], X[i]);
-        const jr = (rnd(i, 31) - (inner ? 0 : 0.5)) * 2 * a * slot * (inner ? 0.5 : 1);
-        const r = r0 + jr, th = t0 + (rnd(i, 32) - 0.5) * 0.4 * slot / Math.max(1, r0);
+        const jr = (rnd(sd(i), 31) - (inner ? 0 : 0.5)) * 2 * a * slot * (inner ? 0.5 : 1);
+        const r = r0 + jr, th = t0 + (rnd(sd(i), 32) - 0.5) * 0.4 * slot / Math.max(1, r0);
         moveUnit(i, Math.cos(th) * r - X[i], Math.sin(th) * r - Y[i]);
       }
       // band limits for the collision pass: band 1 never reaches into the gutter before band 2
@@ -585,7 +590,7 @@ export async function buildLayout(S, pause = null) {
     const big = kids[top].slice().sort(byMc)[0];
     // (round 2 final) 100 deg +- 55 deg (was 75 +- 15): at the overview the biggest child sat tangent to nearly every chip at
     // 12 o'clock and read as a row of notification badges. Still clear of the E label slot.
-    const rot = (100 + (rnd(f.id, 5) - 0.5) * 110) * DEG - Math.atan2(Y[big], X[big]);
+    const rot = (100 + (rnd(fs(f), 5) - 0.5) * 110) * DEG - Math.atan2(Y[big], X[big]);
     const cr = Math.cos(rot), sr = Math.sin(rot);
     for (const i of f.members) { const x = X[i], y = Y[i]; X[i] = x * cr - y * sr; Y[i] = x * sr + y * cr; NR[i] = Math.hypot(X[i], Y[i]); TH[i] = norm2pi(Math.atan2(Y[i], X[i])); }
     NR[top] = 0; TH[top] = norm2pi(rot);
@@ -685,7 +690,7 @@ export async function buildLayout(S, pause = null) {
             let dx = X[j] - X[i], dy = Y[j] - Y[i]; const need = R[i] + R[j] + EG; const d2 = dx * dx + dy * dy;
             if (d2 >= need * need - 1e-6) continue;
             let d = Math.sqrt(d2);
-            if (d < 1e-6) { const a2 = rnd(i + j, 7) * TAU; dx = Math.cos(a2); dy = Math.sin(a2); d = 0; } else { dx /= d; dy /= d; }
+            if (d < 1e-6) { const a2 = rnd(sd(i) + sd(j), 7) * TAU; dx = Math.cos(a2); dy = Math.sin(a2); d = 0; } else { dx /= d; dy /= d; }
             const ov = need - d + 1e-3;
             // mover: the deeper one, else the smaller one (j is never larger than i); equal size and depth: split
             if (DEP[i] !== DEP[j] || R[i] !== R[j]) {
@@ -717,7 +722,7 @@ export async function buildLayout(S, pause = null) {
     const top = f.top, dbg = [];
     for (const i of f.members) { LOC[i] = 0; U[i] = R[i]; UOX[i] = 0; UOY[i] = 0; }
     X[top] = 0; Y[top] = 0; NR[top] = 0; DEP[top] = 0;
-    const rot = rnd(f.id, 5) * TAU;
+    const rot = rnd(fs(f), 5) * TAU;
     if (f.members.length === 1) {
       TH[top] = norm2pi(rot);
       Object.assign(f, { bandIn: [0], bandOut: [R[top]], ring: [0], count: [1], arcR: [0], genSpan: [[]], Rc: R[top], coreR: R[top], dbg, noArc: [], layoutMode: "galaxy" });

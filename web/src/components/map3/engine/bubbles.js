@@ -1,7 +1,7 @@
 // (map3 port) Copied from the prototype. Changed: logos come ONLY through opts.images (the app's bounded loader: hi logos
 // want(url, 256), lo logos want(url, 128), lo requested first so the planet tops get the newest stamps; re-checked on
 // images.onLoaded at most every 250 ms; no Image(), no fetch); canvas fonts are Geist Mono (monograms stay disabled);
-// a highlight mask per instance (setHl: unmatched coins dim to TOK.dim, 160 ms crossfade); every geometry, material,
+// a highlight mask per instance (setVis: unmatched coins dim to TOK.dim, 160 ms crossfade); every geometry, material,
 // atlas texture and the glyph texture is disposed with the engine; __bubbleLOD -> S.debugFns.bubbleLOD.
 // bubbles.js: the coins. Logo atlases + one instanced impostor mesh (flat opaque dots, matte spheres, crisp 1 px heat
 // rims that double as the 24 h gauge, live-only cores, logo chips, quiet monograms, knock-out halos, hover/selection rings).
@@ -54,11 +54,17 @@
 //   Debug: S.debug.obj.bubbles (shadows stays null: the drop-shadow pass is deleted); S.debug.map.logos (cells reserved at
 //          build: the HI planets plus the pinned LO tops, not every top);
 //          S.debugFns.bubbleLOD() -> per-LOD instance counts at the current zoom + HDR emitter count.
-//   (map3 port) setHl(bitOf(i) -> 0|1, tSec?)  highlight mask over every instance (births included); logoPx(i) = atlas
-//                                cell px once that coin's logo is drawn (256 hi, 128 lo), else 0.
+//   (map3 port) logoPx(i) = atlas cell px once that coin's logo is drawn (256 hi, 128 lo), else 0.
+//   (the Key's last-trade filter, 2026-11-10) setVis(coins | null, tSec = now)  every instance's alpha follows its code in S.vis.a
+//                                (vis.js: 0 hidden, 1 dim = an anchor or a coin the ?hl highlight does not match, 2 full;
+//                                the old setHl mask is folded into it), crossfading 160 ms from what it shows now, per instance
+//                                (aHl = from, to, start), so a coin a trade reveals fades in alone. The galaxy coronas follow
+//                                their family top (hidden when nothing of the family is drawn). A hidden coin takes no logo cell
+//                                (assignCells), asks for no logo, does not breathe; a cell owner the filter reveals asks then.
 import * as THREE from "three";
 import { TOK, GAL, FONT, heatClass, coreBoost } from "./tokens.js";
 import { rnd } from "./util.js";
+import { VIS_ALPHA } from "./vis.js";
 
 // LOD (screen radius, CSS px; spec R10). Bands crossfade over +-0.4 px so zooming never pops.
 // (final polish) bands moved up from the spec 3 / 8: below 8 px a coin is a FLAT, OPAQUE disc (no rim: a seed head reads as
@@ -134,6 +140,10 @@ export function buildBubbles(S) {
   const scene = S.gfx.scene;
   // (visibility lane) shared focus uniforms (physics declares them in state.js; ??= keeps this file working before that lands)
   U.uFocusCoin ??= { value: -1 }; U.uFocusT ??= { value: 0 }; U.uFocusDim ??= { value: 0 };
+  // (last-trade filter) the levels (vis.js, index.js computed them before the build; motion.js owns them). null = all drawn
+  const V = S.vis || null;
+  const visA = (i) => VIS_ALPHA[V && i < V.a.length ? V.a[i] : 2];
+  const visHid = (i) => !!(V && V.on && V.level[i] === 0);
   const tBuild = performance.now();
   // (galaxy look, 2026-10-21) G = galaxy look; T = S.tok (GAL over TOK) or TOK, so the flat look reads the very same values.
   // Every galaxy change in JS sits behind G, every GLSL change behind #ifdef GALAXY (defines set only when G): flat stays
@@ -386,16 +396,17 @@ export function buildBubbles(S) {
   };
   if (images) {
     // newest want first: the most important coin is asked LAST (lo tops by share, then the planet tops by family rank)
-    const loByShare = loTops.filter((i) => img[i]).sort((a, b) => (fams[famOf[a]].share || 0) - (fams[famOf[b]].share || 0));
+    // (last-trade filter) a top the filter hides keeps its reserved cell but asks for nothing until it is revealed (setVis)
+    const loByShare = loTops.filter((i) => img[i] && !visHid(i)).sort((a, b) => (fams[famOf[a]].share || 0) - (fams[famOf[b]].share || 0));
     if (G) {
       for (const i of loByShare) wantLogo(i);
-      for (let q = hiList.length - 1; q >= 0; q--) wantLogo(hiList[q]);
+      for (let q = hiList.length - 1; q >= 0; q--) if (!visHid(hiList[q])) wantLogo(hiList[q]);
     } else {
       // (bubbles lane, look fix 2026-10-22) flat: at build only the PLANET tops are asked (at 64, smallest share first: the biggest
       // is asked last, served first). A dust-family top is not drawn at the overview (its disc fades in with uDustExpand from
       // 1.6 k0, see the vertex shader), so its logo is asked by assignCells (P1) once it is on screen and drawn >= LOGO_MIN_PX.
       // Before, every one of the ~2,300 tops was queued at the overview and the on-screen ones at 4x waited ~20 s behind them.
-      const all = hiList.filter((i) => img[i]).sort((a, b) => (fams[famOf[a]].share || 0) - (fams[famOf[b]].share || 0));
+      const all = hiList.filter((i) => img[i] && !visHid(i)).sort((a, b) => (fams[famOf[a]].share || 0) - (fams[famOf[b]].share || 0));
       for (const i of all) wantLogo(i);
     }
     let off = null;
@@ -446,7 +457,10 @@ export function buildBubbles(S) {
   // (round 2) birth start (s), birth mode (0 scale, 1 fade), seed-head size factor (drawn / layout R once zoomed past 2k0)
   const aBirth = new Float32Array(CAP * 3); for (let k = 0; k < CAP; k++) { aBirth[k * 3] = -1e3; aBirth[k * 3 + 1] = 0; aBirth[k * 3 + 2] = 1; }
   const aXY = new Float32Array(CAP * 2);                 // (round 2) world centre, re-read from S.X/S.Y when a coin moves
-  const aHl = new Float32Array(CAP * 2).fill(1);         // (map3 port) highlight: (shown when the crossfade started, target)
+  // (map3 port) highlight, (last-trade filter) and visibility: one alpha per instance, (shown when its crossfade started,
+  // target, start s on the uTime clock); targets VIS_ALPHA[S.vis.a[coin]] = 0 hidden, TOK.dim, 1
+  const aHl = new Float32Array(CAP * 3);
+  for (let k = 0; k < CAP; k++) { aHl[k * 3] = aHl[k * 3 + 1] = 1; aHl[k * 3 + 2] = -1e3; }
   const mX = new Float32Array(CAP), mY = new Float32Array(CAP);   // the S.X/S.Y values last uploaded, per COIN
   const m4 = new THREE.Matrix4();
   const bubbles = new THREE.InstancedMesh(bGeo, null, CAP);
@@ -482,13 +496,14 @@ export function buildBubbles(S) {
     aBirth[k * 3 + 2] = R[i] > 0 ? rr / R[i] : 1;
     m4.makeScale(R[i], R[i], 1); m4.setPosition(X[i], Y[i], f.planet ? 2 : 1); bubbles.setMatrixAt(k, m4);
     aXY[k * 2] = mX[i] = X[i]; aXY[k * 2 + 1] = mY[i] = Y[i];
+    aHl[k * 3] = aHl[k * 3 + 1] = visA(i);   // (last-trade filter) the first frame draws what the Key shows
   }
   const aIn = new Float32Array(CAP), atIn = new THREE.InstancedBufferAttribute(aIn, 1); atIn.setUsage(THREE.DynamicDrawUsage);
   bGeo.setAttribute("aIn", atIn);
   const atHeat = new THREE.InstancedBufferAttribute(aHeat, 4), atFlash = new THREE.InstancedBufferAttribute(aFlash, 3);
   const atBirth = new THREE.InstancedBufferAttribute(aBirth, 3), atXY = new THREE.InstancedBufferAttribute(aXY, 2);
   const atA = new THREE.InstancedBufferAttribute(aA, 4), atB = new THREE.InstancedBufferAttribute(aB, 4);
-  const atHl = new THREE.InstancedBufferAttribute(aHl, 2);
+  const atHl = new THREE.InstancedBufferAttribute(aHl, 3);
   for (const at of [atHeat, atFlash, atBirth, atXY, atHl, atA]) at.setUsage(THREE.DynamicDrawUsage);
   // (visibility lane) a coin's atlas code changed (logo landed, cell lost, pre-fill): one float of aA
   setCode = (i) => { const k = invIdx[i]; const c = codeFor(i); if (i < CAP) logoIdx[i] = c; if (k < 0 || aA[k * 4 + 2] === c) return; aA[k * 4 + 2] = c; touch(atA, k * 4 + 2, 1); S.invalidate(); };
@@ -509,7 +524,6 @@ uniform float uPx, uDpr, uTime, uDustExpand, uHover, uHoverFam, uMinScale, uDimM
 uniform vec3 uRim[4]; uniform float uRimA[4]; uniform float uFlatA[4]; uniform vec3 uBodyS[4]; uniform vec3 uBodyF[4]; uniform vec3 uFlatC[4];
 uniform float uLogoSat[4]; uniform float uLogoVal[4]; uniform vec3 uCore[2]; uniform vec3 uGround;
 uniform float uBreath; uniform vec3 uPulseCol, uGlowCol;
-uniform float uHlT0;    // (map3 port) start of the last highlight crossfade (s, uTime clock)
 uniform float uAnimT, uGalT, uFlow, uLook; uniform float uHeatK[4];   // (galaxy) declared in both looks, read under GALAXY only
 uniform float uFocusCoin, uFocusT, uFocusDim;   // (visibility lane) the focus lane animates them
 #ifdef GALAXY
@@ -517,7 +531,7 @@ varying vec2 vFoc;      // (visibility lane) focus weight of THIS coin (uFocusT)
 varying vec4 vGal;      // (galaxy) brightness breath, rim annulus thickness (device px), hover-sweep x (9 = none), birth ripple t (-1 = none)
 varying vec2 vGal2;     // (galaxy) full radius (device px, before the birth scale), live weight
 #endif
-attribute vec2 aHl;     // (map3 port) highlight: (shown value when the crossfade started, target); 1 = match, 0 = dimmed
+attribute vec3 aHl;     // (map3 port + last-trade filter) alpha: (shown when its crossfade started, target, start s); 0 hidden, TOK.dim, 1
 attribute vec2 aXY;     // (round 2) world centre (follows S.X/S.Y; the instance matrix keeps scale + z)
 attribute vec3 aBirth;  // (round 2) birth start (s), mode (0 scale, 1 fade), seed-head size factor
 attribute vec4 aHeat;   // cls, prevCls, tChange (s), coreBoost
@@ -578,8 +592,9 @@ void main(){
   if (uHoverFam > -0.5 && abs(aB.z - uHoverFam) > 0.5) a *= mix(1.0, ${f3(TOK.dim)}, uDimMix);
   // (final polish) focus: when a family owns the view the others recede
   if (uFocusFam > -0.5 && abs(aB.z - uFocusFam) > 0.5 && abs(aB.z - uHoverFam) > 0.5) a *= mix(1.0, ${f3(G ? 1.0 : FOCUS_DIM)}, uFocusMix);
-  // (map3 port) highlight: a coin that does not match dims like the hover dim (160 ms crossfade); hit-testing is unchanged
-  a *= mix(${f3(TOK.dim)}, 1.0, mix(aHl.x, aHl.y, smoothstep(uHlT0, uHlT0 + 0.16, uTime)));
+  // (map3 port) highlight: a coin that does not match dims like the hover dim (160 ms crossfade); (last-trade filter) an
+  // anchor dims the same, a hidden coin goes to 0 (and is culled below); motion.js keeps the hit test in step
+  a *= mix(aHl.x, aHl.y, smoothstep(aHl.z, aHl.z + 0.16, uTime));
   // heat class crossfade in time (never through hue space)
   int ci = int(aHeat.x + 0.5), pi = int(aHeat.y + 0.5);
   float t = smoothstep(aHeat.z, aHeat.z + 0.6, uTime);
@@ -879,7 +894,6 @@ void main(){
       uBody: { value: C(TOK.body) }, uSep: { value: C(TOK.sep) }, uArcCol: { value: C(TOK.arc) }, uHoverCol: { value: C(TOK.hover) },
       uArcA: { value: TOK.arcA }, uTrackA: { value: TOK.arcTrackA }, uSelected: { value: -1 },
       uBreath: { value: 0 }, uPulseCol: { value: C(TOK.pulse) }, uGlowCol: { value: C(TOK.ink).multiplyScalar(0.8) },
-      uHlT0: { value: -1e3 },
     },
     vertexShader: BUBBLE_VS, fragmentShader: BUBBLE_FS,
     transparent: true, depthTest: false, depthWrite: false,
@@ -896,11 +910,13 @@ void main(){
   // core: r = 5 coreR (screen floor coreMinPx(share, maxShare) x 2.6 dpr), family heat x heatK, alpha 0.30 fading in by 1.6 k0;
   // hull: r = 1.1 Rc, alpha 0.045 live / 0.025 fading in by 3 k0. FS g = exp(-4.2 d^2) (1 - smoothstep(0.85, 1, d)). The core
   // breathes like its body (uAnimT), flashCorona(i) doubles it for 600 ms. Both follow the family top (drags carry them).
-  let glows = null, flashCorona = () => false, glowTick = () => false;
+  let glows = null, flashCorona = () => false, glowTick = () => false, glowVis = () => 0;
   if (G && planets.length) {
     const NP = planets.length, NG = NP * 2;
     const gGeo = new THREE.InstancedBufferGeometry(); gGeo.index = quad.index; gGeo.setAttribute("position", quad.getAttribute("position"));
     const aGC = new Float32Array(NG * 2), aGP = new Float32Array(NG * 4), aGH = new Float32Array(NG * 2);
+    // (last-trade filter) per instance: (shown when its crossfade started, target, start s): 0 when the family top is hidden
+    const aGV = new Float32Array(NG * 3);
     const offX = new Float32Array(NP), offY = new Float32Array(NP), famCls = new Uint8Array(NP);
     const coreMinPx = typeof T.coreMinPx === "function" ? T.coreMinPx : GAL.coreMinPx;
     const famClass = (f) => { let c = cls[f.top]; for (const m of f.members) { const v = cls[m]; if (v < c) { c = v; if (!c) break; } } return c; };
@@ -911,10 +927,12 @@ void main(){
       aGP.set([(T.coreRk || GAL.coreRk) * coreR, 0, f.id, coreMinPx(f.share, maxShare)], q * 8);
       aGP.set([(T.hullRk || GAL.hullRk) * Rc, 1, f.id, 0], q * 8 + 4);
       aGH.set([famCls[q], -1e3, famCls[q], -1e3], q * 4);
+      const gv = visHid(f.top) ? 0 : 1; aGV.set([gv, gv, -1e3, gv, gv, -1e3], q * 6);
     });
     const atGC = new THREE.InstancedBufferAttribute(aGC, 2), atGP = new THREE.InstancedBufferAttribute(aGP, 4), atGH = new THREE.InstancedBufferAttribute(aGH, 2);
-    atGC.setUsage(THREE.DynamicDrawUsage); atGH.setUsage(THREE.DynamicDrawUsage);
-    gGeo.setAttribute("aGC", atGC); gGeo.setAttribute("aGP", atGP); gGeo.setAttribute("aGH", atGH);
+    const atGV = new THREE.InstancedBufferAttribute(aGV, 3);
+    atGC.setUsage(THREE.DynamicDrawUsage); atGH.setUsage(THREE.DynamicDrawUsage); atGV.setUsage(THREE.DynamicDrawUsage);
+    gGeo.setAttribute("aGC", atGC); gGeo.setAttribute("aGP", atGP); gGeo.setAttribute("aGH", atGH); gGeo.setAttribute("aGV", atGV);
     const hullA = T.hullA || GAL.hullA;
     const gMat = new THREE.ShaderMaterial({
       uniforms: { ...U, uRim: bMat.uniforms.uRim, uHeatK: bMat.uniforms.uHeatK, uBreath: bMat.uniforms.uBreath,
@@ -922,7 +940,7 @@ void main(){
       vertexShader: /* glsl */`
 uniform float uPx, uDpr, uTime, uAnimT, uK0, uHoverFam, uDimMix, uFadeP, uFocusFam, uFocusMix, uBreath;
 uniform vec3 uRim[4]; uniform float uHeatK[4];
-attribute vec2 aGC; attribute vec4 aGP; attribute vec2 aGH;
+attribute vec2 aGC; attribute vec4 aGP; attribute vec2 aGH; attribute vec3 aGV;
 varying vec2 vP; varying vec3 vCol; varying float vA;
 const float TAU_V = 6.28318530718;
 void main(){
@@ -942,6 +960,7 @@ void main(){
   a *= uFadeP;
   if (uHoverFam > -0.5 && abs(aGP.z - uHoverFam) > 0.5) a *= mix(1.0, ${f3(TOK.dim)}, uDimMix);
   if (uFocusFam > -0.5 && abs(aGP.z - uFocusFam) > 0.5 && abs(aGP.z - uHoverFam) > 0.5) a *= mix(1.0, ${f3(G ? 1.0 : FOCUS_DIM)}, uFocusMix);
+  a *= mix(aGV.x, aGV.y, smoothstep(aGV.z, aGV.z + 0.16, uTime));   // (last-trade filter) nothing of the family drawn: no corona
   vCol = uRim[ci]; vA = a; vP = position.xy;   // (visibility) monolith M:377: lin(heatHex) x alpha, no HDR heatK (x1.9 blew $Kimchi out to white)
   gl_Position = projectionMatrix * viewMatrix * vec4(aGC + position.xy * rpx / uPx, 0.5, 1.0);
   if (a < 0.002) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -989,6 +1008,21 @@ void main(){
       aGH[q * 4 + 1] = t; atGH.needsUpdate = true; S.invalidate();
       glowFlashUntil = Math.max(glowFlashUntil, t + 0.65);
       return true;
+    };
+    // (last-trade filter) the core + hull glow of a planet follow its top: gone (160 ms) when nothing of the family is drawn.
+    // list = coins whose code changed (null: every planet); only the tops among them matter
+    glowVis = (list, t) => {
+      let n = 0;
+      const one = (q) => {
+        const to = visHid(planets[q].top) ? 0 : 1, o = q * 6;
+        if (aGV[o + 1] === to) return;
+        for (const b of [o, o + 3]) { const e = smoothJ(aGV[b + 2], aGV[b + 2] + 0.16, t); aGV[b] += (aGV[b + 1] - aGV[b]) * e; aGV[b + 1] = to; aGV[b + 2] = t; }
+        n++;
+      };
+      if (list == null) for (let q = 0; q < NP; q++) one(q);
+      else for (const i of list) { if (!(i >= 0 && i < N)) continue; const q = qOfFam[famOf[i]]; if (q >= 0 && planets[q].top === i) one(q); }
+      if (n) { atGV.needsUpdate = true; glowFlashUntil = Math.max(glowFlashUntil, t + 0.2); S.invalidate(); }
+      return n;
     };
     S.life.onDispose(() => { scene.remove(glows); if (!S.contextLost) { gGeo.dispose(); gMat.dispose(); } });
   }
@@ -1114,7 +1148,8 @@ void main(){
     aA.set([nt ? 1.5 : 0, Math.min(1, Math.log10(1 + Math.max(0, nn)) / TOK.arcLogDen), -1, nt], k * 4);   // (round 2 final) no monogram
     aB.set([f && f.planet ? 0 : 1, i, f ? f.id : -1, top ? 1 : 0], k * 4);
     aFlash[k * 3] = aFlash[k * 3 + 1] = aFlash[k * 3 + 2] = -1e3; aBirth[k * 3] = -1e3; aBirth[k * 3 + 1] = 0; aBirth[k * 3 + 2] = 1; aIn[k] = 0;
-    { const hv = typeof S.hlBit === "function" ? (S.hlBit(i) ? 1 : 0) : 1; aHl[k * 2] = hv; aHl[k * 2 + 1] = hv; touch(atHl, k * 2, 2); }   // (map3 port)
+    // (map3 port) highlight, (last-trade filter) visibility: motion set the newborn's code before this call
+    { const hv = visA(i); aHl[k * 3] = hv; aHl[k * 3 + 1] = hv; aHl[k * 3 + 2] = -1e3; touch(atHl, k * 3, 3); }
     aXY[k * 2] = mX[i] = x; aXY[k * 2 + 1] = mY[i] = y;
     m4.makeScale(r, r, 1); m4.setPosition(x, y, f && f.planet ? 2 : 1); bubbles.setMatrixAt(k, m4); drawR[i] = r;
     touch(bubbles.instanceMatrix, k * 16, 16);
@@ -1171,19 +1206,35 @@ void main(){
     insideNow = next; if (any) S.invalidate();
   }
   function selectCoin(i) { bMat.uniforms.uSelected.value = i == null || i < 0 ? -1 : i; selCoin = i == null || i < 0 ? -1 : i; S.invalidate(); }
-  // (map3 port) highlight mask: bitOf(coin) -> 1 match / 0 dimmed, for every instance in use (births included). One
-  // crossfade for all of them (160 ms): each starts from what it shows now.
-  const uHlT0 = bMat.uniforms.uHlT0;
-  function setHl(bitOf, tSec) {
-    const t = nowT(tSec), e = smoothJ(uHlT0.value, uHlT0.value + 0.16, t);
-    for (let k = 0; k < count; k++) {
-      const o = k * 2, i = perm[k], cur = bitOf(i) ? 1 : 0;
-      aHl[o] = aHl[o] + (aHl[o + 1] - aHl[o]) * e; aHl[o + 1] = cur;
-    }
-    uHlT0.value = t; animUntil = Math.max(animUntil, t + 0.2);
-    atHl.clearUpdateRanges(); fullAttrs.delete(atHl); atHl.needsUpdate = true; S.invalidate();
+  // (map3 port) highlight + (last-trade filter) visibility: every listed coin (null: every instance in use, births included)
+  // takes the alpha of its code in S.vis.a, crossfading 160 ms from what it shows now, from its OWN start (aHl.z): a coin a
+  // trade reveals fades in alone while the rest hold. A cell owner the filter reveals asks for its logo now (its want was
+  // skipped while hidden); the next cell pass may give the others a cell.
+  const fullUpload = (attr) => {   // one whole upload; ranges stay off until it happened (see touch)
+    attr.clearUpdateRanges(); fullAttrs.add(attr);
+    if (!attr.__fullHook) { attr.__fullHook = true; attr.onUpload(() => fullAttrs.delete(attr)); }
+    attr.needsUpdate = true;
+  };
+  function setVis(list, tSec) {
+    const t = tSec == null ? performance.now() / 1000 : tSec;   // a fade starts now (uTime is the last frame's time)
+    let n = 0;
+    const one = (i) => {
+      const k = invIdx[i]; if (!(k >= 0)) return;
+      const o = k * 3, to = Math.fround(visA(i));
+      if (aHl[o + 1] === to) return;
+      const e = smoothJ(aHl[o + 2], aHl[o + 2] + 0.16, t);
+      aHl[o] += (aHl[o + 1] - aHl[o]) * e; aHl[o + 1] = to; aHl[o + 2] = t;
+      if (list != null) touch(atHl, o, 3);
+      if (to > 0 && img && img[i] && (hiC[i] >= 0 || loC[i] >= 0) && !hiHas[i] && !loHas[i] && !pendingLogo.has(i) && !failedLogo.has(i) && !dirty.has(i)) wantLogo(i);
+      n++;
+    };
+    if (list == null) { for (let k = 0; k < count; k++) one(perm[k]); if (n) fullUpload(atHl); }
+    else for (const i of list) if (i >= 0 && i < CAP) one(i);
+    glowVis(list, t);
+    if (n) { animUntil = Math.max(animUntil, t + 0.2); needAssign = true; S.invalidate(); }
+    return n;
   }
-  const hlOf = (i) => { const k = invIdx[i]; return k >= 0 ? aHl[k * 2 + 1] : 1; };
+  const hlOf = (i) => { const k = invIdx[i]; return k >= 0 ? aHl[k * 3 + 1] : 1; };
   const logoPx = (i) => (i >= 0 && i < CAP ? (hiC[i] >= 0 && hiHas[i] ? hiHas[i] : loC[i] >= 0 && loHas[i] ? loHas[i] : 0) : 0);
 
   // ======================= (visibility lane) atlas cell assignment + coverage debug =======================
@@ -1222,7 +1273,7 @@ void main(){
     const cand = [], cr = [];
     for (let q = 0; q < count; q++) {
       const i = perm[q];
-      if (i >= nI || !img[i] || failedLogo.has(i)) continue;
+      if (i >= nI || !img[i] || failedLogo.has(i) || visHid(i)) continue;   // (last-trade filter) a hidden coin takes no cell
       if (isTop[i]) {
         // (local fix) an unpinned top without a cell competes for one like a child, once it is drawn (planets always; a
         // dust-family top once the field has handed off) at the logo size; a pinned top only refreshes its LRU stamp. Only
@@ -1270,7 +1321,7 @@ void main(){
     const p3 = [], p1 = [];
     const dustOn = G || S.dustExpand > 0.02;
     if (!G) for (const f of fams) {
-      const i = f.top; if (!(i >= 0) || i >= nI || !img[i] || failedLogo.has(i) || invIdx[i] < 0) continue;
+      const i = f.top; if (!(i >= 0) || i >= nI || !img[i] || failedLogo.has(i) || invIdx[i] < 0 || visHid(i)) continue;
       if (!f.planet && !dustOn) continue;
       const q = invIdx[i], r = screenR(i); if (r < LOGO_MIN_PX || !onScreenQ(q, r, W, H, k)) continue;
       if (hiC[i] >= 0 && r >= HI_UP_PX && !hiWant[i]) { hiWant[i] = 1; p3.push(i); }
@@ -1312,13 +1363,14 @@ void main(){
   const scrOf = (q) => { const k = S.cam.k; return { x: (aXY[q * 2] - S.cam.x) * k + S.W() / 2, y: S.H() / 2 - (aXY[q * 2 + 1] - S.cam.y) * k }; };
   // (look fix) withDust: keep the dust specks (dust.js, S.debug.obj.dustPts) in the probe too: in the flat look a small family's
   // top at the overview IS its speck, so topVis counts it there
-  const probePx = (withDust = false) => {
+  // (last-trade filter) all: the whole scene (every layer), for visPx below
+  const probePx = (withDust = false, all = false) => {
     const gfx = S.gfx, rr = gfx && gfx.renderer, comp = gfx && gfx.composer, sc = gfx && gfx.scene;
     if (!rr || !comp || !sc || S.contextLost) return null;
     if (S.motion && typeof S.motion.applyCam === "function") S.motion.applyCam();
     const hidden = [];
     const keepDust = withDust && S.debug && S.debug.obj ? S.debug.obj.dustPts : null;
-    sc.traverse((o) => { if (o !== sc && o !== bubbles && o !== keepDust && o.visible && (o.isMesh || o.isPoints || o.isLine)) { o.visible = false; hidden.push(o); } });
+    if (!all) sc.traverse((o) => { if (o !== sc && o !== bubbles && o !== keepDust && o.visible && (o.isMesh || o.isPoints || o.isLine)) { o.visible = false; hidden.push(o); } });
     const bl = gfx.bloom, blWas = bl ? bl.enabled : false, cc = new THREE.Color(); rr.getClearColor(cc); const ca = rr.getClearAlpha();
     const g = rr.getContext(), w = g.drawingBufferWidth, h = g.drawingBufferHeight, buf = new Uint8Array(w * h * 4);
     try {
@@ -1334,8 +1386,13 @@ void main(){
       }
       return m;
     };
-    return { maxAt, w, h, dpr };
+    // device pixels whose max channel is >= minMax (the ground is far below it)
+    const lit = (minMax) => { let n = 0; for (let o = 0; o < buf.length; o += 4) if (Math.max(buf[o], buf[o + 1], buf[o + 2]) >= minMax) n++; return n; };
+    return { maxAt, lit, w, h, dpr };
   };
+  // (last-trade filter) QA: lit device pixels of the whole scene (every layer, bloom off): a mask that hides everything leaves
+  // only the ground (and, galaxy, the ambient star field)
+  S.debugFns.visPx = (minMax = 40) => { const P = probePx(false, true); return P ? { lit: P.lit(minMax), w: P.w, h: P.h } : null; };
   const pct = (a, p) => (a.length ? a[Math.min(a.length - 1, Math.floor(a.length * p))] : null);
   const inFit = (p, fr) => p.x >= fr.x0 && p.x <= fr.x1 && p.y >= fr.y0 && p.y <= fr.y1;
   // (look fix) topVis(minMax, withDust = true): bubbles + the dust specks (flat: a small family's top at the overview is its speck);
@@ -1441,10 +1498,12 @@ void main(){
   function breathCheck(now) {
     const k = S.cam.k, ms = U.uMinScale.value, W = S.W(), H = S.H(), k0 = U.uK0.value, dustOn = S.dustExpand > 0.05;
     const rel = 1 - smoothJ(STIP_K0[0] * k0, STIP_K0[1] * k0, k);
+    const vl = V && V.on ? V.level : null;                   // (last-trade filter) a hidden coin does not breathe
     let vis = 0, rMax = 0;
     for (let q = 0; q < count; q++) {
       if (aHeat[q * 4] !== 0) continue;                       // drawn class: live only
       if (aB[q * 4] > 0.5 && !dustOn) continue;              // dust families are hidden at the overview
+      if (vl && vl[perm[q]] === 0) continue;
       let r = Math.max(scaleAt(q, k) * k, aA[q * 4] * ms);
       if (!aB[q * 4 + 3] && !aB[q * 4]) r += (Math.min(r, aA[q * 4 + 3] ? STIP_NOTABLE_PX : STIP_PX) - r) * rel;
       if (r < BREATH_MIN_PX) continue;
@@ -1514,7 +1573,7 @@ void main(){
   Object.assign(S.bubbles, { mesh: bubbles, perm, invIdx, cls, atlas: HIa.rt.texture, atlasHi: HIa.rt.texture, atlasLo: LOa.rt.texture, logoIdx, logoList, setCoinHeat, flashRim, selectCoin, screenR, outerR, setInside, hasLogo: (i) => logoIdx[i] >= 0, drawnPx: screenR, drawsDustTops: G, atlasStats: () => ({ ...up, dirty: dirty.size, pending: pendingLogo.size, failed: failedLogo.size }),
     flashFamily, flashCore, birth, syncXY, addCoin, moveCoin, patchImage, coinIndex, capacity: CAP, count: () => count, drawR, rangesSafe: true,
     glows, flashCorona, look: G ? "galaxy" : "flat",
-    setHl, hlOf, logoPx, breathState: () => ({ on: +uBreath.value.toFixed(2), asleep: !!breath.asleep, sleepMs: BREATH_SLEEP_MS, sinceInputMs: Math.round(performance.now() - (S.lastInputAt || 0)), visible: breath.vis, rMaxPx: +breath.rMax.toFixed(1), renderEveryMs: Math.round(breath.interval), requests: breath.requests }) });
+    setVis, hlOf, logoPx, breathState: () => ({ on: +uBreath.value.toFixed(2), asleep: !!breath.asleep, sleepMs: BREATH_SLEEP_MS, sinceInputMs: Math.round(performance.now() - (S.lastInputAt || 0)), visible: breath.vis, rMaxPx: +breath.rMax.toFixed(1), renderEveryMs: Math.round(breath.interval), requests: breath.requests }) });
   // (map3 port) teardown: the mesh, its geometry (+ the quad it borrows from), the material, both atlases and the glyphs
   S.life.onDispose(() => {
     scene.remove(bubbles);

@@ -110,9 +110,12 @@ type Props = {
   mode?: SizeMode;
   /// The family loader: a listed asset's undrawn coins continue its kids list. Absent = drawn kids only.
   families?: FamilyStore | null;
+  /// The coin's own last-trade bucket is off in the Key's filter (lib/map/visibility.ts): the map draws it only because it
+  /// is selected. The panel says so, with the way back to every coin (`onShowAll`: ?last=all).
+  lastHidden?: boolean; onShowAll?: () => void;
 };
 
-export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, families = null }: Props) {
+export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, families = null, lastHidden = false, onShowAll }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
   const [sparkRef, sparkW] = useWidth();
@@ -276,6 +279,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
         </div>
         <div className="map-side-spark" ref={sparkRef}>{candles === undefined || sparkW === 0 ? <Skeleton h={SPARK_H} r={8} /> : candles && candles.candles.length >= 2 ? <Sparkline candles={candles.candles} w={sparkW} h={SPARK_H} unit={candles.priceKey} title={`${sym(node)} price, last ${spanLabel(change?.spanS ?? 0)}, ${change ? signedPct(change.ratio) : "no change"}`} /> : <span className="map-spark-none">no candles yet</span>}</div>
       </div>
+      {lastHidden && <p className="map-side-hidden">Hidden by the Key filter · {heat && heat.last > 0 ? <>last trade {ago(heat.last)}</> : "no trade on record"}{onShowAll && <> · <button type="button" className="linkish" onClick={onShowAll} title="Show every coin, whatever its last trade (?last=all)">show all</button></>}</p>}
       <div className="map-side-stats">
         <div><em>mcap</em><strong>{usd(node.mcapUsd)}</strong></div>
         <div><em>children</em><strong>{count(node.children)}{(node.descendants ?? 0) > node.children ? <small> / {count(node.descendants)}</small> : null}</strong></div>

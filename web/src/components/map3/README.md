@@ -33,7 +33,9 @@ pages/Map.tsx ──eager──> map3/probe.ts       WebGL2 + EXT_color_buffer_f
   40 ms), labels (font race of at most 1.5 s), motion, shader compile, first frame.
 - **Lifecycle.** One engine per build. A build happens for the first paint and when the size mode, the roots
   limit or the phone band (container width ≤ 700 px) changes, for a selection the engine does not know, for
-  drift (many unknown or removed coins while the map is idle), and after a lost WebGL context. A new engine
+  drift (many unknown or removed coins while the map is idle), when the Key's last-trade mask changes (reason
+  `last`: rebuilt from lib/map/visibility.ts buildSet's filtered set once the toggles settle), and after a lost WebGL
+  context. A new engine
   renders hidden while the old one stays on screen; on success the old one fades out and is destroyed 160 ms
   later. An unmount aborts any build and destroys everything. `window.__sporeMap3.counters()` counts live
   engines (0 after every unmount).

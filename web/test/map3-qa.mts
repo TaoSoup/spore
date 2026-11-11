@@ -33,6 +33,17 @@
 //   (n) leak: 5 SPA cycles /map → / → /map: counters().live 0 after each, heap growth cycle 1 → 5 ≤ 8 MB after GC,
 //       DOM nodes + JS listeners within 5 % of cycle 1, no "Too many active WebGL contexts", the map works after
 //   (o) other pages: /c/<mint>#tree and /embed/map render .bm-canvas, no map3 chunk; screenshots
+//   (q) last-trade filter (?last=, the Key): every other section runs with last=all (u() / page.navigate append it).
+//       (compact layout) last=all builds every node (lastBuild().filtered false, built = all). No param → ONE rebuild
+//       (builds() + 1, reason "last", filtered) of mask 7 holding only shown + anchor coins (built < all, drift() hidden ~0,
+//       the page's levels ≈ the build), the sampled coins moved, the largest family's shown coins ≥ 2x larger at its fit
+//       (compact(): median radius; links, in coin radii, no longer than at all); a coin the engine hides in place (setLastFilter 3) is not picked at its
+//       spot; a 24 h off/on within 60 ms builds nothing; each settled mask is one build; the Key's buckets write ?last=
+//       (24 h off → 30m,3h; older on → 30m,3h,old; show all → all, a full build; reset → no param), the last bucket on
+//       cannot be switched off, K toggles default ↔ all; a selected coin the build left out is shown next to its parent
+//       and rebuilt in once (select-unknown), with the side panel's "Hidden by the Key filter" line, whose "show all" writes
+//       last=all; lastBuild().families is the engine's family count (buildSet's is rootsKept); a Dominance row of a family the
+//       filtered build left out selects its top and rebuilds once (select-unknown, filtered), framed on it
 //   (p) 0 console errors overall (network errors listed separately)
 //
 //   node --import tsx test/map3-qa.mts --url http://127.0.0.1:5260 --prod --shots <dir> [--only a,b,c] [--chrome-gpu metal|swiftshader]
@@ -40,7 +51,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  INSET_RECT_JS, LOOK, MAP3_ASSET_RE, MOCK_ES, RAF_PROBE, SETTLED_JS, cli, launchChrome, map3AssetsJs, mapReadyJs, rafStatsJs, sleep, withDebug,
+  INSET_RECT_JS, LOOK, MAP3_ASSET_RE, MOCK_ES, RAF_PROBE, SETTLED_JS, cli, launchChrome, map3AssetsJs, mapReadyJs, rafStatsJs, sleep, withDebug, withLast,
   type Browser, type GpuMode, type Page, type RafStats,
 } from "./map3-cdp.mts";
 import { sharePct } from "../src/lib/map/dominance.ts";
@@ -54,7 +65,10 @@ const GPU = (opt("--chrome-gpu", "metal") ?? "metal") as GpuMode;
 const W = 1440, H = 900;
 mkdirSync(SHOTS, { recursive: true });
 const J = JSON.stringify;
-const u = (path: string) => withDebug(path, PROD);
+/// every /map path carries last=all (the whole map, as before the Key's last-trade filter) unless it names its own last=
+const u = (path: string) => withDebug(withLast(path), PROD);
+/// a path exactly as given (section q: no ?last= means the filter's default)
+const uRaw = (path: string) => withDebug(path, PROD);
 const want = (k: string) => !ONLY || ONLY.split(",").map((s) => s.trim()).includes(k);
 const result: Record<string, unknown> = { url: BASE, prod: PROD, gpu: GPU, startedAt: new Date().toISOString() };
 const sections: Record<string, Record<string, unknown>> = {};
@@ -131,6 +145,14 @@ async function openMap(p: Page, path = "/map", renderer: "three" | "classic" = "
   await p.waitFor(mapReadyJs(renderer), timeoutMs, `${renderer} map on ${path}`);
 }
 const spa = (p: Page, path: string) => p.evalJs(`(history.pushState({}, "", ${J(u(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
+const spaRaw = (p: Page, path: string) => p.evalJs(`(history.pushState({}, "", ${J(uRaw(path))}), dispatchEvent(new PopStateEvent("popstate")), true)`);
+/// clicks the centre of the first element matching `sel` (false when there is none or it has no box)
+const clickSel = async (p: Page, sel: string) => {
+  const r = await p.evalJs<{ x: number; y: number; w: number; h: number } | null>(`__qa.rect(${J(sel)})`);
+  if (!r || !(r.w > 0 && r.h > 0)) return false;
+  await p.click(r.x + r.w / 2, r.y + r.h / 2);
+  return true;
+};
 async function settle(p: Page, ms = 30_000, what = "the map to settle") {
   await p.waitFor(SETTLED_JS, ms, what).catch(() => notes.push(`settle timeout: ${what}`));
   await sleep(300);
@@ -141,7 +163,7 @@ const shot = (p: Page, name: string) => p.shot(join(SHOTS, name)).catch((e) => `
 async function toOverview(p: Page) {
   const st = await p.evalJs<{ on: boolean; q: string }>(`({ on: !!(window.__sporeMapPage && __sporeMapPage.renderer && __sporeMapPage.renderer() === "three" && window.__sporeMap && location.pathname === "/map"), q: location.search })`).catch(() => ({ on: false, q: "" }));
   if (!st.on) await openMap(p, "/map");
-  else if (/focus=|hl=|size=|roots=/.test(st.q)) { await spa(p, "/map"); await sleep(1200); }
+  else if (/focus=|hl=|size=|roots=/.test(st.q) || !/[?&]last=all(&|$)/.test(st.q)) { await spa(p, "/map"); await sleep(1200); }
   await p.waitFor(mapReadyJs("three"), 60_000, "the map");
   await p.mouse("mouseMoved", 3, 3);
   await p.evalJs("__sporeMap.fit()");
@@ -851,6 +873,233 @@ try {
     check(emb, "/embed/map rendered no .bm-canvas");
     check(embChunk.length === 0, `/embed/map loaded the map3 chunk: ${embChunk.join(", ")}`);
     s.shotEmbed = await shot(page, "o-embed-map.png");
+  });
+
+  // ---------------------------------------------------------------- (q)
+  await section("q", async (s, check) => {
+    type Stats = { mask: number; shown: number; anchors: number; hidden: number; byClass: [number, number, number, number] };
+    // families: the engine's own build stat (its families); rootsKept: buildSet's (the roots the filtered set kept)
+    type Build = { reason: string; filtered: boolean; mask: number; built: number; all: number; shown: number; anchors: number; pins: number; kept: number; families: number; rootsKept: number; dropped: number; prepMs: number; buildMs?: number };
+    type Probe = { members: number; shown: number; Rc: number; kFit: number; kUncapped: number; capBinds: boolean; medRpx: number; medLinkPx: number; share3px: number; filtered: boolean } | null;
+    const stats = () => page.evalJs<Stats | null>("__sporeMap.visibility()");
+    const builds = () => page.evalJs<number>("__sporeMap.builds()");
+    const lastBuild = () => page.evalJs<Build | null>("__sporeMap.lastBuild()");
+    // (compact layout) a mask change rebuilds: wait for the build of that mask to be the one on screen
+    const waitBuild = (m: number, what: string) => page.waitFor<Build>(`(() => { const b = __sporeMap.lastBuild(), v = __sporeMap.visibility(); return b && b.mask === ${m} && v && v.mask === ${m} ? b : null; })()`, 20_000, what).catch(() => null);
+    const waitParam = (v: string | null, what: string) => page.waitFor(`__qa.param("last") === ${J(v)}`, 3000, what).then(() => true, () => false);
+    // the largest family's readability at its own fit (EngineCompactProbe), by its title
+    const probe = () => page.evalJs<Probe>(`(() => { const M = __sporeMap, f = M.eng && M.eng.families(400).find((x) => x.title === "$PUMP") || (M.eng && M.eng.families(1)[0]); return f ? M.compact(f.title.replace(/^\\$/, "")) : null; })()`);
+    await openMap(page, "/map");
+    await toOverview(page);
+    const sample = await page.evalJs<string[]>("__sporeMap.sample(600).map((p) => p.mint)");
+    const xy0 = await page.evalJs<number[]>(`__sporeMap.xy(${J(sample)})`);
+    const all = await stats();
+    const allBuild = await lastBuild();
+    s.all = all; s.allBuild = allBuild;
+    s.allProbe = await probe();
+    check(!!all && all.mask === 15 && all.hidden === 0 && all.anchors === 0, `last=all: the engine's filter ${J(all)} (expected mask 15, nothing hidden)`);
+    check(!!allBuild && allBuild.filtered === false && allBuild.built === allBuild.all, `last=all: the build holds every node ${J(allBuild)}`);
+    const famsAll = await page.evalJs<number>("__sporeMap.eng.families(1e7).length");
+    check(!!allBuild && allBuild.families === famsAll && famsAll > 0, `last=all: lastBuild().families ${allBuild?.families} (the engine holds ${famsAll} families)`);
+    // no ?last: the default hides "older" (no trade in 24 h, never traded included): one rebuild, from the filtered set
+    const b0 = await builds();
+    await spaRaw(page, "/map");
+    const defBuild = await waitBuild(7, "the default filter's build");
+    const def = await stats();
+    s.def = def; s.defBuild = defBuild;
+    s.page = await page.evalJs("__sporeMapPage.last()");
+    const b1 = await builds();
+    check(b1 === b0 + 1, `entering the default from all built ${b1 - b0} times (expected 1)`);
+    if (check(!!defBuild && !!def, "no ?last: no build of mask 7")) {
+      check(defBuild!.reason === "last" && defBuild!.filtered === true, `the default's build: reason ${defBuild!.reason}, filtered ${defBuild!.filtered}`);
+      check(defBuild!.built < defBuild!.all && defBuild!.built === defBuild!.shown + defBuild!.anchors, `the default's build holds ${defBuild!.built} of ${defBuild!.all} nodes (${defBuild!.shown} shown + ${defBuild!.anchors} anchors)`);
+      const famsDef = await page.evalJs<number>("__sporeMap.eng.families(1e7).length");
+      check(defBuild!.families === famsDef && defBuild!.rootsKept > 0, `the default's build: families ${defBuild!.families} (the engine holds ${famsDef}), rootsKept ${defBuild!.rootsKept}`);
+      const drift = await page.evalJs<{ hidden: number; revealed: number; missed: number } | null>("__sporeMap.drift()");
+      s.drift = drift;
+      check(!!drift && drift.hidden <= Math.max(2, 0.01 * defBuild!.built), `right after the default's build ${drift?.hidden} built coins are hidden (heat ticks aside, none)`);
+      const lv = (s.page as { levels?: { shown: number; anchors: number } | null } | null)?.levels;
+      if (lv) check(Math.abs(lv.shown + lv.anchors - defBuild!.built) <= Math.max(5, 0.01 * defBuild!.built), `the page's levels ${lv.shown} + ${lv.anchors} vs the build's ${defBuild!.built} coins`);
+    }
+    const pg = s.page as { eff: number; keys: string[] } | null;
+    check(!!pg && pg.eff === 7 && pg.keys.join(",") === "30m,3h,24h", `__sporeMapPage.last() ${J(pg)}`);
+    // the biggest families keep their planet title at their own fit (the compact tree packs children around the chip)
+    const titled = await page.evalJs<{ title: string; has: boolean }[]>(`(async () => {
+      const M = __sporeMap, e = M.eng, out = [];
+      for (const f of e.families(3)) {
+        const m = e.mintAt(f.top);
+        await e.focusFamily(m);
+        const t0 = performance.now(); while (performance.now() - t0 < 6000 && !(M.settled() && !M.flying())) await new Promise((r) => setTimeout(r, 50));
+        await new Promise((r) => setTimeout(r, 500));
+        out.push({ title: f.title, has: M.titles().includes(m) });
+      }
+      return out;
+    })()`, 60_000);
+    s.titled = titled;
+    for (const t of titled) check(t.has, `the default's build: ${t.title} has no planet title at its own fit`);
+    await page.evalJs("__sporeMap.fit()");
+    await sleep(250);
+    await settle(page);
+    // the shown coins moved (the families were laid out around what is shown), and the largest family is more readable
+    const xy1 = await page.evalJs<number[]>(`__sporeMap.xy(${J(sample)})`);
+    let moved = 0, both = 0;
+    for (let i = 0; i < xy0.length; i += 2) if (Number.isFinite(xy0[i]) && Number.isFinite(xy1[i])) { both++; if (Math.abs(xy0[i] - xy1[i]) > 1e-3 || Math.abs(xy0[i + 1] - xy1[i + 1]) > 1e-3) moved++; }
+    check(both === 0 || moved > 0.5 * both, `the compact build moved ${moved} of the ${both} sampled coins it holds`);
+    s.defProbe = await probe();
+    const pa = s.allProbe as Probe, pd = s.defProbe as Probe;
+    if (pa && pd && pa.shown > 0) {
+      check(pd.medRpx >= 2 * pa.medRpx, `the largest family's shown coins: median ${pa.medRpx} px at all, ${pd.medRpx} px at the default (expected >= 2x)`);
+      // links in units of the coins they join (px grow with the zoom): the compact family's are no longer than the full one's
+      // (the alpha-only default hung its shown coins on links ~50 radii long: the complaint)
+      const ra = pa.medLinkPx / Math.max(pa.medRpx, 0.1), rd = pd.medLinkPx / Math.max(pd.medRpx, 0.1);
+      check(rd <= 1.25 * ra, `the largest family's links: median ${ra.toFixed(1)} coin radii at all, ${rd.toFixed(1)} at the default`);
+    }
+    // a coin the Key hides in place (the engine's own filter, between builds) is not picked at its spot
+    await page.evalJs("__sporeMap.setLastFilter(3, [])");
+    const hid = await page.evalJs<{ mint: string; x: number; y: number } | null>(`(() => { const M = __sporeMap, R = __qa.insetRect(), e = M.eng; for (let i = 0; i < e.built(); i++) { const m = e.mintAt(i); if (M.visibility(m) !== "hidden") continue; const p = M.screenOf(m); if (p && p.r >= 4 && __qa.inRect(p, R, 8) && __qa.onCanvas(p.x, p.y)) return { mint: m, x: p.x, y: p.y }; } return null; })()`);
+    if (hid) {
+      const pk = await page.evalJs<{ node: string | null }>(`__sporeMap.pick(${hid.x}, ${hid.y})`);
+      s.hiddenPick = { ...hid, picked: pk.node };
+      check(pk.node !== hid.mint, `a hidden coin (${hid.mint}) is still picked at its spot`);
+    } else notes.push("(q) no hidden coin ≥ 4 px on screen to pick-test");
+    await page.evalJs(`__sporeMap.setLastFilter(7, (__sporeMapPage.last() || {}).pinned || [])`);
+    check(b1 === (await builds()), "the engine's own setLastFilter rebuilt the map");
+    s.shotDefault = await shot(page, "q-last-default.png");
+    // the Key's buckets write ?last=; each settled mask is one build
+    if (!(await page.evalJs<boolean>(`!!document.querySelector(".map-key.open")`))) await clickSel(page, ".map-key-toggle");
+    await page.waitFor(`!!document.querySelector('.map-key-scale button[data-last="2"]')`, 3000, "the Key's toggles").catch(() => check(false, "the Key has no last-trade toggles"));
+    const pressed = await page.evalJs<string[]>(`[...document.querySelectorAll(".map-key-scale button[data-last]")].map((b) => b.getAttribute("aria-pressed"))`);
+    check(pressed.join(",") === "true,true,true,false", `the default's toggles read ${pressed.join(",")}`);
+    s.keyLine = await page.evalJs<string>(`(document.querySelector(".map-key-last") || {}).textContent || ""`);
+    check(/showing [\d,.KMB]+ of [\d,.KMB]+ coins/.test(String(s.keyLine)), `the Key's line reads "${s.keyLine}"`);
+    s.shotKey = await shot(page, "q-key.png");
+    // a quick double toggle (24 h off and on again) builds nothing new: the pending build is aborted, the mask on screen is back
+    const bq = await builds();
+    await page.evalJs(`(() => { const b = document.querySelector('.map-key-scale button[data-last="2"]'); b.click(); setTimeout(() => document.querySelector('.map-key-scale button[data-last="2"]').click(), 60); return true; })()`);
+    await sleep(3000);
+    check((await builds()) === bq, `24 h off and on within 60 ms built ${(await builds()) - bq} times (expected 0)`);
+    await clickSel(page, '.map-key-scale button[data-last="2"]');
+    check(await waitParam("30m,3h", "24 h off"), `24 h off wrote ?last=${await param(page, "last")}`);
+    const b3 = await waitBuild(3, "the build of mask 3");
+    check(!!b3 && b3.reason === "last" && b3.filtered, `24 h off: the engine's build ${J(b3)}`);
+    check((await builds()) === bq + 1, `24 h off built ${(await builds()) - bq} times (expected 1)`);
+    await clickSel(page, '.map-key-scale button[data-last="3"]');
+    check(await waitParam("30m,3h,old", "older on"), `older on wrote ?last=${await param(page, "last")}`);
+    await waitBuild(11, "the build of mask 11");
+    await clickSel(page, '.map-key-last button[data-last="all"]');
+    check(await waitParam("all", "show all"), `show all wrote ?last=${await param(page, "last")}`);
+    const ball = await waitBuild(15, "the build of mask 15");
+    check(!!ball && ball.filtered === false && ball.built === ball.all, `show all: a full build again ${J(ball)}`);
+    await clickSel(page, '.map-key-last button[data-last="reset"]');
+    check(await waitParam(null, "reset"), `reset left ?last=${await param(page, "last")}`);
+    await waitBuild(7, "the default's build again");
+    // the last bucket on cannot be switched off
+    await spaRaw(page, "/map?last=30m");
+    await waitBuild(1, "the build of mask 1");
+    await clickSel(page, '.map-key-scale button[data-last="0"]');
+    await sleep(300);
+    check((await param(page, "last")) === "30m", `switching off the only bucket wrote ?last=${await param(page, "last")}`);
+    // K: default ↔ all
+    await spaRaw(page, "/map");
+    await waitBuild(7, "the default again");
+    await page.evalJs(`(document.activeElement && document.activeElement.blur && document.activeElement.blur(), true)`);
+    await page.key("k");
+    check(await waitParam("all", "K → all"), `K from the default wrote ?last=${await param(page, "last")}`);
+    // the URL changes before the page re-renders, and K reads the rendered state: wait for that render (and the engine's mask)
+    await page.waitFor(`(__sporeMapPage.last() || {}).eff === 15`, 3000, "the page at all").catch(() => null);
+    await waitBuild(15, "mask 15 after K");
+    await page.key("k");
+    check(await waitParam(null, "K → default"), `K from all left ?last=${await param(page, "last")}`);
+    // a selected cold coin the default's build left out: shown at once next to its parent (a stand-in), then rebuilt right
+    // away with it built (one select-unknown build, opened framed on it); no relayout later while its card is open; the side
+    // panel says why it is hidden
+    await waitBuild(7, "the default before the selection");
+    const cold = await page.evalJs<string | null>(`${J(sample)}.find((m) => !__sporeMap.has(m) && !!(__sporeMapPage.last() || {}).levels && __sporeMapPage.level(m) === "hidden") ?? null`);
+    if (check(!!cold, "no left-out coin in the sample to select")) {
+      const bs = await builds();
+      await spaRaw(page, `/map?focus=${cold}`);
+      const shown = await page.waitFor(`__sporeMap.visibility(${J(cold)}) === "shown"`, 6000, "the selected cold coin shown").then(() => true, () => false);
+      const sb = await page.waitFor<Build>(`(() => { const b = __sporeMap.lastBuild(); return __sporeMap.builds() > ${bs} && b ? b : null; })()`, 20_000, "the select-unknown build").catch(() => null);
+      await page.waitFor(`__sporeMap.selected() === ${J(cold)} && __sporeMap.settled() && !__sporeMap.flying()`, 8000, "the selection settled").catch(() => null);
+      const parent = (truth.find((r) => r.mint === cold) ?? null)?.parentMint ?? null;
+      const pv = parent ? await page.evalJs<string | null>(`__sporeMap.visibility(${J(parent)})`) : "shown";
+      const line = await page.waitFor<string>(`(document.querySelector(".map-side .map-side-hidden") || {}).textContent || null`, 6000, "the side panel's hidden line").catch(() => null);
+      const at = await page.evalJs<{ r: number } | null>(`__sporeMap.screenOf(${J(cold)})`);
+      s.cold = { mint: cold, shown, build: sb, parent, parentLevel: pv, line, r: at?.r ?? null, live: await page.evalJs("(__sporeMap.live() || {}).reveals") };
+      check(shown, `the selected cold coin ${cold} is ${await page.evalJs(`__sporeMap.visibility(${J(cold)})`)}`);
+      check(!!sb && sb.reason === "select-unknown" && sb.filtered, `selecting a left-out coin: the build ${J(sb)} (expected one select-unknown, filtered)`);
+      check((await builds()) === bs + 1, `selecting a left-out coin built ${(await builds()) - bs} times (expected 1)`);
+      check((await page.evalJs<string | null>("__sporeMap.selected()")) === cold, "the rebuilt map does not select the coin");
+      check(!(await page.evalJs<{ select: boolean } | null>("__sporeMap.drift()"))?.select, "after its build the selection is still a stand-in");
+      check(!!at && at.r >= 3, `the selected coin is drawn at ${at?.r} px (expected >= 3: framed on it)`);
+      check(pv === "shown" || pv === "anchor", `its parent ${parent} is ${pv}`);
+      check(!!line && /Hidden by the Key filter/.test(line), `the side panel's line reads ${J(line)}`);
+      await sleep(11_000);
+      check((await builds()) === bs + 1, `the map was rebuilt again while the coin's card was open (${(await builds()) - bs - 1})`);
+      s.shotCold = await shot(page, "q-cold-selected.png");
+      await clickSel(page, ".map-side .map-side-hidden button");
+      check(await waitParam("all", "the panel's show all"), `the panel's show all wrote ?last=${await param(page, "last")}`);
+      await waitBuild(15, "the panel's show all build");
+    }
+    // a coin of a capped asset family that 30 min leaves out entirely (nothing of it traded): its pick rebuilds once
+    // (select-unknown: the pins bring the top in), then the family's chunk brings the coin and it is selected
+    await spaRaw(page, "/map?last=30m");
+    await waitBuild(1, "the build of mask 1");
+    const capped = truth.filter((r) => !r.parentMint && r.asset && (r.children ?? 0) > (famSize.get(r.mint) ?? 0) + 20).map((r) => r.mint);
+    const outTops = await page.evalJs<string[]>(`${J(capped)}.filter((m) => !__sporeMap.has(m))`);
+    let speck: string | null = null;
+    const drawnSet = new Set(truth.map((r) => r.mint));
+    for (const top of outTops.slice(0, 6)) {
+      const fj = await fetch(`${BASE}/api/map/family/${top}?offset=${Math.max(0, (famSize.get(top) ?? 0) - 1)}&limit=100`).then((r) => r.json()).catch(() => null) as { nodes?: [string][] } | null;
+      const m = (fj?.nodes ?? []).map((row) => row[0]).find((x) => !drawnSet.has(x));
+      if (m) { speck = m; break; }
+    }
+    s.capped = { tops: outTops.length, speck };
+    if (speck) {
+      const bc = await builds();
+      await spaRaw(page, `/map?last=30m&focus=${speck}`);
+      const cb = await page.waitFor<Build>(`(() => { const b = __sporeMap.lastBuild(); return __sporeMap.builds() > ${bc} && b ? b : null; })()`, 20_000, "the capped family's select-unknown build").catch(() => null);
+      const sel = await page.waitFor(`__sporeMap.selected() === ${J(speck)}`, 30_000, "the capped coin selected").then(() => true, () => false);
+      s.capped = { ...(s.capped as object), build: cb, selected: sel, builds: (await builds()) - bc };
+      check(!!cb && cb.reason === "select-unknown", `a capped family 30 min left out: its coin's pick built ${J(cb)} (expected select-unknown)`);
+      check(sel, `the capped family's coin ${speck} is never selected on the map`);
+      check((await builds()) === bc + 1, `the capped family's pick built ${(await builds()) - bc} times (expected 1)`);
+      await spaRaw(page, "/map?last=30m");
+    } else notes.push(`(q) no capped asset family left out under 30 min with an undrawn coin (${outTops.length} left out)`);
+    // a Dominance row of a family the filtered build left out (nothing of it shown): the pick selects its top and rebuilds it in
+    // at once (one select-unknown build, filtered), framed on it (it used to do nothing)
+    let domPick: { path: string; mint: string; rank: number } | null = null;
+    for (const path of ["/map?last=30m&size=mcap", "/map?last=30m", "/map?size=mcap"]) {
+      const bp = await builds();
+      await spaRaw(page, path);
+      const mk = path.includes("30m") ? 1 : 7, mode = path.includes("mcap") ? "mcap" : "locked";
+      await page.waitFor(`(() => { const b = __sporeMap.lastBuild(); return __sporeMap.builds() > ${bp} && !!b && b.mask === ${mk} && __sporeMap.settled(); })()`, 30_000, `the build of ${path}`).catch(() => null);
+      const lost = await page.evalJs<{ mint: string; rank: number } | null>(`(() => { const d = __sporeMapPage.dominance(20); if (!d) return null; const t = d.${mode}.top; for (let k = 0; k < t.length; k++) if (!__sporeMap.has(t[k].mint)) return { mint: t[k].mint, rank: k }; return null; })()`);
+      if (lost) { domPick = { path, ...lost }; break; }
+    }
+    s.domPick = domPick;
+    if (domPick) {
+      await page.evalJs(`(() => { const t = [...document.querySelectorAll(".map-rail-tabs button[role=tab]")].find((b) => b.textContent === "Dominance"); if (t && t.getAttribute("aria-selected") !== "true") t.click(); return !!t; })()`);
+      await page.waitFor(`document.querySelectorAll(".map-rail-row.dom").length > ${domPick.rank}`, 3000, "the Dominance rows").catch(() => null);
+      const r = await page.evalJs<{ x: number; y: number } | null>(`(() => { const b = [...document.querySelectorAll(".map-rail-row.dom")][${domPick.rank}]; if (!b) return null; b.scrollIntoView({ block: "center" }); const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+      if (check(!!r, `no Dominance row ${domPick.rank} to click`)) {
+        const bd = await builds();
+        await page.click(r!.x, r!.y);
+        const db = await page.waitFor<Build>(`(() => { const b = __sporeMap.lastBuild(); return __sporeMap.builds() > ${bd} && b ? b : null; })()`, 20_000, "the Dominance pick's build").catch(() => null);
+        const sel = await page.waitFor(`__sporeMap.selected() === ${J(domPick.mint)} && __sporeMap.settled() && !__sporeMap.flying()`, 10_000, "the family's top selected").then(() => true, () => false);
+        const at = await page.evalJs<{ r: number } | null>(`__sporeMap.screenOf(${J(domPick.mint)})`);
+        s.domPick = { ...domPick, build: db, selected: sel, focus: await param(page, "focus"), builds: (await builds()) - bd, r: at?.r ?? null };
+        check(!!db && db.reason === "select-unknown" && db.filtered, `a Dominance row of a left-out family (${domPick.mint}, ${domPick.path}): the build ${J(db)} (expected one select-unknown, filtered)`);
+        check(sel, `the Dominance pick's top ${domPick.mint} is never selected on the map`);
+        check((await param(page, "focus")) === domPick.mint, `the Dominance pick wrote ?focus=${await param(page, "focus")}`);
+        check((await builds()) === bd + 1, `the Dominance pick built ${(await builds()) - bd} times (expected 1)`);
+        check(!!at && at.r >= 3, `the picked top is drawn at ${at?.r} px (expected >= 3: framed on it)`);
+      }
+    } else notes.push("(q) no top-20 Dominance family left out of the build under 30 min (locked / mcap) or the default mcap");
+    s.buildMs = { all: allBuild?.buildMs ?? null, def: defBuild?.buildMs ?? null };
+    if (allBuild?.buildMs && defBuild?.buildMs) notes.push(`(q) buildMs: all ${allBuild.buildMs}, default ${defBuild.buildMs}`);
+    await spa(page, "/map");
+    await sleep(500);
   });
 } catch (e) {
   fails.push(`crashed: ${(e as Error).message}`);
