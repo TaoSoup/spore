@@ -31,6 +31,11 @@ const BACKFILL_RESCAN_S = 7 * 24 * 3600;
 /** Listed-asset scans cost the same full walk each; the live stream adds their new coins, so a month between walks. */
 const ASSET_RESCAN_S = 30 * 24 * 3600;
 const SHARES_TTL_S = 6 * 3600;
+// A quote mint whose bonding-curve PDA the chain answered as no pump curve (no account, another owner, bytes that do
+// not decode) is not asked about again by ensureAncestors for this long. Coins quoted in assets that are not in
+// QuoteControl (tokenized stocks, TSLA, META, ...: 13 on the local index, Nov 11 2026) keep those mints missing for
+// good, and every live spawn under a new parent used to ask for all of them again, in each round.
+export const NOT_CURVE_TTL_MS = 30 * 60_000;
 // On-demand lookups (/api/coin, eligibility) remember whether a mint is a pump coin for this long,
 // so a stream of requests for the same mint costs one RPC round, not one per request.
 const FETCH_CACHE_MS = 60_000;
@@ -71,6 +76,8 @@ export const QUOTE_USD_MS = 120_000;
 const COINGECKO = `https://api.coingecko.com/api/v3/simple/price?ids=${["solana", ...Object.values(QUOTE_PRICE_IDS)].join(",")}&vs_currencies=usd&include_market_cap=true`;
 
 export class Indexer {
+  // #listedQuotes(): the Set, and the whitelist array and QuoteControl object it was built from.
+  #listed = null; #listedFrom = [];
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
@@ -83,6 +90,7 @@ export class Indexer {
     // duplicate; `mintRun` settles when it ends.
     this.mintCatchingUp = false; this.mintRun = null;
     this.fetchCache = new Map(); // mint → { at, found } for fetchCoin
+    this.notCurve = new Map();   // quote mint → when the chain said it is no pump curve (ensureAncestors, NOT_CURVE_TTL_MS)
     this.pairSent = new Map();   // mint → when its `pair` event went out (dedupe)
     this.assetScanning = false;  // the asset walk (scanAssetQuotes) in flight
     this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 },
@@ -403,19 +411,29 @@ export class Indexer {
    * Every tracked coin's quote-mint chain down to depth 0 lives in the model (DESIGN §6.1). An ancestor that
    * arrives already migrated gets its pool (vaults + virtual quote) read right away: without it every coin
    * below it has no price until the rolling refresh reaches it (up to FULL_REFRESH_MS).
+   *
+   * Each round runs on the event loop, so it walks the quote mints in use (the keys of the model's child index:
+   * every coin with a quote mint sits in its quote mint's set; ~8k keys for 155k coins) against a Set of the
+   * listed quotes, and skips mints the chain said are no pump curve (`notCurve`, NOT_CURVE_TTL_MS). Before that,
+   * a round walked every coin and base58-encoded up to 231 QuoteControl keys per coin quoted in an asset:
+   * ~20 s of blocked event loop per round on the local index (Nov 11 2026), two rounds per new parent.
    */
   async ensureAncestors({ rpc = this.rpc } = {}) {
     const addedMints = [];
+    const now = Date.now();
+    for (const [m, at] of this.notCurve) if (now - at >= NOT_CURVE_TTL_MS) this.notCurve.delete(m);
     for (let round = 0; round <= 6; round++) {
-      const missing = new Set();
-      for (const c of this.model.coins.values()) if (c.quoteMint && !this.model.coins.has(c.quoteMint) && !this.#isListedQuote(c.quoteMint)) missing.add(c.quoteMint);
-      if (!missing.size) break;
-      const mints = [...missing];
-      const infos = await rpc.getMultipleAccounts(mints.map((m) => bondingCurvePda(m).toBase58()));
+      const listed = this.#listedQuotes(), mints = [];
+      for (const [q, kids] of this.model.children) if (kids.size && !this.model.coins.has(q) && !listed.has(q) && !this.notCurve.has(q)) mints.push(q);
+      if (!mints.length) break;
+      const keys = mints.map((m) => bondingCurvePda(m).toBase58());
+      const infos = await rpc.getMultipleAccounts(keys);
       let added = 0;
       infos.forEach((info, i) => {
-        if (!info || info.owner !== PUMP_PROGRAM_ID.toBase58()) return;
-        try { this.model.upsertCoin({ mint: mints[i], ...decodeCurve(info.data, bondingCurvePda(mints[i])), tracked: true }); added++; addedMints.push(mints[i]); } catch { /* not a curve */ }
+        let cur = null;
+        if (info && info.owner === PUMP_PROGRAM_ID.toBase58()) { try { cur = decodeCurve(info.data, keys[i]); } catch { /* not a curve */ } }
+        if (!cur) { this.notCurve.set(mints[i], Date.now()); return; }
+        try { this.model.upsertCoin({ mint: mints[i], ...cur, tracked: true }); added++; addedMints.push(mints[i]); } catch (e) { this.log.warn(`backfill: ancestor ${mints[i]}: ${e.message}`); }
       });
       this.log.info(`backfill: ancestors round ${round}: ${added}/${mints.length} added`);
       if (!added) break;
@@ -423,9 +441,20 @@ export class Indexer {
     const migrated = addedMints.map((m) => this.model.get(m)).filter((c) => c?.migrated);
     if (migrated.length) await this.ensurePools(migrated, { rpc });
   }
-  #isListedQuote(mint) {
-    return mint === SOL_MINT || (this.model.global?.whitelistedQuoteMints ?? []).includes(mint) || !!this.quoteControlRaw?.mints.some((m) => m.mint.toBase58() === mint);
+  /**
+   * SOL, the Global's whitelisted quote mints and the QuoteControl mints, as base58 strings in one Set. Rebuilt only
+   * when loadGlobal (every 10 min) replaced the whitelist array or the decoded QuoteControl: a toBase58() is a bn.js
+   * encode of a few microseconds, which ensureAncestors used to pay per coin and QuoteControl key.
+   */
+  #listedQuotes() {
+    const wl = this.model.global?.whitelistedQuoteMints ?? null, qc = this.quoteControlRaw ?? null;
+    if (!this.#listed || this.#listedFrom[0] !== wl || this.#listedFrom[1] !== qc) {
+      this.#listed = new Set([SOL_MINT, ...(wl ?? []), ...(qc?.mints ?? []).map((m) => m.mint.toBase58())]);
+      this.#listedFrom = [wl, qc];
+    }
+    return this.#listed;
   }
+  #isListedQuote(mint) { return this.#listedQuotes().has(mint); }
 
   /**
    * Decimals, token program and on-chain name/symbol/uri for every mint we reference (coins and
@@ -888,7 +917,7 @@ export class Indexer {
     // A coin we did not track yet (a depth-0 coin without children) is kept untracked: it shows on its
     // own page and in eligibility but stays out of the feed and the leaderboard until it has a child.
     const c = this.model.upsertCoin({ mint, ...cur, tracked: known ? known.tracked : false, refreshedAt: nowS() });
-    if (c.quoteMint && !this.model.coins.has(c.quoteMint)) await this.ensureAncestors({ rpc });
+    if (c.quoteMint && !this.model.coins.has(c.quoteMint) && !this.#isListedQuote(c.quoteMint)) await this.ensureAncestors({ rpc });
     if (!m?.metadata) await this.ensureMintInfo([c], { rpc });
     if (c.migrated && !c.poolQuoteVault) await this.ensurePools([c], { rpc }); else if (c.migrated) await this.refreshVaults([c], { rpc });
     return this.model.get(mint);
