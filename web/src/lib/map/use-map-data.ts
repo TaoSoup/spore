@@ -1,6 +1,7 @@
 // The map's data: cache first, then only what changed (DESIGN §11.5). On mount the IndexedDB cache is
 // rendered at once; `GET /api/map?scope=all&limit=all&since=<generatedAt>` then merges the delta. A cold
-// cache does one full load. Live `pair` / `mapdelta` / `coin` events patch the same set, and every change
+// cache does one full load, then one delta from its generatedAt (deltaAfterFull: the server builds the body in
+// slices while live events land). Live `pair` / `mapdelta` / `coin` events patch the same set, and every change
 // is written back so the next open is already current. Unchanged nodes keep their object identity, which
 // is what lets BubbleMap diff 15 k nodes in a millisecond instead of restarting.
 //
@@ -51,6 +52,12 @@ const LIVE_GRACE_MS = 60_000;
 
 /// True when the next sync must be a full one: never had a complete load, or the last one is stale.
 export const needsFull = (fullAt: number | null, now: number): boolean => fullAt == null || !Number.isFinite(fullAt) || now - fullAt > FULL_EVERY_MS;
+/// The cursor of the delta to ask right after a sync, or null. The server builds a full body in slices (2026-11-11)
+/// while the event stream keeps patching the set, so a node a `mapdelta` updated during the build (a logo that
+/// resolved, a trade) comes back older in the body, which a full load puts in as it is: one delta from the body's
+/// generatedAt (only the build window's changes) puts the newer state back at once, not at the next resync (2 min).
+export const deltaAfterFull = (since: number | null, generatedAt: number | null): number | null =>
+  since == null && generatedAt != null && Number.isFinite(generatedAt) ? generatedAt : null;
 
 // mcapCapUsd rides along (the coin view carries it only when the liquidity cap bites); fromMapCoin reads it.
 const coinToMap = (c: Coin): MapCoin => ({ mint: c.mint, parentMint: c.parent?.mint ?? null, depth: c.depth, name: c.name, symbol: c.symbol, image: c.image, mcapUsd: c.mcapUsd, lockedUsd: c.lockedUsd, children: c.children, descendants: c.descendants, migrated: c.migrated, ours: !!c.ours, createdAt: c.createdAt, updatedAt: c.updatedAt ? c.updatedAt * 1000 : undefined, mcapCapUsd: (c as Coin & { mcapCapUsd?: number | null }).mcapCapUsd ?? null } as MapCoin);
@@ -109,6 +116,7 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
   const sync = useCallback((since: number | null) => {
     if (inflight.current) return inflight.current;
     setSyncing(true);
+    let follow: number | null = null; // a full load's follow-up delta (deltaAfterFull)
     const p = api.map({ scope: "all", limit: "all", since: since ?? undefined }).then((res) => {
       if (!alive.current) return;
       const norm = normalise(res);
@@ -128,6 +136,7 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
         changed = upsert(s, norm.nodes);
       }
       gen.current = norm.generatedAt ?? Date.now();
+      follow = deltaAfterFull(since, norm.generatedAt);
       if (norm.indexed != null) setIndexed(norm.indexed);
       setError(null);
       setSource("network");
@@ -149,7 +158,11 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
       if (!alive.current) return;
       setError(errorMessage(e));
       setLoading(false);
-    }).finally(() => { inflight.current = null; if (alive.current) setSyncing(false); });
+    }).finally(() => {
+      inflight.current = null;
+      if (alive.current) setSyncing(false);
+      if (follow != null && alive.current) void sync(follow);
+    });
     inflight.current = p;
     return p;
   }, [bump, markDirty]);

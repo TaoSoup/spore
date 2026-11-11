@@ -5,10 +5,11 @@
 // carries last=all, so the script keeps measuring the whole map.
 // End-to-end check of the map's delta sync, client cache and live patching (DESIGN §11.5) against
 // test/map-mock-api.mts, which serves the exact wire shapes and a real SSE stream. Through CDP (no
-// puppeteer): cold load = one full request and a filled cache; touched nodes come back through
-// `since=` only (no full reload, no layout restart); `mapdelta` and `pair` events patch the map live;
-// a reload paints from the cache before the network answers and asks only for the delta; a cache whose
-// last complete load is older than 15 min re-syncs in full (one request, no since=).
+// puppeteer): cold load = one full request, then one `since=<its generatedAt>` delta (what changed while
+// the server built the body), and a filled cache; touched nodes come back through `since=` only (no full
+// reload, no layout restart); `mapdelta` and `pair` events patch the map live; a reload paints from the
+// cache before the network answers and asks only for the delta; a cache whose last complete load is older
+// than 15 min re-syncs in full (one full request and its delta, no second full request).
 //
 //   node --import tsx test/map-mock-api.mts &                # :8798, proxies the rest to :8795
 //   API_PORT=8798 npx vite --port 5233 --host 127.0.0.1 &    # dev server on the mock
@@ -53,16 +54,31 @@ try {
   await send("Page.enable", {}, S); await send("Runtime.enable", {}, S); await send("Log.enable", {}, S);
   const evalJs = async <T,>(expression: string): Promise<T> => { const r = (await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, S)) as { result: { value: T }; exceptionDetails?: { text: string } }; if (r.exceptionDetails) throw new Error(`eval failed: ${r.exceptionDetails.text} :: ${expression.slice(0, 80)}`); return r.result.value; };
   const waitFor = async (expression: string, timeoutMs: number, what: string) => { const t0 = Date.now(); while (Date.now() - t0 < timeoutMs) { let v: unknown = null; try { v = await evalJs(expression); } catch { /* loading */ } if (v) return v; await sleep(100); } throw new Error(`timeout waiting for ${what}`); };
-  // /api/map itself (the tree and its deltas), not the /api/map/heat sidecar
-  const mapRequests = () => evalJs<{ url: string; ms: number }[]>(`performance.getEntriesByType("resource").filter((e) => /\\/api\\/map(\\?|$)/.test(e.name)).map((e) => ({ url: e.name.replace(/^.*\\/api\\/map/, "/api/map"), ms: Math.round(e.duration) }))`);
+  // /api/map itself (the tree and its deltas), not the /api/map/heat sidecar; `at` / `end` are epoch ms
+  const MAP_RE = `/\\/api\\/map(\\?|$)/`;
+  const mapRequests = () => evalJs<{ url: string; ms: number; at: number; end: number }[]>(`performance.getEntriesByType("resource").filter((e) => ${MAP_RE}.test(e.name)).map((e) => ({ url: e.name.replace(/^.*\\/api\\/map/, "/api/map"), ms: Math.round(e.duration), at: Math.floor(performance.timeOrigin + e.startTime), end: Math.ceil(performance.timeOrigin + e.responseEnd) }))`);
+  // A full load is followed by exactly one delta from that body's generatedAt (use-map-data deltaAfterFull: the server
+  // builds the body in slices while live events land, 2026-11-11), and by no second full request. The mock stamps a
+  // full body with its own clock while it answers, so the delta's cursor falls within the full request's span.
+  const fullThenDelta = (reqs: { url: string; at: number; end: number }[], what: string) => {
+    const [full, ...rest] = reqs;
+    const got = JSON.stringify(reqs.map((r) => r.url));
+    check(!!full && /limit=all/.test(full.url) && !/since=/.test(full.url), `${what}: one full limit=all request first (got ${got})`);
+    check(rest.length === 1 && /since=\d+/.test(rest[0].url), `${what}: then exactly one since= delta and no second full request (got ${got})`);
+    const cursor = Number(/since=(\d+)/.exec(rest[0]?.url ?? "")?.[1] ?? NaN);
+    check(!!full && cursor >= full.at - 2 && cursor <= full.end + 2, `${what}: the delta asks from the full body's generatedAt (since=${cursor}, full request ${full?.at}-${full?.end})`);
+  };
+  const mapRequestCount = `performance.getEntriesByType("resource").filter((e) => ${MAP_RE}.test(e.name)).length`;
 
-  // ---- cold: one full request, bubbles, cache filled
+  // ---- cold: one full request and its follow-up delta, bubbles, cache filled
   await send("Page.navigate", { url: `${BASE}/map?roots=all&renderer=classic&last=all` }, S);
   await waitFor("!!(window.__sporeMap && window.__sporeMap.firstPaintAt() > 0)", 60_000, "first paint");
   await waitFor("__sporeMap.settled()", 120_000, "settle");
+  await waitFor(`${mapRequestCount} >= 2`, 10_000, "the follow-up delta").catch(() => null);
+  await sleep(500); // nothing else may follow
   const reqs1 = await mapRequests();
   result.coldRequests = reqs1;
-  check(reqs1.length === 1 && /limit=all/.test(reqs1[0].url) && !/since=/.test(reqs1[0].url), "cold open must make exactly one full limit=all request");
+  fullThenDelta(reqs1, "cold open");
   const n0 = await evalJs<number>("__sporeMap.nodes()");
   const ticks0 = await evalJs<number>("__sporeMap.worker().ticks");
   result.nodes = n0;
@@ -74,7 +90,7 @@ try {
   await evalJs("__sporeMapPage.sync()");
   await sleep(2500);
   const reqs2 = await mapRequests();
-  const deltaReq = reqs2.find((r) => /since=\d+/.test(r.url));
+  const deltaReq = reqs2.slice(reqs1.length).find((r) => /since=\d+/.test(r.url)); // the one this sync asked for
   result.deltaRequest = deltaReq ?? null;
   check(!!deltaReq, "sync must request since=<generatedAt>");
   check(reqs2.filter((r) => !/since=/.test(r.url)).length === 1, "no second full request after the delta");
@@ -131,7 +147,7 @@ try {
   await sleep(4000);
   const reqs4 = await mapRequests();
   result.staleFullRequests = reqs4;
-  check(reqs4.length === 1 && !/since=/.test(reqs4[0].url) && /limit=all/.test(reqs4[0].url), `a stale 'full' record must make exactly one full /api/map request without since= (got ${JSON.stringify(reqs4.map((r) => r.url))})`);
+  fullThenDelta(reqs4, "a stale 'full' record");
   check((await evalJs<{ count: number } | null>("__sporeMapPage.cacheInfo()")) != null, "the stale-full reopen did not paint from the cache first");
   ws.close();
 } catch (e) {

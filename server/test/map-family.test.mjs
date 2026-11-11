@@ -265,7 +265,11 @@ test("indexed: total + the asset coins the map leaves undrawn, on the full and t
   const { indexed, ...rest } = body;
   assert.deepEqual(rest, JSON.parse(JSON.stringify(entry.body)));
   assert.deepEqual(Object.keys(body).at(-1), "indexed");
-  const growth = Buffer.byteLength(entry.apiPrepared.text) - Buffer.byteLength(entry.prepared.text);
+  // The /api bytes are encoded straight from the body, in slices (mapApiPrepared): the same bytes and ETag as
+  // splicing `indexed` into prepareJson(body), which the route did before (and no shared `prepared` slot is filled).
+  const spliceOld = preparedWithIndexed(prepareJson(entry.body), entry.indexed);
+  assert.ok(entry.apiPrepared.bytes.equals(spliceOld.bytes)); assert.equal(entry.apiPrepared.etag, spliceOld.etag);
+  const growth = Buffer.byteLength(entry.apiPrepared.text) - Buffer.byteLength(prepareJson(entry.body).text);
   assert.equal(growth, `,"indexed":${indexed}`.length); assert.ok(growth <= 32, `growth ${growth} B`);
   assert.equal(withIndexed('{"a":1}', 7), JSON.stringify({ a: 1, indexed: 7 }));
   // The spliced bytes are exactly what encoding the text again would give: text, bytes, ETag, gzip.

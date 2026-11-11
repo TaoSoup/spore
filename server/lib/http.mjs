@@ -4,7 +4,41 @@
 // only HTTP package in this server and helmet/compression/express-rate-limit would each pull a
 // tree of their own for a few dozen lines of behaviour that is easier to test here.
 import { createHash, randomBytes } from "node:crypto";
-import { brotliCompressSync, gzipSync, createBrotliCompress, createGzip, constants as Z } from "node:zlib";
+import { brotliCompressSync, gzipSync, brotliCompress, gzip, createBrotliCompress, createGzip, constants as Z } from "node:zlib";
+import { promisify } from "node:util";
+
+const brotliAsync = promisify(brotliCompress), gzipAsync = promisify(gzip);
+/** Output chunk of the thread-pool compression (preparedBytes' encodedAsync). */
+const ASYNC_CHUNK_BYTES = 1 << 20;
+/**
+ * Thread-pool compressions running at once. libuv's pool has 4 threads (UV_THREADPOOL_SIZE is not set) and also
+ * serves fs (the logo sheets' reads) and DNS; a 35 MB brotli holds a thread ~100 ms per output chunk, so the rest wait.
+ */
+export const POOL_COMPRESSIONS = 2;
+/**
+ * Bodies under this size skip that cap and are compressed at once on the pool: they hold a thread for milliseconds
+ * (the 613 KB heat sidecar: ~8 ms of brotli), and in the queue they waited behind whole 35 MB map compressions.
+ */
+export const POOL_CAP_BYTES = 4 * 2 ** 20;
+/** Compressions running and waiting now, and the most that ever ran at once. */
+export const compressionStats = { active: 0, waiting: 0, maxActive: 0, runs: 0 };
+const poolWaiting = [];
+function onPool(make) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      compressionStats.active++; compressionStats.runs++;
+      if (compressionStats.active > compressionStats.maxActive) compressionStats.maxActive = compressionStats.active;
+      make().then(resolve, reject).finally(() => {
+        compressionStats.active--;
+        const nextRun = poolWaiting.shift();
+        compressionStats.waiting = poolWaiting.length;
+        nextRun?.();
+      });
+    };
+    if (compressionStats.active < POOL_COMPRESSIONS) run();
+    else { poolWaiting.push(run); compressionStats.waiting = poolWaiting.length; }
+  });
+}
 
 // ---------------------------------------------------------------- rate limiting
 /**
@@ -274,27 +308,106 @@ export function sendCachedJson(req, res, body, { maxAge = 5, swr = maxAge * 4, c
  */
 export function prepareJson(body, opts = {}) { return prepareJsonText(JSON.stringify(body), opts); }
 /** `prepareJson` for a body that is already JSON text (the /v1 map rewrites the /api bytes, DESIGN §12). */
-export function prepareJsonText(text, { brotliQuality = 4, gzipLevel = 6 } = {}) {
-  const buf = Buffer.from(text, "utf8");
-  const p = { text, bytes: buf, etag: etagOf(text), br: null, gz: null };
+export function prepareJsonText(text, opts = {}) { return preparedBytes(Buffer.from(text, "utf8"), etagOf(text), { ...opts, text }); }
+/**
+ * A prepared body from its bytes and ETag: `encoded(enc)` makes the gzip or brotli bytes once, on the event loop;
+ * `encodedAsync(enc)` makes the same bytes once on libuv's thread pool (zlib's async API gives the sync API's
+ * bytes; one job per encoding however many requests wait on it). `text` is the JSON text when one was given,
+ * else decoded from the bytes on each read: a body encoded in slices (prepareJsonGen) keeps only its bytes.
+ */
+export function preparedBytes(bytes, etag, { brotliQuality = 4, gzipLevel = 6, text } = {}) {
+  const brOpts = { params: { [Z.BROTLI_PARAM_QUALITY]: brotliQuality } }, gzOpts = { level: gzipLevel };
+  // The async API hands every output chunk back to the event loop: with the default 16 KB, brotli of the 35 MB map
+  // took 4.6 s while map builds held the loop in 8 ms slices (~500 hops), 0.8 s with 1 MB chunks. Same bytes either way.
+  const brAsync = { ...brOpts, chunkSize: ASYNC_CHUNK_BYTES }, gzAsync = { ...gzOpts, chunkSize: ASYNC_CHUNK_BYTES };
+  let txt = text;
+  const p = { bytes, etag, br: null, gz: null };
+  Object.defineProperty(p, "text", { enumerable: true, configurable: true, get: () => (txt === undefined ? bytes.toString("utf8") : txt), set: (v) => { txt = v; } });
   p.encoded = (enc) => {
-    if (enc === "br") return (p.br ??= brotliCompressSync(buf, { params: { [Z.BROTLI_PARAM_QUALITY]: brotliQuality } }));
-    if (enc === "gzip") return (p.gz ??= gzipSync(buf, { level: gzipLevel }));
-    return buf;
+    if (enc === "br") return (p.br ??= brotliCompressSync(bytes, brOpts));
+    if (enc === "gzip") return (p.gz ??= gzipSync(bytes, gzOpts));
+    return bytes;
+  };
+  const jobs = { br: null, gzip: null };
+  const pool = bytes.length >= POOL_CAP_BYTES ? onPool : (make) => make();
+  p.encodedAsync = (enc) => {
+    if (enc === "br") return p.br ? Promise.resolve(p.br) : (jobs.br ??= pool(() => brotliAsync(bytes, brAsync)).then((b) => (p.br ??= b)).finally(() => { jobs.br = null; }));
+    if (enc === "gzip") return p.gz ? Promise.resolve(p.gz) : (jobs.gzip ??= pool(() => gzipAsync(bytes, gzAsync)).then((b) => (p.gz ??= b)).finally(() => { jobs.gzip = null; }));
+    return Promise.resolve(bytes);
   };
   return p;
 }
+/** A map tree node (`{ coin, children }`) with at least this many children is encoded one child at a time: its text is the same. */
+const SPLIT_CHILDREN = 4;
+/** JSON text gathered before it is turned into bytes and hashed (prepareJsonGen). */
+const CHUNK_CHARS = 64 * 1024;
+const isTreeNode = (o) => { const k = Object.keys(o); return k.length === 2 && k[0] === "coin" && k[1] === "children" && o.coin !== undefined; };
+/**
+ * prepareJson as a generator for runSliced (sliced.mjs), for a body whose first key `key` holds a big array (the
+ * map's `roots` or `nodes`: 35 MB of JSON on the local index, 0.6 s of stringify and hashing in one block). The
+ * array is encoded one element at a time (a tree node with many children one child at a time) into ~64 KB chunks,
+ * hashed as they come, and the bytes are joined once. The bytes are exactly JSON.stringify(body)'s, with the closing
+ * "}" replaced by `tail` when given (the /api map bodies append `,"indexed":n}`) and each chunk mapped by `transform`
+ * (the /v1 bodies' absolute image URLs; a chunk ends between two JSON values, so no image field is split). Returns
+ * preparedBytes(bytes, etag): the ETag is sha1 over those bytes, as etagOf gives; no text is kept.
+ */
+export function* prepareJsonGen(body, { key, tail = null, transform = null, ...opts } = {}) {
+  const arr = body?.[key], head = `{${JSON.stringify(key)}:[`, shell = JSON.stringify({ ...body, [key]: [] });
+  if (!Array.isArray(arr) || !shell.startsWith(`${head}]`)) { // not the shape this splits: in one go
+    let text = JSON.stringify(body);
+    if (tail != null) text = text.slice(0, -1) + tail;
+    return prepareJsonText(transform ? transform(text) : text, opts);
+  }
+  const hash = createHash("sha1"), bufs = [];
+  let len = 0, chunk = head, n = 0;
+  const flush = () => {
+    const b = Buffer.from(transform ? transform(chunk) : chunk, "utf8");
+    hash.update(b); bufs.push(b); len += b.length; chunk = "";
+  };
+  function* add(node) {
+    const kids = node?.children;
+    if (Array.isArray(kids) && kids.length >= SPLIT_CHILDREN && isTreeNode(node)) {
+      chunk += `{"coin":${JSON.stringify(node.coin)},"children":[`;
+      for (let j = 0; j < kids.length; j++) { if (j) chunk += ","; yield* add(kids[j]); }
+      chunk += "]}";
+    } else chunk += JSON.stringify(node) ?? "null";
+    if (chunk.length >= CHUNK_CHARS) { flush(); yield; } else if ((++n & 63) === 0) yield;
+  }
+  for (let i = 0; i < arr.length; i++) { if (i) chunk += ","; yield* add(arr[i]); }
+  const rest = shell.slice(head.length); // "]" + the body's other keys + "}"
+  chunk += tail != null ? rest.slice(0, -1) + tail : rest;
+  flush();
+  yield;
+  // The chunks joined into one buffer (what zlib and res.end take) ~8 MB per step: the 35 MB copy was one 17-23 ms step.
+  let bytes = bufs[0];
+  if (bufs.length > 1) {
+    bytes = Buffer.allocUnsafe(len);
+    let at = 0, since = 0;
+    for (const b of bufs) { b.copy(bytes, at); at += b.length; since += b.length; if (since >= 8 * 2 ** 20) { since = 0; yield; } }
+    yield;
+  }
+  return preparedBytes(bytes, `W/"${hash.digest("base64url").slice(0, 20)}"`, opts);
+}
+/** Bodies at least this big are compressed on the thread pool (encodedAsync) when their bytes are not made yet: brotli of the 35 MB map took 1.2 s of the event loop. */
+export const ASYNC_ENCODE_BYTES = 256 * 1024;
 /** Sends a `prepareJson` result with the cache headers of `sendCachedJson`, pre-encoded for the client's accept-encoding. */
 export function sendPrepared(req, res, prepared, { maxAge = 5, swr = maxAge * 4, cacheControl = null } = {}) {
   res.setHeader("etag", prepared.etag);
   res.setHeader("cache-control", cacheControl ?? `public, max-age=${maxAge}, stale-while-revalidate=${swr}`);
   if (req.headers["if-none-match"] === prepared.etag) return res.status(304).end();
   const enc = req.method === "HEAD" ? null : encodingOf(req);
-  const out = enc && prepared.bytes.length >= 1024 ? prepared.encoded(enc) : prepared.bytes;
-  res.setHeader("content-type", "application/json; charset=utf-8");
-  if (out !== prepared.bytes) { res.setHeader("content-encoding", enc); const vary = res.getHeader("vary"); res.setHeader("vary", vary ? `${vary}, accept-encoding` : "accept-encoding"); }
-  res.setHeader("content-length", String(out.length));
-  res.end(out);
+  const send = (out) => {
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    if (out !== prepared.bytes) { res.setHeader("content-encoding", enc); const vary = res.getHeader("vary"); res.setHeader("vary", vary ? `${vary}, accept-encoding` : "accept-encoding"); }
+    res.setHeader("content-length", String(out.length));
+    res.end(out);
+  };
+  if (!enc || prepared.bytes.length < 1024) return send(prepared.bytes);
+  const made = enc === "br" ? prepared.br : enc === "gzip" ? prepared.gz : null;
+  if (!made && prepared.encodedAsync && prepared.bytes.length >= ASYNC_ENCODE_BYTES) {
+    return prepared.encodedAsync(enc).then(send, () => send(prepared.bytes)).catch(() => res.destroy());
+  }
+  return send(prepared.encoded(enc));
 }
 
 /**

@@ -12,7 +12,8 @@
 // Images: the model hands out same-origin proxy paths (`/api/img?u=…`); a partner page lives on
 // another origin, so every image in a /v1 body is made absolute against PUBLIC_URL.
 import express from "express";
-import { v1Cors, RateLimiter, sendCachedJson, sendPrepared, prepareJson, prepareJsonText } from "./http.mjs";
+import { v1Cors, RateLimiter, sendCachedJson, sendPrepared, prepareJson, prepareJsonGen } from "./http.mjs";
+import { runSliced } from "./sliced.mjs";
 import { openApiDoc } from "./openapi.mjs";
 import { agentsBody, agentBody, agentCoinBody } from "./agents/registry.mjs";
 
@@ -50,7 +51,7 @@ export function createV1({ model, indexer, apiRpc, hub, meta = null, apiKeys, is
   const stream = new V1Stream({ model, hub, abs, cfg, isMint });
   const familyCache = new Map(); // mint → { at, body }
   const treeCache = new Map();   // root mint (+ the asked mint when it is off-tree) → { at, version, prepared }
-  const mapPrepared = new WeakMap(); // model map entry → its /v1 bytes (absolute image URLs)
+  const mapPrepared = new WeakMap(); // model map entry → (a promise of) its /v1 bytes (absolute image URLs)
   const docPrepared = prepareJson(openApiDoc({ publicUrl: base, limits: cfg }));
 
   // ------------------------------------------------------------ tiers
@@ -192,18 +193,24 @@ export function createV1({ model, indexer, apiRpc, hub, meta = null, apiKeys, is
   });
   router.get("/coin/:mint/family", coinRoute((req, res, c) => sendCachedJson(req, res, family(c), { cacheControl: V1_CACHE })));
   router.get("/tree/:mint", coinRoute((req, res, c) => sendPrepared(req, res, tree(c), { cacheControl: V1_CACHE })));
-  router.get("/map", (req, res) => {
+  router.get("/map", wrap(async (req, res) => {
     const raw = req.query.since;
     let since = raw != null && raw !== "" ? Number(raw) : null;
     if (since != null && !Number.isFinite(since)) return res.status(400).json({ error: "since must be a millisecond timestamp" });
     // Whole seconds: a superset of the exact answer, and one cached delta per second at most
     // however many distinct values partners send.
     if (since != null) since = Math.max(0, Math.floor(since / 1000) * 1000);
-    const entry = since != null ? model.mapSince({ all: true, since }) : model.mapAll({ all: true, depth: model.mapDepth() });
+    // The /api build, sliced (model.mapAllAsync / mapSinceAsync), encoded in slices with absolute image URLs
+    // and without `indexed`: JSON.stringify(entry.body) with absImagesText, once per entry.
+    const entry = since != null ? await model.mapSinceAsync({ all: true, since }) : await model.mapAllAsync({ all: true, depth: model.mapDepth() });
     let p = mapPrepared.get(entry);
-    if (!p) { entry.prepared ??= prepareJson(entry.body); p = prepareJsonText(absImagesText(entry.prepared.text)); mapPrepared.set(entry, p); }
-    sendPrepared(req, res, p, { cacheControl: V1_CACHE });
-  });
+    if (!p) {
+      p = runSliced(prepareJsonGen(entry.body, { key: Array.isArray(entry.body?.roots) ? "roots" : "nodes", transform: absImagesText })).then((run) => run.value);
+      mapPrepared.set(entry, p);
+      p.catch(() => mapPrepared.delete(entry));
+    }
+    return sendPrepared(req, res, await p, { cacheControl: V1_CACHE });
+  }));
   router.get("/heat", (req, res) => {
     const entry = model.heatEntry();
     entry.prepared ??= prepareJson(entry.body);

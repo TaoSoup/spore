@@ -5,7 +5,6 @@
 // wired here per route: the upload may carry a 3 MB image, everything else is capped at 16 KB.
 import express from "express";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { brotliCompressSync, gzipSync, constants as Z } from "node:zlib";
 import { join, sep } from "node:path";
 import { checkEligibility } from "./eligibility.mjs";
 import { PublicKey, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, PUMP_FEE_PROGRAM_ID, VersionedTransaction } from "./sdk.mjs";
@@ -15,7 +14,8 @@ import { shareOf, claimTotals } from "./treasury.mjs";
 import { fromBase58 } from "./decode.mjs";
 import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLIT_BPS } from "./pricing.mjs";
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
-import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
+import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
+import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
 import { ApiKeys } from "./apikeys.mjs";
 import { uploadFields, imageFromDataUrl, LIMITS } from "./validate.mjs";
@@ -145,13 +145,20 @@ export function preparedWithIndexed(prepared, indexed) {
   if (end < 1 || prepared.bytes[end] !== 0x7d) return prepareJsonText(withIndexed(prepared.text, indexed)); // not an object: never for the map bodies
   const tail = `,"indexed":${JSON.stringify(indexed ?? null)}}`;
   const bytes = Buffer.concat([prepared.bytes.subarray(0, end), Buffer.from(tail, "utf8")]);
-  const p = { text: prepared.text.slice(0, -1) + tail, bytes, etag: etagOf(bytes), br: null, gz: null };
-  p.encoded = (enc) => {
-    if (enc === "br") return (p.br ??= brotliCompressSync(bytes, { params: { [Z.BROTLI_PARAM_QUALITY]: 4 } }));
-    if (enc === "gzip") return (p.gz ??= gzipSync(bytes, { level: 6 }));
-    return bytes;
-  };
-  return p;
+  return preparedBytes(bytes, etagOf(bytes), { text: prepared.text.slice(0, -1) + tail });
+}
+/**
+ * The /api bytes of a map entry (the full forest or a since= delta): its body with `,"indexed":n` appended (what
+ * preparedWithIndexed(prepareJson(body), n) gives), encoded once per entry in slices (prepareJsonGen under
+ * runSliced) so the event loop keeps serving while 35 MB of JSON is written; concurrent requests share the job.
+ * Sets `entry.encodeMs` (time spent encoding) for the x-map-encode-ms header.
+ */
+export function mapApiPrepared(entry) {
+  if (entry.apiPrepared) return Promise.resolve(entry.apiPrepared);
+  entry.apiPreparing ??= runSliced(prepareJsonGen(entry.body, { key: Array.isArray(entry.body?.roots) ? "roots" : "nodes", tail: `,"indexed":${JSON.stringify(entry.indexed ?? null)}}` }))
+    .then((run) => { entry.apiPrepared = run.value; entry.encodeMs = Math.round(run.cpuMs); return run.value; })
+    .finally(() => { entry.apiPreparing = null; });
+  return entry.apiPreparing;
 }
 
 /** Trades → OHLC candles of `res` seconds; USD when every trade has a USD price, else quote units. */
@@ -185,7 +192,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
   const ok = !wsDown && !stalled;
   const mem = process.memoryUsage();
   return {
-    ok, status: ok ? "ok" : "degraded", now, uptimeS, mode: model.mode, coins: model.coins.size, ourCoins: model.scope().ours.size,
+    ok, status: ok ? "ok" : "degraded", now, uptimeS, mode: model.mode, coins: model.coins.size, ourCoins: typeof model.ourCount === "function" ? model.ourCount() : model.scope().ours.size,
     indexer: { phase: snap.phase ?? null, lagS, lastRefreshAt: snap.lastRefreshAt ?? null, lastVaultsAt: snap.lastVaultsAt ?? null, pricingPoolsAt: snap.pricingPoolsAt ?? null, lastError: snap.lastError ?? null, backfill: { ...model.backfill }, created: snap.created ?? null, map: snap.map ?? null },
     map: { ...(model.mapStats ?? {}), total: model.mapCache?.total ?? null, cachedVersion: model.mapCache?.version ?? null, dirty: model.dirty?.size ?? 0, family: model.familyStats ? { ...model.familyStats, ...model.familyHeld() } : null },
     ws: ws ? { connected: ws.connected, lastMessageAgoMs: ws.lastMessageAgoMs, connects: ws.connects, errors: ws.errors, backoffMs: ws.backoffMs ?? null, reconnecting: !!ws.reconnecting } : null,
@@ -330,25 +337,25 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // payload (or the client's simulation) explode.
   // `scope=all` draws every pump.fun pair the indexer knows, whatever the listing mode: the map is
   // the one place that shows the whole ecosystem, with our launches flagged by `ours` on each node.
-  app.get("/api/map", (req, res) => {
+  app.get("/api/map", (req, res, next) => {
     const all = req.query.scope === "all";
     if (req.query.limit === "all") {
       const since = req.query.since != null && req.query.since !== "" ? Number(req.query.since) : null;
       if (since != null && !Number.isFinite(since)) return res.status(400).json({ error: "since must be a millisecond timestamp" });
       const depth = req.query.depth != null && req.query.depth !== "" ? clampInt(req.query.depth, model.mapDepth(), 0, 6) : model.mapDepth();
-      const entry = since != null ? model.mapSince({ all, since }) : model.mapAll({ all, depth });
-      // These bodies carry `indexed` (the map's nodes + the asset-family coins it leaves undrawn, stored on
-      // the entry at build time). /v1 shares `entry.prepared` without it, so the /api bytes are their own
-      // slot, spliced from the same encoded JSON (DESIGN-FAMILY-ALL §4.5).
-      if (!entry.apiPrepared) {
-        const t0 = performance.now();
-        entry.prepared ??= prepareJson(entry.body);
-        entry.apiPrepared = preparedWithIndexed(entry.prepared, entry.indexed);
-        entry.encodeMs = Math.round(performance.now() - t0);
-      }
-      if (entry.buildMs != null) res.setHeader("x-map-build-ms", String(entry.buildMs)); // tree walk + mapRef; the JSON encode is x-map-encode-ms
-      if (entry.encodeMs != null) res.setHeader("x-map-encode-ms", String(entry.encodeMs));
-      return sendPrepared(req, res, entry.apiPrepared, { maxAge: 10 });
+      // Built, encoded and compressed without holding the event loop: the build and the encoding run in slices
+      // (mapAllAsync / mapSinceAsync, mapApiPrepared), brotli and gzip on the thread pool (sendPrepared). On the local
+      // index the full map was one 3.4 s block per rebuild. A burst of requests shares one build and one encoding.
+      // These bodies carry `indexed` (the map's nodes + the asset-family coins it leaves undrawn, stored on the
+      // entry at build time); /v1 encodes the same body without it (DESIGN-FAMILY-ALL §4.5).
+      return (since != null ? model.mapSinceAsync({ all, since }) : model.mapAllAsync({ all, depth }))
+        .then(async (entry) => {
+          const p = await mapApiPrepared(entry);
+          if (entry.buildMs != null) res.setHeader("x-map-build-ms", String(entry.buildMs)); // tree walk + mapRef; the JSON encode is x-map-encode-ms
+          if (entry.encodeMs != null) res.setHeader("x-map-encode-ms", String(entry.encodeMs));
+          return sendPrepared(req, res, p, { maxAge: 10 });
+        })
+        .catch(next);
     }
     const limit = clampInt(req.query.limit, 60, 1, 200), depth = clampInt(req.query.depth, 2, 0, 4), fanout = clampInt(req.query.fanout, 40, 1, 200);
     const d = model.computed();
@@ -406,20 +413,28 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // `mint=<top>` answers just that family's row (`families` is then [] or one row; `total` is always
   // the whole map's). Built from the cached all-scope forest, kept 30 s per mode with its encoded bytes.
   const dominance = new Map(); // mode → { at, body, prepared }
-  app.get("/api/map/dominance", (req, res) => {
+  const dominanceJobs = new Map(); // mode → the table being made (it waits on a sliced map build)
+  app.get("/api/map/dominance", (req, res, next) => {
     const m = req.query.mode;
     const mode = m == null || m === "" || m === "mcap" ? "mcap" : m === "locked" ? "locked" : null;
     if (!mode) return res.status(400).json({ error: "mode must be locked or mcap" });
     const mint = req.query.mint != null && req.query.mint !== "" ? String(req.query.mint) : null;
     if (mint != null && !isMint(mint)) return res.status(400).json({ error: "invalid mint" });
-    let entry = dominance.get(mode);
-    if (!entry || now() - entry.at >= DOMINANCE_CACHE_MS) {
-      entry = { at: now(), body: familyShares(model.mapAll({ all: true }).body.roots, mode), prepared: null };
-      dominance.set(mode, entry);
+    const cached = dominance.get(mode);
+    let ready;
+    if (cached && now() - cached.at < DOMINANCE_CACHE_MS) ready = Promise.resolve(cached);
+    else if (!(ready = dominanceJobs.get(mode))) {
+      const at = now();
+      ready = model.mapAllAsync({ all: true })
+        .then((built) => { const e = { at, body: familyShares(built.body.roots, mode), prepared: null }; dominance.set(mode, e); return e; })
+        .finally(() => dominanceJobs.delete(mode));
+      dominanceJobs.set(mode, ready);
     }
-    if (mint == null) { entry.prepared ??= prepareJson(entry.body); return sendPrepared(req, res, entry.prepared, { maxAge: 30 }); }
-    const row = entry.body.families.find((f) => f.mint === mint);
-    sendCachedJson(req, res, { mode, total: entry.body.total, families: row ? [row] : [] }, { maxAge: 30 });
+    return ready.then((entry) => {
+      if (mint == null) { entry.prepared ??= prepareJson(entry.body); return sendPrepared(req, res, entry.prepared, { maxAge: 30 }); }
+      const row = entry.body.families.find((f) => f.mint === mint);
+      sendCachedJson(req, res, { mode, total: entry.body.total, families: row ? [row] : [] }, { maxAge: 30 });
+    }).catch(next);
   });
 
   // `scope=all` opens the chart of any tracked coin to the map's side panel (the map shows every

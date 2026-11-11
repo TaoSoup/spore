@@ -8,19 +8,19 @@ import { USDC_MINT, NATIVE_MINT, TOKEN_2022_PROGRAM_ID } from "./sdk.mjs";
 import { priceQuoteOf, chainPrices, progressOf, units, mcapCapOf, liqQuoteOf } from "./pricing.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { Activity } from "./activity.mjs";
+import { drain, runSliced } from "./sliced.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
 /**
  * computed() walks every indexed coin (about 345k on mainnet, 1-3 s on the VPS) and every live trade bumps
  * the version, so the map flush (every 3 s), refresh and stats used to re-run it back to back and starve the
  * event loop (API answers took 2-9 s). On a large index a new pass starts at most every COMPUTED_MIN_MS and
- * runs in the background in COMPUTED_SLICE_MS slices; callers get the last finished table meanwhile (they read
- * it with ?. / ?? {}). Small indexes (tests, a fresh devnet) recompute synchronously.
+ * runs in the background on the sliced scheduler (sliced.mjs: SLICE_MS of the event loop per turn, shared with
+ * the map jobs); callers get the last finished table meanwhile (they read it with ?. / ?? {}). Small indexes
+ * (tests, a fresh devnet) recompute synchronously.
  */
 export const COMPUTED_MIN_MS = 5_000;
 export const COMPUTED_THROTTLE_MIN_COINS = 20_000;
-/** Longest stretch one slice of a background pass may hold the event loop. */
-export const COMPUTED_SLICE_MS = 12;
 const SOL_DECIMALS = 9;
 // `PublicKey.toBase58()` encodes on every call (bn.js); `decimalsOf` runs millions of times per
 // derived pass at 15k coins, so the SOL mint is compared as a string constant.
@@ -42,6 +42,13 @@ export const PENDING_MAX = 500;
 // The whole-forest map (DESIGN §11.5) is rebuilt at most once per this window, and only when the
 // model version moved; the delta variant (`since=`) shares the window.
 export const MAP_CACHE_MS = 10_000;
+/**
+ * since= deltas kept: at most this many entries, and at most this many nodes over all of them, the oldest dropped
+ * first. A cursor older than the index gives the whole forest flat (~93k nodes, ~70 MB with its encoded bytes on the
+ * local index), so the entry count alone let 64 of those pile up.
+ */
+export const MAP_SINCE_ENTRIES = 64;
+export const MAP_SINCE_NODES = 250_000;
 /** How many coins of a listed asset's family the full map draws (every coin with children or younger than a day, then the biggest by locked value); the rest stay in the index and in the family's counts. */
 export const ASSET_FAMILY_DRAW = 300;
 // Family snapshots (`/api/map/family/:mint`, DESIGN-FAMILY-ALL §4): every coin of one family, biggest
@@ -82,8 +89,8 @@ const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
 
 export class Model {
-  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW } = {}) {
-    this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw;
+  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW, mapSinceNodes = MAP_SINCE_NODES } = {}) {
+    this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw; this.mapSinceNodes = mapSinceNodes;
     this.platformWallet = platformWallet; this.splitBps = splitBps;
     // The platform share a sharing config must carry to count as ours: the configured platform
     // slice (50% by default). Mere presence is not enough — anyone can write a config that names
@@ -125,7 +132,7 @@ export class Model {
     this.byUri = new Map();         // metadata uri → Set<mint>
     this.mapCache = null; this.mapSinceCache = new Map(); this.totalCache = null;
     this.lastGeneratedAt = 0;
-    this.mapStats = { builds: 0, lastBuildMs: null, maxBuildMs: 0 }; // full-forest builds (health)
+    this.mapStats = { builds: 0, lastBuildMs: null, maxBuildMs: 0, lastSlices: null, maxSliceMs: 0 }; // full-forest builds (health); slices: of the last sliced build, maxSliceMs: the longest one so far
   }
 
   load() {
@@ -402,6 +409,21 @@ export class Model {
     return changed;
   }
   pendingMints() { this.sweepPending(); return [...this.pending.keys()]; }
+  /**
+   * scope().ours.size without building the scope (a 155k-entry set, ~100 ms on the local index, and every trade
+   * moves the version it is cached by): `/api/health` reports it and is polled every few seconds. The same
+   * count, cached per version; free when the scope is current.
+   */
+  ourCount() {
+    this.sweepPending();
+    if (this.scopeVersion === this.version && this.scopeCache) return this.scopeCache.ours.size;
+    if (this.ourCountCache?.version === this.version) return this.ourCountCache.n;
+    let n = 0;
+    for (const c of this.coins.values()) if (c.tracked && this.isOurCoin(c)) n++;
+    this.ourCountCache = { version: this.version, n };
+    return n;
+  }
+  ourCountCache = null;
   #persistPending() { this.db.kvSet("oursPending", Object.fromEntries(this.pending)); }
 
   /**
@@ -414,11 +436,18 @@ export class Model {
   scope() {
     this.sweepPending();
     if (this.scopeVersion === this.version) return this.scopeCache;
+    const v = this.version, sc = drain(this.#scopeGen());
+    this.scopeCache = sc; this.scopeVersion = v;
+    return sc;
+  }
+  /** scope()'s pass as a generator (it yields every 2k coins: ~100 ms on the local index), for the sliced map jobs; the caller swept and caches. */
+  *#scopeGen() {
     const ours = new Set(); const inScope = new Set(); const derived = new Map();
     const d = this.computed();
-    for (const c of this.coins.values()) if (c.tracked && this.isOurCoin(c)) ours.add(c.mint);
+    let n = 0;
+    for (const c of this.coins.values()) { if ((++n & 2047) === 0) yield; if (c.tracked && this.isOurCoin(c)) ours.add(c.mint); }
     if (this.mode === "all") {
-      for (const c of this.coins.values()) if (c.tracked) inScope.add(c.mint);
+      for (const c of this.coins.values()) { if ((++n & 2047) === 0) yield; if (c.tracked) inScope.add(c.mint); }
     } else {
       for (const m of ours) { inScope.add(m); for (const a of this.ancestors(m)) inScope.add(a.mint); }
       const memo = new Map();
@@ -442,8 +471,13 @@ export class Model {
         derived.set(mint, { children: shown, descendants: desc(mint), lockedQuote: locked, lockedUsd, otherChildren: (e?.children ?? 0) - shown });
       }
     }
-    this.scopeCache = { ours, inScope, derived }; this.scopeVersion = this.version;
-    return this.scopeCache;
+    return { ours, inScope, derived };
+  }
+  /** scoped(c) from a map job's computed row `e` and scope `sc` (scoped reads both live, and the scope is rebuilt per version). */
+  #scopedIn(c, e, sc) {
+    const d = e ?? {};
+    if (this.mode === "all") return { children: d.children ?? 0, descendants: d.descendants ?? 0, lockedQuote: d.lockedQuote ?? 0n, lockedUsd: d.lockedUsd ?? null, otherChildren: 0 };
+    return sc.derived.get(c.mint) ?? { children: 0, descendants: 0, lockedQuote: 0n, lockedUsd: d.priceUsd != null ? 0 : null, otherChildren: d.children ?? 0 };
   }
   /** Scoped counts for a coin, or the "nothing of ours below it" row for a foreign coin viewed directly. */
   scoped(c) {
@@ -464,14 +498,21 @@ export class Model {
    */
   assetFamilies() {
     if (this.assetVersion === this.version && this.assetCache) return this.assetCache;
+    const fam = drain(this.#assetFamiliesGen());
+    this.assetCache = fam; this.assetVersion = this.version;
+    return fam;
+  }
+  /** assetFamilies' pass as a generator (it yields every 2k coins): the sliced map jobs run it, the method drains it. */
+  *#assetFamiliesGen() {
     const fam = new Map();
+    let n = 0;
     for (const c of this.coins.values()) {
+      if ((++n & 2047) === 0) yield;
       if (!c.tracked || c.depth !== 0 || !c.quoteMint || c.quoteMint === SOL_MINT) continue;
       let list = fam.get(c.quoteMint);
       if (!list) { list = []; fam.set(c.quoteMint, list); }
       list.push(c);
     }
-    this.assetCache = fam; this.assetVersion = this.version;
     return fam;
   }
   /**
@@ -482,17 +523,35 @@ export class Model {
    */
   assetDrawn() {
     if (this.drawnVersion === this.version && this.drawnCache) return this.drawnCache;
-    const out = new Map(), d = this.computed(), cap = this.assetFamilyDraw, dayAgo = Math.floor(this.now() / 1000) - 86_400;
-    for (const [asset, kids] of this.assetFamilies()) {
+    const d = this.computed();
+    const out = drain(this.#assetDrawnGen(d, this.assetFamilies()));
+    this.drawnCache = out; this.drawnVersion = this.version;
+    return out;
+  }
+  /**
+   * assetDrawn's pass as a generator over `fam` with the computed table `d`. The rest of a family is ordered by
+   * keys read once per coin (locked value, then price, both descending, -1 when unknown): the same comparisons as
+   * reading them from `d` in the comparator, so the same order, without two Map lookups per comparison (USDC's
+   * 21k coins took ~100 ms that way).
+   */
+  *#assetDrawnGen(d, fam) {
+    const out = new Map(), cap = this.assetFamilyDraw, dayAgo = Math.floor(this.now() / 1000) - 86_400;
+    let n = 0;
+    for (const [asset, kids] of fam) {
       const keep = new Set(), rest = [];
-      for (const k of kids) { if ((d.get(k.mint)?.children ?? 0) > 0 || (k.createdAt ?? 0) > dayAgo) keep.add(k.mint); else rest.push(k); }
-      if (keep.size < cap) {
-        rest.sort((a, b) => (d.get(b.mint)?.lockedUsd ?? -1) - (d.get(a.mint)?.lockedUsd ?? -1) || (d.get(b.mint)?.priceUsd ?? -1) - (d.get(a.mint)?.priceUsd ?? -1));
-        for (const k of rest) { if (keep.size >= cap) break; keep.add(k.mint); }
+      for (const k of kids) {
+        if ((++n & 2047) === 0) yield;
+        if ((d.get(k.mint)?.children ?? 0) > 0 || (k.createdAt ?? 0) > dayAgo) keep.add(k.mint); else rest.push(k);
+      }
+      if (keep.size < cap && rest.length) {
+        const lk = new Float64Array(rest.length), pk = new Float64Array(rest.length), order = new Array(rest.length);
+        for (let i = 0; i < rest.length; i++) { const e = d.get(rest[i].mint); lk[i] = e?.lockedUsd ?? -1; pk[i] = e?.priceUsd ?? -1; order[i] = i; }
+        yield;
+        order.sort((a, b) => lk[b] - lk[a] || pk[b] - pk[a]);
+        for (const i of order) { if (keep.size >= cap) break; keep.add(rest[i].mint); }
       }
       out.set(asset, keep);
     }
-    this.drawnCache = out; this.drawnVersion = this.version;
     return out;
   }
   // Logos of listed quote assets whose mint metadata has no image (USDC, WBTC, WETH, …): mint → the
@@ -516,14 +575,20 @@ export class Model {
   /** The stored icon URL of a listed asset mint, or null. */
   assetIconOf(mint) { return this.assetIcons.get(mint) ?? null; }
   /** The bubble of a listed quote asset: its name and logo from the mint metadata, the value its family has locked in it. */
-  assetMapRef(mint) {
-    const kids = this.assetFamilies().get(mint) ?? [];
-    const d = this.computed();
+  assetMapRef(mint, fam = null, dt = null) { return drain(this.#assetMapRefGen(mint, fam, dt)); }
+  /** assetMapRef as a generator (it yields every 2k family coins: USDC's 21k took up to ~30 ms), for the sliced map jobs. */
+  *#assetMapRefGen(mint, fam = null, dt = null) {
+    const kids = (fam ?? this.assetFamilies()).get(mint) ?? [];
+    const d = dt ?? this.computed();
     const { name, symbol } = this.nameOf(mint);
     const dec = this.decimalsOf(mint), quoteUsd = this.quoteUsdOf(mint);
-    let locked = 0n, descendants = 0, updatedAt = 0;
+    let locked = 0n, descendants = 0, updatedAt = 0, n = 0;
     for (const k of kids) {
-      locked += BigInt((k.migrated ? k.poolQuote : k.realQuoteReserves) ?? 0);
+      if ((++n & 2047) === 0) yield;
+      // what computed() memoizes per coin object (lockMemo): the same BigInt, made once per coin state
+      let v = this.lockMemo.get(k);
+      if (v === undefined) { v = BigInt((k.migrated ? k.poolQuote : k.realQuoteReserves) ?? 0); this.lockMemo.set(k, v); }
+      locked += v;
       descendants += 1 + (d.get(k.mint)?.descendants ?? 0);
       updatedAt = Math.max(updatedAt, k.updatedAt ?? 0);
     }
@@ -600,7 +665,11 @@ export class Model {
     }
     return out;
   }
-  childrenOf(mint) { return [...(this.children.get(mint) ?? [])].map((m) => this.coins.get(m)).filter((c) => c && c.tracked); }
+  childrenOf(mint) {
+    const out = [], set = this.children.get(mint);
+    if (set) for (const m of set) { const c = this.coins.get(m); if (c && c.tracked) out.push(c); }
+    return out;
+  }
   tracked() { return [...this.coins.values()].filter((c) => c.tracked); }
   metaFor(c) { const uri = this.mints.get(c.mint)?.uri; return uri ? this.meta.get(uri) ?? null : null; }
 
@@ -622,16 +691,10 @@ export class Model {
   #computeJob = null;
   #startSlicedPass() {
     if (this.#computeJob || Date.now() - this.derivedAt < COMPUTED_MIN_MS) return;
-    const gen = this.#computePass();
-    this.#computeJob = gen;
-    const step = () => {
-      const until = performance.now() + COMPUTED_SLICE_MS;
-      let r;
-      try { do { r = gen.next(); } while (!r.done && performance.now() < until); }
-      catch (e) { this.#computeJob = null; this.log?.warn?.(`computed: ${e?.message ?? e}`); return; }
-      if (r.done) this.#computeJob = null; else setImmediate(step);
-    };
-    setImmediate(step);
+    // On the scheduler the map jobs share (sliced.mjs): one SLICE_MS budget per event-loop turn for all of them.
+    this.#computeJob = runSliced(this.#computePass())
+      .catch((e) => { this.log?.warn?.(`computed: ${e?.message ?? e}`); })
+      .finally(() => { this.#computeJob = null; });
   }
   /** One full pass as a generator: it yields every few hundred coins so a caller can spread it over ticks. */
   *#computePass() {
@@ -694,7 +757,7 @@ export class Model {
       for (const c of this.coins.values()) { if ((++n & 511) === 0) yield; desc(c.mint); }
       this.descCache = memo; this.descVersion = structVersion;
     }
-    for (const [mint, e] of d) e.descendants = this.descCache.get(mint) ?? 0;
+    for (const [mint, e] of d) { if ((++n & 4095) === 0) yield; e.descendants = this.descCache.get(mint) ?? 0; } // one row per coin: 37-75 ms in one step at 155k
     this.derived = d; this.derivedVersion = version; this.derivedAt = Date.now(); this.derivedMs = this.derivedAt - t0;
   }
   /** 24 h volume/trade counts per mint (Map<mint, { trades, usd }>), live from the in-memory activity counters. */
@@ -717,13 +780,21 @@ export class Model {
   ref(c) { const { name, symbol } = this.nameOf(c.mint); return { mint: c.mint, name, symbol, image: imageProxyUrl(this.metaFor(c)?.image), depth: c.depth, ...this.oursOf(c) }; }
   /** CoinRef plus the few numbers a bubble needs. Skips the ancestor walk and the volume join that
    *  make `view()` cost more, because the map asks for hundreds of coins per request. */
-  mapRef(c, all = false) {
-    const d = this.computed().get(c.mint) ?? {};
-    const s = all ? this.scopedAll(c) : this.scoped(c);
+  mapRef(c, all = false, dt = null, sc = null) {
+    // `dt`, `sc`: the computed() table and the scope a map job took once (the build calls this ~90k times, and the
+    // scope is rebuilt per version); with `all`, scopedAll's numbers come from the same row, without a second
+    // computed() call and an object per call.
+    const tab = dt ?? this.computed();
+    const e = tab.get(c.mint), d = e ?? {};
+    const s = all ? null : (sc || this.mode === "all") ? this.#scopedIn(c, e, sc) : this.scoped(c); // mode "all" reads no scope
     const supply = units(c.tokenTotalSupply, this.decimalsOf(c.mint));
     const mcapUsd = d.priceUsd != null ? d.priceUsd * supply : null;
-    const cap = this.mcapCapOf(c, mcapUsd);
-    return { ...this.ref(c), mcapUsd, ...capField(cap), lockedUsd: s.lockedUsd, children: s.children, descendants: s.descendants, otherChildren: s.otherChildren, migrated: c.migrated, createdAt: c.createdAt };
+    const cap = this.mcapCapOf(c, mcapUsd, tab);
+    return {
+      ...this.ref(c), mcapUsd, ...capField(cap),
+      lockedUsd: s ? s.lockedUsd : d.lockedUsd ?? null, children: s ? s.children : d.children ?? 0, descendants: s ? s.descendants : d.descendants ?? 0, otherChildren: s ? s.otherChildren : 0,
+      migrated: c.migrated, createdAt: c.createdAt,
+    };
   }
 
   // ---------------------------------------------------------------- the whole-forest map (DESIGN §11.5)
@@ -739,87 +810,321 @@ export class Model {
   /** A family's children on the map: all of them, except a listed asset's family, which is capped (assetDrawn). */
   mapChildren(mint, all) {
     if (!all) return this.visibleChildren(mint);
-    const kids = this.childrenOf(mint), drawn = this.assetDrawn().get(mint);
-    return drawn ? kids.filter((k) => drawn.has(k.mint)) : kids;
+    return this.#kidsIn(mint, all, this.assetDrawn(), null);
+  }
+  /** mapChildren from what a map job took: `drawn` (assetDrawn's map) with `all`; without, visibleChildren on the job's scope `sc`. */
+  #kidsIn(mint, all, drawn, sc) {
+    const kids = this.childrenOf(mint);
+    if (!all) return this.mode === "all" ? kids : kids.filter((c) => sc.inScope.has(c.mint));
+    const dr = drawn.get(mint);
+    return dr ? kids.filter((k) => dr.has(k.mint)) : kids;
+  }
+  /**
+   * The cache and job key of the scope a body is built in: `all` (scope=all, the map's) or the listing mode's. In
+   * mode "all" the two differ (no asset tops, no drawn cap without scope=all), so they never share an entry.
+   */
+  #scopeKey(all) { return all ? "all" : `scoped-${this.mode}`; }
+  /**
+   * What every map job reads first, once: the computed() table; with `all` the listed-asset families and their drawn
+   * sets; without it in mode "ours" the listing scope (`sc`, whose first step sweeps the pending spawns that ran out:
+   * read live, the scope would be rebuilt in every slice while trades move the version); then the roots (mapRoots'
+   * list and order). Without `all` in mode "all" the scope holds every tracked coin, so nothing needs it. The
+   * per-version caches are used when current and refilled when nothing moved while this ran (always, in one go).
+   */
+  *#mapCtxGen(all) {
+    const scoped = !all && this.mode !== "all";
+    if (scoped) this.sweepPending();
+    const v0 = this.version, d = this.computed();
+    let fam = null, drawn = null, sc = null;
+    if (all) {
+      fam = this.assetVersion === v0 && this.assetCache ? this.assetCache : yield* this.#assetFamiliesGen();
+      drawn = this.drawnVersion === v0 && this.drawnCache ? this.drawnCache : yield* this.#assetDrawnGen(d, fam);
+      if (this.version === v0) { this.assetCache = fam; this.assetVersion = v0; this.drawnCache = drawn; this.drawnVersion = v0; }
+    } else if (scoped) {
+      sc = this.scopeVersion === v0 && this.scopeCache ? this.scopeCache : yield* this.#scopeGen();
+      if (this.version === v0) { this.scopeCache = sc; this.scopeVersion = v0; }
+    }
+    const roots = yield* this.#rootsGen(all, fam, d, sc);
+    return { version: v0, d, fam, drawn, sc, roots };
+  }
+  /**
+   * mapRoots(all) from a job's context: with `all` the depth-0 coins with a child (allRoots' order) not drawn under
+   * an asset, then the asset tops; without, visibleRoots() (its order) on the job's table and scope.
+   */
+  *#rootsGen(all, fam, d, sc) {
+    const out = [], byKids = all || this.mode === "all";
+    let n = 0;
+    for (const c of this.coins.values()) {
+      if ((++n & 2047) === 0) yield;
+      if (!c.tracked || c.depth !== 0) continue;
+      if (byKids ? (d.get(c.mint)?.children ?? 0) > 0 && !(all && fam.has(c.quoteMint ?? "")) : sc.inScope.has(c.mint) && (sc.derived.get(c.mint)?.descendants ?? 0) > 0) out.push(c);
+    }
+    if (all) for (const mint of fam.keys()) out.push({ mint, asset: true, depth: -1 });
+    return out;
+  }
+  /**
+   * A node's children in map order: locked value (scopedAll's, or scoped's without `all`), then price, both
+   * descending and -1 when unknown, ties in mapChildren's order. The keys are read once per child: the same
+   * comparisons the old comparator made with two lookups per side, so the same order.
+   */
+  #sortKids(kids, all, d, sc) {
+    const n = kids.length;
+    if (n < 2) return kids;
+    const lk = new Float64Array(n), pk = new Float64Array(n), order = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = kids[i], e = d.get(c.mint);
+      lk[i] = (all ? e?.lockedUsd ?? null : this.#scopedIn(c, e, sc).lockedUsd) ?? -1;
+      pk[i] = e?.priceUsd ?? -1;
+      order[i] = i;
+    }
+    order.sort((a, b) => lk[b] - lk[a] || pk[b] - pk[a]);
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) out[i] = kids[order[i]];
+    return out;
   }
   /**
    * Every root and every descendant as `{ coin: mapRef, children }` nodes, no fan-out cap. Built
    * from `mapRef` only (no `view()`: no ancestor walk, no volume join), cached per model version
-   * and at most once per `MAP_CACHE_MS` so a burst of opens shares one build (≈ 50 ms for 15k
-   * coins). The cache entry carries `body`, `total` and a `prepared` slot the HTTP layer fills with
-   * the encoded bytes. Roots and children are ordered by locked value, biggest first.
+   * and at most once per `MAP_CACHE_MS` so a burst of opens shares one build. The cache entry
+   * carries `body`, `total`, `indexed` and the slots the HTTP layer fills with the encoded bytes.
+   * Roots and children are ordered by locked value, biggest first. This builds at once (tests, the
+   * card); the HTTP routes await mapAllAsync, the same build in slices.
    */
   mapAll({ all = true, depth = this.mapDepth() } = {}) {
-    const key = `${all ? "all" : this.mode}:${depth}`;
-    const hit = this.mapCache;
-    if (hit && hit.key === key && (hit.version === this.version || this.now() - hit.at < MAP_CACHE_MS)) return hit;
+    const key = `${this.#scopeKey(all)}:${depth}`;
+    const hit = this.#mapHit(key);
+    if (hit) return hit;
     const t0 = performance.now();
+    const entry = drain(this.#mapBuildGen({ all, depth, key, shared: false }));
+    return this.#installMap(entry, performance.now() - t0, null);
+  }
+  /**
+   * mapAll on the sliced scheduler (sliced.mjs): the whole-forest build took ~1.5 s of one block on the local index
+   * (155k coins, 92k nodes). Resolves with the same entry, under mapAll's cache rule. Callers of one key share one
+   * build; builds of different keys (scope, depth) run one after another, as the synchronous ones did: each holds
+   * its tree and then its encoded bytes, so side by side they multiplied the peak memory.
+   */
+  mapAllAsync({ all = true, depth = this.mapDepth() } = {}) {
+    const key = `${this.#scopeKey(all)}:${depth}`;
+    const hit = this.#mapHit(key);
+    if (hit) return Promise.resolve(hit);
+    let job = this.#mapJobs.get(key);
+    if (!job) {
+      const build = () => this.#mapHit(key) ?? runSliced(this.#mapBuildGen({ all, depth, key, shared: true })).then((run) => this.#installMap(run.value, run.cpuMs, run));
+      job = this.#buildQueue.then(build).finally(() => this.#mapJobs.delete(key));
+      this.#buildQueue = job.then(() => {}, () => {});
+      this.#mapJobs.set(key, job);
+    }
+    return job;
+  }
+  #mapJobs = new Map(); // key → its build, queued or running
+  #buildQueue = Promise.resolve(); // the build queued last: the next one starts when it ends
+  #sinceJobs = new Map(); // since key → the sliced delta in flight
+  /**
+   * `ctx:` / `counts:` + scope key + model version → { done, value, error }: a job's context (#mapCtxGen) or whole-tree
+   * counts (#countsGen) that the other jobs started at the same version wait for instead of making their own (a
+   * burst of since= requests at one version made one walk with the synchronous code, through the per-version caches).
+   */
+  #shared = new Map();
+  *#sharedGen(key, make) {
+    const cur = this.#shared.get(key);
+    if (cur) {
+      while (!cur.done) yield;
+      if (cur.error) throw cur.error;
+      return cur.value;
+    }
+    const s = { done: false, value: undefined, error: null };
+    this.#shared.set(key, s);
+    try { s.value = yield* make(); return s.value; } catch (e) { s.error = e; throw e; } finally { s.done = true; if (this.#shared.get(key) === s) this.#shared.delete(key); }
+  }
+  /** #mapCtxGen shared by the jobs started at one version (only jobs on the scheduler: a drained job cannot wait). */
+  *#ctxShared(all) {
+    if (!all && this.mode !== "all") this.sweepPending(); // the version the key names is the swept one
+    return yield* this.#sharedGen(`ctx:${this.#scopeKey(all)}:${this.version}`, () => this.#mapCtxGen(all));
+  }
+  /** #countsGen shared the same way. */
+  *#countsShared(all, ctx) {
+    return yield* this.#sharedGen(`counts:${this.#scopeKey(all)}:${ctx.version}`, () => this.#countsGen(all, ctx));
+  }
+  #mapHit(key) {
+    const hit = this.mapCache;
+    return hit && hit.key === key && (hit.version === this.version || this.now() - hit.at < MAP_CACHE_MS) ? hit : null;
+  }
+  /** The build, as a generator (yields every 32 nodes): returns the entry, not yet cached (#installMap). */
+  *#mapBuildGen({ all, depth, key, shared }) {
     const generatedAt = this.now();
-    const d = this.computed();
-    const stat = (c) => (all ? this.scopedAll(c) : this.scoped(c));
-    const cmp = (a, b) => (stat(b).lockedUsd ?? -1) - (stat(a).lockedUsd ?? -1) || (d.get(b.mint)?.priceUsd ?? -1) - (d.get(a.mint)?.priceUsd ?? -1);
-    let total = 0;
-    const seen = new Set(), nested = new Set(), fam = all ? this.assetFamilies() : null; // for `indexed` (#indexedFrom)
-    const node = (c, left, root = false) => {
-      total++; seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
-      return { coin: c.asset ? this.assetMapRef(c.mint) : this.mapRef(c, all), children: left > 0 ? this.mapChildren(c.mint, all).sort(cmp).map((k) => node(k, left - 1)) : [] };
-    };
-    const rootLocked = new Map(this.mapRoots(all).map((r) => [r, (r.asset ? this.assetMapRef(r.mint).lockedUsd : stat(r).lockedUsd) ?? -1]));
-    const roots = [...rootLocked.keys()].sort((a, b) => rootLocked.get(b) - rootLocked.get(a)).map((r) => node(r, r.asset ? depth + 1 : depth, true));
-    const body = { roots, scope: all ? "all" : this.mode, version: this.version, generatedAt, total };
+    // Before anything is read: a change made while a sliced build runs is stamped after generatedAt, so the
+    // client's next since=<generatedAt> carries it (stamps never fall behind lastGeneratedAt, see #stamp).
     this.lastGeneratedAt = Math.max(this.lastGeneratedAt, generatedAt);
-    this.mapCache = { key, all, version: this.version, at: generatedAt, body, total, prepared: null, buildMs: Math.round(performance.now() - t0) };
-    this.totalCache = { all, version: this.version, total };
-    this.mapCache.indexed = this.#indexedFrom(seen.size, nested, all);
-    if (depth === this.mapDepth()) this.indexedCache = { all, version: this.version, n: this.mapCache.indexed };
-    this.mapStats.builds++; this.mapStats.lastBuildMs = this.mapCache.buildMs; this.mapStats.maxBuildMs = Math.max(this.mapStats.maxBuildMs, this.mapCache.buildMs);
-    return this.mapCache;
+    // Without `all` in mode "ours" the build reads the listing scope, whose first step sweeps the pending spawns that
+    // ran out (a version bump). Sweep before the version is read, as the synchronous build did (in visibleRoots, before
+    // it read the version at its end), so the body's version and ETag are the swept state's.
+    if (!all && this.mode !== "all") this.sweepPending();
+    const version = this.version;
+    const ctx = shared ? yield* this.#ctxShared(all) : yield* this.#mapCtxGen(all);
+    const { d, fam, drawn, sc } = ctx, self = this;
+    let total = 0, n = 0;
+    const seen = new Set(), nested = new Set(); // for `indexed` (#indexedIn)
+    const assetRefs = new Map(); // an asset top's bubble is read for the root order and drawn once: one pass over its family
+    function* assetRef(mint) { let r = assetRefs.get(mint); if (!r) { r = yield* self.#assetMapRefGen(mint, fam, d); assetRefs.set(mint, r); } return r; }
+    function* node(c, left, root) {
+      total++; seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
+      const coin = c.asset ? yield* assetRef(c.mint) : self.mapRef(c, all, d, sc);
+      const children = [];
+      if (left > 0) for (const k of self.#sortKids(self.#kidsIn(c.mint, all, drawn, sc), all, d, sc)) children.push(yield* node(k, left - 1, false));
+      if ((++n & 31) === 0) yield;
+      return { coin, children };
+    }
+    const list = ctx.roots, locked = new Float64Array(list.length), order = new Array(list.length);
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i];
+      locked[i] = (r.asset ? (yield* assetRef(r.mint)).lockedUsd : all ? d.get(r.mint)?.lockedUsd ?? null : this.#scopedIn(r, d.get(r.mint), sc).lockedUsd) ?? -1;
+      order[i] = i;
+      // an asset top's bubble sums its whole family (USDC: 21k coins): one per step, the asset tops come last
+      if (r.asset || (i & 63) === 63) yield;
+    }
+    order.sort((a, b) => locked[b] - locked[a]);
+    yield;
+    const roots = [];
+    for (const i of order) { const r = list[i]; roots.push(yield* node(r, r.asset ? depth + 1 : depth, true)); }
+    const body = { roots, scope: all ? "all" : this.mode, version, generatedAt, total };
+    return { key, all, version, at: generatedAt, body, total, prepared: null, buildMs: 0, indexed: this.#indexedIn(seen.size, nested, all, ctx), depth };
+  }
+  /** Caches a finished build (a slower one never replaces a newer one of the same key) and counts it in mapStats. */
+  #installMap(entry, ms, run) {
+    entry.buildMs = Math.round(ms);
+    const cur = this.mapCache;
+    if (!cur || cur.key !== entry.key || cur.at <= entry.at) {
+      this.mapCache = entry;
+      // the counts of the default-depth tree only: a shallower build's node count is not the map's (since= reports it)
+      if (this.version === entry.version && entry.depth === this.mapDepth()) {
+        this.totalCache = { all: entry.all, version: entry.version, total: entry.total };
+        this.indexedCache = { all: entry.all, version: entry.version, n: entry.indexed };
+      }
+    }
+    const st = this.mapStats;
+    st.builds++; st.lastBuildMs = entry.buildMs; st.maxBuildMs = Math.max(st.maxBuildMs, entry.buildMs);
+    if (run) { st.lastSlices = run.slices; st.maxSliceMs = Math.max(st.maxSliceMs ?? 0, Math.round(run.maxSliceMs)); }
+    return entry;
   }
   /** Number of nodes the full map holds right now (a cheap walk when no build is cached for this version). */
   mapTotal(all = true) {
     if (this.totalCache?.version === this.version && this.totalCache.all === all) return this.totalCache.total;
-    const depth = this.mapDepth();
-    let total = 0;
-    const walk = (c, left) => { total++; if (left > 0) for (const k of this.mapChildren(c.mint, all)) walk(k, left - 1); };
-    for (const r of this.mapRoots(all)) walk(r, r.asset ? depth + 1 : depth);
-    this.totalCache = { all, version: this.version, total };
-    return total;
+    return drain(this.#countsGen(all, drain(this.#mapCtxGen(all)))).total;
   }
-  /** Is this coin drawn by the full map: a root with children, or a child whose parent chain reaches a tracked root? */
-  #onMap(c, all) {
+  /**
+   * mapTotal and mapIndexed in one walk of the default-depth tree from a job's context, as a generator; the
+   * per-version caches answer when current and are refilled when nothing moved since the context was taken.
+   */
+  *#countsGen(all, ctx) {
+    const tc = this.totalCache, ic = this.indexedCache;
+    const totalHit = tc?.version === this.version && tc.all === all, indexedHit = ic?.version === this.version && ic.all === all;
+    if (totalHit && indexedHit) return { total: tc.total, indexed: ic.n };
+    const depth = this.mapDepth(), fam = ctx.fam, self = this;
+    let total = 0, n = 0;
+    const seen = new Set(), nested = new Set();
+    function* walk(c, left, root) {
+      total++; seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
+      if ((++n & 255) === 0) yield;
+      if (left > 0) for (const k of self.#kidsIn(c.mint, all, ctx.drawn, ctx.sc)) yield* walk(k, left - 1, false);
+    }
+    for (const r of ctx.roots) yield* walk(r, r.asset ? depth + 1 : depth, true);
+    const indexed = this.#indexedIn(seen.size, nested, all, ctx);
+    if (this.version === ctx.version) {
+      if (!totalHit) this.totalCache = { all, version: ctx.version, total };
+      if (!indexedHit) this.indexedCache = { all, version: ctx.version, n: indexed };
+    }
+    return { total: totalHit ? tc.total : total, indexed: indexedHit ? ic.n : indexed };
+  }
+  /**
+   * Is this coin drawn by the full map: a root with children, or a child whose parent chain reaches a tracked root?
+   * Without `all` the listing scope applies: the job's snapshot in mode "ours"; in mode "all" it is every tracked coin.
+   */
+  #onMapIn(c, all, ctx) {
     if (!c.tracked) return false;
-    if (!all && !this.scope().inScope.has(c.mint)) return false;
-    if (c.depth === 0) return (all && !!c.quoteMint && c.quoteMint !== SOL_MINT && (this.assetDrawn().get(c.quoteMint)?.has(c.mint) ?? false)) || this.mapChildren(c.mint, all).length > 0;
+    const scoped = !all && this.mode !== "all";
+    if (scoped && !ctx.sc.inScope.has(c.mint)) return false;
+    if (c.depth === 0) return (all && !!c.quoteMint && c.quoteMint !== SOL_MINT && (ctx.drawn.get(c.quoteMint)?.has(c.mint) ?? false)) || this.#kidsIn(c.mint, all, ctx.drawn, ctx.sc).length > 0;
     if (c.depth > this.mapDepth()) return false;
     const anc = this.ancestors(c.mint);
-    return anc.length > 0 && anc[anc.length - 1].depth === 0 && anc.every((a) => a.tracked && (all || this.scope().inScope.has(a.mint)));
+    return anc.length > 0 && anc[anc.length - 1].depth === 0 && anc.every((a) => a.tracked && (!scoped || ctx.sc.inScope.has(a.mint)));
   }
   /**
    * Delta sync: the nodes whose `updatedAt` (ms) is after `since`, flat, each with its `parentMint`
    * (null for a root). `removed` is reserved (coins are never deleted from the tree). `total` says
    * how many nodes the full map holds, so a client can tell a stale cache from a complete one.
+   * This builds at once; the HTTP routes await mapSinceAsync, the same delta in slices.
    */
   mapSince({ all = true, since = 0 } = {}) {
-    const key = `${all ? "all" : this.mode}:${since}`;
+    const key = `${this.#scopeKey(all)}:${since}`;
+    const hit = this.#sinceHit(key);
+    if (hit) return hit;
+    return this.#installSince(drain(this.#mapSinceGen({ all, since, key, shared: false })));
+  }
+  /**
+   * mapSince on the sliced scheduler: its whole-tree counts (total, indexed) took ~0.6 s of one block on the local
+   * index. Callers of one key share the job; jobs started at one model version share the context and the counts.
+   * Deltas of different cursors run side by side, not queued like full builds: deliberately (review, Nov 11 2026), as a
+   * queue would lose that sharing and make a simultaneous burst slower, and bursts are rare on a one-user site.
+   */
+  mapSinceAsync({ all = true, since = 0 } = {}) {
+    const key = `${this.#scopeKey(all)}:${since}`;
+    const hit = this.#sinceHit(key);
+    if (hit) return Promise.resolve(hit);
+    let job = this.#sinceJobs.get(key);
+    if (!job) {
+      job = runSliced(this.#mapSinceGen({ all, since, key, shared: true })).then((run) => this.#installSince(run.value)).finally(() => this.#sinceJobs.delete(key));
+      this.#sinceJobs.set(key, job);
+    }
+    return job;
+  }
+  #sinceHit(key) {
     const hit = this.mapSinceCache.get(key);
-    if (hit && (hit.version === this.version || this.now() - hit.at < MAP_CACHE_MS)) return hit;
+    return hit && (hit.version === this.version || this.now() - hit.at < MAP_CACHE_MS) ? hit : null;
+  }
+  /** Caches a delta: at most MAP_SINCE_ENTRIES of them and mapSinceNodes nodes in all, the oldest out first (the one installed stays). */
+  #installSince(entry) {
+    this.mapSinceCache.set(entry.key, entry);
+    let nodes = 0;
+    for (const e of this.mapSinceCache.values()) nodes += e.body.nodes.length;
+    for (const [k, e] of this.mapSinceCache) {
+      if (this.mapSinceCache.size <= MAP_SINCE_ENTRIES && nodes <= this.mapSinceNodes) break;
+      if (e === entry) continue;
+      this.mapSinceCache.delete(k); nodes -= e.body.nodes.length;
+    }
+    return entry;
+  }
+  *#mapSinceGen({ all, since, key, shared }) {
     const generatedAt = this.now();
+    this.lastGeneratedAt = Math.max(this.lastGeneratedAt, generatedAt); // before anything is read, as in #mapBuildGen
+    const ctx = shared ? yield* this.#ctxShared(all) : yield* this.#mapCtxGen(all);
+    const fam = all ? ctx.fam : new Map();
+    // The version the job's reads start from (ctx: after the listing scope's sweep in mode "ours"); the delta's own sweep
+    // below moves it. Anything else that moves the version while the job runs can be missing from the body, so the
+    // entry is then matched only through MAP_CACHE_MS, not by version (#sinceHit), however long the model stays quiet.
+    let v = ctx.version;
+    // Without `all` in mode "all" the synchronous delta swept the pending spawns that ran out when it met the first
+    // tracked coin changed after `since` (its scope() call), then read the version: the same here.
+    let sweep = !all && this.mode === "all";
     const nodes = [], assets = new Set();
-    const fam = all ? this.assetFamilies() : new Map();
+    let n = 0;
     for (const c of this.coins.values()) {
-      if (!((c.updatedAt ?? 0) > since) || !this.#onMap(c, all)) continue;
+      if ((++n & 1023) === 0) yield;
+      if (!((c.updatedAt ?? 0) > since)) continue;
+      if (sweep && c.tracked) { sweep = false; const before = this.version; this.sweepPending(); if (before === v) v = this.version; }
+      if (!this.#onMapIn(c, all, ctx)) continue;
       const underAsset = c.depth === 0 && fam.has(c.quoteMint ?? "");
       if (underAsset) assets.add(c.quoteMint);
-      nodes.push({ ...this.mapRef(c, all), parentMint: c.depth > 0 || underAsset ? c.quoteMint : null });
+      nodes.push({ ...this.mapRef(c, all, ctx.d, ctx.sc), parentMint: c.depth > 0 || underAsset ? c.quoteMint : null });
+      if ((nodes.length & 63) === 0) yield; // an old cursor draws nearly every coin it scans
     }
-    for (const mint of assets) nodes.push({ ...this.assetMapRef(mint), parentMint: null });
+    for (const mint of assets) { nodes.push({ ...(yield* this.#assetMapRefGen(mint, ctx.fam, ctx.d)), parentMint: null }); yield; }
+    yield;
     nodes.sort((a, b) => (b.lockedUsd ?? -1) - (a.lockedUsd ?? -1));
-    const body = { nodes, removed: [], generatedAt, total: this.mapTotal(all), version: this.version };
-    this.lastGeneratedAt = Math.max(this.lastGeneratedAt, generatedAt);
-    const entry = { key, version: this.version, at: generatedAt, body, prepared: null, indexed: this.mapIndexed(all) };
-    this.mapSinceCache.set(key, entry);
-    if (this.mapSinceCache.size > 64) this.mapSinceCache.delete(this.mapSinceCache.keys().next().value);
-    return entry;
+    const counts = shared ? yield* this.#countsShared(all, ctx) : yield* this.#countsGen(all, ctx);
+    const version = this.version; // the body's, read last as the synchronous delta did: after any sweep above
+    const body = { nodes, removed: [], generatedAt, total: counts.total, version };
+    return { key, version: this.version === v ? version : -1, at: generatedAt, body, prepared: null, indexed: counts.indexed };
   }
 
   /**
@@ -847,21 +1152,16 @@ export class Model {
    */
   mapIndexed(all = true) {
     if (this.indexedCache?.version === this.version && this.indexedCache.all === all) return this.indexedCache.n;
-    const depth = this.mapDepth(), seen = new Set(), nested = new Set(), fam = all ? this.assetFamilies() : null;
-    const walk = (c, left, root) => {
-      seen.add(c.mint); if (!root && fam?.has(c.mint)) nested.add(c.mint);
-      if (left > 0) for (const k of this.mapChildren(c.mint, all)) walk(k, left - 1, false);
-    };
-    for (const r of this.mapRoots(all)) walk(r, r.asset ? depth + 1 : depth, true);
-    const n = this.#indexedFrom(seen.size, nested, all);
-    this.indexedCache = { all, version: this.version, n };
-    return n;
+    return drain(this.#countsGen(all, drain(this.#mapCtxGen(all)))).indexed;
   }
   indexedCache = null;
-  #indexedFrom(distinct, nested, all) {
+  /** `indexed` from a walk's distinct mints and nested asset tops, with the job's families and drawn sets (mapUndrawn's sum). */
+  #indexedIn(distinct, nested, all, ctx) {
     if (!all) return distinct;
-    let n = distinct + this.mapUndrawn(true);
-    if (nested.size) { const drawn = this.assetDrawn(), fam = this.assetFamilies(); for (const a of nested) n -= Math.max(0, (fam.get(a)?.length ?? 0) - (drawn.get(a)?.size ?? 0)); }
+    const { fam, drawn } = ctx;
+    let n = distinct;
+    for (const [asset, kids] of fam) n += Math.max(0, kids.length - (drawn.get(asset)?.size ?? 0));
+    for (const a of nested) n -= Math.max(0, (fam.get(a)?.length ?? 0) - (drawn.get(a)?.size ?? 0));
     return n;
   }
 
