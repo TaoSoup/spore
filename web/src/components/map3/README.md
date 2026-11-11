@@ -135,6 +135,30 @@ everyone. Every fallback logs one `console.warn`, never `console.error`.
   the first screen's 114 logos are drawn about 0.5 s after the map is ready (it was about 10 s with the old
   80 ms spacing). On a real first visit the logos are bound by the network: `/api/img` sends the original
   images (some 0.5–0.7 MB) and fetches cache misses with a concurrency of 3 on the server.
+  The engine side (`engine/bubbles.js` assignCells, 2026-11-11, review fixes the same day): the view the camera is
+  heading to (a flight, a zoom tween, an instant jump such as a flight under reduced motion, a drag's throw;
+  `S.motion.goal()`) gets its logo cells and requests at once, so a flight hides the request and the answer; the eased
+  wheel zoom's target once it has held still 80 ms (and every 300 ms on the way of a zoom in or a pan, but never while
+  the target is more than 5 % further out than where the gesture started, turned back in, or last took a pass; a zoom out
+  slower than 5 % per 300 ms can take one pass in its first 300 ms); a jump or a zoom tween that comes within 150 ms of the last such change (a held +/− key's auto-repeat)
+  continues a series, so only the first asks at once, a tween then follows the wheel's rules and a jump the hand-motion
+  ones; while the camera moves by hand a pass runs at most every 300 ms, and one 100 ms after it stops. A pass tests
+  the coins' positions first, from the instance arrays only. A load notice is applied in the next frame, and each frame
+  uploads what has landed (`texSubImage2D` into the LO 4096² / HI 2048² atlases, at most 4 ms a frame), then blits those
+  cells' own mip levels (a batch of more than 64 LO / 8 HI cells regenerates the whole chain with one `generateMipmap`).
+  The LRU eviction never takes a cell drawn on screen now or at the destination. Measured on the local index (headless
+  Chrome on the RTX, medians, 2 runs per build), base → now: a flight's landing to 90 % of the family's logos drawn
+  907 → 0 ms (drawn at the landing; requests ~1 s before it); the last wheel notch to 90 % 1,576 → 262 ms (6 notches
+  sent over CDP) and 1,546 → 398 ms (6 notches sent in the page, the same cells as the base); a drag's release to 90 %
+  565 → 7 ms. The cost: on the full map (`?last=all`, 92k coins) a flight's destination pass runs in its first frame
+  (3.6 ms; the base's pass after the landing 13.9 ms), drags send ~4 smaller sheets instead of 1 for the same cells, and
+  a wheel gesture whose notches come over 80 ms apart takes a pass per notch. A mip blit costs ~0.02 ms of GPU per 64 px
+  cell on an Intel UHD, where the whole LO chain costs ~3.6 ms. Second review (2026-11-11; headless engine, 3,000
+  children around a planet, logos answered 180 ms after the want): the zoom-out test had compared the target with the
+  eased camera, which trails it, so a gentle trackpad or pinch zoom out (4x over 3 s) still took 11 passes and asked
+  2,326 logos on the way, none of them in the view it ended on; now 0. A held +/− (30 repeats 33 ms apart) took a
+  pass per repeat (11–22 passes, up to 2,166 logos); now 2–3 passes. The cost: a zoom out that still ends at the logo
+  size has nothing asked ahead (2x over 2 s, 1,997 children at the end: 90 % drawn 80 → 560 ms after the last step).
 
 ## Debug hooks
 
@@ -219,6 +243,5 @@ g−r ≥ 40; violet b−g ≥ 24 && r ≥ g && max ≥ 56; grey max−min ≤ 1
 - A returning visitor's cached map data (IndexedDB) comes back in mint order, so each family's inner
   arrangement differs from a first visit (the planets and their sizes are the same). Fixing it means keeping
   the server order in `lib/map/cache.ts`.
-- The logo atlases (2048² each) are re-uploaded whole, at most every 400 ms, while logos stream in.
 - The React lifecycle (`ThreeMap`, `use-engine-sync`) is tested end to end in Chrome (map3-qa a, h, n), not by
   unit tests: the repo has no DOM test library.

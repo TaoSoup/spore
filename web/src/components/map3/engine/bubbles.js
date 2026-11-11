@@ -1,6 +1,6 @@
 // (map3 port) Copied from the prototype. Changed: logos come ONLY through opts.images (the app's bounded loader: hi logos
-// want(url, 256), lo logos want(url, 128), lo requested first so the planet tops get the newest stamps; re-checked on
-// images.onLoaded at most every 250 ms; no Image(), no fetch); canvas fonts are Geist Mono (monograms stay disabled);
+// want(url, 256), lo logos want(url, 128), lo requested first so the planet tops get the newest stamps; re-checked in the
+// frame after an images.onLoaded notice (2026-11-11: was at most every 250 ms); no Image(), no fetch); canvas fonts are Geist Mono (monograms stay disabled);
 // a highlight mask per instance (setVis: unmatched coins dim to TOK.dim, 160 ms crossfade); every geometry, material,
 // atlas texture and the glyph texture is disposed with the engine; __bubbleLOD -> S.debugFns.bubbleLOD.
 // bubbles.js: the coins. Logo atlases + one instanced impostor mesh (flat opaque dots, matte spheres, crisp 1 px heat
@@ -47,8 +47,9 @@
 //                                        Reads S.X/Y/R/famOf/age/n24/sym/notable[i] when present, else opts {x, y, r, fam,
 //                                        age, n24, sym}. Returns the instance index, or -1 when full/invalid. Then birth(i).
 //     tSec is on the uTime clock (seconds, performance.now()/1000); omitted -> S.U.uTime.value.
-//   One frame hook: throttled atlas upload (400 ms) while logos stream in; returns true while an atlas upload,
-//   a class crossfade or a rim flash is still animating (render-on-demand keeps drawing).
+//   One frame hook: the logo cell pass (assignCells: for the view the camera is heading to, or the current one), the atlas
+//   upload (one batch per frame while cells are dirty, 2026-11-11); returns true while an atlas upload, a class crossfade or
+//   a rim flash is still animating (render-on-demand keeps drawing).
 //   Reads shared uniforms: uPx uDpr uTime uDustExpand uHover uHoverFam uMinScale uDimMix uHoverT uK0 uFadeP uFadeD
 //   uFocusFam uFocusMix (final polish: other families recede when one owns the view).
 //   Debug: S.debug.obj.bubbles (shadows stays null: the drop-shadow pass is deleted); S.debug.map.logos (cells reserved at
@@ -79,6 +80,57 @@ const LOD = { body: 8, sphere: 11, logo: 6 };
 // (assignCells, biggest first, <= ASSIGN_MAX new cells per pass, LRU eviction of off-screen children only); galaxy keeps 10 px.
 // At inu 20x the five biggest children are 4.7-7.6 px and none reached the old 10 px gate.
 const LOGO_MIN_PX = 4.5, ASSIGN_MAX = 400;
+// (2026-11-11, logos at once) when the cell pass runs (assignCells, the rules are written there): for a destination the
+// camera is heading to at once, again when it moves past GOAL_MOVE_PX / GOAL_MOVE_LK (log zoom) and, for a drag's throw, at
+// most every GOAL_GAP_MS (the eased wheel zoom: EASE_HOLD_MS below; a held +/- key's repeats: SERIES_MS below); for the
+// current view every MOVE_PASS_MS while the camera moves by hand and STILL_MS after it stopped; a pass cut short at
+// ASSIGN_MAX goes on PASS_GAP_MS later. Atlas uploads: one batch per frame while cells are dirty, at most UPLOAD_BUDGET_MS
+// of texSubImage2D (the rest goes in the next frame).
+// GOAL_GAP_MS was 150 in a first draft: a 6-notch wheel flick (6 x 40 ms) then took 3 passes, the middle one for a target
+// wider than the final view (cells asked per gesture, medians of 12: base 181, draft 350); at 300 it takes the first notch's
+// and the final one's, as early as before (last notch -> 90 % drawn 221 ms, base 1,570 ms; cells 279, base 180). (Review,
+// 2026-11-11: the wheel now waits for its target to hold, EASE_HOLD_MS.)
+// Tried and not kept (2026-11-11): a preload, in each pass, of the logos about to be drawn (on screen 3-4.5 px, and at the
+// logo size within half a view around it; wants only, asked before the on-screen ones, 128 a pass, only while the loader's
+// queue was short). Medians over 12 gestures each against the same build without it (7 of its drags left after server
+// stalls): wheel 221 -> 166 ms for 279 -> 375 cells a gesture, drag 10 -> 5.5 ms (everything is drawn at the release either
+// way) for 76 -> 190 cells: not worth the requests.
+export const STILL_MS = 100, MOVE_PASS_MS = 300, GOAL_GAP_MS = 300, PASS_GAP_MS = 50, UPLOAD_BUDGET_MS = 4;
+export const GOAL_MOVE_PX = 32, GOAL_MOVE_LK = 0.05;
+// (2026-11-11 review, wheel requests) an eased wheel zoom / pan target (goal kind "ease") takes its destination pass once it
+// has held still for EASE_HOLD_MS (the view the gesture ends on); while it keeps moving, a pass every GOAL_GAP_MS from the
+// gesture's start (EASE_MOVE_PASSES; logos come in on the way) while the target is not more than GOAL_MOVE_LK further out
+// than the zoom the gesture started from (or turned back in at) or the highest its passes took (assignCells gRefK): a zoom in
+// or a pan, not a zoom out, except that one slower than GOAL_MOVE_LK per GOAL_GAP_MS can take one pass in its first GOAL_GAP_MS
+// (its children shrink, mostly below the logo size). Before (every GOAL_GAP_MS while the target moved, from the first
+// notch), the performance review measured on the full map: a 3 s trackpad zoom out asked 426-652 cells (base 31-141), 12 %
+// of them drawn in the view it ended on; zooming in 1.7x the cells of the base. In the headless engine (logos answered
+// 180 ms after the want, children asked / time from the last step until 90 % of the end view's children are drawn),
+// first-notch rule -> this: a single notch 582 / 276 ms -> 582 / 356 ms (the hold), 6 notches 40 ms apart 772 / 355 -> 372
+// / 331, 6 notches out 737 / 375 -> 605 / 356, a 1 s trackpad zoom in 1,285 / 336 -> 1,285 / 288, out (ending below the
+// logo size) 966 -> 0 cells; 6 notches 150 ms apart (each holds: a pass each) 1,570 -> 1,824 cells.
+// (Second review, 2026-11-11) the zoom-out test compared the target with the CAMERA (g.k >= cam.k x e^-GOAL_MOVE_LK). The
+// eased camera trails its target by about rate x 0.09 s, so a zoom out slower than ~0.6/s in log k (a gentle trackpad or
+// pinch) passed it and took a pass every GOAL_GAP_MS; the "966 -> 0" above was a fast one (1.9/s). Headless, 3,000
+// children around a planet from ~12 px (passes / children asked on the way, camera test -> gRefK): a trackpad or a pinch
+// 4x over 3 s 11 / 2,326 -> 0 / 0, the performance review's probe (45 x +20 px, 67 ms apart) 10 / 2,011 -> 0 / 0 (none of
+// them in the view it ends on); a zoom in 4x over 3 s 9 passes either way. The cost: a zoom out that still ends at the
+// logo size has nothing asked ahead (2x over 2 s, 1,997 children at the end: 90 % drawn 80 -> 560 ms after the last step,
+// uploads at 0.05 ms a cell).
+export const EASE_HOLD_MS = 80, EASE_MOVE_PASSES = true;
+// (2026-11-11, second review: a held +/- key) a jump or a zoom tween that comes within SERIES_MS of the last goal change
+// continues a series (Map.tsx calls scaleBy on every keydown: the auto-repeat sends one every 30-90 ms at the usual
+// settings). A tween then takes the ease target's rules above (once it holds; GOAL_GAP_MS apart on the way of a zoom in),
+// a jump (a goal for one frame) the hand-motion ones (a pass every MOVE_PASS_MS while it goes on, then STILL_MS after the
+// last). The first of a series still asks its view at once. A slower series holds each view >= STILL_MS, so each would take
+// a pass anyway. Before, every repeat took a pass at once: a "jump" under reduced motion (since the first review), a
+// "tween" with normal motion. Headless, same fixture, 30 repeats 33 ms apart (passes / children asked): reduced motion "+"
+// k 1.2 -> 80 11 / 898 -> 2 / 404 (the first press's view, asked at once), "-" k 60 -> 0.6 12 / 1,203 -> 3 / 16; normal
+// motion "+" 21 / 1,286 -> 3 / 404, "-" 22 / 2,166 -> 2 / 16. With a keyboard's 500 ms delay before the repeats, reduced
+// motion "+" 17 -> 9 passes (2,714 asked either way: the first view shows 500 ms), "-" 12 / 1,203 -> 3 / 27. The cost, as
+// for a zoom out above: a held "-" that ends at the logo size has less asked ahead (normal motion, 2,137 children at the
+// end: fully asked 62 -> 450 ms after the last key, 90 % drawn 482 -> 754 ms).
+export const SERIES_MS = 150;
 // flat-disc strength per class (mixed into the ground, opaque): live 0.88, cooling 0.62, quiet 0.52, cold 0.55 (cold is
 // a neutral grey that must stay visible); lower than TOK.flatA so a hot seed head is a texture, not a neon mass
 const FLAT = [0.80, 0.66, 0.62, 0.48];   // L* 77 / 48 / 37 / 21: the classes separate in greyscale
@@ -160,8 +212,10 @@ export function buildBubbles(S) {
   //       then the other tops and the children drawn >= the logo size by drawn size, LRU eviction of off-screen cells. Code 64 + j.
   //   HI: 8 x 8 cells of 256 px (2048^2; phone 128 px, 1024^2) = 64 cells: the planet tops; cell 62 = the selected coin,
   //       63 = the focused coin (S.U.uFocusCoin). Code 0..63.
-  // A logo lands in its cell with texSubImage2D (renderer.copyTextureToTexture) in batches <= every 250 ms, <= 2 ms each,
-  // then one generateMipmap; the shader clamps the lod so a cell never bleeds into its neighbour. Until the logo is there a
+  // A logo lands in its cell with texSubImage2D in the next frame (2026-11-11, logos at once: one batch per frame while
+  // cells are dirty, <= UPLOAD_BUDGET_MS each; was a batch <= every 250 ms, 100 ms in a burst), then its own mip levels are
+  // blitted (cellMips; a big batch: one generateMipmap per changed atlas); the shader clamps the lod so a cell never bleeds
+  // into its neighbour. Until the logo is there a
   // coin that owns a cell shows the pre-fill disc (#123020 + its heat-coloured letter, from the glyph texture).
   const CAP = N + SPARE;
   const PHONE = typeof S.phone === "function" ? !!S.phone() : false;
@@ -187,13 +241,68 @@ export function buildBubbles(S) {
   };
   const renderer = S.gfx && S.gfx.renderer;
   const gl = renderer ? renderer.getContext() : null;
-  const HIa = { rt: mkRT(HI_SZ), cell: HI_CELL, cols: HI_COLS, ok: false }, LOa = { rt: mkRT(LO_SZ), cell: LO_CELL, cols: LO_COLS, ok: false };
+  // frame: S.frame of the last batch; mipGens: whole-chain generateMipmap calls; mipBlits: cells whose levels were blitted
+  const up = { batches: 0, cells: 0, lastMs: 0, maxMs: 0, at: -1e9, fail: 0, frame: -1, mipGens: 0, mipBlits: 0 };
+  // (2026-11-11 review, GPU) cells: the cells (x, y px at level 0) a batch uploaded; blitMax: up to this many, their mip levels
+  // are blitted (cellMips) instead of regenerating the whole chain
+  const HIa = { rt: mkRT(HI_SZ), cell: HI_CELL, cols: HI_COLS, ok: false, cells: [], blitMax: PHONE ? 4 : 8 };
+  const LOa = { rt: mkRT(LO_SZ), cell: LO_CELL, cols: LO_COLS, ok: false, cells: [], blitMax: PHONE ? 32 : 64 };
   const genMips = (A) => {
     if (!renderer || !gl) return;
     const p = renderer.properties.get(A.rt.texture);
     if (!p.__webglTexture) return;
     renderer.state.bindTexture(gl.TEXTURE_2D, p.__webglTexture); gl.generateMipmap(gl.TEXTURE_2D); renderer.state.unbindTexture();
+    up.mipGens++;
   };
+  // (2026-11-11 review, GPU) a cell's own mip levels 1..log2(cell) - 3 (the shader's lod clamp: nothing above is sampled) by
+  // blitFramebuffer from level l - 1 to level l of the same atlas, LINEAR 2:1 = the 2 x 2 box generateMipmap computes, in
+  // linear light for the sRGB atlas as generateMipmap does. With one batch per frame (logos at once) generateMipmap of the
+  // whole 4096^2 LO chain ran in nearly every frame that uploaded a logo; the performance review measured it at 4.5 ms of GPU
+  // on an Intel UHD (frames that moved: 5.0 ms GPU without, 10.5 ms with; 7 -> 144 regenerations on the full map). Measured
+  // for this (headless Chrome, ANGLE D3D11, a logo-like cell against the whole chain regenerated): levels identical (0 of 255)
+  // on the RTX 4080 and the Intel UHD, <= 1 on SwiftShader; the neighbouring cells untouched. GPU per batch on the Intel UHD:
+  // LO 1 cell 0.03 ms, 9 cells 0.2, 32 cells 0.66, 128 cells 2.6 against 3.6 ms for the chain; HI (256 px cells) 0.04 ms a
+  // cell against 0.8 ms (phone LO 32 px 0.014 / 1.0, phone HI 128 px 0.03 / 0.28): a bigger batch (blitMax) regenerates the
+  // chain once as before. Any failure (an incomplete framebuffer, a throw) falls back to generateMipmap for good.
+  let mipFb = renderer && gl && typeof gl.createFramebuffer === "function" && typeof gl.blitFramebuffer === "function" ? { r: gl.createFramebuffer(), d: gl.createFramebuffer(), ok: false } : null;
+  function cellMips(A) {
+    if (!mipFb || mipFb.off || !mipFb.r || !mipFb.d || A.cells.length > 2 * A.blitMax) return false;
+    const p = renderer.properties.get(A.rt.texture), wt = p.__webglTexture;
+    if (!wt) return false;
+    const st = renderer.state, L = Math.log2(A.cell) - 3;
+    let bound = false;
+    try {
+      st.disable(gl.SCISSOR_TEST);   // a blit is clipped by the scissor box (three sets it again with its next render target)
+      st.bindFramebuffer(gl.READ_FRAMEBUFFER, mipFb.r); st.bindFramebuffer(gl.DRAW_FRAMEBUFFER, mipFb.d); bound = true;
+      for (let l = 1; l <= L; l++) {
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, wt, l - 1);
+        gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, wt, l);
+        if (!mipFb.ok) {   // once: both ends complete (an sRGB level as a colour attachment)
+          if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE || gl.checkFramebufferStatus(gl.DRAW_FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("mip framebuffer");
+          mipFb.ok = true;
+        }
+        const s = A.cell >> (l - 1), h = s >> 1;
+        for (let j = 0; j < A.cells.length; j += 2) {
+          const sx = A.cells[j] >> (l - 1), sy = A.cells[j + 1] >> (l - 1), dx = sx >> 1, dy = sy >> 1;
+          gl.blitFramebuffer(sx, sy, sx + s, sy + s, dx, dy, dx + h, dy + h, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+        }
+      }
+      up.mipBlits += A.cells.length >> 1;
+      return true;
+    } catch {
+      mipFb.off = true;   // generateMipmap from now on
+      return false;
+    } finally {
+      // the atlas leaves the framebuffers (it is sampled by the next draw); three's render target is bound again (its
+      // framebuffer, viewport and scissor test, as clearAtlas leaves them)
+      if (bound) try {
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0); gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+        st.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+        const face = typeof renderer.getActiveCubeFace === "function" ? renderer.getActiveCubeFace() : 0, lvl = typeof renderer.getActiveMipmapLevel === "function" ? renderer.getActiveMipmapLevel() : 0;
+        st.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null); renderer.setRenderTarget(renderer.getRenderTarget(), face, lvl);
+      } catch { /* a lost context */ }
+    }
+  }
   function clearAtlas(A) {
     if (!renderer) return;
     const prev = renderer.getRenderTarget(), cc = new THREE.Color(), ca = renderer.getClearAlpha(); renderer.getClearColor(cc);
@@ -202,12 +311,16 @@ export function buildBubbles(S) {
     genMips(A); A.ok = true;
   }
   try { clearAtlas(HIa); clearAtlas(LOa); } catch { /* a lost context: the logos stay pre-fill discs */ }
+  // (2026-11-11 review, GPU) the blit path's one-time costs at build, not in the first frame that uploads a logo: the
+  // framebuffer completeness check (a synchronous round trip to the GPU process) and the GPU's first blit (ANGLE builds its
+  // blit shaders then), on cell 0 of each atlas, which holds the pre-fill at every level (no logo has landed yet)
+  for (const A of [HIa, LOa]) { if (!mipFb || mipFb.off || !A.ok) break; A.cells.push(0, 0); cellMips(A); A.cells.length = 0; }
+  up.mipBlits = 0;
   // one scratch canvas + texture per cell size (a thumbnail of another size is scaled into it)
   const mkScratch = (sz) => { const c = document.createElement("canvas"); c.width = c.height = sz; const t = new THREE.CanvasTexture(c); t.flipY = false; return { c, ctx: c.getContext("2d"), t }; };
   const scLo = mkScratch(LO_CELL), scHi = mkScratch(HI_CELL);
   const dstV = new THREE.Vector2();
   const rawT = {};   // marker: upload the loader's bitmap itself (no scratch canvas)
-  const up = { batches: 0, cells: 0, lastMs: 0, maxMs: 0, at: -1e9, fail: 0 };
   // cell assignment
   function takeLo(i, now, pin) {
     if (loC[i] >= 0) { loUse[loC[i]] = now; return loC[i]; }
@@ -351,7 +464,7 @@ export function buildBubbles(S) {
         renderer.state.bindTexture(gl.TEXTURE_2D, wt);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, src === rawT ? im : sc.c);
       } catch { drawnImg[i] = null; pendingLogo.add(i); return n; }
-      A.dirtyMips = true; has[i] = Math.min(s, A.cell); n++;
+      A.dirtyMips = true; A.cells.push(x, y); has[i] = Math.min(s, A.cell); n++;
     }
     drawnImg[i] = im;
     return n;
@@ -359,9 +472,14 @@ export function buildBubbles(S) {
   function uploadBatch(now) {
     // (bubbles lane, look fix 2026-10-22) a burst of logos (a zoom that lands 100+ children / tops at once) is uploaded in 6 ms
     // batches every 100 ms instead of 2 ms every 250 ms, so a screenful reaches the atlas in ~0.3 s, not 2-4 s
-    const burst = dirty.size > 32;
-    if (!dirty.size || !renderer || now - up.at < (burst ? 100 : 250)) return false;
-    const budgetMs = burst ? 6 : 2;
+    // (2026-11-11, logos at once) no gap at all: every frame that finds dirty cells uploads them, one batch per frame (S.frame),
+    // at most UPLOAD_BUDGET_MS of texSubImage2D (a bigger burst goes on in the next frames), then the mip levels: the cells'
+    // own (cellMips, review 2026-11-11) or one generateMipmap per changed atlas. Measured with the gaps (headless Chrome, 8
+    // families): ~310 ms (240-570) from the first upload of a new view to 90 % of its logos drawn, while one batch of 157
+    // cells took ~1 ms and its mipmaps ~0 ms of CPU.
+    if (!dirty.size || !renderer || up.frame === S.frame) return false;
+    up.frame = S.frame;
+    const budgetMs = UPLOAD_BUDGET_MS;
     const t0 = performance.now();
     let n = 0;
     const done = [];
@@ -377,16 +495,18 @@ export function buildBubbles(S) {
     for (const i of done) { dirty.delete(i); setCode(i); }
     renderer.state.unbindTexture();
     const tm = performance.now();
-    for (const A of [HIa, LOa]) if (A.dirtyMips) { genMips(A); A.dirtyMips = false; }
+    for (const A of [HIa, LOa]) if (A.dirtyMips) { if (!cellMips(A)) genMips(A); A.dirtyMips = false; A.cells.length = 0; }
     const ms = performance.now() - t0; up.mipMs = +(performance.now() - tm).toFixed(3); up.lastN = n;
     up.at = now; up.batches++; up.cells += n; up.lastMs = +ms.toFixed(3); up.maxMs = Math.max(up.maxMs, up.lastMs);
     S.invalidate();
     return true;
   }
   const hex = (h) => "#" + h.toString(16).padStart(6, "0");
-  let logoCheckAt = -1e9, logoTimer = 0;
+  // (2026-11-11, logos at once) a load notice is applied in the next frame (the frame hook below), one recheck per frame
+  // however many notices came; before, a 250 ms timer (logoCheckAt + 250) held a landed sheet's logos back up to 250 ms
+  let loadSeen = false;
   const recheckLogos = () => {
-    logoTimer = 0; logoCheckAt = performance.now();
+    loadSeen = false;
     if (!S.dead && sweepDue()) sweepFailed();   // the timer's work, if a load notice came first
     if (S.dead || !images || !pendingLogo.size) return;
     for (const i of [...pendingLogo]) {
@@ -413,8 +533,8 @@ export function buildBubbles(S) {
     try {
       off = images.onLoaded(() => {
         // (logos that come later) a notice also runs a due failed-logo sweep (a background tab's timers run late)
-        if (S.dead || logoTimer || !(pendingLogo.size || sweepDue())) return;
-        logoTimer = S.life.timeout(recheckLogos, Math.max(0, logoCheckAt + 250 - performance.now()));
+        if (S.dead || !(pendingLogo.size || sweepDue())) return;
+        loadSeen = true;
       });
     } catch { off = null; }
     S.life.onDispose(() => { try { if (typeof off === "function") off(); } catch { /* ignore */ } });
@@ -477,6 +597,9 @@ export function buildBubbles(S) {
   let maxDustShare = 0; for (const f of fams) if (!f.planet && (f.share || 0) > maxDustShare) maxDustShare = f.share;
   if (!(maxDustShare > 0)) maxDustShare = 1;
   const minPxS = new Float32Array(N);
+  // (2026-11-11 review, pass cost) the largest instance scale (layout radius) and minPx (aA.x) of any coin, kept as births come
+  // in: the cell pass's first position test (offViewOf) bounds every coin's drawn radius with them
+  let maxScale = 0, maxMinPx = 0;
   for (let k = 0; k < N; k++) {
     const i = perm[k], f = fams[famOf[i]], top = i === f.top, a = ageOf(i);
     aHeat.set([cls[i], cls[i], -1e3, coreBoost(a)], k * 4);
@@ -492,6 +615,7 @@ export function buildBubbles(S) {
     const sweep = Math.min(1, Math.log10(1 + Math.max(0, n24Of(i))) / TOK.arcLogDen);
     const lz = codeFor(i); logoIdx[i] = lz;   // (visibility lane) -1 none, >= 0 a landed logo cell, <= -2 the galaxy pre-fill letter
     aA.set([minPx, sweep, lz, notable[i]], k * 4);
+    if (R[i] > maxScale) maxScale = R[i]; if (minPx > maxMinPx) maxMinPx = minPx;
     aB.set([f.planet ? 0 : 1, i, f.id, top ? 1 : 0], k * 4);
     aBirth[k * 3 + 2] = R[i] > 0 ? rr / R[i] : 1;
     m4.makeScale(R[i], R[i], 1); m4.setPosition(X[i], Y[i], f.planet ? 2 : 1); bubbles.setMatrixAt(k, m4);
@@ -1152,6 +1276,7 @@ void main(){
     { const hv = visA(i); aHl[k * 3] = hv; aHl[k * 3 + 1] = hv; aHl[k * 3 + 2] = -1e3; touch(atHl, k * 3, 3); }
     aXY[k * 2] = mX[i] = x; aXY[k * 2 + 1] = mY[i] = y;
     m4.makeScale(r, r, 1); m4.setPosition(x, y, f && f.planet ? 2 : 1); bubbles.setMatrixAt(k, m4); drawR[i] = r;
+    if (r > maxScale) maxScale = r; if (nt && 1.5 > maxMinPx) maxMinPx = 1.5;
     touch(bubbles.instanceMatrix, k * 16, 16);
     touch(atHeat, k * 4, 4); touch(atA, k * 4, 4); touch(atB, k * 4, 4); touch(atFlash, k * 3, 3); touch(atBirth, k * 3, 3); touch(atXY, k * 2, 2); touch(atIn, k, 1);
     bubbles.count = count; S.invalidate();
@@ -1185,15 +1310,17 @@ void main(){
   // drawn geometry in CSS px at the CURRENT zoom, for label obstacles and hit radii (labels / motion may adopt them):
   //   screenR(i)  the disc (minPx, uMinScale and the 1-device-px floor included)
   //   outerR(i)   the outermost drawn thing: the knock-out halo (r + 1.5) from 3 px
-  const screenR = (i) => {
+  // (2026-11-11, logos at once) screenRAt(i, k): the same at zoom k (the cell pass sizes a destination view with it)
+  const screenRAt = (i, k) => {
     if (!(invIdx[i] >= 0)) return 0;
-    const q = invIdx[i] * 4, sc = scaleAt(invIdx[i], S.cam.k);   // the drawn world radius at this zoom
-    let r = Math.max(sc * S.cam.k, aA[q] * U.uMinScale.value, 0.5);
-    if (!aB[q + 3] && !aB[q]) { const k0 = U.uK0.value; r += (Math.min(r, aA[q + 3] ? SPN : SP) - r) * (1 - smoothJ(STIP_K0[0] * k0, STIP_K0[1] * k0, S.cam.k)); }
+    const q = invIdx[i] * 4, sc = scaleAt(invIdx[i], k);   // the drawn world radius at this zoom
+    let r = Math.max(sc * k, aA[q] * U.uMinScale.value, 0.5);
+    if (!aB[q + 3] && !aB[q]) { const k0 = U.uK0.value; r += (Math.min(r, aA[q + 3] ? SPN : SP) - r) * (1 - smoothJ(STIP_K0[0] * k0, STIP_K0[1] * k0, k)); }
     if (!G && !aB[q + 3]) r = Math.max(r, 1 / (S.DPR || 1));   // (flat fix) the 1-device-px radius floor
     if (G && aB[q]) r = aB[q + 3] ? Math.max(r, Math.max(aA[q] * U.uMinScale.value, 2.5)) : Math.max(r, 1.0);   // (visibility) the VS dust floors
     return r;
   };
+  const screenR = (i) => screenRAt(i, S.cam.k);
   // (final polish) nothing is drawn outside the disc any more but the knock-out halo (the gauge sits on the rim)
   // (round 2) a breathing live coin reaches r x 1.03 at its peak
   const outerR = (i) => { let r = screenR(i); if (cls[i] === 0 && bMat.uniforms.uBreath.value > 0) r *= 1 + BREATH_A; return r >= 3 ? r + HALO_PX : r; };
@@ -1239,15 +1366,57 @@ void main(){
 
   // ======================= (visibility lane) atlas cell assignment + coverage debug =======================
   // The LO_PIN biggest family tops own a cell from the build (pinned). Other tops and children drawn on screen at the logo
-  // size with a logo URL take LO cells, biggest first; a full atlas evicts the least recently wanted unpinned cell. Re-evaluated at most every 250 ms while the
-  // camera moves, and once more when it settles. HI_SEL / HI_FOC follow selectCoin and S.U.uFocusCoin.
-  const onScreenQ = (q, r, W, H, k) => {
-    const sx = (aXY[q * 2] - S.cam.x) * k + W / 2, sy = H / 2 - (aXY[q * 2 + 1] - S.cam.y) * k;
-    return sx >= -r && sx <= W + r && sy >= -r && sy <= H + r;
+  // size with a logo URL take LO cells, biggest first; a full atlas evicts the least recently wanted unpinned cell whose
+  // owner is drawn on screen neither now nor where the camera is heading (keepCells). HI_SEL / HI_FOC follow selectCoin and
+  // S.U.uFocusCoin.
+  // (2026-11-11, logos at once) when a pass runs, and for which VIEW (camera centre, zoom, container size and the dust
+  // hand-off at that zoom; screenRAt / onScreenQ size and place the coins for it):
+  //   - the camera is heading somewhere it knows (S.motion.goal(): a flight's destination, a zoom tween's end, an instant
+  //     jump, the eased wheel zoom / pan target S.tgt, where a drag's throw comes to rest): one pass for THAT view at once, so
+  //     the request and the answer happen while the camera is on its way (a flight takes ~0.7-1.2 s). It runs again only when
+  //     the destination moves (GOAL_MOVE_PX / GOAL_MOVE_LK) or the pass was cut short (PASS_GAP_MS on); for a throw at most
+  //     every GOAL_GAP_MS; the wheel's target once it holds still (EASE_HOLD_MS) and, while a zoom in or a pan keeps moving
+  //     it, every GOAL_GAP_MS (never while it is further out than where the gesture started or last passed: gRefK). No pass
+  //     for the views on the way: the loader serves the newest want first, so their wants would push the destination's
+  //     logos back. A flight replaced or cancelled on the way gets its new destination's pass, or the still pass where it
+  //     stopped. A jump or a tween within SERIES_MS of the last goal change (a held +/- key's repeats) continues a series:
+  //     the tween takes the wheel target's rules, the jump the hand-motion ones below; the first of the series is at once.
+  //   - otherwise (a drag, a pinch, a still camera): a pass for the current view every MOVE_PASS_MS while it moves (logos come
+  //     in while panning) and one STILL_MS after it stopped; a still view takes another pass only when something changed
+  //     (needAssign: a pass cut short at ASSIGN_MAX, PASS_GAP_MS on; a reveal, a patched URL, a failed logo handed back).
+  //   Measured before (2026-11-11, headless Chrome against the local server, 8 families flown to): 740-1,160 ms (median ~950)
+  //   from the landing to 90 % of the family's logos drawn, ~420 ms of it before the first request: no pass ran during a
+  //   flight, and after it a pass waited for two checks 250 ms apart to see the same camera. After (same probe, flights the
+  //   server answered within 2 s): the requests go out ~1 s before the landing and 90 % are drawn at the first sample after
+  //   it (base: median 746 ms of 32 flights); last wheel notch -> 90 % drawn 221 ms (base 1,570), drag release -> 90 % 10 ms
+  //   (base 506).
+  //   Review fixes (2026-11-11; the position test first, the wheel's EASE_HOLD_MS, jumps, exact tween landings; same probes,
+  //   2 runs per build, base -> now): landing -> 90 % 907 -> 0 ms; last wheel notch -> 90 % 1,576 -> 262 ms (CDP notches)
+  //   and 1,546 -> 398 ms (notches sent in the page, as many cells as the base); drag release -> 90 % 565 -> 7 ms. At
+  //   ?last=all (92k coins) a flight's destination pass 3.6 ms (5.8-31 ms before the position test came first).
+  //   Second review (2026-11-11): a slow wheel zoom out no longer takes passes on the way (gRefK), and a held +/- key no
+  //   longer takes one per repeat (SERIES_MS); headless numbers at those constants.
+  const viewOf = (x, y, k, dust) => ({ x, y, k, w: S.W(), h: S.H(), dust });
+  const camView = () => viewOf(S.cam.x, S.cam.y, S.cam.k, S.dustExpand);
+  const sameView = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.k === b.k && a.w === b.w && a.h === b.h;
+  const farView = (a, b) => !a || !b || a.w !== b.w || a.h !== b.h || Math.abs(Math.log(a.k / b.k)) > GOAL_MOVE_LK || Math.hypot(a.x - b.x, a.y - b.y) * a.k > GOAL_MOVE_PX;
+  const onScreenQ = (q, r, V) => {
+    const sx = (aXY[q * 2] - V.x) * V.k + V.w / 2, sy = V.h / 2 - (aXY[q * 2 + 1] - V.y) * V.k;
+    return sx >= -r && sx <= V.w + r && sy >= -r && sy <= V.h + r;
   };
-  let assignAt = -1e9, needAssign = true, selCoin = -1, lastSel = -1, lastFoc = -1;
-  const aCam = { x: NaN, y: NaN, k: NaN };
-  const asg = { passes: 0, lastMs: 0, assigned: 0, evicted: 0 };
+  let needAssign = true, selCoin = -1, lastSel = -1, lastFoc = -1;
+  // the camera as the last frame saw it, when it last moved and when this motion began; the last pass for the current view
+  // (passV, passAt: any pass) and the last destination pass (goalV; goalMore: it was cut short at ASSIGN_MAX; goalFull: it
+  // ran out of cells it may evict, the ones on screen at the start being kept)
+  const camL = { x: NaN, y: NaN, k: NaN, w: NaN, h: NaN };
+  let movedAt = -1e9, moveFrom = -1e9, passV = null, passAt = -1e9, goalV = null, goalAt = -1e9, goalMore = false, goalFull = false;
+  // the goal as the last frame saw it (gL), when it last changed (gMovedAt: kept across the frames without a goal, so a held
+  // key's jumps, one frame each, still see the last one), when this run of changes began (gFrom), the zoom an ease target is
+  // measured against for its passes on the way (gRefK: the run's start, then each pass's), and whether the goal continues a
+  // series (gSeries: it came within SERIES_MS of the last change)
+  let gL = null, gMovedAt = -1e9, gFrom = -1e9, gRefK = NaN, gSeries = false;
+  const asg = { passes: 0, lastMs: 0, maxMs: 0, assigned: 0, evicted: 0, goal: 0, moving: 0, still: 0, kept: 0, lastKind: "", lastAt: 0 };
+  const goalOf = () => { try { return S.motion && typeof S.motion.goal === "function" ? S.motion.goal() : null; } catch { return null; } };
   function reserveHi(i, cell) {
     const o = hiOwn[cell];
     if (o === i) return false;
@@ -1256,22 +1425,119 @@ void main(){
     takeHi(i, cell); drawnImg[i] = null; setCode(i); wantLogo(i);
     return true;
   }
+  // per frame: the HI reservations, then at most one cell pass (the rules above)
   function assignCells(now) {
     let any = false;
     const fc = U.uFocusCoin.value | 0;
     if (selCoin !== lastSel) { lastSel = selCoin; any = reserveHi(selCoin, HI_SEL) || any; }
     if (fc !== lastFoc) { lastFoc = fc; any = reserveHi(fc, HI_FOC) || any; }
-    if (now - assignAt < 250) return any;
-    const moved = S.cam.x !== aCam.x || S.cam.y !== aCam.y || S.cam.k !== aCam.k;
-    if (moved) { aCam.x = S.cam.x; aCam.y = S.cam.y; aCam.k = S.cam.k; needAssign = true; assignAt = now; return any; }   // settle first
-    if (!needAssign) return any;
-    needAssign = false; assignAt = now;
-    const t0 = performance.now(), W = S.W(), H = S.H(), k = S.cam.k, nI = img ? img.length : 0;
+    const c = S.cam, W = S.W(), H = S.H();
+    if (c.x !== camL.x || c.y !== camL.y || c.k !== camL.k || W !== camL.w || H !== camL.h) {
+      if (now - movedAt >= STILL_MS) moveFrom = now;   // a motion begins
+      camL.x = c.x; camL.y = c.y; camL.k = c.k; camL.w = W; camL.h = H; movedAt = now;
+    }
+    const g = goalOf();
+    if (g) {
+      if (!gL || g.x !== gL.x || g.y !== gL.y || g.k !== gL.k) {
+        gSeries = now - gMovedAt < SERIES_MS;
+        // (2026-11-11, third review) a new run also starts when an ease target follows a goal of another kind (a wheel during
+        // a flight or tween: the gesture starts at the camera, not at the flight's destination) and when the ease target turns
+        // back in after going out (a pinch overshoot: the way in gets its passes again)
+        const turnIn = !!gL && gL.kind === "ease" && g.kind === "ease" && g.k > gL.k && gL.dir < 0;
+        if (!gL || now - gMovedAt >= EASE_HOLD_MS || (g.kind === "ease" && gL.kind !== "ease") || turnIn) { gFrom = now; gRefK = gL && gL.kind === g.kind ? gL.k : c.k; }
+        const dir = gL && g.k !== gL.k ? Math.sign(g.k - gL.k) : gL ? gL.dir : 0;
+        gMovedAt = now; gL = { x: g.x, y: g.y, k: g.k, kind: g.kind, dir };
+      }
+      // a jump or a tween that continues a series (SERIES_MS above): a jump (one frame) takes the hand-motion rules below, a
+      // tween (it lasts) the ease target's
+      const kind = gSeries && g.kind === "tween" ? "ease" : g.kind;
+      if (!(gSeries && kind === "jump")) {
+        const gv = viewOf(g.x, g.y, g.k, g.dust), fresh = farView(gv, goalV);
+        // a flight, a tween, a jump: at once; a throw's rest: at most every GOAL_GAP_MS; an ease target: once it holds, or on
+        // the way of a zoom in / pan, every GOAL_GAP_MS while it is not out from gRefK (EASE_HOLD_MS above)
+        let due = fresh;
+        if (fresh && kind === "inertia") due = now - goalAt >= GOAL_GAP_MS;
+        else if (fresh && kind === "ease") due = now - gMovedAt >= EASE_HOLD_MS || (EASE_MOVE_PASSES && now - Math.max(goalAt, gFrom) >= GOAL_GAP_MS && g.k >= gRefK * Math.exp(-GOAL_MOVE_LK));
+        if (due || (!fresh && goalMore && now - goalAt >= PASS_GAP_MS)) {
+          const r = cellPass(now, gv, camView());
+          // an ease pass never lowers gRefK: a slow zoom out with the cursor far off centre pans the target fresh before it is
+          // GOAL_MOVE_LK further out, and lowering the reference with each such pass let it follow the zoom out
+          goalMore = r.more; goalFull = r.full; goalV = gv; gRefK = kind === "ease" ? Math.max(gRefK, gv.k) : gv.k; goalAt = passAt = now; asg.goal++; asg.lastKind = `goal:${g.kind}`;
+          if (r.any) any = true;
+        }
+        return any;
+      }
+    }
+    // arrived (or stopped on the way): where the camera rests is the destination pass's view (a flight, a tween, an ease end
+    // exactly there) and that pass did everything: no other pass. Else the still pass below runs there (STILL_MS on) for what
+    // it could not do: a throw that ended a little off its estimate, a flight stopped on the way, the rest of a pass cut short,
+    // cells that were kept for the start view (free now). The motion that ends here was not a hand one: the MOVE_PASS_MS
+    // clock starts over (else the landing frame, which moved the camera, took a "moving" pass at once). A jump that continues
+    // a series comes here too, as hand motion: a pass every MOVE_PASS_MS while the jumps go on, the still pass after the last
+    gL = null;
+    if (goalV) { passV = goalMore || goalFull ? null : goalV; goalV = null; goalMore = goalFull = false; moveFrom = now; }
+    const still = now - movedAt >= STILL_MS;
+    if (still ? !sameView(camL, passV) || (needAssign && now - passAt >= PASS_GAP_MS) : now - Math.max(passAt, moveFrom) >= MOVE_PASS_MS) {
+      const cv = camView(), r = cellPass(now, cv, null);
+      needAssign = r.more; passV = cv; passAt = now;
+      if (still) asg.still++; else asg.moving++;
+      asg.lastKind = still ? "still" : "moving";
+      if (r.any) any = true;
+    }
+    return any;
+  }
+  // (2026-11-11, logos at once) every LO cell whose owner is drawn on screen in view V at a size where its logo shows (flat:
+  // from LOGO_MIN_PX - 0.8, where the shader fades it in; galaxy: any size) is stamped `now`, so the eviction (loUse < now)
+  // never takes it. Pass 1 below stamps only the candidates (>= the logo size); a destination pass keeps the cells on screen
+  // NOW as well, so what the viewer sees while a flight starts keeps its logos.
+  const LOGO_SHOW_PX = G ? 0 : LOGO_MIN_PX - 0.8;
+  // (2026-11-11 review, pass cost) offViewOf(V)(q): instance q is off view V by more than any radius it can be drawn at there,
+  // read from the instance arrays only (q-indexed, in memory order): its centre (aXY) against the largest radius of any coin
+  // (maxScale x k, maxMinPx, the px floors), then against its own bound rb >= screenRAt's radius (the layout radius x k is the
+  // matrix scale, never under the seed-head shrink; the px floors are <= 2.5). The passes test this before perm[q], img[i],
+  // the failed-logo Map and the filter. Measured by the performance review (?last=all, 91.7k coins, headless Chrome): the
+  // coin loop read img[i] (a string array in perm order) for every coin before its position test, and the P1 loop sized all
+  // ~5.5k tops: a pass took p50 7.9-11.4 ms (max 30) while moving; with the position test first, 2.2-3.0 ms
+  const offViewOf = (V) => {
+    const k = V.k, hw = V.w / 2, hh = V.h / 2, msc = U.uMinScale.value, im = bubbles.instanceMatrix.array;
+    const mR = Math.max(maxScale * k, maxMinPx * msc, 2.5);
+    return (q) => {
+      const ex = Math.abs(aXY[q * 2] - V.x) * k - hw, ey = Math.abs(aXY[q * 2 + 1] - V.y) * k - hh;
+      if (ex > mR || ey > mR) return true;
+      if (ex <= 2.5 && ey <= 2.5) return false;
+      const rb = Math.max(im[q * 16] * k, aA[q * 4] * msc, 2.5);
+      return ex > rb || ey > rb;
+    };
+  };
+  function keepCells(now, V) {
+    let n = 0;
+    const off = offViewOf(V);
+    for (let j = 0; j < LO_N; j++) {
+      const o = loOwn[j]; if (o < 0 || loPin[j] || loUse[j] === now) continue;
+      const q = invIdx[o]; if (!(q >= 0) || off(q) || visHid(o)) continue;
+      const r = screenRAt(o, V.k); if (r < LOGO_SHOW_PX || !onScreenQ(q, r, V)) continue;
+      loUse[j] = now; n++;
+    }
+    asg.kept += n;
+  }
+  // one pass for view V: assign cells and ask for the logos drawn there; the cells drawn in view P (or null) are only kept.
+  // Returns { any: a cell changed hands, more: cut short at ASSIGN_MAX, full: no cell left to evict }
+  function cellPass(now, V, P) {
+    let any = false, more = false;
+    const t0 = performance.now(), k = V.k, nI = img ? img.length : 0;
     // (bubbles lane, look fix 2026-10-22) flat children take a cell from LOGO_MIN_PX (4.5 px, the tops' threshold); galaxy 10 px
     const KID_PX = G ? 10 : LOGO_MIN_PX, TOP_PX = G ? LOD.logo : LOGO_MIN_PX;
-    const dustTops = G || S.dustExpand > 0.02;
+    const dustTops = G || V.dust > 0.02;
     const cand = [], cr = [];
+    // (2026-11-11) a coin off the view by more than its largest possible drawn radius is skipped before the exact size
+    // (screenRAt) and the failed-logo lookup. Measured at ?last=all (91k coins, 16 flights, medians of the per-flight p95 /
+    // max), a draft without it (the destination pass, its ASSIGN_MAX continuations and an arrival pass all running the exact
+    // loop over every coin): frame() while flying 18.5 / 28 ms against the base's 10.5 / 14 ms; with it and no arrival pass
+    // after a complete destination pass, 13.9 / 19.2 ms (base 10.4 / 15.6 in the same session; the rest is the uploads, now in
+    // flight). (2026-11-11 review) The position test comes first (offViewOf: the instance arrays only), then the coin's data.
+    const off = offViewOf(V);
     for (let q = 0; q < count; q++) {
+      if (off(q)) continue;
       const i = perm[q];
       if (i >= nI || !img[i] || failedLogo.has(i) || visHid(i)) continue;   // (last-trade filter) a hidden coin takes no cell
       if (isTop[i]) {
@@ -1280,13 +1546,13 @@ void main(){
         // the planets' permanent HI cells skip this: a top holding HI_SEL / HI_FOC keeps a LO cell too, so it still has its
         // logo when the selection or focus moves on
         if ((hiC[i] >= 0 && hiC[i] < HI_PLANETS) || !(dustTops || (i < N && isTopOfPlanet[i]))) continue;
-        const r = screenR(i);
-        if (r < TOP_PX || !onScreenQ(q, r, W, H, k)) continue;
+        const r = screenRAt(i, k);
+        if (r < TOP_PX || !onScreenQ(q, r, V)) continue;
         cand.push(i); cr.push(r); continue;
       }
       if (drawR[i] * k * 1.05 < KID_PX && aA[q * 4] < KID_PX) continue;   // cheap bound before the exact mirror
-      const r = screenR(i);
-      if (r < KID_PX || !onScreenQ(q, r, W, H, k)) continue;
+      const r = screenRAt(i, k);
+      if (r < KID_PX || !onScreenQ(q, r, V)) continue;
       cand.push(i); cr.push(r);
     }
     const ord = cand.map((_, j) => j).sort((a, b) => cr[b] - cr[a]);
@@ -1294,20 +1560,22 @@ void main(){
     // pass 1: every candidate that already owns a cell is touched FIRST, so the LRU eviction list below never holds an
     // on-screen cell (before, the list was built lazily at the first miss, before smaller on-screen owners were touched)
     for (const j of ord) { const i = cand[j]; if (loC[i] >= 0) { loUse[loC[i]] = now; if (!loHas[i]) want.push(j); } }
-    // pass 2: assign, biggest first, at most ASSIGN_MAX new cells per pass (the next pass, 250 ms on, continues); a full
+    // (2026-11-11, logos at once) and every cell drawn in V or P below the candidates' size (keepCells)
+    keepCells(now, V); if (P) keepCells(now, P);
+    // pass 2: assign, biggest first, at most ASSIGN_MAX new cells per pass (the next pass, PASS_GAP_MS on, continues); a full
     // atlas evicts the least recently wanted unpinned cell = an off-screen child or unpinned top; pinned tops never move
-    let ev = null, evAt = 0, assigned = 0;
+    let ev = null, evAt = 0, assigned = 0, full = false;
     for (const j of ord) {
       const i = cand[j];
       if (loC[i] >= 0) continue;
-      if (assigned >= ASSIGN_MAX) { needAssign = true; break; }
+      if (assigned >= ASSIGN_MAX) { more = true; break; }
       let c = takeLo(i, now, false);
       if (c < 0) {
         if (!ev) { ev = []; for (let q = 0; q < LO_N; q++) if (!loPin[q] && loOwn[q] >= 0 && loUse[q] < now) ev.push(q); ev.sort((a, b) => loUse[a] - loUse[b]); }
-        if (evAt >= ev.length) break;                              // every cell is in use on this screen: no thrash
+        if (evAt >= ev.length) { full = true; break; }             // every cell is in use on this screen: no thrash
         dropLo(ev[evAt++]); asg.evicted++;
         c = takeLo(i, now, false);
-        if (c < 0) break;
+        if (c < 0) { full = true; break; }
       }
       drawnImg[i] = null; setCode(i); want.push(j); asg.assigned++; assigned++; any = true;
     }
@@ -1317,13 +1585,17 @@ void main(){
     // of tops drawn >= HI_UP_PX, then P2 the children >= KID_PX (biggest last), then P1 the on-screen tops still without a
     // logo (smallest share first, biggest last). Off-screen tops (P4) keep their older build-time stamps.
     // (look fix) P1 asks only for tops that are DRAWN: planets always, a dust-family top once the field has handed off
-    // (S.dustExpand > 0) and it is drawn >= LOGO_MIN_PX; at the overview that is ~60 planets, not every family
+    // (S.dustExpand > 0; 2026-11-11: the view's own hand-off, V.dust) and it is drawn >= LOGO_MIN_PX; at the overview that is
+    // ~60 planets, not every family
     const p3 = [], p1 = [];
-    const dustOn = G || S.dustExpand > 0.02;
+    const dustOn = G || V.dust > 0.02;
+    // (2026-11-11 review, pass cost) the position test first here too (it sized every top on the map)
     if (!G) for (const f of fams) {
-      const i = f.top; if (!(i >= 0) || i >= nI || !img[i] || failedLogo.has(i) || invIdx[i] < 0 || visHid(i)) continue;
       if (!f.planet && !dustOn) continue;
-      const q = invIdx[i], r = screenR(i); if (r < LOGO_MIN_PX || !onScreenQ(q, r, W, H, k)) continue;
+      const i = f.top; if (!(i >= 0)) continue;
+      const q = invIdx[i]; if (!(q >= 0) || off(q)) continue;
+      if (i >= nI || !img[i] || failedLogo.has(i) || visHid(i)) continue;
+      const r = screenRAt(i, k); if (r < LOGO_MIN_PX || !onScreenQ(q, r, V)) continue;
       if (hiC[i] >= 0 && r >= HI_UP_PX && !hiWant[i]) { hiWant[i] = 1; p3.push(i); }
       else if (!(hiHas[i] || loHas[i])) p1.push(i);
     }
@@ -1332,18 +1604,18 @@ void main(){
     p1.sort((a, b) => (fams[famOf[a]].share || 0) - (fams[famOf[b]].share || 0));
     for (const i of p1) wantLogo(i);
     asg.p1 = p1.length; asg.p2 = want.length; asg.p3 = p3.length;
-    asg.passes++; asg.lastMs = +(performance.now() - t0).toFixed(3);
-    return any;
+    asg.passes++; asg.lastAt = now; asg.lastMs = +(performance.now() - t0).toFixed(3); asg.maxMs = Math.max(asg.maxMs, asg.lastMs);
+    return { any, more, full };
   }
   // (visibility lane) QA: show/hide this file's meshes ("bubbles" | "coronas") to attribute pixels
   S.debugFns.visToggle = (name, on) => { const m = name === "coronas" ? glows : name === "bubbles" ? bubbles : null; if (!m) return null; m.visible = !!on; S.invalidate(); return m.visible; };
   S.debugFns.coverage = () => {
-    const W = S.W(), H = S.H(), k = S.cam.k, hist = { lt1: 0, "1to3": 0, "3to6": 0, ge6: 0 };
+    const W = S.W(), H = S.H(), V = camView(), hist = { lt1: 0, "1to3": 0, "3to6": 0, ge6: 0 };
     let tops = 0, onScreen = 0, minTopPx = Infinity;
     for (const f of fams) {
       const i = f.top; if (!(i >= 0) || invIdx[i] < 0) continue;
       const r = screenR(i); tops++;
-      if (onScreenQ(invIdx[i], r, W, H, k)) onScreen++;
+      if (onScreenQ(invIdx[i], r, V)) onScreen++;
       if (r < minTopPx) minTopPx = r;
       hist[r < 1 ? "lt1" : r < 3 ? "1to3" : r < 6 ? "3to6" : "ge6"]++;
     }
@@ -1451,10 +1723,10 @@ void main(){
   // logo landed, wanted and pending, failed, the loader's ready flag, the image host) - to tell a loader / network wait from a
   // cell-assignment miss
   S.debugFns.kidLogos = (minR = 10, max = 60) => {
-    const W = S.W(), H = S.H(), k = S.cam.k, nI = img ? img.length : 0, rows = [];
+    const V = camView(), nI = img ? img.length : 0, rows = [];
     for (let q = 0; q < count; q++) {
       const i = perm[q]; if (isTop[i] || i >= nI) continue;
-      const r = screenR(i); if (r < minR || !onScreenQ(q, r, W, H, k)) continue;
+      const r = screenR(i); if (r < minR || !onScreenQ(q, r, V)) continue;
       let rdy = null; try { rdy = images && img[i] ? !!images.ready(img[i]) : null; } catch { rdy = null; }
       let host = null; try { host = img[i] ? new URL(String(img[i]), location.href).searchParams.get("u") : null; host = host ? new URL(host).host : (img[i] ? String(img[i]).slice(0, 40) : null); } catch { host = img[i] ? String(img[i]).slice(0, 40) : null; }
       rows.push({ i, sym: sym ? sym[i] : "", r: +r.toFixed(2), img: !!img[i], cell: loC[i], has: loHas[i], code: logoIdx[i], pending: pendingLogo.has(i), failed: failedLogo.has(i), retryInS: failedLogo.has(i) ? Math.round((failedLogo.get(i) - Date.now()) / 1000) : null, ready: rdy, dirty: dirty.has(i), host });
@@ -1464,18 +1736,18 @@ void main(){
     return { n, drawn, noCell, pending: pend, rows: rows.slice(0, max) };
   };
   S.debugFns.logoCoverage = () => {
-    const W = S.W(), H = S.H(), k = S.cam.k, nI = img ? img.length : 0;
+    const V = camView(), nI = img ? img.length : 0;
     const dustOn = G || S.dustExpand > 0.02;
     const o = { rootsOnScreen: 0, rootsWithImage: 0, rootsDrawn: 0, roots6: 0, roots6Drawn: 0, roots6Dead: 0, kids5: 0, kids5WithImage: 0, kids5Drawn: 0, kids10: 0, kids10WithImage: 0, kids10Drawn: 0, cellsLo: LO_N, cellsHi: HI_N, usedLo: 0, usedHi: 0 };
     for (let q = 0; q < count; q++) {
       const i = perm[q], r = screenR(i);
       if (isTop[i]) {
-        if (!onScreenQ(q, r, W, H, k)) continue;
+        if (!onScreenQ(q, r, V)) continue;
         o.rootsOnScreen++; if (i < nI && img[i]) { o.rootsWithImage++; if (aA[q * 4 + 2] >= 0) o.rootsDrawn++; }
         // (fixer) what the viewer sees: tops drawn at >= LOGO_MIN_PX (the logo threshold) and those showing a logo
         const shown = dustOn || !!isTopOfPlanet[i];
         if (shown && r >= (G ? LOD.logo : LOGO_MIN_PX)) { o.roots6++; if (aA[q * 4 + 2] >= 0) o.roots6Drawn++; else if (!(i < nI && img[i]) || failedLogo.has(i)) o.roots6Dead++; }
-      } else if (r >= LOGO_MIN_PX && onScreenQ(q, r, W, H, k)) {
+      } else if (r >= LOGO_MIN_PX && onScreenQ(q, r, V)) {
         const hasImg = i < nI && !!img[i], drawn = aA[q * 4 + 2] >= 0;
         o.kids5++; if (hasImg) { o.kids5WithImage++; if (drawn) o.kids5Drawn++; }
         if (r >= 10) { o.kids10++; if (hasImg) { o.kids10WithImage++; if (drawn) o.kids10Drawn++; } }
@@ -1517,14 +1789,20 @@ void main(){
     breath.interval = Math.max(16, Math.min(66, speed > 0 ? (1000 * BREATH_STEP_PX) / speed : 66));
   }
 
-  // per frame: upload a changed atlas at most every 400 ms; follow moved coins; keep frames coming while something animates
+  // per frame: apply load notices, the cell pass, upload dirty cells; follow moved coins; keep frames coming while something
+  // animates
   let lastNow = 0;
   S.onFrame((now) => {
     let busy = false;
     // (map3 port) one render per atlas upload: a dirty atlas waiting out its 400 ms throttle no longer asks for a render on
     // every frame (the app's loader delivers logos over tens of seconds; the hook runs every frame anyway, so the upload
     // still happens on time). The look is unchanged.
-    // (visibility lane) cell assignment (<= every 250 ms and on camera settle) + dirty-cell upload batch (<= 2 ms)
+    // (visibility lane) cell assignment + dirty-cell upload batch
+    // (2026-11-11, logos at once) in this order, every frame: the load notices since the last frame (one recheck: a landed
+    // logo goes dirty), the cell pass when one is due (assignCells: a destination pass at a flight's start; its logos that the
+    // loader already holds go dirty at once), then one upload batch of what is dirty (<= UPLOAD_BUDGET_MS), so a logo is drawn
+    // in the frame after it lands
+    if (loadSeen) recheckLogos();
     if (assignCells(now)) busy = true;
     if (uploadBatch(now)) busy = true;
     if (dirty.size) busy = true;
@@ -1577,7 +1855,7 @@ void main(){
   // (map3 port) teardown: the mesh, its geometry (+ the quad it borrows from), the material, both atlases and the glyphs
   S.life.onDispose(() => {
     scene.remove(bubbles);
-    if (!S.contextLost) { bGeo.dispose(); quad.dispose(); bMat.dispose(); HIa.rt.dispose(); LOa.rt.dispose(); scLo.t.dispose(); scHi.t.dispose(); gTex.dispose(); }   // a lost context took them already
+    if (!S.contextLost) { bGeo.dispose(); quad.dispose(); bMat.dispose(); HIa.rt.dispose(); LOa.rt.dispose(); scLo.t.dispose(); scHi.t.dispose(); gTex.dispose(); if (mipFb) { try { gl.deleteFramebuffer(mipFb.r); gl.deleteFramebuffer(mipFb.d); } catch { /* ignore */ } mipFb = null; } }   // a lost context took them already
     scLo.c.width = scLo.c.height = 0; scHi.c.width = scHi.c.height = 0; gCan.width = gCan.height = 0;
     drawnImg.fill(null); pendingLogo.clear(); dirty.clear(); failedLogo.clear(); bornIdx.clear();
   });

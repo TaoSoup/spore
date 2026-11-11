@@ -153,6 +153,16 @@ export function buildMotion(S) {
   let tween = null;     // anchored zoom tween (double-click, +/-): {sx, sy, wx, wy, ka, kb, t0, dur}
   let flight = null;    // {path, m, t0, dur, ease, x, y, k, kind, fam, onEnd, resolves[]}
   const setCam = (x, y, k, snap = true) => { tgt.x = x; tgt.y = y; tgt.k = clampK(k); anchor = null; if (snap) { Object.assign(cam, tgt); tween = null; inertia = null; } S.dirty = true; };
+  // (2026-11-11 review, logos at once) an instant camera jump the page asked for (a flight under reduced motion or one already
+  // there, fit / focus with snap, the first camera, ?focus at mount, a zoom tween under reduced motion): goal() reports it as
+  // kind "jump" until the frame hooks of the next frame have run, so bubbles.js runs the cell pass for it in that frame. Without
+  // it the jump looked like hand motion and waited STILL_MS (measured in the headless engine: reduced motion first want of the
+  // destination's children 128 ms after flyTo, normal motion 16 ms). Not for setCam's per-frame users (the bench modes).
+  // (Second review, 2026-11-11) a jump within SERIES_MS of the last goal change (a held +/- key: zoomTween on every
+  // auto-repeat) is hand motion again in bubbles.js (SERIES_MS there); only the first of such a series passes at once.
+  let jump = null;
+  const noteJump = (x0, y0, k0_) => { if (cam.x !== x0 || cam.y !== y0 || cam.k !== k0_) jump = { x: cam.x, y: cam.y, k: cam.k }; };
+  const snapCam = (x, y, k) => { const x0 = cam.x, y0 = cam.y, k0_ = cam.k; setCam(x, y, k, true); noteJump(x0, y0, k0_); };
   function zoomAt(sx, sy, factor) {
     const [wx, wy] = toW(sx, sy);
     anchor = { sx, sy, wx, wy };
@@ -164,10 +174,30 @@ export function buildMotion(S) {
   function zoomTween(sx, sy, factor, dur) {
     cancelAll();
     const [wx, wy] = toW(sx, sy), kb = clampK(cam.k * factor);
-    if (rm) { cam.k = kb; cam.x = wx - (sx - W() / 2) / kb; cam.y = wy + (sy - H() / 2) / kb; Object.assign(tgt, cam); S.dirty = true; return; }
+    if (rm) { const x0 = cam.x, y0 = cam.y, k0_ = cam.k; cam.k = kb; cam.x = wx - (sx - W() / 2) / kb; cam.y = wy + (sy - H() / 2) / kb; Object.assign(tgt, cam); noteJump(x0, y0, k0_); S.dirty = true; return; }
     tween = { sx, sy, wx, wy, ka: cam.k, kb, t0: performance.now(), dur };
   }
   function panBy(dx, dy) { cancelAll(); anchor = null; tgt.x += dx / cam.k; tgt.y += dy / cam.k; if (rm) Object.assign(cam, tgt); S.dirty = true; }
+  // the dust field's hand-off at zoom k (S.dustExpand is this at cam.k, every frame)
+  const dustAt = (k) => smooth(6 / S.dustTypR, 14 / S.dustTypR, k);
+  // (2026-11-11, logos at once) where the camera is heading, for the logo cell pass (bubbles.js asks for the logos of the view
+  // the camera will show while it is still on its way): {x, y, k, kind, dust} = a flight's destination ("flight"), a zoom
+  // tween's end ("tween"), where a drag's throw comes to rest ("inertia": v px per 16.7 ms frame, x 0.92 per frame, so
+  // v / 0.08 = 12.5 v px in all) or the eased wheel zoom / pan target S.tgt ("ease"); clamped like the camera (clampC); dust =
+  // the dust hand-off there. null when the camera is where it is going (still, or moved 1:1 by a drag or a pinch).
+  // (2026-11-11 review) "jump": an instant jump the page asked for (snapCam), where the camera already is, for one frame.
+  const THROW = 1 / (1 - 0.92);
+  function goal() {
+    let o;
+    if (flight) o = { x: flight.x, y: flight.y, k: flight.k, kind: "flight" };
+    else if (tween) { const k = tween.kb; o = { x: tween.wx - (tween.sx - W() / 2) / k, y: tween.wy + (tween.sy - H() / 2) / k, k, kind: "tween" }; }
+    else if (inertia) o = { x: tgt.x - (inertia.vx * THROW) / cam.k, y: tgt.y + (inertia.vy * THROW) / cam.k, k: tgt.k, kind: "inertia" };
+    else if (Math.abs(Math.log(tgt.k / cam.k)) > 1e-4 || Math.hypot(tgt.x - cam.x, tgt.y - cam.y) * cam.k > 0.05) o = { x: tgt.x, y: tgt.y, k: tgt.k, kind: "ease" };
+    else if (jump) o = { x: jump.x, y: jump.y, k: jump.k, kind: "jump" };
+    else return null;
+    clampC(o); o.dust = dustAt(o.k);
+    return o;
+  }
 
   // ---------- framing inside the page's chrome (map3 port) ----------
   // The inset rect is the container minus the page's bands (overlay, side panel, sheet); 6 px of the container edge stay free.
@@ -243,7 +273,7 @@ export function buildMotion(S) {
     const trivial = Math.hypot(x - cam.x, y - cam.y) * cam.k < 0.5 && Math.abs(Math.log(k / cam.k)) < 2e-3;
     const fl = { x, y, k, m, kind: opts.kind || "point", fam: opts.fam ?? -1, coin: opts.coin ?? -1, onEnd: opts.onEnd, resolves: prev ? prev.resolves : [], t0: performance.now() };
     const done = new Promise((res) => fl.resolves.push(res));
-    if (rm || trivial) { flight = fl; endFlight(); return done; }
+    if (rm || trivial) { const x0 = cam.x, y0 = cam.y, k0_ = cam.k; flight = fl; endFlight(); noteJump(x0, y0, k0_); return done; }
     fl.path = zoomPath(p0, p1);
     let wmax = 0; for (let s = 1; s < 24; s++) wmax = Math.max(wmax, fl.path(s / 24)[2]);
     fl.ease = wmax > Math.max(p0[2], p1[2]) * 1.001 ? easeInOut : easeOut;   // ease-out unless the path rises above both ends
@@ -272,8 +302,8 @@ export function buildMotion(S) {
   };
   // (map3 port) fit() keeps the selection (the prototype's flyOverview cleared it)
   const flyOverview = () => { const t = S.overview.overviewTarget(); return startFlight(t.x, t.y, t.k, { kind: "overview" }); };
-  const fitAll = (snap = true) => { if (!snap) return flyOverview(); const t = S.overview.overviewTarget(); setCam(t.x, t.y, t.k, true); focusedFam = -1; };
-  const focus = (s, snap = true) => { const f = famByKey(s); if (!f) return; if (!snap) return flyToFamily(f); const t = famTarget(f); setCam(t.x, t.y, t.k, true); focusedFam = famHid(f.id) ? familyAtCentre() : f.id; };
+  const fitAll = (snap = true) => { if (!snap) return flyOverview(); const t = S.overview.overviewTarget(); snapCam(t.x, t.y, t.k); focusedFam = -1; };
+  const focus = (s, snap = true) => { const f = famByKey(s); if (!f) return; if (!snap) return flyToFamily(f); const t = famTarget(f); snapCam(t.x, t.y, t.k); focusedFam = famHid(f.id) ? familyAtCentre() : f.id; };
   const focusKey = (f) => { const t = (sym[f.top] || "").replace(/^\$+/, ""); return t && S.famBy(t) === f ? t : mint[f.top]; };
 
   // ---------- selection (map3 port: owned by the page; persistent ring + selected branch, never a tooltip) ----------
@@ -1857,7 +1887,9 @@ export function buildMotion(S) {
       else { const p = flight.path(flight.ease(u)); cam.x = p[0]; cam.y = p[1]; cam.k = flight.m / p[2]; Object.assign(tgt, cam); }
       moved = true;
     } else if (tween) {
-      const u = clamp((now - tween.t0) / tween.dur, 0, 1), k = Math.exp(Math.log(tween.ka) + Math.log(tween.kb / tween.ka) * easeOut(u));
+      // (2026-11-11 review) the last frame lands on kb exactly, where goal() put the tween's destination pass: exp(log(ka) +
+      // log(kb / ka)) missed kb by an ulp in 68 % of 400k random tweens, and bubbles.js then took a redundant still pass there
+      const u = clamp((now - tween.t0) / tween.dur, 0, 1), k = u >= 1 ? tween.kb : Math.exp(Math.log(tween.ka) + Math.log(tween.kb / tween.ka) * easeOut(u));
       cam.k = k; cam.x = tween.wx - (tween.sx - W() / 2) / k; cam.y = tween.wy + (tween.sy - H() / 2) / k; Object.assign(tgt, cam);
       if (u >= 1) tween = null;
       moved = true;
@@ -1884,7 +1916,7 @@ export function buildMotion(S) {
     else if (wasMoving && now - lastMoveT > 120) { wasMoving = false; onSettle(); }
     // 2. shared uniforms
     const k = cam.k, K0 = k0();
-    S.dustExpand = smooth(6 / S.dustTypR, 14 / S.dustTypR, k); S.dustA = 1 - S.dustExpand;
+    S.dustExpand = dustAt(k); S.dustA = 1 - S.dustExpand;
     U.uDustExpand.value = S.dustExpand; U.uTime.value = now / 1000; U.uFine.value = smooth(1.3 * K0, 4 * K0, k); U.uK0.value = K0;
     if (G) {   // (galaxy) opened-ness + the animation clock (seconds; frozen asleep and under reduced motion)
       U.uGalT.value = smooth(1.3 * K0, 2.6 * K0, k);
@@ -1929,6 +1961,7 @@ export function buildMotion(S) {
     firePulses(now);
     const animating = stepAnims(now);
     const hooks = S.runFrameHooks(now, dt);
+    jump = null;   // (2026-11-11 review) the hooks have seen it (goal() kind "jump")
     const why = moved ? "moved" : simOn ? "sim" : animating ? "tween" : hooks ? "hook" : S.needsRender ? "invalidate" : now < animUntil ? "anim" : !rm && now - lastRenderT >= 500 ? "idle2Hz" : "";
     let drew = false;
     if (why) { drew = S.gfx.render(); S.needsRender = false; lastRenderT = now; if (drew) { renders++; whyN[why] = (whyN[why] || 0) + 1; } }
@@ -2152,10 +2185,10 @@ export function buildMotion(S) {
       // (galaxy physics) the focus lane's framing + pulse when it exists (S.focus is built before motion)
       let t = null; try { if (S.focus && typeof S.focus.target === "function") t = S.focus.target(i0); } catch (e) { if (errors++ < 3) console.error("map3", e); }
       if (!t || !Number.isFinite(t.x) || !Number.isFinite(t.y) || !(t.k > 0)) t = coinTarget(i0);
-      setCam(t.x, t.y, t.k, true); focusedFam = famOf[i0]; select(i0);
+      snapCam(t.x, t.y, t.k); focusedFam = famOf[i0]; select(i0);
       if (S.focus && typeof S.focus.pulse === "function") life.raf(() => life.raf(() => { try { S.focus.pulse(i0); } catch (e) { if (errors++ < 3) console.error("map3", e); } }));
     }
-    else if (f0) { const t = famTarget(f0); setCam(t.x, t.y, t.k, true); focusedFam = famHid(f0.id) ? familyAtCentre() : f0.id; }
+    else if (f0) { const t = famTarget(f0); snapCam(t.x, t.y, t.k); focusedFam = famHid(f0.id) ? familyAtCentre() : f0.id; }
     else fitAll(true);
   }
 
@@ -2169,7 +2202,9 @@ export function buildMotion(S) {
   });
 
   Object.assign(S.motion, {
-    applyCam, setCam, zoomAt, fitAll, focus, hoverAt, start, flyTo, flyToFamily, flyToCoin, flyOverview, select,
+    applyCam, zoomAt, fitAll, focus, hoverAt, start, flyTo, flyToFamily, flyToCoin, flyOverview, select,
+    // (2026-11-11 review) a snap from outside (index.js: ?focus at mount; tests) is a page jump (snapCam)
+    setCam: (x, y, k, snap = true) => (snap ? snapCam(x, y, k) : setCam(x, y, k, false)),
     selected: () => selected, focusedFam: () => focusedFam, reduced: rm,
     // (round 2) coin drag + live feed
     grab: (i, sx, sy) => grab(i, sx, sy), dragTo: (sx, sy) => dragMove(sx, sy), release: () => release(), dragging: () => drag.i,
@@ -2179,6 +2214,8 @@ export function buildMotion(S) {
     // (last-trade filter) focus.js pins its pulsing coin ('foc'); swarm.js reports the families whose loaded specks are shown,
     // and asks whether the hovered speck is still drawn once its specks' alpha targets changed
     visPin, visSpeck, dropHiddenHover,
+    // (2026-11-11, logos at once) where the camera is heading (bubbles.js: the destination's logo pass)
+    goal,
   });
   setRm(rm);
 

@@ -107,7 +107,8 @@ async function mount(loader: Loader, nFams = 8, kids = 2) {
   S.gfx.renderer = fakeRenderer(uploads);
   buildBubbles(S);
   let now = 1_000;
-  /// One frame of the engine's frame hooks (cell pass every 250 ms, atlas uploads), 300 ms after the last.
+  /// One frame of the engine's frame hooks (load notices, the cell pass, atlas uploads), 300 ms after the last.
+  /// (2026-11-11, logos at once) a load notice is applied in the next frame now, not by a 250 ms recheck timer
   const frame = () => { now += 300; S.frame++; return S.runFrameHooks(now, 300); };
   return {
     S, life, live, uploads, frame, FAIL_SWEEP_MS: FAIL_SWEEP_MS as number, FAIL_ASK_MAX: FAIL_ASK_MAX as number,
@@ -125,7 +126,7 @@ function clock() {
 
 /// 3 h of another logo landing every 100 ms while the planets' sources fail and the loader always says "ask again in
 /// `retryMs`": the sweep timer (armed >= FAIL_SWEEP_MS) fires after failNext, so a load notice in between runs the due
-/// sweep first (recheckLogos).
+/// sweep first (recheckLogos, in the frame after the notice).
 async function threeHoursOfNotices(retryMs: number) {
   const off = clock();
   const loader = fakeLoader();
@@ -135,11 +136,13 @@ async function threeHoursOfNotices(retryMs: number) {
     assert.equal(e.cov().failed, 4, "the planets' logos failed at build");
     assert.equal(e.live.size, 1, "one sweep timer");
     e.resetMaxLive();
-    // 3 h of another logo landing every 100 ms
+    // 3 h of another logo landing every 100 ms, a frame after each notice
     const H3 = 3 * 3_600_000, STEP = 100;
-    for (let t = 0; t < H3; t += STEP) { loader.notify(); mock.timers.tick(STEP); }
+    for (let t = 0; t < H3; t += STEP) { loader.notify(); e.frame(); mock.timers.tick(STEP); }
     const st = e.cov();
-    assert.ok(e.maxLive() <= 2, `at most the sweep timer + the 250 ms recheck timer live at any time (max ${e.maxLive()})`);
+    // (2026-11-11, logos at once) was <= 2: the sweep timer + the 250 ms recheck timer; a notice is now applied in the next
+    // frame, so the sweep timer is the only one
+    assert.ok(e.maxLive() <= 1, `at most the sweep timer lives at any time (max ${e.maxLive()})`);
     assert.ok(st.failSweeps <= H3 / e.FAIL_SWEEP_MS + 1, `sweeps ${st.failSweeps} <= one per ${e.FAIL_SWEEP_MS} ms`);
     assert.ok(st.failSweeps >= H3 / 2_000, `the sweep keeps running (${st.failSweeps})`);
     mock.timers.tick(1_000);
@@ -157,9 +160,9 @@ async function threeHoursOfNotices(retryMs: number) {
 test("one sweep timer at a time: load notices that run due sweeps early never leave a second timer chain; sweeps <= 1 per FAIL_SWEEP_MS", () => threeHoursOfNotices(700));
 
 // "ask again in 300 ms" puts failNext 700 ms before the sweep timer: a notice lands in between at every sweep and its
-// recheck (~250 ms later) finds the failed logos due, so only the FAIL_SWEEP_MS rule in sweepDue keeps the sweeps to one
-// per FAIL_SWEEP_MS (without it: one per ~600 ms). With 700 ms a notice almost never comes before the timer, so that case
-// alone stays green without the rule.
+// recheck (the next frame; ~250 ms later before 2026-11-11) finds the failed logos due, so only the FAIL_SWEEP_MS rule in
+// sweepDue keeps the sweeps to one per FAIL_SWEEP_MS (without it: one per 300 ms, 35,999 in the 3 h). With 700 ms a notice almost never comes
+// before the timer, so that case alone stays green without the rule.
 test("sweeps <= 1 per FAIL_SWEEP_MS also when every sweep's failNext comes well before its timer (ask again in 300 ms)", () => threeHoursOfNotices(300));
 
 test("a coin whose cell shows an older logo is asked for its patched URL again after that URL's dead time, and the new logo lands", async () => {

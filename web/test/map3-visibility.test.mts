@@ -352,7 +352,7 @@ test("engine: a hidden coin takes no logo-atlas cell and asks for no logo; revea
   try {
     const { S, dbg, idx, frame } = e;
     dbg.zoomTo(idx("m0"), 12);
-    frame(); frame(); frame();   // the cell pass waits for a still camera, then runs (every 250 ms)
+    frame(); frame(); frame();   // the cell pass runs once the camera has been still for STILL_MS (2026-11-11; was two checks 250 ms apart)
     const rows = S.debugFns.kidLogos(4.5, 200).rows as { i: number; cell: number }[];
     const hidden = rows.filter((r) => S.vis.level[r.i] === VIS.HIDDEN), drawn = rows.filter((r) => S.vis.level[r.i] !== VIS.HIDDEN);
     assert.ok(hidden.length > 0 && drawn.length > 0, `on screen: ${hidden.length} hidden, ${drawn.length} drawn`);
