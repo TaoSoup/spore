@@ -28,9 +28,10 @@ const SPLIT = [5000, 2500, 1000, 1500];
 const DAY = 86_400;
 
 /** A model with: ASSET → 10 depth-0 coins (two carry a child, two tie on everything but the mint), ROOT → 3 kids (+1 grandchild). */
-function buildFamilies({ clock, mode = "all", draw = DRAW } = {}) {
+// `nestedDraw`: the cap of an asset drawn inside another one (the tests below keep it at `draw`, so a nested family is capped too).
+function buildFamilies({ clock, mode = "all", draw = DRAW, nestedDraw = draw } = {}) {
   const db = new Db(":memory:");
-  const model = new Model(db, { platformWallet: PLATFORM, splitBps: SPLIT, mode, now: () => clock.t, log: quiet, assetFamilyDraw: draw });
+  const model = new Model(db, { platformWallet: PLATFORM, splitBps: SPLIT, mode, now: () => clock.t, log: quiet, assetFamilyDraw: draw, nestedAssetFamilyDraw: nestedDraw });
   model.load();
   model.setGlobal({ maxCurveDepth: 2, initialRealTokenReserves: "793100000000000", createV2Enabled: true, whitelistedQuoteMints: [] });
   model.setSolUsd(100);
@@ -519,4 +520,30 @@ test("perf: 20k coins — first build ≤ 250 ms, a cached page ≤ 5 ms, a 5k p
     assert.equal(mints.size, N, "four pages cover the family, each mint once");
     process.stdout.write(`# perf 20k: build ${buildMs.toFixed(1)} ms (snap.buildMs ${snap.buildMs}), 5k page ${raw} B raw / ${gz} B gzip, cached round trip best ${times[0].toFixed(2)} / median ${times[4].toFixed(2)} ms, in-process ${inProc[4].toFixed(3)} ms\n`);
   } finally { s.close(); db.close(); }
+});
+
+// $baton under PUMP with its own cap (NESTED_ASSET_FAMILY_DRAW): a client holds a nested asset as a member, not a family
+// top, so nothing stands in for the coins a cap would leave out; its family is drawn whole (up to that cap) instead.
+test("an asset drawn inside another asset is drawn whole, under its own cap, and indexed still equals the client's familyTotal", async () => {
+  const c = { t: 1_800_000_000_000 };
+  const f = buildFamilies({ clock: c, nestedDraw: 50 });
+  const NEST = key("nest-whole"), old = Math.floor(c.t / 1000) - 10 * DAY;
+  f.model.upsertCoin({ mint: NEST, curve: key("nest-whole-curve"), depth: 0, quoteMint: ASSET, ...base, virtualQuoteReserves: "5000000000", realQuoteReserves: "0", createdAt: old });
+  for (let i = 0; i < 6; i++) f.model.upsertCoin({ mint: key(`nest-whole-${i}`), curve: key(`nest-whole-curve-${i}`), depth: 0, quoteMint: NEST, ...base, virtualQuoteReserves: String(3_000_000_000 + i * 1_000_000), realQuoteReserves: "0", createdAt: old });
+  c.t += 1_000;
+  const s = await serve(f.model);
+  try {
+    const drawn = f.model.assetDrawn(), fams = f.model.assetFamilies();
+    const undrawn = (a) => fams.get(a).length - drawn.get(a).size;
+    assert.equal(drawn.get(NEST).size, 6, "every coin of the nested family");
+    assert.ok(undrawn(ASSET) > 0, "the outer asset keeps its own cap");
+    const body = (await s.get("/api/map?scope=all&limit=all")).body;
+    const where = new Map();
+    const walk = (n, root) => { where.set(n.coin.mint, [...(where.get(n.coin.mint) ?? []), root]); n.children.forEach((k) => walk(k, root)); };
+    for (const r of body.roots) walk(r, r.coin.mint);
+    assert.deepEqual(where.get(NEST).sort(), [ASSET, NEST].sort(), "under ASSET and as its own top");
+    for (let i = 0; i < 6; i++) assert.equal(where.get(key(`nest-whole-${i}`))?.length, 2, `coin ${i} under both`);
+    assert.equal(body.indexed, where.size + undrawn(ASSET) + undrawn(BIG), "nothing of the nested family is left undrawn");
+    assert.equal(body.indexed, clientIndexed(body), "the client's familyTotal");
+  } finally { s.close(); f.db.close(); }
 });

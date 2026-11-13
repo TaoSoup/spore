@@ -51,6 +51,12 @@ export const MAP_SINCE_ENTRIES = 64;
 export const MAP_SINCE_NODES = 250_000;
 /** How many coins of a listed asset's family the full map draws (every coin with children or younger than a day, then the biggest by locked value); the rest stay in the index and in the family's counts. */
 export const ASSET_FAMILY_DRAW = 300;
+/**
+ * The cap for a listed asset that is a tracked coin quoted in another listed asset ($baton and $pill in PUMP): the map
+ * draws it inside that asset's family, where a client holds it as a member, not as a family top, so the coins its cap
+ * leaves out get no ghost, no paging and no "+N" there (model.mapIndexed). Drawn whole up to this many instead.
+ */
+export const NESTED_ASSET_FAMILY_DRAW = 2_000;
 // Family snapshots (`/api/map/family/:mint`, DESIGN-FAMILY-ALL §4): every coin of one family, biggest
 // first, with mapRef's numbers. A snapshot is rebuilt like the map (version moved and MAP_CACHE_MS passed)
 // and stays readable by its `v` for FAMILY_SNAPSHOT_MS after its last read, so a client paging through it
@@ -89,8 +95,8 @@ const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
 
 export class Model {
-  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW, mapSinceNodes = MAP_SINCE_NODES } = {}) {
-    this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw; this.mapSinceNodes = mapSinceNodes;
+  constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW, nestedAssetFamilyDraw = NESTED_ASSET_FAMILY_DRAW, mapSinceNodes = MAP_SINCE_NODES } = {}) {
+    this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw; this.nestedAssetFamilyDraw = Math.max(assetFamilyDraw, nestedAssetFamilyDraw); this.mapSinceNodes = mapSinceNodes;
     this.platformWallet = platformWallet; this.splitBps = splitBps;
     // The platform share a sharing config must carry to count as ours: the configured platform
     // slice (50% by default). Mere presence is not enough — anyone can write a config that names
@@ -547,7 +553,8 @@ export class Model {
    * The slice of each listed asset's family the full map draws (ASSET_FAMILY_DRAW): every coin that has
    * children or is younger than a day, then the biggest by locked value, then by price. Tens of thousands
    * of coins sit under PUMP or USDC alone and nearly all of them never traded; the family's bubble still
-   * counts them all (assetMapRef), the index and the search still know them.
+   * counts them all (assetMapRef), the index and the search still know them. An asset drawn inside another asset's
+   * family (a tracked coin quoted in it) is capped at NESTED_ASSET_FAMILY_DRAW instead.
    */
   assetDrawn() {
     if (this.drawnVersion === this.version && this.drawnCache) return this.drawnCache;
@@ -563,9 +570,11 @@ export class Model {
    * 21k coins took ~100 ms that way).
    */
   *#assetDrawnGen(d, fam) {
-    const out = new Map(), cap = this.assetFamilyDraw, dayAgo = Math.floor(this.now() / 1000) - 86_400;
+    const out = new Map(), dayAgo = Math.floor(this.now() / 1000) - 86_400;
     let n = 0;
     for (const [asset, kids] of fam) {
+      const self = this.coins.get(asset), nested = !!self?.tracked && self.depth === 0 && fam.has(self.quoteMint ?? "");
+      const cap = nested ? this.nestedAssetFamilyDraw : this.assetFamilyDraw;
       const keep = new Set(), rest = [];
       for (const k of kids) {
         if ((++n & 2047) === 0) yield;

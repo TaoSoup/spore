@@ -22,11 +22,29 @@ const chunks = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i +
 const DEPTH_OFFSET = 141; // BondingCurve.depth (DESIGN §2)
 const QUOTE_MINT_OFFSET = 83; // BondingCurve.quote_mint (measured on live curves: a coin quoted in $gmonad, $gmonad quoted in MON)
 // The slice of a BondingCurve the asset walk reads, from offset 32: real_quote_reserves u64 at 0, `complete` at 16
-// (48), quote_mint at 51..83 (83..115), depth at 109 (141). A staged row that holds only this slice is shorter than
-// CURVE_FULL_MIN and gets its full account fetched before it is resolved.
-const CURVE_SLICE_OFFSET = 32, CURVE_SLICE_LEN = 110, CURVE_FULL_MIN = 142;
+// (48), quote_mint at 51..83 (83..115), depth at 109 (141). A staged row that holds only this slice (no discriminator
+// in front) gets its full account fetched before it is resolved.
+const CURVE_SLICE_OFFSET = 32, CURVE_SLICE_LEN = 110;
+// A curve created after quote_mint was added and before depth was keeps that shorter account, one size per program
+// upgrade in between (the pump SDK's decodeBondingCurve lists them): 115 (quote_mint), 124 (creator_fee_bps and
+// can_edit_creator_fee), 125 (is_holder_reward), 141 (creator_fee and protocol_fees); depth (142+) is 0, the decoder's
+// default. Its slice ends early, so a slice only has to reach the end of the quote mint. The walk used to drop them
+// all (Nov 13 2026: 7,593 coins quoted in PUMP were 125 bytes, $baton among them, and 63k quoted in USDC 115 bytes),
+// so a listed asset that is itself a coin quoted in another one was drawn as a root.
+const SHORT_CURVE_SIZES = [115, 124, 125, 141];
+const QUOTE_SLICE_END = QUOTE_MINT_OFFSET + 32 - CURVE_SLICE_OFFSET;
+/** Failed calls in a row after which the short-curve scan leaves the rest to the next start. */
+const SHORT_SCAN_FAILS = 5;
+/** The longest a staging transaction holds the event loop (#stageCurves). */
+const STAGE_SLICE_MS = 8;
 const ZERO_KEY_HEX = "0".repeat(64);
-const sliceCurve = (buf) => { const q = buf.subarray(QUOTE_MINT_OFFSET - CURVE_SLICE_OFFSET, QUOTE_MINT_OFFSET - CURVE_SLICE_OFFSET + 32); return { rq: Number(buf.readBigUInt64LE(0)), complete: buf[48 - CURVE_SLICE_OFFSET] === 1, quoteMint: q.toString("hex") === ZERO_KEY_HEX ? null : new PublicKey(q).toBase58(), depth: buf[DEPTH_OFFSET - CURVE_SLICE_OFFSET] }; };
+const ZERO_KEY = new PublicKey(Buffer.alloc(32)).toBase58(); // an empty whitelist slot reads as this key
+const sliceCurve = (buf) => {
+  const q = buf.subarray(QUOTE_MINT_OFFSET - CURVE_SLICE_OFFSET, QUOTE_SLICE_END), d = DEPTH_OFFSET - CURVE_SLICE_OFFSET;
+  return { rq: Number(buf.readBigUInt64LE(0)), complete: buf[48 - CURVE_SLICE_OFFSET] === 1, quoteMint: q.toString("hex") === ZERO_KEY_HEX ? null : new PublicKey(q).toBase58(), depth: buf.length > d ? buf[d] : 0 };
+};
+/** Whether a staged row's data is the asset walk's slice rather than a whole account (which starts with the discriminator). */
+const isSlice = (data) => !Buffer.from(data, "base64").subarray(0, 8).equals(BONDING_CURVE_DISCRIMINATOR);
 /** Full re-scan of a depth (getProgramAccountsV2 on Helius walks the whole pump key space, ~8 min per depth); the live stream covers the rest. */
 const BACKFILL_RESCAN_S = 7 * 24 * 3600;
 /** Listed-asset scans cost the same full walk each; the live stream adds their new coins, so a month between walks. */
@@ -82,7 +100,7 @@ export class Indexer {
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
-      mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, ...opts };
+      mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
     this.live = null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
@@ -131,10 +149,12 @@ export class Indexer {
   announcePair(mint) {
     const c = this.model.get(mint);
     if (!c || !c.tracked || !c.quoteMint) return false;
-    // A coin quoted in a listed asset (depth 0 on chain): its family top is the asset's bubble, not a coin.
-    const underAsset = c.depth < 1 && c.quoteMint !== SOL_MINT && !this.model.coins.has(c.quoteMint);
-    if (c.depth < 1 && !underAsset) return false;
-    const p = underAsset ? null : this.model.get(c.quoteMint);
+    if (c.depth < 1 && c.quoteMint === SOL_MINT) return false;
+    // A coin quoted in a listed asset (depth 0 on chain): its family top is the asset's bubble, unless the asset is a
+    // tracked coin itself ($baton, $pill: quoted in PUMP), which is then the parent node, hung under its own asset.
+    const q = this.model.get(c.quoteMint);
+    const underAsset = c.depth < 1 && !q?.tracked;
+    const p = underAsset ? null : q;
     if (!underAsset && (!p || !p.tracked)) return false;
     const at = this.pairSent.get(mint);
     if (at != null && Date.now() - at < PAIR_DEDUPE_MS) return false;
@@ -142,7 +162,7 @@ export class Indexer {
     if (this.pairSent.size > 5_000) for (const [m, t] of this.pairSent) { if (Date.now() - t >= PAIR_DEDUPE_MS) this.pairSent.delete(m); if (this.pairSent.size <= 2_500) break; }
     this.state.map.pairs++;
     // `parentMint` on both halves, as on a `since=` node, so a client that does not hold the parent yet can hang it under its own parent instead of drawing it as a root.
-    const parent = underAsset ? { ...this.model.assetMapRef(c.quoteMint), parentMint: null } : { ...this.model.mapRef(p, true), parentMint: p.depth > 0 ? p.quoteMint ?? null : null };
+    const parent = underAsset ? { ...this.model.assetMapRef(c.quoteMint), parentMint: null } : { ...this.model.mapRef(p, true), parentMint: p.quoteMint && p.quoteMint !== SOL_MINT ? p.quoteMint : null };
     this.hub?.emit("pair", { coin: { ...this.model.mapRef(c, true), parentMint: c.quoteMint }, parent });
     return true;
   }
@@ -245,6 +265,9 @@ export class Indexer {
       db.backfillSet(`scanned:${d}`, nowS());
       this.log.info(`backfill: depth ${d}: ${rows.length} curves in ${Date.now() - t0} ms`);
     }
+    // Before the resolve: it drains every staged curve first (days on the free RPC with the asset walk's rows).
+    await this.scanShortAssetCurves().catch((e) => this.log.warn(`backfill: short curves: ${e.message}`));
+    await this.resolveStagedAssets().catch((e) => this.log.warn(`backfill: listed assets: ${e.message}`));
     this.model.setBackfill({ ...db.backfillStats() });
 
     this.state.phase = "backfill:resolve";
@@ -328,7 +351,13 @@ export class Indexer {
     const curve = decodeCurve(Buffer.from(row.data, "base64"), row.curve);
     // Already known (live CreateEvent or a child's quote mint pointed here): no RPC needed.
     const known = this.model.byCurve(row.curve);
-    if (known) { db.backfillResolve(row.curve, known.mint); return known.mint; }
+    if (known) {
+      // A staged curve belongs to the tracked tree: a coin cached untracked (fetchCoin, for /api/coin: one click on
+      // a listed asset such as $baton) joins it here, or the row would be resolved while its coin stayed out for good.
+      if (!known.tracked) this.model.upsertCoin({ mint: known.mint, tracked: true });
+      db.backfillResolve(row.curve, known.mint);
+      return known.mint;
+    }
     let accounts = await this.rpc.getTokenAccountsByOwner(row.curve, TOKEN_2022_PROGRAM_ID.toBase58());
     if (!accounts.some((a) => a.mint !== curve.quoteMint)) accounts = accounts.concat(await this.rpc.getTokenAccountsByOwner(row.curve, TOKEN_PROGRAM_ID.toBase58()));
     const base = accounts.find((a) => a.mint !== curve.quoteMint);
@@ -340,14 +369,118 @@ export class Indexer {
     if (curve.quoteMint) this.#resolveByMint(curve.quoteMint);
     return base.mint;
   }
+  /** Resolves the staged curve of a known mint (its PDA) without a token-account lookup; false when none is pending. */
   #resolveByMint(mint) {
     const db = this.model.db;
     const key = bondingCurvePda(mint).toBase58();
     const row = db.backfillCurve(key);
-    if (!row || row.resolvedAt) return;
+    if (!row || row.resolvedAt || row.error) return false;
+    // a slice (the asset walk's) has no discriminator to decode: resolveCurves fills it first, resolveOne lands here again
+    if (isSlice(row.data)) return false;
     const curve = decodeCurve(Buffer.from(row.data, "base64"), key);
     this.model.upsertCoin({ mint, ...curve, tracked: true });
     db.backfillResolve(key, mint);
+    return true;
+  }
+  /**
+   * Listed assets that are pump coins themselves ($baton, quoted in PUMP) and wait as staged curves: their mint is
+   * known (the asset's), so each resolves by its PDA at once (#resolveByMint), instead of behind every staged curve
+   * (graduated first, then the biggest raise: days on the free RPC). Until it resolves, such an asset is drawn as
+   * the top of its own family with no parent, and ensureAncestors never asks for listed mints. A slice is filled
+   * first (one call per 100). Then their pools are read when migrated, as ensureAncestors does. Returns the mints.
+   */
+  async resolveStagedAssets() {
+    const db = this.model.db;
+    const fam = (await runSliced(this.model.assetFamiliesStep({ shared: true }))).value;
+    const want = [];
+    let n = 0;
+    for (const mint of fam.keys()) {
+      if (this.model.get(mint)?.tracked) continue; // an untracked copy (fetchCoin's cache) still resolves: #resolveByMint tracks it
+      if ((++n & 15) === 0) await new Promise((r) => setImmediate(r)); // a PDA derivation is ~0.2-0.4 ms
+      const row = db.backfillCurve(bondingCurvePda(mint).toBase58());
+      if (row && !row.resolvedAt && !row.error) want.push({ mint, row });
+    }
+    const slices = want.filter((w) => isSlice(w.row.data)).map((w) => w.row);
+    if (slices.length) await this.#fillCurveData(slices);
+    const out = [];
+    for (const { mint } of want) {
+      try { if (this.#resolveByMint(mint)) out.push(mint); } catch (e) { this.log.warn(`backfill: listed asset ${mint}: ${e.message}`); }
+    }
+    if (out.length) {
+      this.log.info(`backfill: ${out.length} listed assets resolved by mint (${out.slice(0, 5).map((m) => this.model.nameOf(m).symbol ?? m).join(", ")}${out.length > 5 ? ", …" : ""})`);
+      await this.#readBatchMints(out);
+      const migrated = out.map((m) => this.model.get(m)).filter((c) => c?.migrated);
+      if (migrated.length) await this.ensurePools(migrated);
+    }
+    return out;
+  }
+  /**
+   * The curves quoted in a listed asset that the asset walk dropped before Nov 13 2026: every account shorter than
+   * its slice (SHORT_CURVE_SIZES). One getProgramAccounts per quote mint and size (discriminator, dataSize and
+   * quote_mint filters; a few hundred ms each on the public RPC), for the listed mints and the assets coins are
+   * quoted in, staged with their whole account. A quote mint whose calls all answered is kept in
+   * `scanned:assets-short:quotes`, so a later start asks only for the rest; `scanned:assets-short` ends it for good
+   * once every one answered (no new curve is that short, and the walk keeps them now). It stops for this start after
+   * SHORT_SCAN_FAILS failed calls in a row. Not needed before the first walk (it keeps them) nor on a provider that
+   * refuses plain getProgramAccounts: each call there is a paginated walk of the whole key space (rpc.mjs, ~8 min on
+   * Helius), so the walk is made due instead (one walk, at the end of this backfill). Returns how many were new.
+   */
+  async scanShortAssetCurves() {
+    const db = this.model.db, key = "scanned:assets-short", doneKey = "scanned:assets-short:quotes";
+    if (db.backfillGet(key, 0)) return 0;
+    if (!db.backfillGet("scanned:assets", 0)) { db.backfillSet(key, nowS()); return 0; }
+    const fam = (await runSliced(this.model.assetFamiliesStep({ shared: true }))).value;
+    const done = new Set(db.backfillGet(doneKey, []));
+    const quotes = [...new Set([...this.#listedQuotes(), ...fam.keys()])].filter((m) => m !== SOL_MINT && m !== ZERO_KEY && !done.has(m));
+    const t0 = Date.now(), disc = bs58(BONDING_CURVE_DISCRIMINATOR);
+    let found = 0, staged = 0, failed = 0, inRow = 0, left = quotes.length;
+    for (const q of quotes) {
+      let ok = true;
+      for (const size of SHORT_CURVE_SIZES) {
+        if (this.stopped || inRow >= SHORT_SCAN_FAILS) { ok = false; break; }
+        let rows;
+        try {
+          rows = await this.rpc.getProgramAccounts(PUMP_PROGRAM_ID.toBase58(), [{ memcmp: { offset: 0, bytes: disc } }, { dataSize: size }, { memcmp: { offset: QUOTE_MINT_OFFSET, bytes: q } }]);
+          inRow = 0;
+        } catch (e) { failed++; inRow++; ok = false; this.log.warn(`backfill: short curves ${q} (${size} bytes): ${e.message}`); continue; }
+        if (this.rpc.gpaV2) {
+          db.backfillSet("scanned:assets", 0); db.backfillSet(key, nowS());
+          this.log.info("backfill: short curves: the provider pages getProgramAccounts (a walk per call), so the asset walk is due again instead");
+          return staged;
+        }
+        found += rows.length;
+        // the quote mint is the filter's; rq and `complete` read in place (a base58 encode per row is ~2 µs x 63k)
+        staged += await this.#stageCurves(rows.map(({ pubkey, account }) => ({ curve: pubkey, depth: 0, quoteMint: q, data: account.data.toString("base64"), graduated: account.data[48] === 1, rq: Number(account.data.readBigUInt64LE(32)) })));
+      }
+      if (!ok) continue;
+      done.add(q); left--;
+      db.backfillSet(doneKey, [...done]);
+    }
+    if (!left) { db.backfillSet(key, nowS()); db.backfillSet(doneKey, []); }
+    this.log.info(`backfill: short curves: ${quotes.length} quote mints, ${found} curves, ${staged} new${left ? `, ${left} quote mints left for the next start (${failed} calls failed)` : ""}, in ${Math.round((Date.now() - t0) / 1000)} s`);
+    return staged;
+  }
+  /**
+   * Stages curve rows that are not resolved yet (nor a tracked coin), in transactions of at most ~8 ms with a turn
+   * of the event loop between them: a row costs ~0.25 ms on the live index (its lookups and the kept counts), and the
+   * walk stages ~400k (minutes as one transaction). Returns how many were staged.
+   */
+  async #stageCurves(rows) {
+    const db = this.model.db;
+    let staged = 0, i = 0;
+    while (i < rows.length) {
+      const t0 = performance.now(), from = i;
+      db.transaction(() => {
+        for (; i < rows.length; i++) {
+          if (i > from && performance.now() - t0 > this.opts.stageSliceMs) break; // at least one row per transaction
+          const row = rows[i];
+          if (this.model.byCurve(row.curve)?.tracked || db.backfillCurve(row.curve)?.resolvedAt) continue;
+          db.backfillCurveUpsert(row); staged++;
+        }
+      });
+      if (i < rows.length) await new Promise((r) => setImmediate(r));
+    }
+    return staged;
   }
   /**
    * Every bonding curve quoted in a listed asset (depth 0 with a quote mint), staged for `resolveCurves` like
@@ -364,22 +497,17 @@ export class Indexer {
       const t0 = Date.now();
       const rows = [];
       const r = await this.rpc.scanProgramAccounts(PUMP_PROGRAM_ID.toBase58(), { filters: [{ memcmp: { offset: 0, bytes: bs58(BONDING_CURVE_DISCRIMINATOR) } }], dataSlice: { offset: CURVE_SLICE_OFFSET, length: CURVE_SLICE_LEN } }, (pubkey, slice) => {
-        if (slice.length < CURVE_SLICE_LEN) return;
+        if (slice.length < QUOTE_SLICE_END) return; // older than quote_mint: SOL-quoted
         const c = sliceCurve(slice);
         if (!c.quoteMint || c.depth !== 0) return;
         rows.push({ curve: pubkey, depth: 0, quoteMint: c.quoteMint, data: slice.toString("base64"), graduated: c.complete, rq: c.rq });
       });
-      let staged = 0;
-      db.transaction(() => {
-        for (const row of rows) {
-          if (this.model.byCurve(row.curve) || db.backfillCurve(row.curve)?.resolvedAt) continue;
-          db.backfillCurveUpsert(row); staged++;
-        }
-      });
+      const staged = await this.#stageCurves(rows);
       db.backfillSet(key, nowS());
       this.model.setBackfill({ ...db.backfillStats() });
       this.log.info(`backfill: assets: ${r.accounts} curves walked (${r.pages} pages), ${rows.length} quoted in a listed asset, ${staged} new, in ${Math.round((Date.now() - t0) / 1000)} s`);
       if (staged) {
+        await this.resolveStagedAssets().catch((e) => this.log.warn(`backfill: listed assets: ${e.message}`));
         await this.resolveCurves();
         await this.ensureAncestors();
         await this.ensureAllMintInfo();
@@ -389,9 +517,12 @@ export class Indexer {
       return staged;
     } finally { this.assetScanning = false; }
   }
-  /** Rows staged by the asset walk hold a slice of the curve: fetch the full accounts (100 per call) and persist them. */
+  /**
+   * Rows staged by the asset walk hold a slice of the curve: fetch the full accounts (100 per call) and persist them.
+   * A whole account shorter than the slice's end (SHORT_CURVE_SIZES) is not fetched again.
+   */
   async #fillCurveData(batch) {
-    const short = batch.filter((r) => Buffer.from(r.data, "base64").length < CURVE_FULL_MIN);
+    const short = batch.filter((r) => isSlice(r.data));
     if (!short.length) return;
     const db = this.model.db;
     for (const part of chunks(short, 100)) {
