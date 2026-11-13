@@ -3,13 +3,14 @@ import { createPortal } from "react-dom";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { api, pumpUrl, solscanTx, type Coin } from "../lib/api";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/api";
 import { routeLabels } from "../lib/chain";
-import { QUOTE_PROBE, runSwap, withSlippage } from "../lib/flow";
-import { isSolRooted, quoteSwap, type Chain, type Side } from "../lib/pump";
-import { CU_PRICE_MICRO } from "../lib/pump/trade";
-import { useAsync, useDebounced, useLocalPref, useNow } from "../lib/hooks";
+import { PriceMovedError, QUOTE_PROBE, runSwap, withSlippage } from "../lib/flow";
+import { ataRentLamports, priorityMicroLamports, quoteSwap, routeVenues, signatureState, swapFeeLamports, swapUnits, CU_PRICE_MICRO, type Side } from "../lib/pump";
+import { assetLabel, blockText, forgetCoin, useTradeRoute } from "../lib/trade-route";
+import { clearPendingTrade, pendingTradeOf, type PendingTrade } from "../lib/trade-store";
+import { useDebounced, useLocalPref, useNow } from "../lib/hooks";
 import { useDialog } from "../lib/dialog";
 import { friendlyError, type Step } from "../lib/steps";
 import { amount, exactAmount, feeSol, lamportsToSol, parseAmount, pct, signedPct, sol, tokens, usd } from "../lib/format";
@@ -29,43 +30,18 @@ const QUICK_PCT = [25, 50, 75, 100];
 /// preview is the usual cause of a slippage failure.
 const REQUOTE_S = 20;
 const STALE_S = 10;
-/// Solana's base signature fee and the rent of an associated token account (165 bytes) in
-/// lamports; both are protocol constants, shown so the fee line adds up.
-const BASE_FEE = 5_000n;
-const ATA_RENT = 2_039_280n;
 /// Lamports kept back on a buy: the WSOL scratch account's rent is refunded in the same
 /// transaction but has to be there at the start.
 const HEADROOM = 2_100_000n;
-
-type Route = { chain: Chain; coins: Coin[]; pending: Coin | null };
-
-/// The chain of this coin plus the full record of every ancestor in one pass, so the widget can
-/// say *which* coin is awaiting migration instead of waiting for the program's 6107. Same link
-/// shape as lib/chain's chainFor (self first, SOL root last); done here to avoid fetching every
-/// ancestor twice.
-async function loadRoute(coin: Coin): Promise<Route> {
-  const ancestors = await Promise.all(coin.ancestors.map((a) => ancestorCached(a.mint)));
-  const coins = [coin, ...ancestors];
-  const chain: Chain = coins.map((c, i) => ({ mint: c.mint, quoteMint: c.quoteMint, tokenProgram: c.tokenProgram, quoteTokenProgram: coins[i + 1]?.tokenProgram ?? TOKEN_PROGRAM_ID.toBase58(), migrated: c.migrated, depth: c.depth }));
-  return { chain, coins, pending: coins.find((c) => c.complete && !c.migrated) ?? null };
-}
-
-/// Ancestor records for the route, shared by the desktop widget and every opening of the phone
-/// sheet (one request per ancestor a minute, not one per opening). Migration state can change, so
-/// the cache is short.
-const ancestorCache = new Map<string, { at: number; p: Promise<Coin> }>();
-function ancestorCached(mint: string): Promise<Coin> {
-  const hit = ancestorCache.get(mint);
-  if (hit && Date.now() - hit.at < 60_000) return hit.p;
-  const p = api.coin(mint, { children: false, trades: false }).then((r) => r.coin);
-  ancestorCache.set(mint, { at: Date.now(), p });
-  p.catch(() => { if (ancestorCache.get(mint)?.p === p) ancestorCache.delete(mint); });
-  return p;
-}
+/// A quote younger than this opens the confirm sheet at once; an older one is simulated again first.
+const FRESH_MS = 5_000;
+/// While a coin on the route waits for its migration, the route is checked again this often.
+const PENDING_POLL_MS = 20_000;
 
 const LockGlyph = () => <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>;
 
-type QuoteState = { amountOut: bigint; units: number; at: number; amountIn: bigint; side: Side };
+/// `unwrapped`: lamports of a wrapped-SOL account the user already had that the route closes into the wallet.
+type QuoteState = { amountOut: bigint; units: number; unwrapped: bigint; at: number; amountIn: bigint; side: Side };
 
 /// "12.50" → "12.5", "3.000000000" → "3": the shortest decimal string for an amount field.
 const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
@@ -74,13 +50,15 @@ const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/
 /// the id of the sheet head, for the phone dialog's aria-labelledby.
 /// `current`: the live record (the coin page's store), read on each render so spot price and the
 /// dollar figures follow the market without the widget subscribing to every trade.
-export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?: Side; sheet?: boolean; onClose?: () => void; amountRef?: RefObject<HTMLInputElement | null>; titleId?: string; current?: () => Coin };
+export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?: Side; sheet?: boolean; onClose?: () => void; amountRef?: RefObject<HTMLInputElement | null>; titleId?: string; current?: () => Coin;
+  /// Told whether a trade is in flight, so the dialog around the widget (the map's quick trade) never closes under it.
+  onBusy?: (busy: boolean) => void };
 
 /// Buy from SOL / sell to SOL through every hop of the chain in one multi_hop_swap. Quotes come
 /// from a simulation (no local curve math), so the preview is what the program does; the widget
 /// adds what a terminal needs around it: balances, impact against spot, slippage, fees, the
 /// reason a trade is blocked, and a confirm step before the wallet opens.
-export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", sheet = false, onClose, amountRef, titleId, current }: TradeWidgetProps) {
+export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", sheet = false, onClose, amountRef, titleId, current, onBusy }: TradeWidgetProps) {
   // Identity fields (mint, decimals, ancestors) are the same in both; prices come from the live one.
   const live = current?.();
   const coin = live && live.mint === base.mint ? live : base;
@@ -89,10 +67,20 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const toast = useToast();
   const user = wallet.publicKey;
   const userKey = user?.toBase58() ?? null;
-  const route = useAsync(() => loadRoute(coin), [coin.mint]);
+  const route = useTradeRoute(coin);
   const chain = route.data?.chain ?? null;
-  const tradable = chain ? isSolRooted(chain) : null;
-  const pending = route.data?.pending ?? null;
+  const block = route.data?.block ?? null;
+  // `pending` passes by itself (a migration landing); any other block holds, and the widget says why.
+  const pending = block?.kind === "pending" ? block.coin : null;
+  const tradable = route.data ? !block || block.kind === "pending" : null;
+  const blockInfo = block && block.kind !== "pending" ? blockText(block, coin) : null;
+  // While a coin on the route waits for its migration, check again on a timer (its record fresh each time).
+  const reloadRoute = route.reload;
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => { forgetCoin(pending.mint); reloadRoute(); }, PENDING_POLL_MS);
+    return () => clearInterval(t);
+  }, [pending, reloadRoute]);
   const [side, setSide] = useState<Side>(initialSide);
   const [input, setInput] = useState("");
   const [slippage, setSlippage] = useLocalPref<number>("slippage", 100);
@@ -100,6 +88,12 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const [steps, setSteps] = useState<Step[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  // The confirm sheet opens on a fresh quote: an older one is simulated again first, and the sheet opens on a quote made
+  // after this time (ms), never on the one it replaces.
+  const [confirmAfter, setConfirmAfter] = useState<number | null>(null);
+  const confirmWhenFresh = confirmAfter != null;
+  // The last check before the wallet found the price had moved: the sheet says so above the new numbers.
+  const [moved, setMoved] = useState(false);
   const [bal, setBal] = useState<{ sol: bigint | null; token: bigint | null; hasAta: boolean }>({ sol: null, token: null, hasAta: false });
   const [nonce, setNonce] = useState(0);
   // Buy in dollars: the field takes USD and writes the SOL amount the rest of the widget reads, so the
@@ -128,10 +122,29 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const amountIn = useMemo(() => parseAmount(dInput, decimalsIn), [dInput, decimalsIn]);
   const ownRef = useRef<HTMLInputElement>(null);
   const inputRef = amountRef ?? ownRef;
-  const confirmRef = useDialog<HTMLDivElement>(confirm, () => setConfirm(false));
   // The phone sheet opens on the amount field as soon as the route is known.
   useEffect(() => { if (sheet && route.data) inputRef.current?.focus({ preventScroll: true }); }, [sheet, route.data, inputRef]);
-  const refs = useMemo(() => new Map<string, Coin | Coin["ancestors"][number]>([[coin.mint, coin], ...coin.ancestors.map((a) => [a.mint, a] as const)]), [coin]);
+  const asset = route.data?.asset ?? null;
+  const refs = useMemo(() => {
+    const m = new Map<string, Coin | CoinRef>([[coin.mint, coin], ...coin.ancestors.map((a) => [a.mint, a] as const)]);
+    if (asset) m.set(asset.mint, { mint: asset.mint, name: null, symbol: asset.symbol.includes("…") ? null : asset.symbol, image: null, depth: 0 });
+    return m;
+  }, [coin, asset]);
+  // The last trade of this coin this browser sent and never saw settle (a reload mid-flight, a status that never came
+  // back): said before another one goes out.
+  const [lastSent, setLastSent] = useState<{ t: PendingTrade; state: "confirmed" | "failed" | "unknown" } | null>(null);
+  useEffect(() => {
+    setLastSent(null);
+    const t = pendingTradeOf(coin.mint);
+    if (!t) return;
+    let alive = true;
+    signatureState(connection, t.sig).catch(() => "unknown" as const).then((state) => {
+      if (!alive) return;
+      if (state !== "unknown") clearPendingTrade(t.sig);
+      setLastSent({ t, state });
+    });
+    return () => { alive = false; };
+  }, [coin.mint, connection]);
 
   const refreshBalances = useCallback(async () => {
     if (!user) { setBal({ sol: null, token: null, hasAta: false }); return; }
@@ -156,48 +169,106 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     setQuoting(true);
     // Before a wallet connects, buys are simulated from a public probe key so the preview works.
     quoteSwap(connection, user ?? QUOTE_PROBE, chain, side, amountIn)
-      .then((q) => { if (alive) { setQuote({ amountOut: q.amountOut, units: q.unitsConsumed, at: Date.now(), amountIn, side }); setQuoteErr(null); } })
-      .catch((e) => { if (alive) { setQuote(null); setQuoteErr(friendlyError(e)); } })
+      .then((q) => { if (alive) { setQuote({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped, at: Date.now(), amountIn, side }); setQuoteErr(null); } })
+      .catch((e) => {
+        if (!alive) return;
+        setQuote(null);
+        const msg = friendlyError(e);
+        // Before a wallet connects the preview pays from a public probe wallet (QUOTE_PROBE) holding a few hundredths of
+        // a SOL: a bigger amount fails there for its balance, not the user's, so say what to do instead.
+        setQuoteErr(!user && /not enough SOL|insufficient|short by|no SOL yet/i.test(msg) ? "Connect a wallet to quote this amount: the preview wallet holds less SOL than that." : msg);
+      })
       .finally(() => { if (alive) setQuoting(false); });
     return () => { alive = false; };
   }, [chain, tradable, pending, amountIn, side, userKey, connection, user, nonce]);
+
+  // The quote of exactly what the field holds (the debounce caught up, same amount, same side), or null: the sheet shows
+  // it and the transaction is built from it, so the minimum always belongs to the amount being sent.
+  const settled = input.trim() === dInput;
+  const quoteFor = quote && amountIn != null && settled && quote.amountIn === amountIn && quote.side === side ? quote : null;
+  const sheetOpen = confirm && !!quoteFor && !!chain;
+  const confirmRef = useDialog<HTMLDivElement>(sheetOpen, () => { setConfirm(false); setMoved(false); });
+  // A sheet whose quote no longer matches closes (and so frees the page: useDialog's inert follows `sheetOpen`).
+  useEffect(() => { if (confirm && !sheetOpen) setConfirm(false); }, [confirm, sheetOpen]);
+  // The dialog around the widget (the map's quick trade) may not close while a trade is in flight.
+  useEffect(() => { onBusy?.(busy); }, [busy, onBusy]);
 
   // Re-simulate a standing quote on a timer, but never under the user's hands (a confirm sheet
   // open, a transaction in flight) and never in a background tab.
   const quoteAge = quote ? Math.max(0, Math.floor((now * 1000 - quote.at) / 1000)) : 0;
   const requote = useCallback(() => setNonce((n) => n + 1), []);
   useEffect(() => {
-    if (!quote || quoting || busy || confirm || document.hidden) return;
+    if (!quote || quoting || busy || confirm || confirmWhenFresh || document.hidden) return;
     if (quoteAge >= REQUOTE_S) requote();
-  }, [quote, quoteAge, quoting, busy, confirm, requote]);
+  }, [quote, quoteAge, quoting, busy, confirm, confirmWhenFresh, requote]);
+
+  // The priority fee from the network's recent fees on the route's venues, read again with every new quote.
+  const [micro, setMicro] = useState(CU_PRICE_MICRO);
+  const routeKey = chain ? `${chain.map((l) => l.mint).join(",")}:${side}` : "";
+  useEffect(() => {
+    if (!chain || !tradable) return;
+    let alive = true;
+    let venues; try { venues = routeVenues(chain, side); } catch { return; }
+    priorityMicroLamports(connection, venues).then((m) => { if (alive) setMicro(m); });
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeKey, tradable, connection, nonce]);
+
+  const askConfirm = () => {
+    if (quoteFor && Date.now() - quoteFor.at < FRESH_MS) { setConfirm(true); return; }
+    setConfirmAfter(Date.now()); requote();
+  };
+  useEffect(() => {
+    if (confirmAfter == null) return;
+    if (quoteErr || !amountIn) { setConfirmAfter(null); setMoved(false); return; }
+    if (quoteFor && !quoting && quoteFor.at > confirmAfter) { setConfirmAfter(null); setConfirm(true); }
+  }, [confirmAfter, quoteFor, quoting, quoteErr, amountIn]);
+  const closeConfirm = () => { setConfirm(false); setMoved(false); };
+  /// Forget a pending or open confirmation: the side, the amount or the coin changed under it.
+  const resetConfirm = () => { setConfirm(false); setConfirmAfter(null); setMoved(false); };
 
   async function go() {
-    if (!chain || !amountIn || !quote) return;
+    // Built from the quote the sheet shows, for the amount and side that quote was made for.
+    const q = quoteFor;
+    if (!chain || !q || quoting || busy) { closeConfirm(); return; }
     setConfirm(false); setBusy(true); setSteps([]);
     try {
-      const { sig } = await runSwap(connection, wallet, chain, side, amountIn, quote.amountOut, slippage, setSteps);
+      const { sig } = await runSwap(connection, wallet, chain, q.side, q.amountIn, q.amountOut, slippage, setSteps, { units: swapUnits(chain.length, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol });
       toast.success(side === "buy" ? `Bought ${sym(coin)}` : `Sold ${sym(coin)}`, { href: solscanTx(sig), label: "view transaction" });
-      setInput(""); setQuote(null); setSteps([]);
+      setInput(""); setQuote(null); setSteps([]); setMoved(false);
       refreshBalances();
+      // the trade settled: the dialog around the widget may close now (it ignores a close while busy)
+      onBusy?.(false);
       onClose?.();
-    } catch (e) { toast.error(friendlyError(e)); }
+    } catch (e) {
+      if (e instanceof PriceMovedError) {
+        // Nothing was signed: drop the quote that failed, and reopen the sheet on a new one only.
+        setSteps([]); setQuote(null); setMoved(true); setConfirmAfter(Date.now()); requote();
+      } else {
+        const sent = (e as { sentSig?: string }).sentSig;
+        const unsettled = sent && (e as { name?: string }).name !== "OnChainError" && (e as { name?: string }).name !== "ExpiredError";
+        if (unsettled) toast.error(`Sent, but Spore could not confirm it yet. Check the transaction before trading ${sym(coin)} again.`, { href: solscanTx(sent), label: "view transaction" });
+        else toast.error(friendlyError(e));
+        setMoved(false);
+      }
+    }
     finally { setBusy(false); }
   }
 
-  const switchSide = (s: Side) => { if (s === side) return; setSide(s); setInput(""); setQuote(null); setQuoteErr(null); setSteps([]); };
+  const switchSide = (s: Side) => { if (s === side || busy) return; resetConfirm(); setSide(s); setInput(""); setQuote(null); setQuoteErr(null); setSteps([]); };
   const pctOf = (p: number) => (bal.token == null ? "" : p === 100 ? exactAmount(bal.token, coin.decimals) : exactAmount((bal.token * BigInt(p)) / 100n, coin.decimals));
   const setPct = (p: number) => { if (bal.token != null) setInput(pctOf(p)); };
   /// "Sell 50%" / "Sell all" under the position: switch to Sell with the amount filled in.
-  const sellPct = (p: number) => { if (bal.token == null) return; if (side !== "sell") { setSide("sell"); setQuote(null); setQuoteErr(null); setSteps([]); } setInput(pctOf(p)); inputRef.current?.focus({ preventScroll: true }); };
+  const sellPct = (p: number) => { if (bal.token == null || busy || confirmWhenFresh) return; resetConfirm(); if (side !== "sell") { setSide("sell"); setQuote(null); setQuoteErr(null); setSteps([]); } setInput(pctOf(p)); inputRef.current?.focus({ preventScroll: true }); };
   const setSlip = (bps: number) => setSlippage(Math.min(5_000, Math.max(1, Math.round(bps))));
 
   // --- derived figures for the preview ---
   const hops = chain?.length ?? 0;
-  // Same CU sizing as buildSwapTx; the unused part of the limit is never charged, but the
-  // priority fee is paid on the limit, so this is the real worst case.
-  const units = Math.min(1_400_000, 150_000 + 80_000 * hops);
-  const networkFee = BASE_FEE + BigInt(Math.ceil((units * CU_PRICE_MICRO) / 1_000_000));
-  const ataRent = side === "buy" && user && !bal.hasAta ? ATA_RENT : 0n;
+  // The compute limit the transaction is built with (the simulated use plus a margin, as buildSwapTx gets it); the
+  // priority fee is paid on the whole limit, so this is the real worst case.
+  const units = swapUnits(hops, quoteFor ? quoteFor.units : null);
+  const networkFee = swapFeeLamports(units, micro);
+  const ataRent = side === "buy" && user && !bal.hasAta ? ataRentLamports(coin.tokenProgram) : 0n;
   // What a buy must leave in the wallet besides the amount itself.
   const reserve = networkFee + ataRent + HEADROOM;
   const need = side === "buy" && amountIn ? amountIn + reserve : null;
@@ -226,30 +297,36 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
 
   // The one reason the primary button is off, in the user's words.
   const blocker: string | null = !chain ? null
-    : tradable === false ? "Not tradable from SOL here"
+    : blockInfo ? `Not tradable here · ${blockInfo.short}`
     : pending ? `Awaiting ${sym(pending)} migration`
     : !wallet.connected ? null
     : insufficient ? (side === "buy" ? "Not enough SOL" : `Not enough ${sym(coin)}`)
     : side === "sell" && bal.token === 0n ? `No ${sym(coin)} in this wallet`
     : null;
-  const canTrade = !!quote && !!amountIn && !blocker && !quoting && !busy && quote.amountIn === amountIn && quote.side === side;
+  const canTrade = !!quoteFor && !blocker && !quoting && !busy;
+  // The amount, its presets and the side stay put while a confirmation waits for its quote or a trade is in flight.
+  const locked = busy || confirmWhenFresh;
 
   // The route as chips: SOL → $ROOT → … → $COIN on a buy, the reverse on a sell.
   const routeCoins = route.data ? [...route.data.coins].reverse() : [];
-  const rootQuote = routeCoins[0]?.quoteSymbol ?? "SOL";
+  // SOL first, then the listed asset whose SOL pool the route starts in (when it does), the root, …, the coin.
   const path: { key: string; label: string; image: string | null; symbol: string | null }[] = route.data
-    ? [{ key: "quote", label: rootQuote, image: null, symbol: null }, ...routeCoins.map((c) => ({ key: c.mint, label: sym(c), image: c.image, symbol: c.symbol }))]
+    ? [{ key: "quote", label: "SOL", image: null, symbol: null },
+      ...(asset ? [{ key: asset.mint, label: assetLabel(asset.symbol), image: null, symbol: asset.symbol }] : []),
+      ...routeCoins.map((c) => ({ key: c.mint, label: sym(c), image: c.image, symbol: c.symbol }))]
     : [];
   if (side === "sell") path.reverse();
   const parent = coin.ancestors[0] ?? null;
-  const routeNote = hops <= 1 ? null
-    : side === "buy" ? `Buying ${sym(coin)} also buys ${sym(parent)}: your SOL routes through every parent.`
-    : `Selling routes back through ${sym(parent)} to SOL.`;
+  // The first coin the route passes through on the way to this one: the parent, or the asset's pool for a root.
+  const via = parent ? sym(parent) : asset ? assetLabel(asset.symbol) : null;
+  const routeNote = hops <= 1 || !via ? null
+    : side === "buy" ? (parent ? `Buying ${sym(coin)} also buys ${via}: your SOL routes through every parent.` : `Your SOL buys ${via} in its PumpSwap pool first, then ${sym(coin)} with it, in one transaction.`)
+    : `Selling routes back through ${via} to SOL.`;
   const tokenUsd = tokenBal != null && coin.priceUsd != null ? tokenBal * coin.priceUsd : null;
   const primary = busy ? "Working…"
     : blocker ?? (!amountIn ? (side === "buy" ? "Enter an amount of SOL" : `Enter an amount of ${sym(coin)}`)
     : quoting && !quote ? "Quoting…"
-    : quote && quote.amountIn === amountIn && quote.side === side ? (side === "buy" ? `Buy ≈ ${amount(outTokens)} ${sym(coin)}` : `Sell for ≈ ${sol(outSol)}`)
+    : quoteFor ? (side === "buy" ? `Buy ≈ ${amount(outTokens)} ${sym(coin)}` : `Sell for ≈ ${sol(outSol)}`)
     : side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`);
   const impactText = impact == null ? null : impact <= 0 ? signedPct(-impact) : `−${pct(impact)}`;
 
@@ -259,13 +336,13 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
         <div className="trade-sheet-head">
           <Logo src={coin.image} label={coin.symbol} size={32} />
           <div><b id={titleId}>{side === "buy" ? "Buy" : "Sell"} {sym(coin)}</b><span className="muted mono">{coin.priceUsd != null ? usd(coin.priceUsd) : sol(coin.priceSol)}</span></div>
-          <button type="button" className="sheet-close" aria-label="Close" onClick={onClose}>×</button>
+          <button type="button" className="sheet-close" aria-label="Close" disabled={busy} title={busy ? "A trade is in flight" : undefined} onClick={onClose}>×</button>
         </div>
       )}
       <div className="trade-tabs" role="tablist" aria-label="Trade side">
         <SlidingPill items="[role=tab]" className="side-pill" />
-        <button type="button" role="tab" aria-selected={side === "buy"} className={side === "buy" ? "on buy" : ""} onClick={() => switchSide("buy")}>Buy</button>
-        <button type="button" role="tab" aria-selected={side === "sell"} className={side === "sell" ? "on sell" : ""} onClick={() => switchSide("sell")}>Sell</button>
+        <button type="button" role="tab" aria-selected={side === "buy"} className={side === "buy" ? "on buy" : ""} disabled={locked} onClick={() => switchSide("buy")}>Buy</button>
+        <button type="button" role="tab" aria-selected={side === "sell"} className={side === "sell" ? "on sell" : ""} disabled={locked} onClick={() => switchSide("sell")}>Sell</button>
       </div>
 
       {route.loading && <div className="stack-2"><Skeleton h={40} r={10} /><Skeleton h={52} r={12} /><Skeleton h={28} r={999} /><Skeleton h={48} r={999} /></div>}
@@ -280,15 +357,25 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
           {routeNote && <p className="route-note">{routeNote}</p>}
         </div>
       )}
-      {route.data && tradable === false && (
+      {lastSent && (
+        <div className={`notice ${lastSent.state === "failed" || lastSent.state === "unknown" ? "warn" : ""} compact trade-last`}>
+          <span>
+            Your last {lastSent.t.side} of {sym(coin)} ({Math.max(1, Math.round((Date.now() - lastSent.t.at) / 60_000))} min ago){" "}
+            {lastSent.state === "confirmed" ? "landed." : lastSent.state === "failed" ? "failed on-chain; nothing was traded." : "has not confirmed yet. Check it before trading again."}{" "}
+            <Ext href={solscanTx(lastSent.t.sig)}>view ↗</Ext>
+          </span>
+          <button type="button" className="sheet-close" aria-label="Dismiss" onClick={() => { if (lastSent.state === "unknown") clearPendingTrade(lastSent.t.sig); setLastSent(null); }}>×</button>
+        </div>
+      )}
+      {route.data && blockInfo && (
         <div className="notice warn trade-block">
-          <span><b>Not tradable from SOL here.</b> This chain bottoms out in a listed mint other than SOL (USDC or a tokenized stock), so <code>multi_hop_swap</code> cannot start from a SOL wallet. <Ext href={pumpUrl(coin.mint)}>Trade on pump.fun ↗</Ext></span>
+          <span><b>{blockInfo.title}.</b> {blockInfo.body} <Ext href={pumpUrl(coin.mint)}>Trade on pump.fun ↗</Ext></span>
         </div>
       )}
       {route.data && tradable && pending && (
         <div className="notice warn trade-block">
-          <span><b>{sym(pending)} is awaiting migration.</b> {pending.mint === coin.mint ? "This coin" : "A coin on this chain"} filled its curve and is moving to a PumpSwap pool; pump blocks trades through it until the migration lands (usually minutes). The quote resumes by itself.</span>
-          <button type="button" className="btn sm ghost" onClick={route.reload}>Check again</button>
+          <span><b>{sym(pending)} is awaiting migration.</b> {blockText({ kind: "pending", coin: pending }, coin).body}</span>
+          <button type="button" className="btn sm ghost" onClick={() => { forgetCoin(pending.mint); route.reload(); }}>Check again</button>
         </div>
       )}
 
@@ -298,7 +385,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
             <span className="field-row">
               <span>{side === "buy" ? "You pay" : "You sell"}</span>
               {user && (
-                <button type="button" className="bal" title="Use the whole balance" onClick={() => side === "buy" ? (bal.sol != null && setInput(exactAmount(bal.sol > reserve ? bal.sol - reserve : 0n, 9))) : setPct(100)}>
+                <button type="button" className="bal" title="Use the whole balance" disabled={locked} onClick={() => side === "buy" ? (bal.sol != null && setInput(exactAmount(bal.sol > reserve ? bal.sol - reserve : 0n, 9))) : setPct(100)}>
                   <i aria-hidden="true" /> {side === "buy" ? (solBal != null ? sol(solBal) : "…") : (tokenBal != null ? amount(tokenBal, sym(coin)) : "…")}
                   {side === "sell" && tokenUsd != null && tokenUsd > 0 && <em>≈ {usd(tokenUsd)}</em>}
                 </button>
@@ -306,8 +393,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
             </span>
             <div className={`amount ${side === "buy" && solUsd ? "has-unit" : ""}`}>
               {usdOn
-                ? <input ref={inputRef} className="input mono" inputMode="decimal" autoComplete="off" placeholder="0.00" aria-label="Amount in US dollars" value={usdText} disabled={busy || !!pending} onChange={(e) => onUsd(e.target.value)} />
-                : <input ref={inputRef} className="input mono" inputMode="decimal" autoComplete="off" placeholder="0.0" value={input} disabled={busy || !!pending} onChange={(e) => setInput(e.target.value.replace(/[^\d.,]/g, ""))} />}
+                ? <input ref={inputRef} className="input mono" inputMode="decimal" autoComplete="off" placeholder="0.00" aria-label="Amount in US dollars" value={usdText} disabled={locked || !!pending} onChange={(e) => onUsd(e.target.value)} />
+                : <input ref={inputRef} className="input mono" inputMode="decimal" autoComplete="off" placeholder="0.0" value={input} disabled={locked || !!pending} onChange={(e) => setInput(e.target.value.replace(/[^\d.,]/g, ""))} />}
               {side === "buy" && solUsd
                 ? <span className="unit-seg seg" role="group" aria-label="Amount unit"><SlidingPill /><button type="button" aria-pressed={!usdOn} onClick={() => setUsdPref(false)}>SOL</button><button type="button" aria-pressed={usdOn} onClick={() => setUsdPref(true)}>USD</button></span>
                 : <em>{side === "buy" ? "SOL" : sym(coin)}</em>}
@@ -318,8 +405,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
           </label>
           <div className="quick">
             {side === "buy"
-              ? QUICK_SOL.map((q) => <button key={q} type="button" aria-pressed={input === q} title={solUsd ? `≈ ${usd(Number(q) * solUsd)}` : undefined} onClick={() => setInput(q)}>{q} SOL</button>)
-              : QUICK_PCT.map((p) => <button key={p} type="button" disabled={!user || bal.token == null || bal.token === 0n} title={tokenUsd != null ? `≈ ${usd((tokenUsd * p) / 100)}` : undefined} onClick={() => setPct(p)}>{p === 100 ? "MAX" : `${p}%`}</button>)}
+              ? QUICK_SOL.map((q) => <button key={q} type="button" disabled={locked} aria-pressed={input === q} title={solUsd ? `≈ ${usd(Number(q) * solUsd)}` : undefined} onClick={() => setInput(q)}>{q} SOL</button>)
+              : QUICK_PCT.map((p) => <button key={p} type="button" disabled={locked || !user || bal.token == null || bal.token === 0n} title={tokenUsd != null ? `≈ ${usd((tokenUsd * p) / 100)}` : undefined} onClick={() => setPct(p)}>{p === 100 ? "MAX" : `${p}%`}</button>)}
           </div>
 
           <div className="slip">
@@ -346,7 +433,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
                     </div>
                     <div><span>Min. received <small className="muted">after {slippage / 100}%</small></span><b>{minLabel}</b></div>
                     {impactText && <div><span><Term k="impact">Price impact</Term> <small className="muted">vs spot, fees included</small></span><b className={impactTone} title={`Spot ${sol(spot)} per ${sym(coin)}; simulated fill ${effPrice != null ? sol(effPrice) : "—"}`}>{impactText}</b></div>}
-                    <div><span>Network fee</span><b title={`${units.toLocaleString("en-US")} CU limit × ${CU_PRICE_MICRO / 1e6} lamports + 5 000 base`}>{feeSol(networkFee)}{ataRent > 0n && <small className="muted"> + {feeSol(ataRent)} account rent</small>}</b></div>
+                    <div><span>Network fee</span><b title={`${units.toLocaleString("en-US")} CU limit × ${micro / 1e6} lamports priority (recent fees on this route) + 5 000 base`}>{feeSol(networkFee)}{ataRent > 0n && <small className="muted"> + {feeSol(ataRent)} account rent</small>}</b></div>
+                    {quote.unwrapped > 0n && <div><span>Wrapped SOL</span><b className="muted" title="Your wallet already holds a wrapped-SOL account; the route closes it, so its balance and rent come back as plain SOL in the same transaction">{sol(lamportsToSol(quote.unwrapped))} unwrapped to SOL</b></div>}
                     <div><span>pump fees</span><b className="muted" title={`Charged inside the route (protocol fee on the SOL hop, creator fee on ${sym(coin)}), so they are already inside the figures above`}>inside the quote</b></div>
                     <div className="quote-age">
                       <span className={stale ? "warn" : "muted"}>{quoting ? "refreshing…" : `quoted ${quoteAge}s ago`}</span>
@@ -360,7 +448,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
           {steps.length > 0 && <Steps steps={steps} />}
           {!wallet.connected
             ? <WalletMultiButton>{side === "buy" ? `Connect wallet to buy ${sym(coin)}` : `Connect wallet to sell ${sym(coin)}`}</WalletMultiButton>
-            : <button type="button" className={`btn lg block trade-go ${side === "buy" ? "accent" : "violet"}`} disabled={!canTrade} onClick={() => setConfirm(true)}>{primary}</button>}
+            : <button type="button" className={`btn lg block trade-go ${side === "buy" ? "accent" : "violet"}`} disabled={!canTrade || confirmWhenFresh} onClick={askConfirm}>{confirmWhenFresh ? "Refreshing the quote…" : primary}</button>}
           {insufficient && side === "buy" && need != null && <p className="hint">You need about {sol(lamportsToSol(need))} for this buy: the amount plus the network fee{ataRent > 0n ? ", the token account rent" : ""} and a {sol(lamportsToSol(HEADROOM))} buffer for the wrapped-SOL scratch account (refunded).</p>}
           {tokenBal != null && tokenBal > 0 && (
             <div className="position">
@@ -375,10 +463,11 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
         </>
       )}
 
-      {confirm && quote && amountIn && chain && createPortal(
-        <div className="confirm-backdrop" onClick={() => setConfirm(false)}>
+      {sheetOpen && quote && amountIn && chain && createPortal(
+        <div className="confirm-backdrop" onClick={closeConfirm}>
           <div ref={confirmRef} className="confirm" role="dialog" aria-modal="true" aria-labelledby="trade-confirm-title" onClick={(e) => e.stopPropagation()}>
-            <div className="confirm-head"><Logo src={coin.image} label={coin.symbol} size={32} /><b id="trade-confirm-title">Confirm {side} · {sym(coin)}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={() => setConfirm(false)}>×</button></div>
+            <div className="confirm-head"><Logo src={coin.image} label={coin.symbol} size={32} /><b id="trade-confirm-title">Confirm {side} · {sym(coin)}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={closeConfirm}>×</button></div>
+            {moved && <p className="notice warn compact" role="status">The price moved past your minimum before the wallet opened, so nothing was sent. These are the new numbers.</p>}
             <div className="confirm-rows">
               <div><span>{side === "buy" ? "You pay" : "You sell"}</span><b>{side === "buy" ? sol(inSol) : amount(inTok, sym(coin))}{inUsd && <small> ≈ {inUsd}</small>}</b></div>
               <div><span>You receive ≈</span><b className={side === "buy" ? "accent" : "violet"}>{outLabel}{outUsd && <small> ≈ {outUsd}</small>}</b></div>
@@ -386,12 +475,13 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
               {impactText && <div><span>Price impact</span><b className={impactTone}>{impactText}</b></div>}
               <div><span>Route</span><b className="route">{routeLabels(chain, refs, side).join(" → ")}</b></div>
               <div><span>Network fee</span><b>{feeSol(networkFee + ataRent)}</b></div>
+              {quote.unwrapped > 0n && <div><span>Wrapped SOL</span><b>{sol(lamportsToSol(quote.unwrapped))} back as SOL</b></div>}
               <div><span>Quote age</span><b className={stale ? "warn" : ""}>{quoteAge}s{stale ? " · consider refreshing" : ""}</b></div>
             </div>
-            <p className="hint">The transaction fails on-chain (nothing charged beyond the network fee) if the fill falls below the minimum. Your wallet shows the final simulation before you sign.</p>
+            <p className="hint">Spore simulates this exact transaction before your wallet opens; if the price has moved past the minimum, it stops and shows new numbers. On-chain, the trade fails (nothing charged beyond the network fee) if the fill falls below the minimum.</p>
             <div className="confirm-actions">
-              <button type="button" className="btn ghost" onClick={() => { setConfirm(false); requote(); }}>Refresh quote</button>
-              <button type="button" className={`btn ${side === "buy" ? "accent" : "violet"}`} onClick={go}>{side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`}</button>
+              <button type="button" className="btn ghost" onClick={() => { closeConfirm(); requote(); }}>Refresh quote</button>
+              <button type="button" className={`btn ${side === "buy" ? "accent" : "violet"}`} disabled={quoting || busy} onClick={go}>{side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`}</button>
             </div>
           </div>
         </div>,

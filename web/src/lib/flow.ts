@@ -14,7 +14,8 @@ import { api, type Coin, type Eligibility, type UploadBody } from "./api";
 import { chainFor, chainForChild, chainForRoot } from "./chain";
 import { AGENT_SEED_LAMPORTS, MAX_LAUNCH_FEE_LAMPORTS, PLATFORM_WALLET, PolicyError, ROOT_SPLIT, SPLIT_BPS, isAgentModel } from "./policy";
 import { splitShares, type Share } from "./pump/shares";
-import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, preflight, quoteSwap, sendAndConfirm, signatureState, type Chain, type LaunchFee, type Side } from "./pump";
+import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, explainCustomError, isSlippageFailure, preflight, quoteSwap, sendAndConfirm, signatureState, ExpiredError, OnChainError, SimulationError, type Chain, type LaunchFee, type Side } from "./pump";
+import { clearPendingTrade, savePendingTrade } from "./trade-store";
 import { friendlyError, stepper, type Report } from "./steps";
 import { clearPending, loadPending, savePendingSafe, type PendingLaunch } from "./launch-store";
 import { DRY_METADATA_URI, drySend, drySkip, drySleep, isDry, type TestWallet } from "./dry";
@@ -399,17 +400,47 @@ export async function checkPending(conn: Connection, p: PendingLaunch): Promise<
   return { status: "unknown", p };
 }
 
-export async function runSwap(conn: Connection, wallet: WalletContextState, chain: Chain, side: Side, amountIn: bigint, amountOutQuoted: bigint, slippageBps: number, report: Report): Promise<{ sig: string; minOut: bigint }> {
+/// The exact transaction failed its last simulation on slippage: the price moved past the minimum the user saw since
+/// the quote. Nothing was signed; the widget re-quotes and shows the new numbers instead of sending.
+export class PriceMovedError extends Error { constructor() { super("The price moved since the quote. Review the new quote before confirming again."); this.name = "PriceMovedError"; } }
+
+/// `units` / `microLamports`: the compute limit and priority fee the widget showed. `mint` / `symbol`: the coin, for the
+/// record of the sent trade (lib/trade-store), which stays until the trade settles.
+export type SwapOpts = { units?: number; microLamports?: number; mint?: string; symbol?: string | null };
+
+/// The buy or sell: build, simulate the exact transaction (the minimum the user confirmed included: a fill that would
+/// miss it stops here as PriceMovedError, before the wallet opens), sign, confirm.
+export async function runSwap(conn: Connection, wallet: WalletContextState, chain: Chain, side: Side, amountIn: bigint, amountOutQuoted: bigint, slippageBps: number, report: Report, opts: SwapOpts = {}): Promise<{ sig: string; minOut: bigint }> {
   if (!wallet.publicKey) throw new Error("Connect a wallet first");
-  const st = stepper([["build", side === "buy" ? "Build the multi-hop buy" : "Build the multi-hop sell"], ["sign", "Sign in your wallet and confirm on-chain"]], report);
+  const st = stepper([["build", side === "buy" ? "Build the multi-hop buy" : "Build the multi-hop sell"], ["check", "Simulate the exact transaction"], ["sign", "Sign in your wallet and confirm on-chain"]], report);
   st.set("build", "active");
   const minOut = withSlippage(amountOutQuoted, slippageBps);
   let tx: Awaited<ReturnType<typeof buildSwapTx>>;
-  try { tx = await buildSwapTx(conn, wallet.publicKey, chain, side, amountIn, minOut); st.set("build", "done", `${chain.length} hop${chain.length === 1 ? "" : "s"}`); }
+  try { tx = await buildSwapTx(conn, wallet.publicKey, chain, side, amountIn, minOut, { units: opts.units, microLamports: opts.microLamports }); st.set("build", "done", `${chain.length} hop${chain.length === 1 ? "" : "s"}`); }
   catch (e) { st.fail("build", e); throw e; }
+  st.set("check", "active", "simulating…");
+  try { await preflight(conn, tx, wallet.publicKey); st.set("check", "done", "passes with your minimum"); }
+  catch (e) {
+    if (e instanceof SimulationError && isSlippageFailure(e.logs, null)) { const moved = new PriceMovedError(); st.fail("check", moved); throw moved; }
+    st.fail("check", e); throw e;
+  }
   st.set("sign", "active", "approve in your wallet…");
-  try { const sig = await sendAndConfirm(conn, wallet, tx, [], (s) => st.note("sign", "sent · waiting for confirmation…", solscanTxUrl(s))); st.set("sign", "done", "confirmed", solscanTxUrl(sig)); return { sig, minOut }; }
-  catch (e) { st.fail("sign", e); throw e; }
+  let sent: string | null = null;
+  try {
+    const sig = await sendAndConfirm(conn, wallet, tx, [], (s) => {
+      sent = s;
+      if (opts.mint) savePendingTrade({ sig: s, mint: opts.mint, symbol: opts.symbol ?? null, side, at: Date.now() });
+      st.note("sign", "sent · waiting for confirmation…", solscanTxUrl(s));
+    }, (code) => explainCustomError(code));
+    clearPendingTrade(sig);
+    st.set("sign", "done", "confirmed", solscanTxUrl(sig));
+    return { sig, minOut };
+  } catch (e) {
+    // A trade that failed on-chain or expired is settled; one whose status never came back stays recorded.
+    if (sent && (e instanceof OnChainError || e instanceof ExpiredError)) clearPendingTrade(sent);
+    if (sent) (e as { sentSig?: string }).sentSig = sent;
+    st.fail("sign", e); throw e;
+  }
 }
 
 /// A public key used only as the simulated payer for buy quotes before a wallet is connected

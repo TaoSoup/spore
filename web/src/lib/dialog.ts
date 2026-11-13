@@ -7,6 +7,8 @@
 import { useEffect, useRef, type RefObject } from "react";
 
 const stack: HTMLElement[] = [];
+/// Whether any dialog is open: a page's own keyboard shortcuts stand down while one is (keys belong to the dialog).
+export const isDialogOpen = () => stack.length > 0;
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function useDialog<T extends HTMLElement = HTMLDivElement>(open: boolean, onClose: () => void, opts: { initialFocus?: RefObject<HTMLElement | null>; returnFocus?: RefObject<HTMLElement | null> } = {}): RefObject<T | null> {
@@ -27,6 +29,9 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(open: boolean,
     first.focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
       if (stack[stack.length - 1] !== node) return;
+      // The wallet adapter's own modal (Connect wallet) opens over a dialog without joining this stack: its Escape
+      // and Tab are its own, so the dialog underneath neither closes nor pulls the focus back.
+      if (document.querySelector(".wallet-adapter-modal")) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); return; }
       if (e.key !== "Tab") return;
       const items = [...node.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === document.activeElement);

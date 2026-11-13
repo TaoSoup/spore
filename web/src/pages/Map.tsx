@@ -21,6 +21,11 @@ import { LiveDot } from "../components/SpawnFeed";
 import LiveNumber from "../components/LiveNumber";
 import SlidingPill from "../components/ui/SlidingPill";
 import SidePanel, { kidCmp, usePanelCoin } from "../components/map/panel/SidePanel";
+import QuickTrade from "../components/QuickTrade";
+import { isDialogOpen } from "../lib/dialog";
+import type { Coin } from "../lib/api";
+import type { Side } from "../lib/pump";
+import { hardBlock, useTradeRoute } from "../lib/trade-route";
 import { firstborns } from "../lib/map/firstborn";
 import MapSearch from "../components/map/panel/MapSearch";
 import Highlights, { useHighlight } from "../components/map/panel/Highlights";
@@ -56,7 +61,8 @@ type Pop = "live" | "filters" | "key" | null;
 
 const typing = (t: EventTarget | null) => { const el = t as HTMLElement | null; return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable); };
 const isRoot = (n: BubbleNode, byMint: Map<string, BubbleNode>) => !n.parentMint || !byMint.has(n.parentMint);
-const depthWord = (d: number) => (d === 0 ? "root" : `d${d}`);
+/// What a screen reader hears for the depth: a depth-0 coin drawn under a listed asset (PUMP, USDC…) is "under $PUMP", not a root.
+const depthWord = (n: BubbleNode, byMint: Map<string, BubbleNode>) => { if (n.depth > 0) return `d${n.depth}`; const p = n.parentMint ? byMint.get(n.parentMint) : undefined; return p ? `under ${sym(p)}` : "root"; };
 const sinceWord = (ms: number) => ago(Math.floor(ms / 1000));
 /// The ← / → walk over the roots: the map's own order (family value in market cap; a listed asset counts 0 there), then kidCmp.
 const rootWalkCmp = (a: BubbleNode, b: BubbleNode) => (familyValueOf(b, "mcap") ?? 0) - (familyValueOf(a, "mcap") ?? 0) || kidCmp(a, b);
@@ -174,6 +180,9 @@ export default function MapPage() {
   const families = useFamilyStore({ byMint: data.byMint, tier: familyTier });
   const heat = useMapHeat(true);
   const { stats } = useStats();
+  // The quick trade over the map (side panel Buy / Sell, the B key): the coin as it was when it opened.
+  const [trade, setTrade] = useState<{ coin: Coin; side: Side } | null>(null);
+  const openTrade = useCallback((side: Side, coin: Coin) => setTrade({ coin, side }), []);
   const status = useStreamStatus();
   const [wide, setWide] = useState(() => typeof window !== "undefined" && window.innerWidth > WIDE_W);
   useEffect(() => { const f = () => setWide(window.innerWidth > WIDE_W); window.addEventListener("resize", f); return () => window.removeEventListener("resize", f); }, []);
@@ -206,6 +215,9 @@ export default function MapPage() {
   const offMap = focus && !allByMint.has(focus) ? focus : null;
   const famNode = useFamilyNode(families, offMap);
   const panel = usePanelCoin(focus);
+  // The selected coin's trade route (lib/trade-route): the side panel's Buy / Sell row and the B key read the same answer.
+  const tradeRoute = useTradeRoute(panel.coin && panel.coin.mint === focus ? panel.coin : null);
+  const tradeOk = !!tradeRoute.data && !!focus && tradeRoute.data.coins[0]?.mint === focus && !hardBlock(tradeRoute.data);
   const [picked, setPicked] = useState<BubbleNode | null>(null);
   const pending = useMemo(() => {
     if (!offMap) return null;
@@ -399,10 +411,12 @@ export default function MapPage() {
   // ---- keyboard: walk the tree, open, launch, frame; zoom and pan without a selection
   // The last-trade filter's part: ↓ ← → step only onto coins the map draws (shown, anchors, the pins); ↑ may climb to a
   // hidden parent, which the selection then pins. K toggles the filter between the default and everything.
-  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus, levels, pinned, lastWant, heatOn: !!heat });
-  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, pop, focus, levels, pinned, lastWant, heatOn: !!heat };
+  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat });
+  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A dialog (the quick trade, a confirm sheet) owns the keyboard: arrows, L or B must not act on the map behind it.
+      if (isDialogOpen()) return;
       const s = keyState.current;
       if (e.key === "Escape") { if (s.pop) setPop(null); else if (s.focus) select(null); return; }
       if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || typing(e.target)) return;
@@ -427,6 +441,7 @@ export default function MapPage() {
         }
         else if (e.key === "Enter" && !onControl) nav(`/c/${n.mint}`);
         else if (e.key === "l" || e.key === "L") { if (!launchBlock({ depth: n.depth, mayhem: s.mayhem }, s.maxDepth)) nav(`/launch?parent=${n.mint}`); }
+        else if (e.key === "b" || e.key === "B") { if (s.coin && s.coin.mint === n.mint && s.tradeOk) openTrade("buy", s.coin); }
         else if (e.key === "f" || e.key === "F") { let r = n; for (let h = 0; r.parentMint && s.byMint.has(r.parentMint) && h < 12; h++) r = s.byMint.get(r.parentMint)!; m?.fitCluster(r.mint, { select: false }); }
         else handled = false;
       }
@@ -439,8 +454,8 @@ export default function MapPage() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [select, nav, setLast]);
-  const announce = selected ? `${nameOf(selected)}, ${sym(selected)}, ${depthWord(selected.depth)}, ${count(selected.children)} ${selected.children === 1 ? "child" : "children"}` : "";
+  }, [select, nav, setLast, openTrade]);
+  const announce = selected ? `${nameOf(selected)}, ${sym(selected)}, ${depthWord(selected, allByMint)}, ${count(selected.children)} ${selected.children === 1 ? "child" : "children"}` : "";
 
   // ---- debug hooks for the headless QA scripts
   const lastDbg = { want: lastWant, eff: lastEff, counts: keyCounts, levels, pinned };
@@ -496,7 +511,7 @@ export default function MapPage() {
   const worldRadius = useCallback((v: number) => map.current?.worldRadius(v) ?? 0, []);
   const chipRadius = useCallback((s: number) => (map.current as Partial<ThreeMapHandle> | null)?.chipRadius?.(s) ?? 0, []);
   const keyChip = renderer === "three" ? chipRadius : null;
-  const panelProps = selected ? { node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast } : null;
+  const panelProps = selected ? { node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast, solUsd: stats?.solUsd ?? null, onTrade: openTrade, trade: { data: tradeRoute.data, error: tradeRoute.error, reload: tradeRoute.reload } } : null;
   // the lead's one line on the filter (only while it hides something): the default reads as "no trade in 24 h"
   const lastOn = !!heat && lastWant !== LAST_ALL;
   const lastLead = lastOn ? (lastWant === lastMask(LAST_DEFAULT) ? " Coins with no trade in 24 h are hidden by default; the Key brings them back." : " Some last-trade buckets are hidden; the Key brings them back.") : "";
@@ -569,6 +584,7 @@ export default function MapPage() {
       {focus && ready && !selected && !data.loading && !data.syncing && !allByMint.has(focus) && !!(panel.coin || panel.error) && !families.familyOf(focus) && <div className="map-toast">That coin is not on the map yet. <Link to={`/c/${focus}`}>Open its page</Link> · <button type="button" className="linkish" onClick={() => select(null)}>dismiss</button></div>}
       <MapHint cam={cam} gone={touched} renderer={renderer} />
       <div className="map-sr" aria-live="polite" aria-atomic="true">{announce}</div>
+      {trade && <QuickTrade coin={trade.coin} side={trade.side} solUsd={stats?.solUsd ?? null} onClose={() => setTrade(null)} />}
     </div>
   );
 }

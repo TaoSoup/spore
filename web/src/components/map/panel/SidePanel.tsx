@@ -11,7 +11,9 @@
 // Only the rows shown become nodes.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { Link } from "react-router-dom";
-import { api, xShareUrl, type Candles, type Coin } from "../../../lib/api";
+import { api, pumpUrl, xShareUrl, type Candles, type Coin } from "../../../lib/api";
+import { blockText, hardBlock, type TradeRoute } from "../../../lib/trade-route";
+import type { Side } from "../../../lib/pump";
 import { copyText, useAsync, useDebounced } from "../../../lib/hooks";
 import { age, ago, count, pct, short, signedPct, usd } from "../../../lib/format";
 import type { HeatRow } from "../../../lib/map/heat";
@@ -19,7 +21,7 @@ import { mapLink, shareText } from "../../../lib/map/share";
 import { shareOf, type DomRow } from "../../../lib/map/dominance";
 import type { BubbleNode, SizeMode } from "../../../lib/map/types";
 import type { BubbleMapHandle } from "../../BubbleMap";
-import { DepthBadge, Logo, ProgressBar, Skeleton, nameOf, sym, Firstborn } from "../../Bits";
+import { DepthBadge, Logo, ProgressBar, Skeleton, listedQuoteOf, nameOf, sym, Firstborn } from "../../Bits";
 import { EMPTY_FIRSTBORNS } from "../../../lib/map/firstborn";
 import { familyOrder, mintAtPos, useFamilyInfo } from "../../../lib/map/family";
 import type { FamilyChunk, FamilyStore } from "../../../lib/map/family-types";
@@ -113,9 +115,14 @@ type Props = {
   /// The coin's own last-trade bucket is off in the Key's filter (lib/map/visibility.ts): the map draws it only because it
   /// is selected. The panel says so, with the way back to every coin (`onShowAll`: ?last=all).
   lastHidden?: boolean; onShowAll?: () => void;
+  /// Opens the quick trade over the map (Map.tsx) for this coin; absent = no Buy / Sell row. `trade` is the selected
+  /// coin's route as the page checked it (useTradeRoute). `solUsd` is unused here (the dialog reads it) but keeps the
+  /// props one object the page builds once.
+  onTrade?: (side: Side, coin: Coin) => void; solUsd?: number | null;
+  trade?: { data: TradeRoute | null; error: string | null; reload: () => void } | null;
 };
 
-export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, families = null, lastHidden = false, onShowAll }: Props) {
+export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
   const [sparkRef, sparkW] = useWidth();
@@ -222,6 +229,34 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
     : block ? <button type="button" className="btn accent block" disabled title={block}>{launchLabel}</button>
     : <Link to={`/launch?parent=${node.mint}`} className="btn accent block launch-cta" title={`Launch a coin under ${tick}`}>{launchLabel}</Link>;
   const mainActs = <div className="map-side-main">{launch}<Link to={`/c/${node.mint}`} className="btn ghost">Open coin →</Link></div>;
+  // Buy / Sell open the quick trade; a coin whose route cannot start from SOL gets pump.fun instead, with the reason,
+  // so the button never leads to a dead end. Only for a coin with a record (a listed asset top such as PUMP has none),
+  // and only once this coin's route is known (the page checks it: lib/trade-route, the same answer the B key reads).
+  const routeFor = trade?.data && trade.data.coins[0]?.mint === node.mint ? trade.data : null;
+  const blocked = hardBlock(routeFor);
+  const why = blocked && c ? blockText(blocked, c) : null;
+  const tradeActs = !onTrade || !trade || !c || c.mint !== node.mint ? null
+    : why ? (
+      <div className="map-side-trade blocked">
+        <a className="btn ghost" href={pumpUrl(node.mint)} target="_blank" rel="noopener noreferrer" title={why.body}>Trade on pump.fun ↗</a>
+        <span className="map-side-why" title={why.body}>{why.short}</span>
+      </div>
+    ) : routeFor ? (
+      <div className="map-side-trade">
+        <button type="button" className="btn buy" onClick={() => onTrade("buy", c)} title={`Buy ${sym(node)} with SOL (B)`}>Buy</button>
+        <button type="button" className="btn sell" onClick={() => onTrade("sell", c)} title={`Sell ${sym(node)} for SOL`}>Sell</button>
+      </div>
+    ) : trade.error ? (
+      <div className="map-side-trade blocked">
+        <a className="btn ghost" href={pumpUrl(node.mint)} target="_blank" rel="noopener noreferrer">Trade on pump.fun ↗</a>
+        <span className="map-side-why" title={trade.error}>route check failed · <button type="button" className="linkish" onClick={trade.reload}>retry</button></span>
+      </div>
+    ) : (
+      <div className="map-side-trade" aria-busy="true">
+        <button type="button" className="btn buy" disabled title="Checking the route…">Buy</button>
+        <button type="button" className="btn sell" disabled title="Checking the route…">Sell</button>
+      </div>
+    );
   const close = <button type="button" className="map-side-close" aria-label="Close" title="Close (Esc)" onClick={onClose}>×</button>;
 
   if (peek) {
@@ -233,6 +268,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           <div className="map-side-title"><b>{nameOf(head)}</b><span className="mono muted">{sym(node)} · {usd(node.mcapUsd)} mcap</span></div>
           {changeEl}
         </div>
+        {tradeActs}
         {mainActs}
       </div>
     );
@@ -254,7 +290,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
             {web && <a className="map-soc" href={web} target="_blank" rel="noopener noreferrer" aria-label="Website" title={web}>{Icon.web}</a>}
           </span>
         </div>
-        <DepthBadge depth={node.depth} />
+        <DepthBadge depth={node.depth} quote={c && c.mint === node.mint ? listedQuoteOf(c) : undefined} />
       </div>
       <nav className="map-crumbs" aria-label="Family">
         <ol>
@@ -288,6 +324,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
       {family && <FamilyBlock family={family} mode={mode} />}
       {c && !c.migrated && <div className="map-side-progress"><span><em>curve</em><strong>{pct(c.progress)}</strong></span><ProgressBar value={c.progress} /></div>}
       <div className="map-side-actions">
+        {tradeActs}
         {mainActs}
         <div className="map-side-links">
           <button type="button" className="btn ghost sm" onClick={() => copy(link, "Map link")} title={link}>Share</button>

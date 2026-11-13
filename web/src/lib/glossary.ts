@@ -9,8 +9,8 @@ export type TermKey =
 export type TermVars = { maxDepth?: number | null; symbol?: string | null; root?: string | null };
 
 const GLOSSARY: Record<TermKey, { label: string; body: (v: TermVars) => string }> = {
-  root: { label: "root", body: () => "The first coin of a tree, bought with SOL like any pump.fun coin. Other coins can launch under it." },
-  child: { label: "child", body: () => "A coin launched under another coin. It is priced in its parent; Spore swaps SOL → parent → child for you in one transaction." },
+  root: { label: "root", body: () => "The first coin of a tree. Most pump.fun coins are priced in SOL; some are priced in a listed asset (PUMP, USDC, a tokenized stock…) and sit under it on the map. Other coins can launch under a root." },
+  child: { label: "child", body: () => "A coin launched under another coin. It is priced in its parent; when the tree reaches SOL, Spore swaps SOL → parent → child for you in one transaction." },
   depth: {
     label: "depth",
     body: (v) => `How far a coin sits from its root: d0 is the root, d1 its child, d2 a grandchild.${v.maxDepth != null ? ` pump.fun allows ${v.maxDepth} levels under a root today.` : ""}`,
@@ -31,7 +31,7 @@ const GLOSSARY: Record<TermKey, { label: string; body: (v: TermVars) => string }
   subscript: { label: "small digit", body: () => "The small digit counts the zeros after the point: $0.0₄293 = $0.0000293." },
   mapAll: { label: "the map", body: () => "The map shows every pump.fun coin pair, not only Spore launches; Spore launches have a lime ring." },
   dominance: { label: "dominance", body: () => "A family's share of the whole map: what its root and every pair under it are worth, over the same sum for every family on the map. In locked value (how the map sizes its bubbles; a coin that locks nothing counts a small slice of its market cap) and in market cap." },
-  quote: { label: "priced in", body: () => "The currency a coin is priced in: SOL for a root, the parent coin for a child." },
+  quote: { label: "priced in", body: () => "The currency a coin is priced in: SOL or a listed asset (PUMP, USDC, a tokenized stock…) for a root, the parent coin for a child." },
   slippage: { label: "slippage", body: () => "The most the fill may fall below the quote before the trade cancels." },
   impact: { label: "price impact", body: () => "How far the simulated fill lands from the current price, pump.fun fees included." },
 };

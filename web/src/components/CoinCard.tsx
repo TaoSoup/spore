@@ -4,7 +4,7 @@ import { api, type Coin } from "../lib/api";
 import { age, count, pctCurve, plural, usdCard } from "../lib/format";
 import { agentProvenance, useAgentIndex, type AgentProvenance } from "../lib/agent-index";
 import { useTradePulse, type TradePulse } from "../lib/live-trades";
-import { AgentChip, DepthBadge, Logo, ParentPill, Skeleton, nameOf, sym, useTint } from "./Bits";
+import { AgentChip, DepthBadge, Logo, ParentPill, Skeleton, listedQuoteOf, nameOf, quoteTick, sym, useTint } from "./Bits";
 import { motionPaused } from "./SporeCanvas";
 import Term from "./Term";
 import Tilt from "./ui/Tilt";
@@ -208,7 +208,7 @@ export default function CoinCard({ coin, fresh = false, size = "md", rank, actio
       {/* An agent launches under its own root: next to "under $ROOT" its chip shortens to "✦ agent" (full text stays in its title and accessible name). */}
       <div className={`cc-lineage ${prov?.role === "child" && prov.agent.root.mint === coin.parent?.mint ? "same-root" : ""}`}>
         <DepthBadge depth={coin.depth} term maxDepth={maxDepth} />
-        {coin.parent ? <ParentPill parent={coin.parent} /> : <span className="pill root">root{coin.descendants > 0 ? ` · ${count(coin.descendants)} in tree` : ""}</span>}
+        {coin.parent ? <ParentPill parent={coin.parent} /> : <span className="pill root">{listedQuoteOf(coin) ? `in ${quoteTick(listedQuoteOf(coin)!)}` : "root"}{coin.descendants > 0 ? ` · ${count(coin.descendants)} in tree` : ""}</span>}
         <AgentChip prov={prov} />
       </div>
 

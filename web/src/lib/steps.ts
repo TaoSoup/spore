@@ -53,14 +53,23 @@ export function friendlyError(e: unknown): string {
   // POST /api/agents/prepare answers 503 when the server has no agent wallet vault (flow.ts tags it).
   if (/agent wallets are not configured/i.test(raw) || name === "AgentWalletError") return "Spore could not create your coin's agent wallet right now.";
   if (/user rejected|rejected the request|cancel|declined/i.test(raw) || name === "WalletSignTransactionError" || name === "WalletSendTransactionError" && /reject/i.test(raw)) return "You cancelled in the wallet. Nothing was sent.";
+  // The swap's last simulation caught it before the wallet opened (flow.ts runSwap): nothing was signed.
+  if (name === "PriceMovedError") return raw;
   const short = text.match(/insufficient lamports (\d+), need (\d+)/i);
   if (short) return `Not enough SOL: the wallet is short by ${fmtSol(Number(short[2]) - Number(short[1]))}. Top up and try again.`;
   if (/found no record of a prior credit|AccountNotFound/i.test(text)) return "The wallet has no SOL yet. Fund it, then try again.";
   if (/insufficient (lamports|funds)|custom program error: 0x1\b/i.test(text)) return "Not enough SOL in the wallet for this.";
-  if (/QuoteCurveAwaitingMigration|6107/.test(text + name)) return "A coin on this chain graduated but has not migrated yet. Try again after it migrates.";
-  if (/QuoteBondingCurveNotEligible|6100/.test(text + name)) return "This coin cannot be a parent (mayhem mode or an unlisted root quote).";
-  if (/CurveDepthExceeded|6105/.test(text + name)) return "The chain is already at the maximum depth.";
-  if (/slippage|6003|TooLittle|exceeds desired slippage|6001|6023/i.test(text)) return "The price moved more than your slippage allows. Try a higher tolerance.";
+  // An error code counts only where it is one: the "(6107)" explainSimulationError / OnChainError append, an on-chain
+  // `"Custom":6107`, or Anchor's "Error Number: 6107". A bare number in a log line is not (a CPI that "consumed 46023"
+  // compute units once read as slippage 6023), and the same code means different things in pump and pump-amm.
+  // An explained code ("(6004)") already carries its program's words, so slippage reads those; a bare on-chain code is
+  // pump's (the launch flows), where 6002 / 6003 / 6042 are its slippage refusals.
+  const unexplained = (n: number) => new RegExp(`"Custom":\\s*${n}\\b|Error Number: ${n}\\b`).test(text);
+  const code = (n: number) => new RegExp(`\\(${n}\\)`).test(raw) || unexplained(n);
+  if (/QuoteCurveAwaitingMigration/.test(text + name) || code(6107)) return "A coin on this chain graduated but has not migrated yet. Try again after it migrates.";
+  if (/QuoteBondingCurveNotEligible/.test(text + name) || code(6100)) return "This coin cannot be a parent (mayhem mode or an unlisted root quote).";
+  if (/CurveDepthExceeded/.test(text + name) || code(6105)) return "The chain is already at the maximum depth.";
+  if (/slippage|TooLittleSol|TooMuchSol|BuySlippage|ExceededSlippage|exceeds desired slippage/i.test(text) || [6001, 6002, 6003, 6023, 6042].some(unexplained)) return "The price moved more than your slippage allows. Try a higher tolerance.";
   // "Expired" is what this page's RPC saw; a wallet that re-broadcast through its own RPC can be
   // ahead of it, so the wording stops short of promising nothing was charged.
   if (name === "ExpiredError" || /blockhash|expired/i.test(raw)) return "The transaction expired before it landed, so it should not have been charged. If your wallet shows it as sent, check the explorer before trying again.";

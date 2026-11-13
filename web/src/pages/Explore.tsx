@@ -13,7 +13,7 @@ import CoinCard, { ChangeChip, CoinCardSkeleton, Sparkline, sparkTone, useOnScre
 import TreeRow, { TreeRowSkeleton, treeMetricValue, type TreeMetric } from "../components/TreeRow";
 import LaunchButton from "../components/LaunchButton";
 import { LiveDot } from "../components/SpawnFeed";
-import { AgentChip, DepthBadge, ErrorBox, Logo, NoSpawnsYet, ParentPill, Skeleton, nameOf, sym } from "../components/Bits";
+import { AgentChip, DepthBadge, ErrorBox, Logo, NoSpawnsYet, ParentPill, Skeleton, listedQuoteOf, nameOf, sym } from "../components/Bits";
 import SlidingPill from "../components/ui/SlidingPill";
 import EmptySpore from "../components/illus/EmptySpore";
 import { Filament, Illus, Motes, Node, Ring, curve } from "../components/illus/base";
@@ -483,7 +483,7 @@ function CoinTable({ coins, sort, onSort, fresh, launch, index, maxDepth, classN
               <Logo src={c.image} label={c.symbol} size={32} />
               <span className="ctable-name"><b><Link className="stretch-link" to={`/c/${c.mint}`} title={nameOf(c)}>{nameOf(c)}</Link></b><span>{sym(c)} · {age(c.createdAt)}{c.migrated ? " · graduated" : ""}</span></span>
             </span>
-            <span role="cell" className={`ctable-parent c-under ${prov?.role === "child" && prov.agent.root.mint === c.parent?.mint ? "same-root" : ""}`}><DepthBadge depth={c.depth} maxDepth={maxDepth} /><ParentPill parent={c.parent} />{prov && <AgentChip prov={prov} />}</span>
+            <span role="cell" className={`ctable-parent c-under ${prov?.role === "child" && prov.agent.root.mint === c.parent?.mint ? "same-root" : ""}`}><DepthBadge depth={c.depth} maxDepth={maxDepth} quote={listedQuoteOf(c)} /><ParentPill parent={c.parent} quote={listedQuoteOf(c)} />{prov && <AgentChip prov={prov} />}</span>
             <span role="cell" className={`num c-mcap ${lit("mcap")} ${c.mcapUsd === 0 ? "is-zero" : ""}`}>{usdCard(c.mcapUsd)}</span>
             <span role="cell" className={`num c-locked ${lit("locked")} ${(c.lockedUsd ?? 0) >= 0.01 ? "accent" : "is-zero"}`}>{usdCard(c.lockedUsd)}</span>
             <span role="cell" className={`num c-vol ${lit("volume")} ${c.volume24hUsd ? "" : "is-zero"}`}>{usdCard(c.volume24hUsd)}</span>

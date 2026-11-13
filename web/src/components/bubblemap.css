@@ -397,6 +397,15 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-side-actions { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .map-side-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .map-side-main .btn { min-width: 0; height: 40px; padding: 0 16px; font-size: 13px; }
+/* Buy / Sell (the quick trade over the map) above Launch / Open: outlined in the trade widget's colours so Launch stays the one lime fill */
+.map-side-trade { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.map-side-trade .btn { min-width: 0; height: 40px; padding: 0 16px; font-size: 13px; font-weight: 600; }
+.map-side-trade .btn.buy { color: var(--accent); border-color: rgba(var(--accent-rgb), .5); background: rgba(var(--accent-rgb), .08); }
+.map-side-trade .btn.buy:hover { border-color: rgba(var(--accent-rgb), .8); background: rgba(var(--accent-rgb), .14); }
+.map-side-trade .btn.sell { color: var(--violet-2); border-color: rgba(var(--violet-rgb), .5); background: rgba(var(--violet-rgb), .08); }
+.map-side-trade .btn.sell:hover { border-color: rgba(var(--violet-rgb), .8); background: rgba(var(--violet-rgb), .14); }
+.map-side-trade.blocked { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+.map-side-why { min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-side-links { display: grid; grid-template-columns: repeat(4, auto); gap: 6px; }
 .map-side-links .btn { height: 28px; padding: 0 8px; font-size: 12px; }
 /* the selected coin's family dominance (DominanceLine draws the line and bar) */

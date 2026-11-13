@@ -13,6 +13,7 @@ import { provenanceFromAgentCoin, useAgentCoin } from "../lib/agent-index";
 import { OFFICIAL_CA } from "../lib/copy";
 import { age, amount, count, pctCurve, plural, price, short, sol, tokens, usd, usdCard, when } from "../lib/format";
 import type { Side } from "../lib/pump";
+import { blockText, hardBlock, useTradeRoute } from "../lib/trade-route";
 import { motionPaused } from "../components/SporeCanvas";
 import ChainBreadcrumb from "../components/ChainBreadcrumb";
 import PriceChart from "../components/PriceChart";
@@ -25,7 +26,7 @@ import LaunchButton from "../components/LaunchButton";
 import Search from "../components/Search";
 import Term from "../components/Term";
 import { Delta, Stat, StatStrip } from "../components/Stat";
-import { Addr, AgentChip, DepthBadge, ErrorBox, Ext, Logo, ProgressBar, Skeleton, nameOf, sym, useTint } from "../components/Bits";
+import { Addr, AgentChip, DepthBadge, ErrorBox, Ext, Logo, ProgressBar, Skeleton, listedQuoteOf, nameOf, sym, useTint } from "../components/Bits";
 import { useToast } from "../components/Toast";
 import CoinActivity, { defaultTab, hashTab, useActivityTab } from "../components/coin/CoinActivity";
 import { CoinIntro, NewToSpore } from "../components/coin/CoinIntro";
@@ -82,6 +83,9 @@ export default function CoinPage() {
   const store = useLiveCoinStore(page.data, solUsd);
   const coin = page.data?.coin ?? null;
   const agentCoin = useAgentCoin(coin);
+  // A coin whose route cannot start from SOL gets no Buy / Sell (phone bar, chart): pump.fun instead, with the reason.
+  const tradeRoute = useTradeRoute(coin);
+  const tradeBlocked = coin ? hardBlock(tradeRoute.data) : null;
   const [sheet, setSheet] = useState<Side | null>(null);
   const amountRef = useRef<HTMLInputElement>(null);
   const activityRef = useRef<HTMLDivElement>(null);
@@ -132,7 +136,7 @@ export default function CoinPage() {
           </div>
           <CoinStats store={store} />
           {coin.depth === 0 && <CoinDominance mint={coin.mint} />}
-          <div className="coin-chart"><PriceChart coin={coin} onBuy={onBuy} live={store} /></div>
+          <div className="coin-chart"><PriceChart coin={coin} onBuy={tradeBlocked ? undefined : onBuy} live={store} /></div>
           <div className={`coin-money ${solo ? "solo" : ""}`}>
             <div className="coin-fees"><ClaimFees coin={coin} /></div>
             <AgentSlot coin={coin} />
@@ -151,7 +155,7 @@ export default function CoinPage() {
           </aside>
         )}
       </div>
-      {narrow && <PhoneBar store={store} daily={daily.data} onOpen={setSheet} />}
+      {narrow && <PhoneBar store={store} daily={daily.data} onOpen={setSheet} blocked={tradeBlocked ? blockText(tradeBlocked, coin).short : null} />}
       {narrow && sheet && <TradeSheet coin={coin} store={store} side={sheet} solUsd={solUsd} onClose={() => setSheet(null)} />}
     </div>
   );
@@ -178,7 +182,7 @@ function CoinHeader({ coin, store, daily, maxDepth, agentCoin, onChildren }: { c
         <div className="coin-title">
           <h1 title={nameOf(coin)}>{nameOf(coin)}</h1>
           <span className="ticker mono">{sym(coin)}</span>
-          <DepthBadge depth={coin.depth} long term maxDepth={maxDepth} />
+          <DepthBadge depth={coin.depth} long term maxDepth={maxDepth} quote={listedQuoteOf(coin)} />
         </div>
         {/* Two rows on desktop; one wrapping run of tags on phones. */}
         <div className="coin-tags">
@@ -416,7 +420,8 @@ function TitleSync({ store }: { store: LiveCoin }) {
 
 /// The phone's sticky bar: price, change and market cap on the left, Buy and Sell on the right, and
 /// the curve's progress as a 2 px line along the top edge.
-function PhoneBar({ store, daily, onOpen }: { store: LiveCoin; daily: Candles | null; onOpen: (s: Side) => void }) {
+/// `blocked`: why the coin cannot be traded here (lib/trade-route): the bar offers pump.fun instead of Buy and Sell.
+function PhoneBar({ store, daily, onOpen, blocked = null }: { store: LiveCoin; daily: Candles | null; onOpen: (s: Side) => void; blocked?: string | null }) {
   const coin = useLive(store, (s) => s.coin);
   const tick = useLive(store, (s) => s.tick);
   const delta = useMemo(() => (daily ? change24h(daily.candles, coin, daily.priceKey) : null), [daily, coin]);
@@ -427,8 +432,10 @@ function PhoneBar({ store, daily, onOpen }: { store: LiveCoin; daily: Candles | 
         <b key={tick?.id ?? 0} className={`bar-price mono ${tick ? `tick-${tick.dir}` : ""}`}>{priceText(coin)}</b>
         <span className="bar-sub">{delta && <Delta ratio={delta.ratio} label={delta.short} title={delta.title} />}<span className="mono">{coin.mcapUsd != null ? `MC ${usd(coin.mcapUsd)}` : mcText(coin)}</span></span>
       </div>
-      <button type="button" className="btn accent" onClick={() => onOpen("buy")}>Buy</button>
-      <button type="button" className="btn violet" onClick={() => onOpen("sell")}>Sell</button>
+      {blocked
+        ? <span className="trade-bar-blocked"><Ext href={pumpUrl(coin.mint)} className="btn ghost trade-bar-ext" title={`Not tradable here: ${blocked}`}>Trade on pump.fun ↗</Ext><small>not tradable here · {blocked}</small></span>
+        : <><button type="button" className="btn accent" onClick={() => onOpen("buy")}>Buy</button>
+          <button type="button" className="btn violet" onClick={() => onOpen("sell")}>Sell</button></>}
     </div>
   );
 }
@@ -436,13 +443,17 @@ function PhoneBar({ store, daily, onOpen }: { store: LiveCoin; daily: Candles | 
 /// The phone trade sheet: a real modal (portal, focus trap, Escape, focus back to the bar).
 function TradeSheet({ coin, store, side, solUsd, onClose }: { coin: CoinT; store: LiveCoin; side: Side; solUsd: number | null; onClose: () => void }) {
   const amountRef = useRef<HTMLInputElement>(null);
-  const ref = useDialog<HTMLDivElement>(true, onClose, { initialFocus: amountRef });
+  // A trade in flight keeps the sheet open (its progress, and no second trade started beside it).
+  const busy = useRef(false);
+  const onBusy = useCallback((b: boolean) => { busy.current = b; }, []);
+  const close = useCallback(() => { if (!busy.current) onClose(); }, [onClose]);
+  const ref = useDialog<HTMLDivElement>(true, close, { initialFocus: amountRef });
   const titleId = useId();
   useScrollLock(true);
   return createPortal(
-    <div className="trade-sheet-backdrop" onClick={onClose}>
+    <div className="trade-sheet-backdrop" onClick={close}>
       <div ref={ref} className="trade-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
-        <TradeWidget coin={coin} solUsd={solUsd} initialSide={side} sheet onClose={onClose} amountRef={amountRef} titleId={titleId} current={store.coin} />
+        <TradeWidget coin={coin} solUsd={solUsd} initialSide={side} sheet onClose={close} amountRef={amountRef} titleId={titleId} current={store.coin} onBusy={onBusy} />
       </div>
     </div>,
     document.body,

@@ -19,9 +19,11 @@ export function CoinIntro({ coin, agentCoin }: { coin: Coin; agentCoin: AgentCoi
     const launches = agentCoin?.role === "root" && agentCoin.agent ? agentCoin.agent.totals.launches : null;
     const grows = coin.children === 0 ? " Nothing grows under it yet."
       : ` ${count(coin.children)} ${coin.children === 1 ? "coin grows" : "coins grow"} under it${coin.lockedUsd != null && coin.lockedUsd > 0 ? ` and ${coin.children === 1 ? "holds" : "hold"} ${usdCard(coin.lockedUsd)} of it` : ""}.`;
+    // A depth-0 coin priced in a listed asset (PUMP, USDC, a stock…) is a pair under that asset, not a SOL root.
+    const listed = coin.quoteMint ? (coin.quoteSymbol.includes("…") ? coin.quoteSymbol : `$${coin.quoteSymbol}`) : null;
     body = (
       <>
-        <b>{s}</b> is a <Term k="root">root coin</Term>{coin.ours ? " launched on Spore" : " on pump.fun"}{coin.createdAt ? ` ${age(coin.createdAt)} ago` : ""}.{grows}
+        <b>{s}</b> is {listed ? <>a pump.fun coin <Term k="quote">priced in</Term> {listed}</> : <>a <Term k="root">root coin</Term>{coin.ours ? " launched on Spore" : " on pump.fun"}</>}{coin.createdAt ? ` ${age(coin.createdAt)} ago` : ""}.{grows}
         {launches != null && launches > 0 && <> Its <Term k="agent">AI agent</Term> has launched {launches <= coin.children ? `${count(launches)} of them` : `${count(launches)} coins under it`}.</>}
       </>
     );

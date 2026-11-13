@@ -510,3 +510,22 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 /* ---------- lock the fee split (a child's creator, no config yet) */
 .fee-lock .btn { justify-self: start; }
 .fee-lock h3 { font-size: var(--fs-md); }
+
+/* ---------- the map's quick trade (QuickTrade.tsx): the trade widget over the map, a centred card on desktop,
+   a bottom sheet on phones (the coin page's .trade-sheet is display: none above 980 px, so it has its own wrapper) */
+.quick-trade-backdrop { position: fixed; inset: 0; z-index: var(--z-overlay); display: grid; place-items: center; padding: 16px; background: rgba(4,10,6,.66); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade .18s var(--ease); }
+.quick-trade { width: min(420px, 100%); max-height: calc(100dvh - 32px); overflow: auto; overscroll-behavior: contain; animation: rise .22s var(--ease); -webkit-overflow-scrolling: touch; }
+.quick-trade:focus { outline: none; }
+.quick-trade .trade { background: color-mix(in srgb, var(--bg-1) 97%, transparent); }
+@media (max-width: 700px) {
+  .quick-trade-backdrop { place-items: end stretch; padding: 0; }
+  .quick-trade { width: 100%; max-height: calc(100dvh - 24px); animation-duration: .25s; }
+  .quick-trade .trade { border-radius: var(--radius-xl) var(--radius-xl) 0 0; padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+}
+/* the phone bar of a coin Spore cannot trade: pump.fun, and the reason in words (lib/trade-route blockText) */
+.trade-bar .trade-bar-blocked { grid-column: 2 / 4; display: grid; justify-items: end; gap: 2px; min-width: 0; }
+.trade-bar .trade-bar-blocked small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.trade-bar .trade-bar-blocked .btn { height: 36px; min-height: 36px; }
+/* the widget's note about the last trade this browser sent and never saw settle */
+.trade-last { align-items: start; }
+.trade-last .sheet-close { width: 24px; height: 24px; font-size: 15px; }

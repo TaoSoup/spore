@@ -110,17 +110,28 @@ export const nameOf = (c: { name: string | null; symbol: string | null; mint: st
 /// d0 lime (roots) · d1 teal · d2 violet · d3+ amber: the depth is the first thing to read on a card.
 /// `long` adds the word ("d1 · child"); `term` makes the badge a <Term> that explains depth on hover/tap
 /// (only where the badge is not inside a link or button). The map's side panel uses the default form.
+/// `quote`: the symbol a depth-0 coin is priced in when that is a listed asset (PUMP, USDC, a stock…), not SOL: the
+/// coin is a pair under that asset (the map draws it there), so the long form reads "d0 · under $PUMP", not "root".
 const DEPTH_WORD = ["root", "child", "grandchild"];
-export const DepthBadge = ({ depth, title, long = false, term = false, maxDepth }: { depth: number; title?: string; long?: boolean; term?: boolean; maxDepth?: number | null }) => {
-  const text = long ? `d${depth} · ${DEPTH_WORD[depth] ?? `depth ${depth}`}` : `d${depth}`;
+/// A quote symbol as a ticker ("$PUMP"); a short mint ("H74C…pump") stays as it is.
+export const quoteTick = (q: string) => (q.includes("…") ? q : `$${q}`);
+/// The listed asset a depth-0 coin is priced in (its quote symbol), or null for a root priced in SOL and for a child.
+export const listedQuoteOf = (c: { depth: number; quoteMint: string | null; quoteSymbol: string }) => (c.depth === 0 && c.quoteMint ? c.quoteSymbol : null);
+export const DepthBadge = ({ depth, title, long = false, term = false, maxDepth, quote }: { depth: number; title?: string; long?: boolean; term?: boolean; maxDepth?: number | null; quote?: string | null }) => {
+  const word = depth === 0 && quote ? `under ${quoteTick(quote)}` : DEPTH_WORD[depth] ?? `depth ${depth}`;
+  const text = long ? `d${depth} · ${word}` : `d${depth}`;
   const cls = `depth d${Math.min(depth, 3)}`;
   if (term) return <span className={cls}><Term k="depth" vars={{ maxDepth }}>{text}</Term></span>;
-  return <span className={cls} title={title ?? `depth ${depth}: ${depth === 0 ? "root, quoted in a listed mint" : `${depth} hop${depth === 1 ? "" : "s"} from a root`}`}>{text}</span>;
+  // `quote` null: known to be priced in SOL; undefined: the caller does not know (the first coin of its tree, either way).
+  const tip = depth === 0 ? (quote ? `depth 0: priced in ${quoteTick(quote)}, a listed asset` : quote === null ? "depth 0: a root, priced in SOL" : "depth 0: the first coin of its tree, priced in SOL or a listed asset") : `depth ${depth}: ${depth} hop${depth === 1 ? "" : "s"} from a root`;
+  return <span className={cls} title={title ?? tip}>{text}</span>;
 };
 
-/// Lineage pill: "↳ under $PARENT" (the parent's symbol in lime, links to its page) or "root".
-export const ParentPill = ({ parent }: { parent: CoinRef | null }) => parent
+/// Lineage pill: "↳ under $PARENT" (the parent's symbol in lime, links to its page), "in $PUMP" for a depth-0 coin
+/// priced in a listed asset (`quote`: its symbol), or "root".
+export const ParentPill = ({ parent, quote = null }: { parent: CoinRef | null; quote?: string | null }) => parent
   ? <Link to={`/c/${parent.mint}`} className="pill parent" title={`Launched under ${parent.name || sym(parent)}`} onClick={(e) => e.stopPropagation()}><span aria-hidden="true">↳</span> under <b>{sym(parent)}</b></Link>
+  : quote ? <span className="pill root" title={`Priced in ${quoteTick(quote)}, a listed asset`}>in {quoteTick(quote)}</span>
   : <span className="pill root">root</span>;
 
 /// "1st" chip: the first child launched under its parent (lib/map/firstborn). A small lime outline with
