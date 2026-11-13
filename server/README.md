@@ -198,7 +198,8 @@ stamps feed (so a late-resolved logo or name reaches open maps), at most 500 ent
 
 **Metadata coverage** (names and logos must show). On-chain name/symbol come from the `mints` table and
 ride on every node. Off-chain JSON is fetched for **every tracked coin in both modes**: `MetaFetcher`
-runs a sweep every minute that queues every tracked coin whose uri has no row, a stale row, or a
+runs a sweep at boot and every minute (in slices on the shared scheduler, `lib/sliced.mjs`, so the pass over every
+coin never holds the event loop) that queues every tracked coin whose uri has no row, a stale row, or a
 failed row whose backoff elapsed, ordered by locked value then recency; 6 workers; results persist in
 `meta` (`attempts` counts consecutive failures: retries after 15 min, 30 min, 1 h … capped at 24 h;
 a temporary failure (429, 5xx, a timeout or network error, gateways that mixed a 403/404 with any

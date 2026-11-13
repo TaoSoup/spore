@@ -10,6 +10,7 @@ import { USDC_MINT, PUMP_SDK, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, GLOBAL_PDA, 
 import { BONDING_CURVE_DISCRIMINATOR, decodeCurve, decodeEvent, decodeMint, decodeMetaplex, decodePool, decodeShares, decodeTokenAccount, eventsInLogs, plain } from "./decode.mjs";
 import { LogsSubscriber } from "./live.mjs";
 import { curvePriceQuote, poolPriceQuote, units } from "./pricing.mjs";
+import { runSliced } from "./sliced.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
 const SOL_MINT = NATIVE_MINT.toBase58(); // encoded once: toBase58() is a base58 encode per call
@@ -542,12 +543,19 @@ export class Indexer {
         if (!info || !info.onchainAt) unread.push([m, weight()]);
         else if (!info.uri && info.onchainAt < retryBefore) noUri.push([m, weight()]);
       };
-      for (const c of this.model.coins.values()) {
-        if (!c.tracked) continue;
-        pick(c.mint, () => family(c));
-        // A quote mint that is not a coin is a listed asset (PUMP, USDC, …): its bubble tops a family.
-        if (c.quoteMint && !this.model.coins.has(c.quoteMint)) pick(c.quoteMint, () => TOP);
-      }
+      // On the shared scheduler (sliced.mjs): the pass over every coin held the loop ~0.2-0.3 s on the local index (Nov 13 2026).
+      const model = this.model;
+      await runSliced((function* () {
+        let n = 0;
+        for (const c of model.coins.values()) {
+          if ((++n & 2047) === 0) yield;
+          if (!c.tracked) continue;
+          pick(c.mint, () => family(c));
+          // A quote mint that is not a coin is a listed asset (PUMP, USDC, …): its bubble tops a family.
+          if (c.quoteMint && !model.coins.has(c.quoteMint)) pick(c.quoteMint, () => TOP);
+        }
+      })());
+      if (this.stopped) return null;
       const byWeight = (a, b) => b[1] - a[1];
       const todo = [...unread.sort(byWeight), ...noUri.sort(byWeight)].slice(0, Math.max(0, max)).map(([m]) => m);
       const out = { unread: unread.length, noUri: noUri.length, read: 0, withUri: 0, metaplex: 0, ms: 0 };
@@ -662,7 +670,10 @@ export class Indexer {
     const wants = (c) => c.depth >= 1 || c.feePaid != null || c.shares != null || this.model.isOurCoin(c);
     const coins = [...(only ?? this.model.coins.values())].filter((c) => wants(c) && (force || nowS() - (c.sharesAt ?? 0) > SHARES_TTL_S));
     for (const part of chunks(coins, 100)) {
-      const infos = await this.rpc.getMultipleAccounts(part.map((c) => feeSharingConfigPda(pk(c.mint)).toBase58()));
+      // A PDA search is ~0.2-0.4 ms of curve math: 100 in a row held the loop 20-40 ms (Nov 13 2026), so the loop gets a turn every 16.
+      const keys = [];
+      for (let i = 0; i < part.length; i++) { if (i > 0 && (i & 15) === 0) await new Promise((r) => setImmediate(r)); keys.push(feeSharingConfigPda(pk(part[i].mint)).toBase58()); }
+      const infos = await this.rpc.getMultipleAccounts(keys);
       infos.forEach((info, i) => this.model.upsertCoin({ mint: part[i].mint, shares: info ? decodeShares(info.data) : null, sharesAt: nowS() }));
     }
     if (coins.length) this.model.sweepPending(); // a config naming the platform confirms a pending spawn
@@ -865,7 +876,8 @@ export class Indexer {
       await this.ensureShares(fresh.filter((c) => hotMints.has(c.mint) || nowS() - (c.sharesAt ?? 0) > SHARES_TTL_S), { force: true });
       for (const c of coins) { const uri = this.model.mint(c.mint)?.uri; if (uri) this.meta?.request(uri, { front: hotMints.has(c.mint) }); }
       this.state.lastRefreshAt = nowS();
-      this.hub?.emit("stats", this.model.stats());
+      // sliced (~0.4 s of one block on the local index), and not awaited: the next tick is not skipped while it runs
+      if (this.hub) this.model.statsAsync().then((s) => this.hub.emit("stats", s), (e) => this.log.warn(`stats: ${e.message}`));
     } finally { this.refreshing = false; }
   }
   /**

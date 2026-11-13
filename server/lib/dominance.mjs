@@ -37,8 +37,18 @@ export const isThinFamily = (coins, lockedSum) => coins <= THIN_MAX_COINS && !(l
  * shares lost 0.03 % of the total to a 1e-6 rounding).
  */
 export function familyShares(roots, mode) {
+  const gen = familySharesGen(roots, mode);
+  let r;
+  do r = gen.next(); while (!r.done);
+  return r.value;
+}
+/**
+ * familyShares as a generator that yields every 2k nodes, for the server's sliced scheduler (lib/sliced.mjs `runSliced`):
+ * the whole forest (~230k nodes on the local index) took ~60 ms at once. Returns what familyShares returns.
+ */
+export function* familySharesGen(roots, mode) {
   const rows = [];
-  let total = 0;
+  let total = 0, seen = 0;
   const stack = [];
   const members = [];
   for (const r of roots) {
@@ -46,6 +56,7 @@ export function familyShares(roots, mode) {
     members.length = 0;
     stack.length = 0; stack.push(r);
     while (stack.length) {
+      if ((++seen & 2047) === 0) yield;
       const n = stack.pop();
       coins++;
       members.push(n.coin);

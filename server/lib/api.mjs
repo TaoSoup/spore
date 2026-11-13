@@ -20,7 +20,7 @@ import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
 import { ApiKeys } from "./apikeys.mjs";
 import { uploadFields, imageFromDataUrl, LIMITS } from "./validate.mjs";
 import { DEFAULT_RATES } from "./config.mjs";
-import { DOMINANCE_CACHE_MS, familyShares } from "./dominance.mjs";
+import { DOMINANCE_CACHE_MS, familySharesGen } from "./dominance.mjs";
 import { FAMILY_PAGE, FAMILY_PAGE_MAX } from "./model.mjs";
 import { AgentRegistry, agentsBody, agentBody, agentCoinBody, isPublicAgent, IMAGE_FILE_RE } from "./agents/registry.mjs";
 import { AgentLedger } from "./agents-live/ledger.mjs";
@@ -261,7 +261,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   const v1 = createV1({ model, indexer, apiRpc, hub, meta, apiKeys: apiKeys ?? new ApiKeys(model.db, { log }), isMint, publicUrl, limits: v1Limits, log, now, agents: ag });
   app.locals.v1 = v1;
 
-  app.get("/api/stats", (req, res) => sendCachedJson(req, res, model.stats(), { maxAge: 3 }));
+  // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
+  app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
     const h = healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag });
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
@@ -388,11 +389,11 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // (model.familyEntry); `v` pins the snapshot a client pages through (held 120 s after its last read, an
   // unknown or dropped `v` gets the current one), and each (offset, limit) page is encoded once per snapshot
   // and kept with it (model.familyPagePut); its JSON text is dropped once encoded, only the bytes are sent.
-  app.get("/api/map/family/:mint", (req, res) => {
+  app.get("/api/map/family/:mint", wrap(async (req, res) => {
     const { mint } = req.params;
     if (!isMint(mint)) return res.status(400).json({ error: "invalid mint" });
     const rawV = typeof req.query.v === "string" && req.query.v !== "" ? Number(req.query.v) : NaN;
-    const snap = model.familyEntry(mint, Number.isFinite(rawV) ? rawV : null);
+    const snap = await model.familyEntryAsync(mint, Number.isFinite(rawV) ? rawV : null); // sliced: PUMP's 31k rows held the loop ~0.12 s
     if (!snap) return res.status(404).json({ error: "unknown family" });
     const limit = clampInt(req.query.limit, FAMILY_PAGE, 1, FAMILY_PAGE_MAX), offset = clampInt(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const key = `${offset}:${limit}`;
@@ -406,7 +407,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     }
     res.setHeader("x-family-build-ms", String(snap.buildMs));
     return sendPrepared(req, res, page, { maxAge: 10 });
-  });
+  }));
 
   // Each family's share of the whole map's value (DESIGN §11.5 "Dominance"), for pages that do not load
   // the map (the coin page): `mode=mcap|locked` (mcap by default, owner 2026-10-21) sizes it as the map's bubbles do,
@@ -426,7 +427,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     else if (!(ready = dominanceJobs.get(mode))) {
       const at = now();
       ready = model.mapAllAsync({ all: true })
-        .then((built) => { const e = { at, body: familyShares(built.body.roots, mode), prepared: null }; dominance.set(mode, e); return e; })
+        .then((built) => runSliced(familySharesGen(built.body.roots, mode))) // ~60 ms at once over the local forest
+        .then((run) => { const e = { at, body: run.value, prepared: null }; dominance.set(mode, e); return e; })
         .finally(() => dominanceJobs.delete(mode));
       dominanceJobs.set(mode, ready);
     }
@@ -784,7 +786,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
       if (mint) {
         try {
           const lib = await cardLib();
-          const data = lib ? await lib.cardData(model, mint, { now: now() }) : null;
+          // cardDataAsync (sliced) when the renderer has it; an injected test renderer may only have cardData
+          const data = lib ? await (lib.cardDataAsync ?? lib.cardData)(model, mint, { now: now() }) : null;
           if (data) html = injectOg(html, ogTags(data, { publicUrl, path: req.originalUrl, now: now() }));
         } catch (e) { log.warn?.(`og ${mint}: ${String(e?.message ?? e).slice(0, 200)}`); }
       }

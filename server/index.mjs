@@ -106,7 +106,8 @@ const imageSweep = setInterval(() => { try { images.sweep(); } catch { /* best e
 // WARM_MAX_MS and the next one, after a restart too, resumes where it stopped: kv imgWarmCursor; failed urls rest
 // for their kind's retry time, kept in sqlite img_fail), so the dead upstreams never pile the passes up.
 let warmRun = null;
-const warmLogos = () => warmRun ?? (warmRun = images.warm(model.warmImageUrls(60, true), 64, 4, { resume: "imgWarmCursor" }).then((r) => log.info(`img warm: ${r.ok}/${r.n} thumbnails ready from #${r.from}, ${r.failed} failed (${r.skipped} skipped${r.full ? `, ${r.full} over the thumbnail budget` : ""}${r.stopped ? ", stopped at the time budget" : ""}), ${r.ms} ms`)).catch((e) => log.warn(`img warm: ${e.message}`)).finally(() => { warmRun = null; }));
+// The list is made in slices (warmImageUrlsAsync: 0.7-0.8 s at once on the local index, Nov 13 2026).
+const warmLogos = () => warmRun ?? (warmRun = model.warmImageUrlsAsync(60, true).then((urls) => images.warm(urls, 64, 4, { resume: "imgWarmCursor" })).then((r) => log.info(`img warm: ${r.ok}/${r.n} thumbnails ready from #${r.from}, ${r.failed} failed (${r.skipped} skipped${r.full ? `, ${r.full} over the thumbnail budget` : ""}${r.stopped ? ", stopped at the time budget" : ""}), ${r.ms} ms`)).catch((e) => log.warn(`img warm: ${e.message}`)).finally(() => { warmRun = null; }));
 const imageWarmFirst = setTimeout(warmLogos, 3 * 60_000); imageWarmFirst.unref();
 const imageWarm = setInterval(warmLogos, 30 * 60_000); imageWarm.unref();
 // Uploaded metadata nobody launched with is removed after META_GC_HOURS (0 keeps everything); the
@@ -117,8 +118,9 @@ const checkpoint = setInterval(() => db.checkpoint(), 15 * 60_000); checkpoint.u
 
 try { await indexer.start(); } catch (e) { log.error(`indexer failed to start: ${e.stack ?? e}`); process.exitCode = 1; shutdown("indexer"); }
 // Off-chain metadata for every tracked coin (DESIGN §11.5): a background sweep every minute, by
-// locked value then recency; HTTP to gateways only, so it never competes with the RPC lanes.
-meta.start();
+// locked value then recency; HTTP to gateways only, so it never competes with the RPC lanes. The first sweep too runs
+// in slices: the server is answering requests by now.
+meta.start({ slicedBoot: true });
 (await import("./lib/asset-icons.mjs")).startAssetIcons({ model, log }); // listed-asset logos (token list icons) at boot and every 6 h, unref'd
 agentRunner.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the

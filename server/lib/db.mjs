@@ -176,6 +176,7 @@ export class Db {
       bfCurveFail: p("UPDATE backfill_curves SET error = ?, resolved_at = ? WHERE curve = ?"),
       bfCurveStats: p("SELECT COUNT(*) AS total, SUM(resolved_at > 0 AND error IS NULL) AS resolved, SUM(error IS NOT NULL) AS failed FROM backfill_curves"),
       bfCurveByKey: p("SELECT curve, depth, quote_mint, data, mint, resolved_at FROM backfill_curves WHERE curve = ?"),
+      bfCurveState: p("SELECT resolved_at > 0 AND error IS NULL AS resolved, error IS NOT NULL AS failed FROM backfill_curves WHERE curve = ?"),
       bfCurvesUnresolvedKeys: p("SELECT curve FROM backfill_curves WHERE resolved_at = 0"),
       uploadInsert: p("INSERT OR IGNORE INTO uploads (name, kind, pair, ip, bytes, at) VALUES (@name, @kind, @pair, @ip, @bytes, @at)"),
       uploadStale: p("SELECT name, kind, pair, at FROM uploads WHERE at < ? ORDER BY at ASC LIMIT ?"),
@@ -198,8 +199,13 @@ export class Db {
   }
 
   transaction(fn) {
+    const bf = this.#bf && { ...this.#bf }; // the backfill counts as they were, for a rollback
     this.db.exec("BEGIN");
-    try { const r = fn(); this.db.exec("COMMIT"); return r; } catch (e) { this.db.exec("ROLLBACK"); throw e; }
+    try { const r = fn(); this.db.exec("COMMIT"); return r; } catch (e) {
+      this.#bf = bf; // first: SQLite may have rolled the transaction back itself (a full disk, an I/O error), and then ROLLBACK throws
+      try { this.db.exec("ROLLBACK"); } catch (r) { if (this.db.isTransaction !== false) throw r; } // none left to roll back: the first error is the one to report
+      throw e;
+    }
   }
 
   kvGet(key, fallback = null) { const r = this.q.kvGet.get(key); return r ? JSON.parse(r.value) : fallback; }
@@ -259,11 +265,42 @@ export class Db {
   static meta(r) { return { uri: r.uri, image: r.image, description: r.description, twitter: r.twitter, telegram: r.telegram, website: r.website, fetchedAt: r.fetched_at, ok: !!r.ok, error: r.error, attempts: r.attempts ?? 0, deadStreak: r.dead_streak ?? 0 }; }
   metaSet(m) { this.q.metaSet.run({ uri: m.uri, image: m.image ?? null, description: m.description ?? null, twitter: m.twitter ?? null, telegram: m.telegram ?? null, website: m.website ?? null, fetchedAt: m.fetchedAt ?? now(), ok: m.ok ? 1 : 0, error: m.error ?? null, attempts: m.attempts ?? 0, deadStreak: m.deadStreak ?? 0 }); }
 
-  backfillCurveUpsert(c) { this.q.bfCurveUpsert.run({ curve: c.curve, depth: c.depth, quoteMint: c.quoteMint ?? null, data: c.data, graduated: c.graduated ? 1 : 0, rq: c.rq }); }
+  backfillCurveUpsert(c) {
+    // one lookup, not #bfWrite's two: the asset walk upserts tens of thousands of rows in one transaction, and an upsert
+    // never touches resolved_at or error, so a row it creates is pending and a row it updates keeps its state
+    const isNew = this.#bf ? this.#bfState(c.curve) == null : false;
+    const r = this.q.bfCurveUpsert.run({ curve: c.curve, depth: c.depth, quoteMint: c.quoteMint ?? null, data: c.data, graduated: c.graduated ? 1 : 0, rq: c.rq });
+    if (isNew && this.#bf) this.#bf.total++;
+    return r;
+  }
   backfillPending(limit) { return this.q.bfCurvePending.all(limit).map((r) => ({ curve: r.curve, depth: r.depth, quoteMint: r.quote_mint, data: r.data })); }
-  backfillResolve(curve, mint) { this.q.bfCurveResolve.run(mint, now(), curve); }
-  backfillFail(curve, error) { this.q.bfCurveFail.run(String(error).slice(0, 200), now(), curve); }
-  backfillStats() { const r = this.q.bfCurveStats.get(); return { total: r.total ?? 0, resolved: r.resolved ?? 0, failed: r.failed ?? 0 }; }
+  backfillResolve(curve, mint) { this.#bfWrite(curve, () => this.q.bfCurveResolve.run(mint, now(), curve)); }
+  backfillFail(curve, error) { this.#bfWrite(curve, () => this.q.bfCurveFail.run(String(error).slice(0, 200), now(), curve)); }
+  /**
+   * `{ total, resolved, failed }` over backfill_curves. Counted once, then kept: every write through this class moves
+   * them (the upsert, #bfWrite) and a rolled-back transaction restores them. The COUNT reads every row (~450k with their curve
+   * data on the local index) and held the event loop ~0.25 s, twice per resolve batch (Nov 13 2026). A row changed
+   * by another process (a manual reset of failed rows) shows after backfillRecount() or a restart.
+   */
+  backfillStats() {
+    if (!this.#bf) { const r = this.q.bfCurveStats.get(); this.#bf = { total: r.total ?? 0, resolved: r.resolved ?? 0, failed: r.failed ?? 0 }; }
+    return { ...this.#bf };
+  }
+  /** backfillStats() counted again from the table. */
+  backfillRecount() { this.#bf = null; return this.backfillStats(); }
+  #bf = null;
+  /** The row's state ("resolved" | "failed" | "pending", null when absent) before and after `write`, applied to the counts. */
+  #bfWrite(curve, write) {
+    if (!this.#bf) return write();
+    const before = this.#bfState(curve), r = write(), after = this.#bfState(curve);
+    if (before !== after) {
+      const b = this.#bf;
+      if (before == null) b.total++; else if (before !== "pending") b[before]--;
+      if (after == null) b.total--; else if (after !== "pending") b[after]++;
+    }
+    return r;
+  }
+  #bfState(curve) { const r = this.q.bfCurveState.get(curve); return !r ? null : r.failed ? "failed" : r.resolved ? "resolved" : "pending"; }
   backfillCurve(curve) { const r = this.q.bfCurveByKey.get(curve); return r ? { curve: r.curve, depth: r.depth, quoteMint: r.quote_mint, data: r.data, mint: r.mint, resolvedAt: r.resolved_at } : null; }
   backfillUnresolvedCurves() { return new Set(this.q.bfCurvesUnresolvedKeys.all().map((r) => r.curve)); }
 

@@ -502,9 +502,35 @@ export class Model {
     this.assetCache = fam; this.assetVersion = this.version;
     return fam;
   }
+  /**
+   * assetFamilies() for a generator (`yield*` it). `shared` (only a job on the sliced scheduler: a drained generator
+   * cannot wait for another job): the cached table when it is the current version's, else the pass in flight, whatever
+   * version it started at (which coins sit under which asset changes far less often than the version: every trade
+   * moves it), else a pass in slices (~45 ms at once on the local index) that later callers wait for; cached when no
+   * change came in meanwhile. Without `shared`: assetFamilies(), at once.
+   */
+  *assetFamiliesStep({ shared = false } = {}) {
+    if (this.assetVersion === this.version && this.assetCache) return this.assetCache;
+    if (!shared) return this.assetFamilies();
+    const cur = this.#assetJob;
+    if (cur) {
+      while (!cur.done) yield;
+      if (cur.error) throw cur.error;
+      return cur.value;
+    }
+    const job = { done: false, value: null, error: null };
+    this.#assetJob = job;
+    try {
+      const v0 = this.version;
+      job.value = yield* this.#assetFamiliesGen();
+      if (this.version === v0) { this.assetCache = job.value; this.assetVersion = v0; }
+      return job.value;
+    } catch (e) { job.error = e; throw e; } finally { job.done = true; if (this.#assetJob === job) this.#assetJob = null; }
+  }
+  #assetJob = null; // { done, value, error }: the shared pass in flight
   /** assetFamilies' pass as a generator (it yields every 2k coins): the sliced map jobs run it, the method drains it. */
   *#assetFamiliesGen() {
-    const fam = new Map();
+    const fam = new Map(), v0 = this.version;
     let n = 0;
     for (const c of this.coins.values()) {
       if ((++n & 2047) === 0) yield;
@@ -513,8 +539,10 @@ export class Model {
       if (!list) { list = []; fam.set(c.quoteMint, list); }
       list.push(c);
     }
+    this.#assetMadeAt.set(fam, v0);
     return fam;
   }
+  #assetMadeAt = new WeakMap(); // asset-family table → the version its pass started at (a job may get one from an older version: assetFamiliesStep)
   /**
    * The slice of each listed asset's family the full map draws (ASSET_FAMILY_DRAW): every coin that has
    * children or is younger than a day, then the biggest by locked value, then by price. Tens of thousands
@@ -609,12 +637,25 @@ export class Model {
    * a cold family cost 2-5 s of sheet re-asks before this). A listed asset's family competes for "largest" by its coin
    * count and its drawn coins stand for its children.
    */
-  warmImageUrls(bigFamilies = 60, all = false) {
+  warmImageUrls(bigFamilies = 60, all = false) { return drain(this.#warmImageUrlsGen(bigFamilies, all, false)); }
+  /**
+   * warmImageUrls on the sliced scheduler (sliced.mjs): with `all` the list took 0.7-0.8 s at once on the local index
+   * (228k coins, Nov 13 2026), 3 min after every start and every 30 min (the logo warm pass).
+   */
+  warmImageUrlsAsync(bigFamilies = 60, all = false) { return runSliced(this.#warmImageUrlsGen(bigFamilies, all, true)).then((run) => run.value); }
+  *#warmImageUrlsGen(bigFamilies, all, shared) {
     const out = new Set();
     const add = (mint) => { const u = this.imageOfMint(mint); if (u) out.add(u); };
-    const roots = this.allRoots(), d = this.computed(), fams = this.assetFamilies(), drawn = this.assetDrawn();
-    for (const r of roots) add(r.mint);
-    for (const mint of fams.keys()) add(mint);
+    const d = this.computed();
+    let n = 0;
+    const roots = []; // allRoots(), in slices
+    for (const c of this.coins.values()) { if ((++n & 2047) === 0) yield; if (c.tracked && c.depth === 0 && (d.get(c.mint)?.children ?? 0) > 0) roots.push(c); }
+    const fams = yield* this.assetFamiliesStep({ shared });
+    const drawn = !shared ? this.assetDrawn() : this.drawnVersion === this.version && this.drawnCache ? this.drawnCache : yield* this.#assetDrawnGen(d, fams);
+    // every add a logo lookup: a step every 2k of them (the asset families' drawn coins alone were ~0.19 s in one step)
+    function* addAll(mints) { for (const m of mints) { if ((++n & 2047) === 0) yield; add(m); } }
+    yield* addAll(roots.map((r) => r.mint));
+    yield* addAll(fams.keys());
     // the drawn coins of a listed asset's family, biggest first (mapAll's order): its children on the map
     const drawnKids = (asset) => [...(drawn.get(asset) ?? [])].sort((a, b) => sortKey(d.get(b)?.lockedUsd) - sortKey(d.get(a)?.lockedUsd) || sortKey(d.get(b)?.priceUsd) - sortKey(d.get(a)?.priceUsd));
     const families = [
@@ -622,9 +663,10 @@ export class Model {
       ...[...fams].map(([asset, members]) => ({ size: members.length, kids: () => drawnKids(asset) })),
     ];
     families.sort((a, b) => b.size - a.size);
-    for (const f of families.slice(0, bigFamilies)) for (const mint of f.kids()) add(mint);
-    for (const asset of fams.keys()) for (const mint of drawnKids(asset)) add(mint);
-    if (all) for (const c of this.tracked()) add(c.mint);
+    yield;
+    for (const f of families.slice(0, bigFamilies)) yield* addAll(f.kids());
+    for (const asset of fams.keys()) { if ((++n & 255) === 0) yield; yield* addAll(drawnKids(asset)); }
+    if (all) for (const c of this.coins.values()) { if ((++n & 2047) === 0) yield; if (c.tracked) add(c.mint); }
     return [...out];
   }
   /** Every depth-0 coin with at least one child on pump.fun, regardless of the mode. */
@@ -1195,30 +1237,79 @@ export class Model {
    * A leaf's snapshot (no rows, not an asset) is built per request and never held: nothing to page through.
    */
   familyEntry(mint, v = null) {
-    const now = this.now();
+    const now = this.now(), hit = this.#familyHit(mint, v, now);
+    if (hit !== undefined) return hit;
+    const t0 = performance.now(); // buildMs includes the shared per-version passes (computed, assetFamilies) when this build pays them, like mapAll's
+    const built = drain(this.#familyBuildGen(mint, false));
+    return built ? this.#installFamily(built, performance.now() - t0, now) : null;
+  }
+  /**
+   * familyEntry on the sliced scheduler (sliced.mjs): PUMP's and USDC's families (27-31k coins) held the loop ~0.12 s
+   * per build on the local index (Nov 13 2026). Requests for one family while its build runs share it. buildMs is the
+   * build's CPU time.
+   */
+  familyEntryAsync(mint, v = null) {
+    const hit = this.#familyHit(mint, v, this.now());
+    if (hit !== undefined) return Promise.resolve(hit);
+    let job = this.#familyJobs.get(mint);
+    if (!job) {
+      job = runSliced(this.#familyBuildGen(mint, true))
+        .then((run) => (run.value ? this.#installFamily(run.value, run.cpuMs, this.now()) : null))
+        .finally(() => this.#familyJobs.delete(mint));
+      this.#familyJobs.set(mint, job);
+    }
+    return job;
+  }
+  #familyJobs = new Map(); // mint → its build in flight
+  /** A held snapshot that answers (`v` while held, else the current one under MAP_CACHE_MS), after dropping the unread ones; undefined when a build is due. */
+  #familyHit(mint, v, now) {
     const pools = [this.familyPools.asset, this.familyPools.coin];
     for (const pool of pools) for (const s of pool.snaps.values()) { if (now - s.readAt < FAMILY_SNAPSHOT_MS) break; this.#dropFamily(s); }
     if (v != null) for (const pool of pools) { const held = pool.snaps.get(`${mint}:${v}`); if (held) return this.#readFamily(held, now); }
     const cur = this.familyCurrent.get(mint);
     if (cur && (cur.version === this.version || now - cur.at < MAP_CACHE_MS)) return this.#readFamily(cur, now);
-    const t0 = performance.now(); // buildMs includes the shared per-version passes (computed, assetFamilies) when this build pays them, like mapAll's
-    const members = this.familyMembers(mint);
+    return undefined;
+  }
+  /**
+   * A family's rows in order, as a generator (yields every 1k rows): `{ mint, version, rows, asset, ownMs }`, or null for
+   * an unknown mint. `shared`: on the sliced scheduler (assetFamiliesStep may wait for another job's pass).
+   */
+  *#familyBuildGen(mint, shared) {
+    const version = this.version, fam = yield* this.assetFamiliesStep({ shared });
+    const c0 = this.coins.get(mint);
+    const members = fam.get(mint) ?? (c0 && c0.tracked ? this.childrenOf(mint) : null);
     if (!members) return null;
-    const d = this.computed(), n = members.length, t1 = performance.now();
+    const d = this.computed(), n = members.length;
+    let own = 0, t = performance.now();
+    function* pause() { own += performance.now() - t; yield; t = performance.now(); }
     const rows = new Array(n), locked = new Float64Array(n), price = new Float64Array(n), order = new Array(n);
     for (let i = 0; i < n; i++) {
+      if ((i & 1023) === 1023) yield* pause();
       const c = members[i], e = d.get(c.mint);
       rows[i] = this.#familyRow(c, e);
       locked[i] = sortKey(e?.lockedUsd); price[i] = sortKey(e?.priceUsd); order[i] = i;
     }
+    yield* pause();
     order.sort((a, b) => locked[b] - locked[a] || price[b] - price[a] || (rows[a][0] < rows[b][0] ? -1 : rows[a][0] > rows[b][0] ? 1 : 0));
+    yield* pause();
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) { if ((i & 4095) === 4095) yield* pause(); out[i] = rows[order[i]]; }
+    own += performance.now() - t;
+    // stamped with the older of its own start and its asset table's: a table from a pass that started before a change
+    // must not make the snapshot pass for the current version's (familyEntry serves a snapshot of the current version)
+    return { mint, version: Math.min(version, this.#assetMadeAt.get(fam) ?? version), rows: out, asset: fam.has(mint), ownMs: own };
+  }
+  /** Holds a finished build as the family's current snapshot (a leaf's is returned, not held) and counts it. */
+  #installFamily(b, buildMs, now) {
+    const { mint, rows } = b, n = rows.length;
+    const pools = [this.familyPools.asset, this.familyPools.coin];
     // v = the build time (ms), above every v of this family still held, so a clock step back never reuses one.
     let at = now;
     for (const pool of pools) for (const s of pool.snaps.values()) if (s.mint === mint && s.v >= at) at = s.v + 1;
-    const snap = { mint, v: at, at, version: this.version, rows: order.map((i) => rows[i]), pages: new Map(), pageBytes: 0, bytes: FAMILY_SNAP_BYTES + n * FAMILY_ROW_BYTES, buildMs: 0, ownMs: 0, readAt: now, pool: null };
-    snap.buildMs = Math.round(performance.now() - t0); snap.ownMs = Math.round(performance.now() - t1);
-    const asset = this.assetFamilies().has(mint);
-    if (n === 0 && !asset) { if (cur) this.familyCurrent.delete(mint); return snap; } // a leaf
+    const snap = { mint, v: at, at, version: b.version, rows, pages: new Map(), pageBytes: 0, bytes: FAMILY_SNAP_BYTES + n * FAMILY_ROW_BYTES, buildMs: Math.round(buildMs), ownMs: Math.round(b.ownMs), readAt: now, pool: null };
+    const cur = this.familyCurrent.get(mint);
+    if (n === 0 && !b.asset) { if (cur) this.familyCurrent.delete(mint); return snap; } // a leaf
+    const asset = b.asset;
     const pool = asset ? this.familyPools.asset : this.familyPools.coin;
     snap.pool = pool;
     pool.snaps.set(`${mint}:${snap.v}`, snap); pool.bytes += snap.bytes;
@@ -1314,19 +1405,109 @@ export class Model {
    * so the UI can say "and N other children on pump.fun".
    */
   stats() {
-    const sc = this.scope();
+    this.sweepPending(); // as scope() does: an expired pending spawn is no longer ours (a version bump)
+    return this.#statsOut(this.#statsHit() ?? this.#installStats(drain(this.#statsGen())));
+  }
+  /**
+   * stats() on the sliced scheduler (sliced.mjs): the whole pass held the loop 0.4-0.5 s on the local index (228k coins,
+   * Nov 13 2026), at every refresh round (the SSE "stats" event) and every /api/stats. Never older than the call: the
+   * cached counts while nothing they read has moved, else the running pass when it started at the current version and
+   * nothing it already read has moved since, else one follow-up queued behind it, which every caller meanwhile shares.
+   * So at most one pass runs and one waits, however often trades move the version.
+   */
+  statsAsync() {
+    this.sweepPending();
+    const hit = this.#statsHit();
+    if (hit) return Promise.resolve(this.#statsOut(hit));
+    const run = this.#statsRun;
+    let done;
+    if (this.#statsNext) done = this.#statsNext; // queued (its pass may not have started yet, even with none running): it starts after this call
+    else if (!run) done = this.#startStats();
+    else if (run.version === this.version && !this.#statsMoved(run)) done = run.done;
+    else done = this.#statsNext ??= run.done.catch(() => {}).then(() => { this.#statsNext = null; this.sweepPending(); return this.#statsHit() ?? this.#startStats(); });
+    return done.then((s) => this.#statsOut(s));
+  }
+  #statsCache = null;
+  #statsRun = null;  // { version, derived, expired, done }: the pass running now, with the inputs it has read so far
+  #statsNext = null; // the follow-up queued behind it
+  #startStats() {
+    const mine = { version: this.version, derived: null, expired: null, done: null };
+    mine.done = runSliced(this.#statsGen(mine)).then((r) => this.#installStats(r.value)).finally(() => { if (this.#statsRun === mine) this.#statsRun = null; });
+    this.#statsRun = mine;
+    return mine.done;
+  }
+  /**
+   * The cached counts when nothing they were made from has moved: the version, the mode and depth cap, and the two
+   * inputs that change without a version bump (#statsMoved). The caller swept the pending spawns.
+   */
+  #statsHit() {
+    const s = this.#statsCache;
+    if (!s || s.version !== this.version || s.mode !== this.mode || s.maxDepth !== (this.global?.maxCurveDepth ?? 0)) return null;
+    return this.#statsMoved(s) ? null : s;
+  }
+  /**
+   * Whether an input `s` read has changed without a version bump since: the computed() table (replaced by a background
+   * pass on a large index) or the 24 h window (trades leave it as time passes). null = not read yet (a running pass that
+   * reads it after the call).
+   */
+  #statsMoved(s) {
+    if (s.derived != null && s.derived !== this.computed()) return true;
+    if (s.expired == null) return false;
+    this.volumes(); // moves the 24 h window to now
+    return s.expired !== (this.activity?.dayExpired ?? 0);
+  }
+  #installStats(s) { const cur = this.#statsCache; if (!cur || cur.version <= s.version) this.#statsCache = s; return s; }
+  /** The counts plus the live fields (price, backfill progress, clock), in stats()' key order. */
+  #statsOut(s) {
+    return { coins: s.coins, roots: s.roots, byDepth: s.byDepth.slice(), lockedUsd: s.lockedUsd, volume24hUsd: s.volume24hUsd, solUsd: this.solUsd, maxDepth: s.maxDepth, backfill: { ...this.backfill }, updatedAt: this.updatedAt, mode: this.mode, ourCoins: s.ourCoins, otherChildren: s.otherChildren };
+  }
+  /**
+   * stats()' counts as a generator (yields every 2k coins). Mode "all": one walk over the coins, no scope sets (the scope
+   * of "all" is every tracked coin: what the scope() pass built, ~0.15 s, only to be read back here). Mode "ours": the
+   * scope (sliced, cached like the map jobs'), then its sets. The same sums in the same order as the walk over scope().
+   */
+  *#statsGen(run = null) {
+    const all = this.mode === "all";
+    this.sweepPending(); // again: the pass may start a turn after the call
+    const version = this.version, d = this.computed();
+    if (run) run.derived = d;
     const maxDepth = this.global?.maxCurveDepth ?? 0;
     const byDepth = new Array(Math.max(maxDepth + 1, 1)).fill(0);
-    let coins = 0, lockedUsd = 0, otherChildren = 0;
-    for (const mint of this.mode === "all" ? sc.inScope : sc.ours) {
-      const c = this.coins.get(mint); if (!c) continue;
-      coins++;
-      if (c.depth < byDepth.length) byDepth[c.depth]++; else byDepth[c.depth] = (byDepth[c.depth] ?? 0) + 1;
+    const count = (c) => { if (c.depth < byDepth.length) byDepth[c.depth]++; else byDepth[c.depth] = (byDepth[c.depth] ?? 0) + 1; };
+    let coins = 0, lockedUsd = 0, otherChildren = 0, roots = 0, ourCoins = 0, n = 0, inScope;
+    if (all) {
+      for (const c of this.coins.values()) {
+        if ((++n & 2047) === 0) yield;
+        if (!c.tracked) continue;
+        coins++; count(c);
+        const e = d.get(c.mint);
+        lockedUsd += e?.lockedUsd ?? 0;
+        if (c.depth === 0 && (e?.children ?? 0) > 0) roots++;
+        if (this.isOurCoin(c)) ourCoins++;
+      }
+      inScope = (mint) => this.coins.get(mint)?.tracked === true;
+    } else {
+      const sc = this.scopeVersion === version && this.scopeCache ? this.scopeCache : yield* this.#scopeGen();
+      if (this.version === version) { this.scopeCache = sc; this.scopeVersion = version; }
+      for (const mint of sc.ours) { if ((++n & 2047) === 0) yield; const c = this.coins.get(mint); if (c) { coins++; count(c); } }
+      for (const mint of sc.inScope) {
+        if ((++n & 2047) === 0) yield;
+        const c = this.coins.get(mint); if (!c) continue;
+        const e = d.get(mint), s = sc.derived.get(mint);
+        lockedUsd += (s ? s.lockedUsd : e?.priceUsd != null ? 0 : null) ?? 0;
+        otherChildren += s ? s.otherChildren : e?.children ?? 0;
+        if (c.tracked && c.depth === 0 && (s?.descendants ?? 0) > 0) roots++;
+      }
+      ourCoins = sc.ours.size;
+      inScope = (mint) => sc.inScope.has(mint);
     }
-    for (const mint of sc.inScope) { const c = this.coins.get(mint); if (!c) continue; const s = this.scoped(c); lockedUsd += s.lockedUsd ?? 0; otherChildren += s.otherChildren; }
-    const roots = this.visibleRoots().length;
-    let volume24hUsd = 0; for (const [mint, v] of this.volumes()) if (sc.inScope.has(mint)) volume24hUsd += v.usd;
-    return { coins, roots, byDepth, lockedUsd, volume24hUsd, solUsd: this.solUsd, maxDepth, backfill: { ...this.backfill }, updatedAt: this.updatedAt, mode: this.mode, ourCoins: sc.ours.size, otherChildren };
+    // a copy of the live Map: a mint whose last trade expires and that trades again between two steps would move to its
+    // end and be counted twice
+    const vols = [...this.volumes()], expired = this.activity?.dayExpired ?? 0;
+    if (run) run.expired = expired;
+    let volume24hUsd = 0;
+    for (let i = 0; i < vols.length; i++) { if ((++n & 2047) === 0) yield; if (inScope(vols[i][0])) volume24hUsd += vols[i][1].usd; }
+    return { version, derived: d, expired, mode: this.mode, maxDepth, coins, roots, byDepth, lockedUsd, volume24hUsd, ourCoins, otherChildren };
   }
 }
 

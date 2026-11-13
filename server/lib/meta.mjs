@@ -25,6 +25,7 @@ import zlib from "node:zlib";
 import { META_NAME_RE, META_TYPES } from "./metahost.mjs";
 import { HostGuard, guardedFetch, pinnedFetch } from "./net.mjs";
 import { sniffImage } from "./validate.mjs";
+import { drain, runSliced } from "./sliced.mjs";
 import { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, SVG_MAX_BYTES, SVG_DRAW_MAX_MS, SVG_RASTER_PX, WORKER_RECYCLE_BYTES, WORKER_JOB_MAX_BYTES, RESVG_MEMORY_MAX_BYTES, renderThumb, runOp, isSvgDocument } from "./img-worker.mjs";
 
 export { IMAGE_THUMB_SIZES, THUMB_TYPES, SHEET_COLS, SHEET_MAX_CELLS, SVG_MAX_BYTES, SVG_DRAW_MAX_MS, SVG_RASTER_PX, WORKER_RECYCLE_BYTES, WORKER_JOB_MAX_BYTES, RESVG_MEMORY_MAX_BYTES, renderThumb };
@@ -565,28 +566,43 @@ export class MetaFetcher {
   }
   /**
    * Queues every tracked coin's uri that needs a (re)fetch, ordered by locked value then recency;
-   * returns how many were added. Cheap enough to run every minute at 15k coins (one sort).
+   * returns how many were added. At once: the boot sweep and tests; the timer runs sweepAsync.
    */
-  sweep({ max = 50_000 } = {}) {
+  sweep({ max = 50_000 } = {}) { return drain(this.#sweepGen(max, false)); }
+  /**
+   * sweep() on the shared scheduler (sliced.mjs): the pass over every coin (a URL parse each) held the loop 0.5-0.9 s
+   * once a minute on the local index (228k coins, Nov 13 2026). One at a time; resolves with how many were queued.
+   */
+  sweepAsync({ max = 50_000 } = {}) {
+    this.sweepJob ??= runSliced(this.#sweepGen(max, true)).then((run) => run.value).finally(() => { this.sweepJob = null; });
+    return this.sweepJob;
+  }
+  sweepJob = null;
+  *#sweepGen(max, shared) {
     if (this.stopped || !this.model.coins) return 0;
     const nowS = Math.floor(this.now() / 1000);
     const d = typeof this.model.computed === "function" ? this.model.computed() : new Map();
+    // a uri queued, fetched or answered while the pass was spread over turns is checked again before it is queued
+    const due = (uri) => typeof uri === "string" && !this.queued.has(uri) && !this.inFlight.has(uri) && isFetchableMetaUri(uri) && this.needsFetch(uri, nowS);
     const cands = [];
+    let i = 0;
     for (const c of this.model.coins.values()) {
+      if ((++i & 1023) === 0) { yield; if (this.stopped) return 0; }
       if (!c.tracked) continue;
       const uri = this.model.mints?.get(c.mint)?.uri;
-      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isFetchableMetaUri(uri) || !this.needsFetch(uri, nowS)) continue;
-      cands.push({ uri, locked: d.get(c.mint)?.lockedUsd ?? -1, at: c.createdAt ?? 0 });
+      if (due(uri)) cands.push({ uri, locked: d.get(c.mint)?.lockedUsd ?? -1, at: c.createdAt ?? 0 });
     }
     // The listed quote assets the map draws at the top of their families (PUMP, USDC, $baton…) need logos too.
-    for (const mint of typeof this.model.assetFamilies === "function" ? this.model.assetFamilies().keys() : []) {
+    const fam = typeof this.model.assetFamiliesStep === "function" ? yield* this.model.assetFamiliesStep({ shared })
+      : typeof this.model.assetFamilies === "function" ? this.model.assetFamilies() : new Map();
+    if (this.stopped) return 0;
+    for (const mint of fam.keys()) {
       const uri = this.model.mints?.get(mint)?.uri;
-      if (typeof uri !== "string" || this.queued.has(uri) || this.inFlight.has(uri) || !isFetchableMetaUri(uri) || !this.needsFetch(uri, nowS)) continue;
-      cands.push({ uri, locked: Number.MAX_SAFE_INTEGER, at: 0 });
+      if (due(uri)) cands.push({ uri, locked: Number.MAX_SAFE_INTEGER, at: 0 });
     }
     cands.sort((a, b) => b.locked - a.locked || b.at - a.at);
     let n = 0;
-    for (const x of cands) { if (n >= max || this.queued.has(x.uri)) continue; this.queued.add(x.uri); this.queue.push(x.uri); n++; }
+    for (const x of cands) { if (n >= max || this.queued.has(x.uri) || this.inFlight.has(x.uri) || !this.needsFetch(x.uri, nowS)) continue; this.queued.add(x.uri); this.queue.push(x.uri); n++; }
     this.stats.sweeps++;
     if (n) this.log.info?.(`meta: sweep queued ${n} uris (${this.pendingCount} pending)`);
     this.#pump();
@@ -635,12 +651,17 @@ export class MetaFetcher {
     db.kvSet("metaGatewayRule", GATEWAY_RULE);
     return n;
   }
-  /** Starts the periodic sweep (the first one runs at once, after the one-time re-checks are queued). */
-  start({ sweepMs = this.sweepMs } = {}) {
+  /**
+   * Starts the periodic sweep: the first one right away (after the one-time re-checks are queued), at once or, with
+   * `slicedBoot` (the server: it is already answering requests), on the shared scheduler like the later ones (sweepAsync),
+   * so the pass over every coin never holds the event loop (~0.8 s on the local index).
+   */
+  start({ sweepMs = this.sweepMs, slicedBoot = false } = {}) {
     try { this.queueImageRecheck(); } catch (e) { this.log.warn?.(`meta: image recheck failed: ${e.message}`); }
     try { this.queueGatewayRecheck(); } catch (e) { this.log.warn?.(`meta: gateway recheck failed: ${e.message}`); }
-    try { this.sweep(); } catch (e) { this.log.warn?.(`meta: sweep failed: ${e.message}`); }
-    this.timer = setInterval(() => { try { this.sweep(); } catch (e) { this.log.warn?.(`meta: sweep failed: ${e.message}`); } }, sweepMs);
+    if (slicedBoot) this.sweepAsync().catch((e) => this.log.warn?.(`meta: sweep failed: ${e.message}`));
+    else try { this.sweep(); } catch (e) { this.log.warn?.(`meta: sweep failed: ${e.message}`); }
+    this.timer = setInterval(() => { this.sweepAsync().catch((e) => this.log.warn?.(`meta: sweep failed: ${e.message}`)); }, sweepMs);
     this.timer.unref?.();
     return this;
   }
@@ -1527,7 +1548,9 @@ export class ImageCache {
    * full, stopped, from, ms }.
    */
   async warm(urls, w = SHEET_CELL, concurrency = 4, { maxMs = WARM_MAX_MS, resume = null, prio = PRIO_WARM } = {}) {
-    const list = [...new Set(urls ?? [])].filter((u) => typeof u === "string" && u);
+    // each url once, in first-seen order; the loop gets a turn every 8k (140k urls on the local index: ~56 ms at once)
+    const list = [];
+    { const seen = new Set(); let i = 0; for (const u of urls ?? []) { if ((++i & 8191) === 0) await new Promise((r) => setImmediate(r)); if (typeof u === "string" && u && !seen.has(u)) { seen.add(u); list.push(u); } } }
     const n = list.length, t0 = Date.now();
     let start = 0;
     if (resume && n) {

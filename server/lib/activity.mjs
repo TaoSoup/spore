@@ -27,6 +27,8 @@ export class Activity {
     this.cap = Math.max(16, capacity);
     this.time = new Uint32Array(this.cap); this.usd = new Float64Array(this.cap); this.mid = new Int32Array(this.cap); this.flag = new Uint8Array(this.cap);
     this.h24 = 0; this.h1 = 0; this.tail = 0;
+    /** Trades that ever left the 24 h window: volumes() changes with it (and with record()), so a cache of them can key on it. */
+    this.dayExpired = 0;
     // Per-mint counters by id. An id is released (and reused) when its 24 h count reaches zero.
     this.ids = new Map(); this.mintOf = []; this.free = [];
     this.idCap = 0; this.#growIds(256);
@@ -106,6 +108,7 @@ export class Activity {
       const v = this.volObj[id]; v.trades = this.n24[id]; v.usd = this.#usdOf(id);
       h++;
     }
+    this.dayExpired += h - this.h24;
     this.h24 = h;
     if (h === tail) { this.h24 = 0; this.h1 = 0; this.tail = 0; }
     else if (h > this.cap >> 1) this.#compact();

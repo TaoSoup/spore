@@ -23,7 +23,8 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { familyShares } from "./dominance.mjs";
+import { familyShares, familySharesGen } from "./dominance.mjs";
+import { drain as drainGen, runSliced } from "./sliced.mjs";
 import { units } from "./pricing.mjs";
 import { NATIVE_MINT } from "./sdk.mjs";
 import { usd, count, pctOf, ageOf, shortMint, underIt } from "./format.mjs";
@@ -90,17 +91,51 @@ const refOf = (model, c) => ({ mint: c.mint, ...model.nameOf(c.mint) });
 /** A listed quote asset (USDC, PUMP, a graduated coin) as a ref: the model's quote vocabulary names it. */
 const assetRefOf = (model, mint) => ({ mint, name: model.nameOf(mint).name, symbol: model.quoteSymbol({ quoteMint: mint }) });
 
-// The map's dominance table ("mcap", the site's default) for the forest build the model has cached:
-// one familyShares pass per map build, shared by every card rendered from it.
+// The map's dominance table ("mcap", the site's default) for a forest build: one familyShares pass per map build,
+// shared by every card rendered from it.
 const shareTables = new WeakMap(); // mapAll cache entry → Map<top mint, row>
-function familyRow(model, top) {
+const shareJobs = new WeakMap();   // mapAll cache entry → the sliced pass making its table
+const lastShares = new WeakMap();  // model → { at, byMint }: the newest table a card read
+const tableOf = (shares) => new Map(shares.families.map((f) => [f.mint, f]));
+/** A card waits for a fresh table when the newest one is older than this (the first card after a quiet spell). */
+export const CARD_SHARES_MAX_AGE_MS = 5 * 60_000;
+const rememberShares = (model, built, byMint) => { const last = lastShares.get(model); if (!last || last.at <= built.at) lastShares.set(model, { at: built.at, byMint }); };
+/** The table of the model's map build, at once (the synchronous cardData: tests, tools). */
+function sharesNow(model) {
   const built = model.mapAll({ all: true });
   let byMint = shareTables.get(built);
-  if (!byMint) {
-    byMint = new Map(familyShares(built.body.roots, "mcap").families.map((f) => [f.mint, f]));
-    shareTables.set(built, byMint);
+  if (!byMint) { byMint = tableOf(familyShares(built.body.roots, "mcap")); shareTables.set(built, byMint); }
+  return byMint;
+}
+/** The table of `built`, made on the sliced scheduler once per build and remembered as the model's newest. */
+function sharesOf(model, built) {
+  const have = shareTables.get(built);
+  if (have) { rememberShares(model, built, have); return Promise.resolve(have); }
+  let job = shareJobs.get(built);
+  if (!job) {
+    job = runSliced(familySharesGen(built.body.roots, "mcap")).then((run) => {
+      const byMint = tableOf(run.value);
+      shareTables.set(built, byMint);
+      rememberShares(model, built, byMint);
+      return byMint;
+    }).finally(() => shareJobs.delete(built));
+    shareJobs.set(built, job);
   }
-  return byMint.get(top) ?? null;
+  return job;
+}
+/**
+ * The table for a card without holding the event loop. The map build is asked for (mapAllAsync: the cached one at
+ * once, else a fresh one in slices; the synchronous build held the loop ~1.8 s on the local index, Nov 13 2026), but
+ * a card does not wait for it when a table younger than CARD_SHARES_MAX_AGE_MS exists: a family's share moves slowly,
+ * and the next card gets the new one. The first card since the start, or after a quiet spell, waits.
+ */
+function sharesFor(model) {
+  const fresh = model.mapAllAsync({ all: true }).then((built) => sharesOf(model, built));
+  const last = lastShares.get(model);
+  const now = typeof model.now === "function" ? model.now() : Date.now();
+  if (!last || now - last.at > CARD_SHARES_MAX_AGE_MS) return fresh;
+  fresh.catch(() => {}); // a failed refresh keeps the old table
+  return Promise.resolve(last.byMint);
 }
 
 /**
@@ -116,8 +151,41 @@ function familyRow(model, top) {
  * `imagePending` says the coin has no image yet while its metadata is still being fetched.
  */
 export function cardData(model, mint) {
-  try { return buildData(model, mint); } catch { return null; }
+  try { return drainGen(buildDataGen(model, mint, () => sharesNow(model), false)); } catch { return null; }
 }
+/**
+ * cardData without holding the event loop (the card route and the og tags): the share table from sharesFor, the
+ * family's walk on the sliced scheduler (lib/sliced.mjs; a coin quoted in PUMP walks PUMP's 31k coins, ~0.2 s at once).
+ * Callers for one mint while its data is being made share it (a link pasted in a busy chat: every unfurl asks for the
+ * same page), and at most CARD_WALKS_MAX walks run at once, the rest in arrival order. The data is read-only for every caller.
+ */
+export function cardDataAsync(model, mint) {
+  let jobs = dataJobs.get(model);
+  if (!jobs) { jobs = new Map(); dataJobs.set(model, jobs); }
+  let job = jobs.get(mint);
+  if (!job) {
+    job = (async () => {
+      try {
+        if (typeof mint !== "string" || !model.get(mint)) return null;
+        const byMint = await sharesFor(model);
+        await walkSlot();
+        try { return (await runSliced(buildDataGen(model, mint, () => byMint, true))).value; } finally { walkDone(); }
+      } catch { return null; }
+    })().finally(() => { if (jobs.get(mint) === job) jobs.delete(mint); });
+    jobs.set(mint, job);
+  }
+  return job;
+}
+/** At most this many card family walks run on the scheduler at once (each holds its family's nodes); the rest wait their turn. */
+export const CARD_WALKS_MAX = 2;
+const dataJobs = new WeakMap(); // model → Map<mint, Promise>: cardDataAsync calls in flight
+let walking = 0;
+const walkWaiters = []; // resolvers, first come first served
+const walkSlot = () => (walking < CARD_WALKS_MAX ? (walking++, Promise.resolve()) : new Promise((r) => walkWaiters.push(r)));
+/** Hands the slot to the next waiter (it never goes back to the pool in between, so no newcomer can jump the queue). */
+const walkDone = () => { const next = walkWaiters.shift(); if (next) next(); else walking--; };
+/** Card walks running and waiting (tests, /api/health). */
+export const cardWalks = () => ({ running: walking, waiting: walkWaiters.length });
 /**
  * Coins below the family top. A coin top: the model's live descendant count (the og:description of
  * its own card says the same number); an asset top (not a coin, so nothing is computed for it): the
@@ -130,7 +198,11 @@ function coinsUnder(model, top, { asset, row, members }) {
   if (row) return Math.max(0, row.coins - 1);
   return members.reduce((n, m) => n + 1 + (model.computed().get(m.mint)?.descendants ?? 0), 0);
 }
-function buildData(model, mint) {
+/**
+ * buildData as a generator (it yields while walking a family): `shares()` gives the dominance table (top mint → row);
+ * `shared` says it runs on the sliced scheduler, so it may wait for the asset-family pass of another job.
+ */
+function* buildDataGen(model, mint, shares, shared) {
   const c = typeof mint === "string" ? model.get(mint) : null;
   if (!c) return null;
   const d = model.computed().get(mint) ?? {};
@@ -140,7 +212,7 @@ function buildData(model, mint) {
   const s = model.scopedAll(c);
   const anc = model.ancestors(mint);                      // nearest first
   const top0 = anc.length ? anc[anc.length - 1] : c;      // the highest coin the model knows in this chain
-  const fam = model.assetFamilies();
+  const fam = typeof model.assetFamiliesStep === "function" ? yield* model.assetFamiliesStep({ shared }) : model.assetFamilies();
   const assetMint = top0.depth === 0 && top0.quoteMint && top0.quoteMint !== SOL_MINT && fam.has(top0.quoteMint) ? top0.quoteMint : null;
   // a spawn whose parent is not indexed (yet) still names it, by mint: it is not a root
   const parentMint = c.depth > 0 && typeof c.quoteMint === "string" ? c.quoteMint : null;
@@ -152,10 +224,11 @@ function buildData(model, mint) {
   const chain = above.concat([...anc].reverse().concat([c]).map((x) => refOf(model, x))); // top … parent, self
   const lineage = chain.map(tick);
   const siblings = parentMint ? model.childrenOf(parentMint) : assetMint ? fam.get(assetMint) : [];
-  const row = familyRow(model, top.mint);
+  const row = shares().get(top.mint) ?? null;
   const under = coinsUnder(model, top, { asset: !!assetMint, row, members: assetMint ? fam.get(assetMint) ?? [] : parentMint ? model.childrenOf(top.mint) : [] });
   const o = model.oursOf(c);
-  const family = familyNodes(model, { top, asset: !!assetMint, focus: c, chain: anc });
+  const family = yield* familyNodesGen(model, { top, asset: !!assetMint, focus: c, chain: anc, fam });
+  yield;
   const { nodes, omitted } = pickBubbles(family.nodes, mint, BUBBLE_CAP);
   const image = model.imageOfMint(mint);
   return {
@@ -193,27 +266,28 @@ function nodeOf(model, c, parentMint) {
  * `asset: true`, never priced, its icon from the model. A top the index does not know (a ghost parent)
  * leaves the coin's known chain as the family. `valueUsd` is the family's market cap in all.
  */
-function familyNodes(model, { top, asset, focus, chain }) {
+function* familyNodesGen(model, { top, asset, focus, chain, fam }) {
   const nodes = [];
   let valueUsd = 0;
   const push = (n) => { nodes.push(n); if (n.mcapUsd > 0) valueUsd += n.mcapUsd; };
-  const walk = (c, parentMint) => {
+  function* walk(c, parentMint) {
     const stack = [[c, parentMint]];
     while (stack.length) {
+      if ((nodes.length & 511) === 511) yield;
       const [x, p] = stack.pop();
       push(nodeOf(model, x, p));
       const kids = model.childrenOf(x.mint);
       for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i], x.mint]);
     }
-  };
+  }
   if (asset) {
     const { name, symbol } = model.nameOf(top.mint);
     push({ mint: top.mint, parentMint: null, depth: 0, symbol: top.symbol ?? symbol ?? null, name: name ?? null, image: model.imageOfMint(top.mint), imagePending: false, mcapUsd: null, migrated: false, ours: false, asset: true });
-    for (const m of model.assetFamilies().get(top.mint) ?? []) walk(m, top.mint);
+    for (const m of fam.get(top.mint) ?? []) yield* walk(m, top.mint);
     return { nodes, valueUsd };
   }
   const topCoin = model.get(top.mint);
-  if (topCoin) { walk(topCoin, null); return { nodes, valueUsd }; }
+  if (topCoin) { yield* walk(topCoin, null); return { nodes, valueUsd }; }
   // a ghost top: the chain below it, nearest ancestor first → the focused coin, parents by mint
   const known = [...chain].reverse();
   known.forEach((a, i) => push(nodeOf(model, a, i === 0 ? null : known[i - 1].mint)));
@@ -230,7 +304,7 @@ function ancestorsIn(byMint, mint) {
   return out;
 }
 /**
- * Which members of a family (familyNodes, flat) a card draws, at most `cap`, deterministically: the
+ * Which members of a family (familyNodesGen, flat) a card draws, at most `cap`, deterministically: the
  * focused coin, its ancestor chain up to the top, its direct children (largest market cap first, up
  * to FOCUS_KIDS), then the rest of the family largest first (each with whatever ancestors it needs
  * so every bubble hangs from a drawn parent). Returns the drawn nodes (top first, `focus` and `top`
@@ -1031,7 +1105,7 @@ export async function renderCard({ model, images = null, mint, publicUrl = "http
   let job = inflight.get(key);
   if (!job) {
     job = (async () => {
-      const data = cardData(model, mint, { now: t });
+      const data = await cardDataAsync(model, mint);
       if (!data) return null;
       const { logos, placeholder } = await gatherLogos(images, data, logoWaitMs, t); // no slot held while a logo is waited for
       let host = "sporepad.com";
