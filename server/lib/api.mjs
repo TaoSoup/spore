@@ -12,6 +12,8 @@ import { META_NAME_RE, META_TYPES, QuotaError } from "./metahost.mjs";
 import { verifySpawnTx } from "./spawned.mjs";
 import { shareOf, claimTotals } from "./treasury.mjs";
 import { fromBase58 } from "./decode.mjs";
+import { AddressLookupTableAccount } from "@solana/web3.js";
+import { JUPITER_PROGRAM, SOL_MINT, JupiterError } from "./jupiter.mjs";
 import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLIT_BPS } from "./pricing.mjs";
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
@@ -95,6 +97,81 @@ export function etagMatches(header, etag) {
 export function isSig(s) { return typeof s === "string" && SIG_RE.test(s); }
 
 const PUMP_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.toBase58(), PUMP_FEE_PROGRAM_ID.toBase58()]);
+/// The top-level programs a relayed Jupiter swap may call: Jupiter itself, the compute budget, token-account setup and
+/// cleanup. Anything else at the top level is not a swap the quick trade built (web/src/lib/jup.ts).
+const JUP_TOP_PROGRAMS = new Set([JUPITER_PROGRAM, "ComputeBudget111111111111111111111111111111", "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "11111111111111111111111111111111"]);
+const ALT_PROGRAM = "AddressLookupTab1e1111111111111111111111111";
+/// A transaction is at most 1,232 bytes: 1,644 characters in base64, 1,683 in base58. Longer strings are refused before
+/// any decoding (the base58 decoder's cost grows with the square of the length), and so are bytes past 1,232.
+export const TX_MAX_BYTES = 1_232;
+const TX_MAX_CHARS = { base64: 1_644, base58: 1_683 };
+/// The message of a serialized transaction, or null. One /api/rpc request asks the same strings several times (the
+/// parameter rule, the relay kind, the Jupiter checks): the last few answers are kept, so each is decoded once.
+const decoded = new Map();
+export function txMessage(encoded, encoding = "base64") {
+  const enc = encoding === "base58" ? "base58" : "base64";
+  if (typeof encoded !== "string" || encoded.length > TX_MAX_CHARS[enc]) return null;
+  const memo = `${enc}:${encoded}`;
+  if (decoded.has(memo)) return decoded.get(memo);
+  let msg = null;
+  try {
+    const bytes = enc === "base58" ? fromBase58(encoded) : Buffer.from(encoded, "base64");
+    if (bytes.length <= TX_MAX_BYTES) msg = VersionedTransaction.deserialize(bytes).message;
+  } catch { msg = null; }
+  decoded.set(memo, msg);
+  while (decoded.size > 32) decoded.delete(decoded.keys().next().value);
+  return msg;
+}
+/// What a serialized transaction is for the relay: "pump" (a pump program at the top level), "jupiter" (a Jupiter swap
+/// with nothing but JUP_TOP_PROGRAMS at the top level: relayed once jupiterTouchesPump finds a pump program in its
+/// accounts), or null.
+export function relayKind(encoded, encoding = "base64") {
+  try {
+    const msg = txMessage(encoded, encoding);
+    if (!msg) return null;
+    const keys = msg.staticAccountKeys.map((k) => k.toBase58());
+    const top = msg.compiledInstructions.map((ix) => keys[ix.programIdIndex]);
+    if (top.some((p) => PUMP_PROGRAMS.has(p))) return "pump";
+    if (top.includes(JUPITER_PROGRAM) && top.every((p) => JUP_TOP_PROGRAMS.has(p))) return "jupiter";
+    return null;
+  } catch { return null; }
+}
+/// The most address lookup tables a relayed Jupiter swap may use: /build answers carried 1-3 (Nov 2026). Unknown tables
+/// are read from the chain, so the cap also bounds what one request costs the shared proxy lane.
+export const JUP_MAX_LOOKUPS = 4;
+/**
+ * What the relay must read to check a Jupiter swap: `staticPump` when a pump program is among its static keys (nothing to
+ * read), else `tables`, the lookup tables it takes accounts from. Null when it names more than JUP_MAX_LOOKUPS tables or
+ * does not parse: refused unread.
+ */
+export function jupiterLookups(encoded, encoding = "base64") {
+  try {
+    const msg = txMessage(encoded, encoding);
+    if (!msg) return null;
+    const all = msg.addressTableLookups ?? [];
+    if (all.length > JUP_MAX_LOOKUPS) return null;
+    if (msg.staticAccountKeys.some((k) => PUMP_PROGRAMS.has(k.toBase58()))) return { staticPump: true, tables: [] };
+    return { staticPump: false, tables: all.filter((l) => l.writableIndexes.length + l.readonlyIndexes.length > 0).map((l) => l.accountKey.toBase58()) };
+  } catch { return null; }
+}
+/**
+ * Does a Jupiter swap pass through a pump program (a coin's curve or pool)? Its static keys, then the accounts its
+ * lookup tables give it: `tablesOf(keys)` answers each table's addresses (null: not a table), for the whole list at once.
+ * So the relay carries the quick trade's swaps of pump.fun coins and no other Jupiter swap.
+ */
+export async function jupiterTouchesPump(encoded, encoding, tablesOf) {
+  try {
+    const info = jupiterLookups(encoded, encoding);
+    if (!info) return false;
+    if (info.staticPump) return true;
+    if (!info.tables.length) return false;
+    const msg = txMessage(encoded, encoding);
+    const used = (msg.addressTableLookups ?? []).filter((l) => l.writableIndexes.length + l.readonlyIndexes.length > 0);
+    const tables = await tablesOf(used.map((l) => l.accountKey.toBase58()));
+    return used.some((l, n) => !!tables[n] && [...l.writableIndexes, ...l.readonlyIndexes].some((i) => PUMP_PROGRAMS.has(tables[n][i])));
+  } catch { return false; }
+}
 /**
  * Does a serialized transaction invoke a pump program? The proxy relays sendTransaction and
  * simulateTransaction only for those, so it cannot be used as a free relay for arbitrary
@@ -103,8 +180,8 @@ const PUMP_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.t
  */
 export function txTouchesPump(encoded, encoding = "base64") {
   try {
-    const bytes = encoding === "base58" ? fromBase58(encoded) : Buffer.from(encoded, "base64");
-    const msg = VersionedTransaction.deserialize(bytes).message;
+    const msg = txMessage(encoded, encoding);
+    if (!msg) return false;
     const keys = msg.staticAccountKeys.map((k) => k.toBase58());
     return msg.compiledInstructions.some((ix) => PUMP_PROGRAMS.has(keys[ix.programIdIndex]));
   } catch { return false; }
@@ -121,8 +198,8 @@ export function rpcParamsError(method, params) {
       return null;
     case "sendTransaction":
     case "simulateTransaction":
-      if (typeof p[0] !== "string" || p[0].length > 4_000) return `${method}: transaction missing or too large`;
-      if (!txTouchesPump(p[0], p[1]?.encoding === "base58" ? "base58" : "base64")) return `${method}: only pump.fun transactions are relayed`;
+      if (typeof p[0] !== "string" || p[0].length > TX_MAX_CHARS[p[1]?.encoding === "base58" ? "base58" : "base64"]) return `${method}: transaction missing or too large`;
+      if (!relayKind(p[0], p[1]?.encoding === "base58" ? "base58" : "base64")) return `${method}: only pump.fun transactions are relayed`;
       return null;
     default:
       return null;
@@ -204,14 +281,40 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
   // Request-driven chain reads run on the RPC's "api" lane so they can never starve the indexer.
   const apiRpc = typeof rpc?.lane === "function" ? rpc.lane("api") : rpc;
+  // The address lookup tables of the Jupiter swaps the proxy is asked to relay (jupiterTouchesPump): those this server's
+  // own /api/jup/build answers named (Jupiter's copy: enough to tell a pump swap from another), else read from the chain
+  // on the proxy lane, every unknown table of a request in one call. Only real tables are kept (10 min, at most 256), so
+  // made-up keys cost one read and never push Jupiter's out.
+  const proxyRpc = typeof rpc?.lane === "function" ? rpc.lane("proxy") : rpc;
+  const tables = new Map();
+  const TABLE_TTL_MS = 10 * 60_000, TABLES_MAX = 256;
+  const rememberTable = (key, addrs) => {
+    tables.delete(key); tables.set(key, { at: now(), addrs });
+    while (tables.size > TABLES_MAX) tables.delete(tables.keys().next().value);
+  };
+  const knownTable = (key) => { const h = tables.get(key); return h && now() - h.at < TABLE_TTL_MS ? h.addrs : undefined; };
+  const lookupTables = async (keys) => {
+    const read = new Map();
+    const miss = [...new Set(keys.filter((k) => knownTable(k) === undefined))];
+    if (miss.length) {
+      const accs = await proxyRpc.getMultipleAccounts(miss);
+      accs.forEach((a, i) => {
+        let addrs = null;
+        if (a && a.owner === ALT_PROGRAM) { try { addrs = AddressLookupTableAccount.deserialize(a.data).addresses.map((k) => k.toBase58()); } catch { addrs = null; } }
+        read.set(miss[i], addrs);
+        if (addrs) rememberTable(miss[i], addrs);
+      });
+    }
+    return keys.map((k) => knownTable(k) ?? read.get(k) ?? null);
+  };
   const limitOf = (name) => ({ limit: rates?.[name]?.limit ?? DEFAULT_RATES[name][0], windowMs: rates?.[name]?.windowMs ?? DEFAULT_RATES[name][1], name, now });
-  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")) };
+  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")), jup: rateLimit(limitOf("jup")) };
   // Share cards (lib/card.mjs: `cardData`, `renderCard`) load on first use: the renderer carries fonts
   // and a wasm rasterizer no other route needs, and a test injects its own `card`. A failed load is
   // retried after CARD_RETRY_MS; meanwhile the card route answers 503 and pages keep the static tags.
@@ -264,7 +367,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag });
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -760,10 +863,61 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     const denied = calls.find((c) => !c || typeof c.method !== "string" || !RPC_ALLOW.has(c.method));
     if (denied) return res.status(403).json({ error: `method not allowed: ${denied?.method ?? "?"}` });
     for (const c of calls) { const err = rpcParamsError(c.method, c.params); if (err) return res.status(403).json({ error: err }); }
+    // a Jupiter swap (the quick trade's route for coins priced in a listed asset) only when Jupiter routing is on and the
+    // swap passes through a pump program; the tables every swap of the request needs are read in one call
+    const jups = [];
+    for (const c of calls) {
+      if (c.method !== "sendTransaction" && c.method !== "simulateTransaction") continue;
+      const enc = c.params?.[1]?.encoding === "base58" ? "base58" : "base64";
+      if (relayKind(c.params[0], enc) !== "jupiter") continue;
+      const info = jupiter ? jupiterLookups(c.params[0], enc) : null;
+      if (!info) return res.status(403).json({ error: `${c.method}: only pump.fun transactions are relayed` });
+      jups.push({ c, enc, info });
+    }
+    if (jups.length) {
+      const keys = [...new Set(jups.flatMap((j) => j.info.tables))];
+      let found;
+      try { found = new Map(keys.length ? (await lookupTables(keys)).map((a, i) => [keys[i], a]) : []); }
+      catch (e) { return res.status(502).json({ error: `rpc unreachable: ${e.message}` }); }
+      const tablesOf = async (ks) => ks.map((k) => found.get(k) ?? null);
+      for (const { c, enc } of jups) if (!(await jupiterTouchesPump(c.params[0], enc, tablesOf))) return res.status(403).json({ error: `${c.method}: only pump.fun transactions are relayed` });
+    }
     try {
       const r = await rpc.proxy(body);
       res.status(r.status === 429 ? 429 : 200).type("application/json").send(r.text);
     } catch (e) { res.status(502).json({ error: `rpc unreachable: ${e.message}` }); }
+  }));
+
+  // ---- Jupiter /build for the quick trade (lib/jupiter.mjs): swaps between SOL and a coin this index tracks, nothing else.
+  app.get("/api/jup/status", (_req, res) => res.json({ enabled: !!jupiter }));
+  // `limits.jup` (on top of the API read every GET counts as): one client cannot keep Jupiter's shared queue full.
+  app.get("/api/jup/build", limits.jup, wrap(async (req, res) => {
+    if (!jupiter) return res.status(503).json({ error: "Jupiter routing is off on this server (JUPITER=0)" });
+    const q = req.query;
+    const inputMint = String(q.inputMint ?? ""), outputMint = String(q.outputMint ?? ""), taker = String(q.taker ?? ""), amount = String(q.amount ?? "");
+    if (![inputMint, outputMint].every((m) => m === SOL_MINT || isMint(m)) || !isMint(taker) || taker === SOL_MINT) return res.status(400).json({ error: "invalid mint or taker" });
+    if ((inputMint === SOL_MINT) === (outputMint === SOL_MINT)) return res.status(400).json({ error: "one side must be SOL" });
+    const coin = inputMint === SOL_MINT ? outputMint : inputMint;
+    if (!model.get(coin)) return res.status(404).json({ error: "not a coin this index tracks" });
+    if (!/^[1-9]\d{0,19}$/.test(amount)) return res.status(400).json({ error: "amount must be a positive integer in base units" });
+    const slippageBps = Number.parseInt(String(q.slippageBps ?? ""), 10);
+    if (!Number.isInteger(slippageBps) || slippageBps < 1 || slippageBps > 5_000) return res.status(400).json({ error: "slippageBps must be 1..5000" });
+    // A browser that dropped the quote (a newer amount, a closed widget) frees its place: Jupiter is not asked for it.
+    const gone = new AbortController();
+    res.on("close", () => { if (!res.writableFinished) gone.abort(); });
+    try {
+      const body = await jupiter.build({ inputMint, outputMint, amount, taker, slippageBps }, { signal: gone.signal });
+      // its tables, as Jupiter listed them: the relay then needs no chain read for the swap the browser builds from it
+      for (const [k, addrs] of Object.entries(body.addressesByLookupTableAddress ?? {})) {
+        if (isMint(k) && Array.isArray(addrs) && addrs.length <= 256 && addrs.every((a) => typeof a === "string")) rememberTable(k, addrs);
+      }
+      res.setHeader("cache-control", "no-store");
+      res.json(body);
+    } catch (e) {
+      if (gone.signal.aborted) return;
+      if (e instanceof JupiterError) return res.status(e.status).json({ error: e.message });
+      throw e;
+    }
   }));
 
   app.use("/v1", v1.router);

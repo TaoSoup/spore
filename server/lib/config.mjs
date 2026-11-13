@@ -11,7 +11,7 @@ import { DEFAULT_PAGES_DOMAIN, DEFAULT_PAGES_PROJECT, DEFAULT_META_DIR, DEFAULT_
 export const DEFAULT_PLATFORM_WALLET = "FcbEAMqBvJVsfcFWDbED7geyBLR88ypcY88BoUSgmeT5";
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 // Per-IP rate limits (requests per window) — DEPLOY.md documents each.
-export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000] };
+export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000] };
 // Command-line flags that stand in for a variable, so a package.json script needs no POSIX
 // `VAR=value node …` prefix (cmd.exe cannot run one): `npm run dev` passes --backfill-limit=150.
 // A flag wins over the environment, as that prefix did; other arguments are ignored, as before.
@@ -61,6 +61,10 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   const rpcApiRps = num("RPC_API_RPS", Math.max(1, rpcRps / 4), { min: 0.1, max: 10_000 });
   const rpcProxyRps = num("RPC_PROXY_RPS", Math.max(1, rpcRps / 4), { min: 0.1, max: 10_000 });
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
+  // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
+  // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
+  const jupApiKey = get("JUP_API_KEY", "");
+  const jupiter = { enabled: bool("JUPITER", true), url: url("JUP_URL", "https://api.jup.ag/swap/v2", ["https:", "http:"]), apiKey: jupApiKey, rps: num("JUP_RPS", jupApiKey ? 1 : 0.5, { min: 0.05, max: 1_000 }) };
   // `ORIGINS` is the documented name; `ORIGIN` stays accepted from the first version.
   const origins = get("ORIGINS", get("ORIGIN", "")).split(",").map((s) => s.trim()).filter(Boolean);
   for (const o of origins) { try { if (new URL(o).origin !== o) throw new Error(); } catch { errors.push(`ORIGINS entry ${JSON.stringify(o)} is not an origin (scheme://host[:port], no path)`); } }
@@ -153,5 +157,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter };
 }

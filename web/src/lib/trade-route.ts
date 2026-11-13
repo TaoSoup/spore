@@ -5,7 +5,10 @@
 // A coin's chain (self first, up to its depth-0 root) is tradable from SOL when the root is quoted in SOL, or when the
 // root is quoted in a listed asset that is itself a graduated pump coin with its canonical PumpSwap pool against WSOL
 // (ANSEM, LMAO!, CATE…: 37 such assets on the local index, Nov 13 2026): the route then starts in that pool. A root
-// quoted in PUMP, USDC, HYPE or a tokenized stock has no pump venue against SOL, so pump's program cannot start there.
+// quoted in PUMP, USDC, HYPE or a tokenized stock has no pump venue against SOL, so pump's program cannot start there;
+// when the server routes through Jupiter (lib/jup.ts), such a root itself trades from SOL with Jupiter's Metis router.
+// The coins launched under it still cannot: Jupiter's route ends in the root, and pump's swap cannot continue from it in
+// the same transaction.
 import { useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey, type Connection } from "@solana/web3.js";
 import { NATIVE_MINT, TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -13,6 +16,7 @@ import { canonicalPumpPoolPdaWithQuote } from "@pump-fun/pump-sdk";
 import { api, type Coin } from "./api";
 import { useAsync } from "./hooks";
 import { withSolPool, type Chain, type SolPoolAsset } from "./pump/route";
+import { jupiterEnabled } from "./jup";
 
 /// The most links one multi_hop_swap transaction holds: with Spore's lookup table (pump/alt.ts) a 5-hop buy compiles to
 /// ~1,170-1,224 bytes and a 6-hop one overflows 1,232 (measured Nov 13 2026). The program's own depth cap (5 levels: 6
@@ -26,17 +30,19 @@ export type RouteAsset = SolPoolAsset & { symbol: string };
 /// Why a coin cannot be traded here. `pending` is the one that passes by itself (a coin on the chain filled its curve
 /// and waits for its PumpSwap pool); the others hold until the chain changes.
 export type TradeBlock =
-  | { kind: "listed"; asset: string; symbol: string }
+  /// `jupiter`: the server routes through Jupiter, which reaches the coins priced in the asset but not this deeper one.
+  | { kind: "listed"; asset: string; symbol: string; jupiter?: boolean }
   | { kind: "mayhem"; coin: Coin }
   | { kind: "gap" }
   | { kind: "deep"; links: number }
   | { kind: "pending"; coin: Coin };
 export type TradeRoute = {
-  /// Self first; with `via: "pool"` the asset's SOL pool is the last link.
+  /// Self first; with `via: "pool"` the asset's SOL pool is the last link. With `via: "jupiter"` the coin alone (a
+  /// depth-0 coin priced in a listed asset): Jupiter finds the way from SOL to it.
   chain: Chain;
   /// The coin and its ancestors' full records, self first (the asset is not one of them).
   coins: Coin[];
-  via: "sol" | "pool";
+  via: "sol" | "pool" | "jupiter";
   asset: RouteAsset | null;
   block: TradeBlock | null;
 };
@@ -46,8 +52,9 @@ export const assetLabel = (s: string | null | undefined) => (!s ? "its listed as
 const tick = (c: { symbol: string | null; mint: string }) => (c.symbol ? `$${c.symbol}` : `${c.mint.slice(0, 4)}…`);
 
 /// The route from the coin's records and, when its root is quoted in a listed asset, that asset's SOL pool (null:
-/// none). Pure: the loaders below fetch what it reads.
-export function routeOf(coins: Coin[], asset: RouteAsset | null): TradeRoute {
+/// none) and whether the server routes through Jupiter. Pure: the loaders below fetch what it reads.
+/// The asset's own SOL pool wins over Jupiter: pump's swap then covers the whole chain, the coins under the root too.
+export function routeOf(coins: Coin[], asset: RouteAsset | null, jupiter = false): TradeRoute {
   let chain: Chain = coins.map((c, i) => ({ mint: c.mint, quoteMint: c.quoteMint, tokenProgram: c.tokenProgram, quoteTokenProgram: coins[i + 1]?.tokenProgram ?? SPL_TOKEN, migrated: c.migrated, depth: c.depth }));
   const top = coins[coins.length - 1];
   const out = (block: TradeBlock | null, via: TradeRoute["via"] = "sol", a: RouteAsset | null = null): TradeRoute => ({ chain, coins, via, asset: a, block });
@@ -55,10 +62,13 @@ export function routeOf(coins: Coin[], asset: RouteAsset | null): TradeRoute {
   const solRoot = top.quoteMint === null || top.quoteMint === WSOL;
   let via: TradeRoute["via"] = "sol", used: RouteAsset | null = null;
   if (!solRoot) {
-    if (!asset || asset.mint !== top.quoteMint) return out({ kind: "listed", asset: top.quoteMint!, symbol: top.quoteSymbol });
-    chain = withSolPool(chain, asset); via = "pool"; used = asset;
+    if (asset && asset.mint === top.quoteMint) { chain = withSolPool(chain, asset); via = "pool"; used = asset; }
+    else if (jupiter && coins.length === 1) via = "jupiter";
+    else return out({ kind: "listed", asset: top.quoteMint!, symbol: top.quoteSymbol, ...(jupiter ? { jupiter: true } : {}) });
   }
-  const mayhem = coins.find((c) => c.mayhem);
+  // pump's multi_hop_swap refuses mayhem venues; Jupiter's route goes through pump's own buy and sell, so its answer
+  // (a route, or "no route") decides.
+  const mayhem = via === "jupiter" ? null : coins.find((c) => c.mayhem);
   if (mayhem) return out({ kind: "mayhem", coin: mayhem }, via, used);
   if (chain.length > MAX_ROUTE_LINKS) return out({ kind: "deep", links: chain.length }, via, used);
   const pending = coins.find((c) => c.complete && !c.migrated);
@@ -70,7 +80,9 @@ export function blockText(b: TradeBlock, self: { symbol: string | null; mint: st
   switch (b.kind) {
     case "listed": {
       const a = assetLabel(b.symbol);
-      return { title: `Priced in ${a}`, short: `priced in ${a}`, body: `This coin's tree is priced in ${a}, a listed asset with no pump.fun pool against SOL, so pump's multi-hop swap cannot start from a SOL wallet. Trade it on pump.fun.` };
+      return b.jupiter
+        ? { title: `Priced in ${a}`, short: `priced in ${a}`, body: `This coin's tree is priced in ${a}, a listed asset with no pump.fun pool against SOL. Spore trades the coins priced directly in ${a} through Jupiter, but not the coins launched under them: Jupiter's route ends at the root, and pump's multi-hop swap cannot continue from there. Trade it on pump.fun.` }
+        : { title: `Priced in ${a}`, short: `priced in ${a}`, body: `This coin's tree is priced in ${a}, a listed asset with no pump.fun pool against SOL, so pump's multi-hop swap cannot start from a SOL wallet. Trade it on pump.fun.` };
     }
     case "mayhem": {
       const who = b.coin.mint === self.mint ? `${tick(self)} is` : `${tick(b.coin)}, on this coin's chain, is`;
@@ -145,12 +157,13 @@ export async function loadTradeRoute(conn: Connection, coin: Coin): Promise<Trad
   const ancestors = await Promise.all(coin.ancestors.map((a) => coinCached(a.mint)));
   const coins = [self, ...ancestors];
   const top = coins[coins.length - 1];
-  let asset: RouteAsset | null = null;
+  let asset: RouteAsset | null = null, jupiter = false;
   if (top.depth === 0 && top.quoteMint && top.quoteMint !== WSOL) {
-    const pool = await resolveAssetPool(conn, top.quoteMint);
+    const [pool, jup] = await Promise.all([resolveAssetPool(conn, top.quoteMint), jupiterEnabled()]);
     if (pool) asset = { ...pool, symbol: top.quoteSymbol };
+    jupiter = jup;
   }
-  return routeOf(coins, asset);
+  return routeOf(coins, asset, jupiter);
 }
 
 /// The route of `coin` (null while it loads or without a coin), keyed by mint: `reload` re-checks it.

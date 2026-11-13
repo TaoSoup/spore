@@ -14,7 +14,8 @@ import { api, type Coin, type Eligibility, type UploadBody } from "./api";
 import { chainFor, chainForChild, chainForRoot } from "./chain";
 import { AGENT_SEED_LAMPORTS, MAX_LAUNCH_FEE_LAMPORTS, PLATFORM_WALLET, PolicyError, ROOT_SPLIT, SPLIT_BPS, isAgentModel } from "./policy";
 import { splitShares, type Share } from "./pump/shares";
-import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, explainCustomError, isSlippageFailure, preflight, quoteSwap, sendAndConfirm, signatureState, ExpiredError, OnChainError, SimulationError, type Chain, type LaunchFee, type Side } from "./pump";
+import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, explainCustomError, isSlippageFailure, preflight, quoteSwap, sendAndConfirm, signatureState, ExpiredError, OnChainError, SimulationError, JUPITER_PROGRAM, type Chain, type LaunchFee, type Side } from "./pump";
+import { buildJupTx, type JupQuote } from "./jup";
 import { clearPendingTrade, savePendingTrade } from "./trade-store";
 import { friendlyError, stepper, type Report } from "./steps";
 import { clearPending, loadPending, savePendingSafe, type PendingLaunch } from "./launch-store";
@@ -418,8 +419,31 @@ export async function runSwap(conn: Connection, wallet: WalletContextState, chai
   let tx: Awaited<ReturnType<typeof buildSwapTx>>;
   try { tx = await buildSwapTx(conn, wallet.publicKey, chain, side, amountIn, minOut, { units: opts.units, microLamports: opts.microLamports }); st.set("build", "done", `${chain.length} hop${chain.length === 1 ? "" : "s"}`); }
   catch (e) { st.fail("build", e); throw e; }
+  const sig = await checkSignConfirm(conn, wallet, tx, side, st, opts, (code) => explainCustomError(code));
+  return { sig, minOut };
+}
+
+/// The Jupiter route's buy or sell (lib/jup.ts): the build the quote simulated, compiled again for the wallet that quoted
+/// it with the compute limit and priority fee the widget showed; then the same checks as runSwap. Jupiter's minimum
+/// (its quote less the slippage the quote was asked with) is inside the swap instruction, so the exact-transaction
+/// simulation stops a fill that would miss it as PriceMovedError, before the wallet opens.
+export async function runJupSwap(conn: Connection, wallet: WalletContextState, q: JupQuote, report: Report, opts: SwapOpts & { units: number; microLamports: number }): Promise<{ sig: string; minOut: bigint }> {
+  if (!wallet.publicKey) throw new Error("Connect a wallet first");
+  const st = stepper([["build", q.side === "buy" ? "Build the Jupiter buy" : "Build the Jupiter sell"], ["check", "Simulate the exact transaction"], ["sign", "Sign in your wallet and confirm on-chain"]], report);
+  st.set("build", "active");
+  let tx: VersionedTransaction;
+  try { tx = await buildJupTx(conn, wallet.publicKey, q, { units: opts.units, microLamports: opts.microLamports }); st.set("build", "done", `${q.legs.length} leg${q.legs.length === 1 ? "" : "s"} · Jupiter`); }
+  catch (e) { st.fail("build", e); throw e; }
+  // An on-chain failure's code comes from the top-level instruction that failed: Jupiter's swap.
+  const sig = await checkSignConfirm(conn, wallet, tx, q.side, st, opts, (code) => explainCustomError(code, JUPITER_PROGRAM));
+  return { sig, minOut: q.minOut };
+}
+
+/// Simulate the exact transaction (a slippage refusal is PriceMovedError), then sign, send and confirm it, recording the
+/// sent trade until it settles (lib/trade-store).
+async function checkSignConfirm(conn: Connection, wallet: WalletContextState, tx: VersionedTransaction, side: Side, st: ReturnType<typeof stepper>, opts: SwapOpts, explain: (code: number) => string | null): Promise<string> {
   st.set("check", "active", "simulating…");
-  try { await preflight(conn, tx, wallet.publicKey); st.set("check", "done", "passes with your minimum"); }
+  try { await preflight(conn, tx, wallet.publicKey!); st.set("check", "done", "passes with your minimum"); }
   catch (e) {
     if (e instanceof SimulationError && isSlippageFailure(e.logs, null)) { const moved = new PriceMovedError(); st.fail("check", moved); throw moved; }
     st.fail("check", e); throw e;
@@ -431,10 +455,10 @@ export async function runSwap(conn: Connection, wallet: WalletContextState, chai
       sent = s;
       if (opts.mint) savePendingTrade({ sig: s, mint: opts.mint, symbol: opts.symbol ?? null, side, at: Date.now() });
       st.note("sign", "sent · waiting for confirmation…", solscanTxUrl(s));
-    }, (code) => explainCustomError(code));
+    }, explain);
     clearPendingTrade(sig);
     st.set("sign", "done", "confirmed", solscanTxUrl(sig));
-    return { sig, minOut };
+    return sig;
   } catch (e) {
     // A trade that failed on-chain or expired is settled; one whose status never came back stays recorded.
     if (sent && (e instanceof OnChainError || e instanceof ExpiredError)) clearPendingTrade(sent);

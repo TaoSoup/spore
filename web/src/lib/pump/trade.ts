@@ -15,7 +15,8 @@ export const CU_PRICE_MICRO = 50_000;
 /// The ceiling (1 lamport per CU: 0.0003 SOL on a 300k-CU route), whatever the recent fees say.
 export const CU_PRICE_MAX_MICRO = 1_000_000;
 const BASE_FEE_LAMPORTS = 5_000;
-const QUOTE_CU_LIMIT = 1_400_000;
+/// The compute limit a quote simulates with: high enough for any route, so the simulation measures what it uses.
+export const QUOTE_CU_LIMIT = 1_400_000;
 
 /// The compute limit a swap is built with: the simulated use plus a margin (account creation differs between the
 /// quote's payer and the signer, and curves move), or the per-hop estimate when there is no simulation.
@@ -155,8 +156,16 @@ const AMM_ERRORS = new Map<number, string>([
   [6085, "the curve hops' balances did not match what pump reported"],
   [6086, "the route mixes buy and sell directions"],
 ]);
-/// Slippage refusals in either program: the fill fell below (or the cost rose above) the bound the transaction carries.
-const SLIPPAGE = { [PUMP_PROGRAM]: new Set([6002, 6003, 6042]), [PUMP_AMM_PROGRAM]: new Set([6004, 6040]) } as Record<string, Set<number>>;
+/// Jupiter's aggregator (the quick trade's route for coins priced in a listed asset with no pump SOL pool: lib/jup.ts).
+export const JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+/// Jupiter v6's errors a /build swap can raise (its IDL's error list).
+const JUP_ERRORS = new Map<number, string>([
+  [6000, "Jupiter's route came back empty"],
+  [6001, "slippage: the output fell below your minimum"],
+  [6017, "the route's output did not match the exact amount asked"],
+]);
+/// Slippage refusals in each program: the fill fell below (or the cost rose above) the bound the transaction carries.
+const SLIPPAGE = { [PUMP_PROGRAM]: new Set([6002, 6003, 6042]), [PUMP_AMM_PROGRAM]: new Set([6004, 6040]), [JUPITER_PROGRAM]: new Set([6001]) } as Record<string, Set<number>>;
 const BOTH_SLIPPAGE = new Set([6002, 6003, 6042, 6004, 6040]);
 const OTHER: Record<number, string> = { 1: "insufficient funds in the wallet for this trade" };
 
@@ -172,11 +181,16 @@ export function failedProgram(logs: string[]): { program: string; code: number }
 }
 
 /// A custom error code in words: the table of the program that raised it; with no program (an on-chain result has
-/// only `{ Custom: n }`), pump-amm's (the program of multi_hop_swap) and then pump's.
+/// only `{ Custom: n }`), pump-amm's (the program of multi_hop_swap) and then pump's. A Jupiter swap's on-chain
+/// result passes JUPITER_PROGRAM: its top-level instruction is Jupiter's.
 export function explainCustomError(code: number, program = ""): string | null {
+  // Another program's code (a pool inside a Jupiter route: Whirlpool, Meteora…) means something else in each table; the
+  // caller then shows that program's own log line.
   const text = program === PUMP_PROGRAM ? PUMP_ERRORS.get(code)
     : program === PUMP_AMM_PROGRAM ? AMM_ERRORS.get(code)
-    : AMM_ERRORS.get(code) ?? PUMP_ERRORS.get(code);
+    : program === JUPITER_PROGRAM ? JUP_ERRORS.get(code)
+    : program === "" ? AMM_ERRORS.get(code) ?? PUMP_ERRORS.get(code)
+    : undefined;
   return text ?? OTHER[code] ?? null;
 }
 

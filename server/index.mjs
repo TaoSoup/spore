@@ -15,6 +15,7 @@ import { createApp } from "./lib/api.mjs";
 import { MetaHost, DailyQuota } from "./lib/metahost.mjs";
 import { Treasury } from "./lib/treasury.mjs";
 import { ApiKeys } from "./lib/apikeys.mjs";
+import { Jupiter } from "./lib/jupiter.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -85,10 +86,11 @@ const liveAgents = live ? new LiveAgents({ runner: agentRunner, router, registry
 if (live && cfg.agents.aiRail === "keyed" && !keyedLlm.available) log.warn("agents: live with the keyed rail but no model key (LLM_URL + LLM_KEY_FILE): agents will use template names and logos");
 // Prepared wallets are bound from the chain in every mode (the browser's report is best effort).
 const stopReconciler = agentVault ? startReconciler({ vault: agentVault, model, registry: agentRegistry, log }) : () => {};
+const jupiter = cfg.jupiter.enabled ? new Jupiter({ url: cfg.jupiter.url, apiKey: cfg.jupiter.apiKey, rps: cfg.jupiter.rps, log }) : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 

@@ -147,6 +147,18 @@ export type AgentCoin = {
 /// root mint (a CoinRef is accepted too).
 export type AgentEvent = { root: string | CoinRef; proposal: AgentProposal & { launched?: { mint: string; signature: string | null } | null } };
 export type RootSort = "locked" | "children" | "new" | "volume";
+/// `GET /api/jup/build`: Jupiter's Swap API v2 /build answer, relayed as is (https://developers.jup.ag/docs/api-reference/swap/build.md).
+/// Amounts are base units as strings. Each instruction is { programId, accounts, data (base64) }.
+export type JupBuildQuery = { inputMint: string; outputMint: string; amount: string; taker: string; slippageBps: number };
+export type JupInstruction = { programId: string; accounts: { pubkey: string; isSigner: boolean; isWritable: boolean }[]; data: string };
+export type JupRouteLeg = { percent?: number; bps?: number; swapInfo: { ammKey: string; label?: string; inputMint: string; outputMint: string; inAmount?: string; outAmount?: string } };
+export type JupBuild = {
+  inputMint: string; outputMint: string; inAmount: string; outAmount: string; otherAmountThreshold: string; swapMode?: string;
+  slippageBps: number; priceImpactPct?: string | number | null; routePlan: JupRouteLeg[];
+  computeBudgetInstructions?: JupInstruction[] | null; setupInstructions?: JupInstruction[] | null; swapInstruction: JupInstruction;
+  cleanupInstruction?: JupInstruction | null; otherInstructions?: JupInstruction[] | null; tipInstruction?: JupInstruction | null;
+  addressesByLookupTableAddress?: Record<string, string[]> | null;
+};
 export type UploadBody = { name: string; symbol: string; description: string; image: string; twitter: string; telegram: string; website: string };
 
 export class ApiError extends Error {
@@ -254,6 +266,12 @@ export const api = {
   /// The agent side of one coin: its own agent (a root) or the agent that launched it (a child). A
   /// server without the route answers 404; the page then shows nothing.
   agentCoin: (mint: string) => request<AgentCoin>(`/agents/coin/${encodeURIComponent(mint)}`),
+  /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
+  jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
+  /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).
+  /// Never retried here: a 502/503 is Jupiter's or the server's answer, not a restart, and the caller's quote timer
+  /// asks again. The server may queue a few seconds behind other quotes, hence the longer timeout.
+  jupBuild: (q: JupBuildQuery, signal?: AbortSignal) => request<JupBuild>(`/jup/build${qs(q)}`, { signal: signal ? withTimeout(signal, 30_000) : AbortSignal.timeout(30_000) }, 30_000),
   eventsUrl: `${BASE}/events`,
 };
 

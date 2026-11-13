@@ -4,9 +4,10 @@ import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/api";
+import { ApiError, pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/api";
 import { routeLabels } from "../lib/chain";
-import { PriceMovedError, QUOTE_PROBE, runSwap, withSlippage } from "../lib/flow";
+import { PriceMovedError, QUOTE_PROBE, runJupSwap, runSwap, withSlippage } from "../lib/flow";
+import { JupPriceMovedError, KNOWN_MINTS, SOL_MINT, jupPath, quoteJup, type JupQuote } from "../lib/jup";
 import { ataRentLamports, priorityMicroLamports, quoteSwap, routeVenues, signatureState, swapFeeLamports, swapUnits, CU_PRICE_MICRO, type Side } from "../lib/pump";
 import { assetLabel, blockText, forgetCoin, useTradeRoute } from "../lib/trade-route";
 import { clearPendingTrade, pendingTradeOf, type PendingTrade } from "../lib/trade-store";
@@ -35,13 +36,16 @@ const STALE_S = 10;
 const HEADROOM = 2_100_000n;
 /// A quote younger than this opens the confirm sheet at once; an older one is simulated again first.
 const FRESH_MS = 5_000;
+/// A quote refused for a passing reason (Jupiter busy or rate-limiting, the server restarting) is asked again after this.
+const RETRY_MS = 8_000;
 /// While a coin on the route waits for its migration, the route is checked again this often.
 const PENDING_POLL_MS = 20_000;
 
 const LockGlyph = () => <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>;
 
 /// `unwrapped`: lamports of a wrapped-SOL account the user already had that the route closes into the wallet.
-type QuoteState = { amountOut: bigint; units: number; unwrapped: bigint; at: number; amountIn: bigint; side: Side };
+/// `jup`: the Jupiter route's quote (its build is what the transaction is compiled from).
+type QuoteState = { amountOut: bigint; units: number; unwrapped: bigint; at: number; amountIn: bigint; side: Side; jup?: JupQuote };
 
 /// "12.50" → "12.5", "3.000000000" → "3": the shortest decimal string for an amount field.
 const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
@@ -54,10 +58,10 @@ export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?
   /// Told whether a trade is in flight, so the dialog around the widget (the map's quick trade) never closes under it.
   onBusy?: (busy: boolean) => void };
 
-/// Buy from SOL / sell to SOL through every hop of the chain in one multi_hop_swap. Quotes come
-/// from a simulation (no local curve math), so the preview is what the program does; the widget
-/// adds what a terminal needs around it: balances, impact against spot, slippage, fees, the
-/// reason a trade is blocked, and a confirm step before the wallet opens.
+/// Buy from SOL / sell to SOL through every hop of the chain in one multi_hop_swap, or, for a coin priced in a listed
+/// asset with no pump SOL pool, through Jupiter (lib/jup.ts). Quotes come from a simulation (no local curve math), so
+/// the preview is what the programs do; the widget adds what a terminal needs around it: balances, impact against spot,
+/// slippage, fees, the reason a trade is blocked, and a confirm step before the wallet opens.
 export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", sheet = false, onClose, amountRef, titleId, current, onBusy }: TradeWidgetProps) {
   // Identity fields (mint, decimals, ancestors) are the same in both; prices come from the live one.
   const live = current?.();
@@ -70,6 +74,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const route = useTradeRoute(coin);
   const chain = route.data?.chain ?? null;
   const block = route.data?.block ?? null;
+  const isJup = route.data?.via === "jupiter";
   // `pending` passes by itself (a migration landing); any other block holds, and the widget says why.
   const pending = block?.kind === "pending" ? block.coin : null;
   const tradable = route.data ? !block || block.kind === "pending" : null;
@@ -118,6 +123,9 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   };
   const now = useNow(1_000);
   const dInput = useDebounced(input.trim(), 350);
+  // The field and its debounced copy agree: no quote is asked for an amount still being typed, or for the old amount read
+  // in the new side's decimals in the moment after a Buy / Sell switch.
+  const settled = input.trim() === dInput;
   const decimalsIn = side === "buy" ? 9 : coin.decimals;
   const amountIn = useMemo(() => parseAmount(dInput, decimalsIn), [dInput, decimalsIn]);
   const ownRef = useRef<HTMLInputElement>(null);
@@ -161,31 +169,48 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const [quote, setQuote] = useState<QuoteState | null>(null);
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
   const [quoting, setQuoting] = useState(false);
+  // A quote refused for a passing reason (the server's Jupiter queue busy, Jupiter rate-limiting, a server restart) is
+  // asked again at this time (ms), as its message promises; any answer clears it.
+  const [retryAt, setRetryAt] = useState<number | null>(null);
+  // Jupiter's minimum is part of its build, so a slippage change asks for a new one (once the clicks or typing settle:
+  // each one costs a request at Jupiter's shared 0.5/s); pump's route applies it when built.
+  const dSlippage = useDebounced(slippage, 400);
+  const jupSlip = isJup ? dSlippage : 0;
+  const coinMint = coin.mint, coinTokenProgram = coin.tokenProgram;
   useEffect(() => {
     setQuoteErr(null);
     if (!chain || !tradable || !amountIn || pending) { setQuote(null); return; }
     if (side === "sell" && !user) { setQuote(null); setQuoteErr("Connect a wallet to quote a sell"); return; }
+    if (!settled) return;
     let alive = true;
+    const ac = new AbortController();
     setQuoting(true);
     // Before a wallet connects, buys are simulated from a public probe key so the preview works.
-    quoteSwap(connection, user ?? QUOTE_PROBE, chain, side, amountIn)
-      .then((q) => { if (alive) { setQuote({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped, at: Date.now(), amountIn, side }); setQuoteErr(null); } })
+    const payer = user ?? QUOTE_PROBE;
+    const run: Promise<Omit<QuoteState, "at" | "amountIn" | "side">> = isJup
+      ? quoteJup(connection, payer, { mint: coinMint, tokenProgram: coinTokenProgram }, side, amountIn, jupSlip, ac.signal).then((q) => ({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped, jup: q }))
+      : quoteSwap(connection, payer, chain, side, amountIn).then((q) => ({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped }));
+    run
+      .then((q) => { if (alive) { setQuote({ ...q, at: Date.now(), amountIn, side }); setQuoteErr(null); setRetryAt(null); } })
       .catch((e) => {
         if (!alive) return;
         setQuote(null);
+        setRetryAt((e instanceof ApiError && [0, 429, 502, 503, 504].includes(e.status)) || e instanceof JupPriceMovedError ? Date.now() + RETRY_MS : null);
         const msg = friendlyError(e);
         // Before a wallet connects the preview pays from a public probe wallet (QUOTE_PROBE) holding a few hundredths of
         // a SOL: a bigger amount fails there for its balance, not the user's, so say what to do instead.
         setQuoteErr(!user && /not enough SOL|insufficient|short by|no SOL yet/i.test(msg) ? "Connect a wallet to quote this amount: the preview wallet holds less SOL than that." : msg);
       })
       .finally(() => { if (alive) setQuoting(false); });
-    return () => { alive = false; };
-  }, [chain, tradable, pending, amountIn, side, userKey, connection, user, nonce]);
+    // a dropped quote is no longer running (the next one, if any, sets it again in the same render)
+    return () => { alive = false; ac.abort(); setQuoting(false); };
+  }, [chain, tradable, pending, amountIn, side, userKey, connection, user, nonce, isJup, jupSlip, coinMint, coinTokenProgram, settled]);
 
   // The quote of exactly what the field holds (the debounce caught up, same amount, same side), or null: the sheet shows
   // it and the transaction is built from it, so the minimum always belongs to the amount being sent.
-  const settled = input.trim() === dInput;
-  const quoteFor = quote && amountIn != null && settled && quote.amountIn === amountIn && quote.side === side ? quote : null;
+  // A Jupiter quote also belongs to one wallet and one slippage: its build carries both.
+  const jupFits = (q: QuoteState) => !q.jup || (q.jup.taker === (userKey ?? QUOTE_PROBE.toBase58()) && q.jup.slippageBps === slippage);
+  const quoteFor = quote && amountIn != null && settled && quote.amountIn === amountIn && quote.side === side && jupFits(quote) ? quote : null;
   const sheetOpen = confirm && !!quoteFor && !!chain;
   const confirmRef = useDialog<HTMLDivElement>(sheetOpen, () => { setConfirm(false); setMoved(false); });
   // A sheet whose quote no longer matches closes (and so frees the page: useDialog's inert follows `sheetOpen`).
@@ -201,14 +226,24 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     if (!quote || quoting || busy || confirm || confirmWhenFresh || document.hidden) return;
     if (quoteAge >= REQUOTE_S) requote();
   }, [quote, quoteAge, quoting, busy, confirm, confirmWhenFresh, requote]);
+  // The retry after a passing refusal (never in a background tab: it waits for the next one).
+  useEffect(() => {
+    if (retryAt == null || quote || quoting || busy) return;
+    const t = setTimeout(() => { if (document.hidden) setRetryAt(Date.now() + RETRY_MS); else { setRetryAt(null); requote(); } }, Math.max(0, retryAt - Date.now()));
+    return () => clearTimeout(t);
+  }, [retryAt, quote, quoting, busy, requote]);
 
   // The priority fee from the network's recent fees on the route's venues, read again with every new quote.
+  // On the Jupiter route the venues are the pools of its last quote (unknown before the first one).
   const [micro, setMicro] = useState(CU_PRICE_MICRO);
-  const routeKey = chain ? `${chain.map((l) => l.mint).join(",")}:${side}` : "";
+  const jupVenues = isJup ? (quote?.jup?.ammKeys ?? []).join(",") : "";
+  const routeKey = chain ? `${chain.map((l) => l.mint).join(",")}:${side}:${jupVenues}` : "";
   useEffect(() => {
     if (!chain || !tradable) return;
     let alive = true;
-    let venues; try { venues = routeVenues(chain, side); } catch { return; }
+    let venues: PublicKey[];
+    try { venues = isJup ? jupVenues.split(",").filter(Boolean).map((k) => new PublicKey(k)) : routeVenues(chain, side); } catch { return; }
+    if (!venues.length) return;
     priorityMicroLamports(connection, venues).then((m) => { if (alive) setMicro(m); });
     return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -233,7 +268,9 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     if (!chain || !q || quoting || busy) { closeConfirm(); return; }
     setConfirm(false); setBusy(true); setSteps([]);
     try {
-      const { sig } = await runSwap(connection, wallet, chain, q.side, q.amountIn, q.amountOut, slippage, setSteps, { units: swapUnits(chain.length, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol });
+      const { sig } = q.jup
+        ? await runJupSwap(connection, wallet, q.jup, setSteps, { units: swapUnits(1, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol })
+        : await runSwap(connection, wallet, chain, q.side, q.amountIn, q.amountOut, slippage, setSteps, { units: swapUnits(chain.length, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol });
       toast.success(side === "buy" ? `Bought ${sym(coin)}` : `Sold ${sym(coin)}`, { href: solscanTx(sig), label: "view transaction" });
       setInput(""); setQuote(null); setSteps([]); setMoved(false);
       refreshBalances();
@@ -266,9 +303,11 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const hops = chain?.length ?? 0;
   // The compute limit the transaction is built with (the simulated use plus a margin, as buildSwapTx gets it); the
   // priority fee is paid on the whole limit, so this is the real worst case.
-  const units = swapUnits(hops, quoteFor ? quoteFor.units : null);
+  const units = swapUnits(isJup ? 1 : hops, quoteFor ? quoteFor.units : null);
   const networkFee = swapFeeLamports(units, micro);
-  const ataRent = side === "buy" && user && !bal.hasAta ? ataRentLamports(coin.tokenProgram) : 0n;
+  // Jupiter's route may open more than the coin's account (an intermediate asset's); its simulation measured them all.
+  const ataRent = isJup && quote?.jup && quote.jup.taker === userKey ? quote.jup.rent
+    : side === "buy" && user && !bal.hasAta ? ataRentLamports(coin.tokenProgram) : 0n;
   // What a buy must leave in the wallet besides the amount itself.
   const reserve = networkFee + ataRent + HEADROOM;
   const need = side === "buy" && amountIn ? amountIn + reserve : null;
@@ -277,7 +316,9 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const outSol = quote ? lamportsToSol(quote.amountOut) : null;
   const outLabel = quote ? (side === "buy" ? amount(outTokens, sym(coin)) : sol(outSol)) : null;
   const outUsd = quote ? (side === "buy" ? (coin.priceUsd != null ? usd(outTokens! * coin.priceUsd) : null) : (solUsd ? usd(outSol! * solUsd) : null)) : null;
-  const minOut = quote ? withSlippage(quote.amountOut, slippage) : null;
+  // A Jupiter minimum belongs to the slippage its build was asked with: after a change it waits for the new build.
+  const minPending = !!quote?.jup && quote.jup.slippageBps !== slippage;
+  const minOut = quote && !minPending ? (quote.jup ? quote.jup.minOut : withSlippage(quote.amountOut, slippage)) : null;
   const minLabel = minOut != null ? (side === "buy" ? amount(tokens(minOut, coin.decimals), sym(coin)) : sol(lamportsToSol(minOut))) : null;
   const inSol = amountIn && side === "buy" ? Number(amountIn) / 1e9 : null;
   const inTok = amountIn && side === "sell" ? tokens(amountIn, coin.decimals) : null;
@@ -286,11 +327,13 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   // pump's protocol and creator fees (they come out of the same route), which is what the user
   // actually loses versus spot.
   const spot = coin.priceSol;
-  const impact = quote && spot && spot > 0 && (inSol != null || inTok != null)
+  // only a quote of what the field holds: the old one, kept while a new amount is quoted, would mix two amounts
+  const sameQuote = !!quote && quote.amountIn === amountIn && quote.side === side;
+  const impact = sameQuote && spot && spot > 0 && (inSol != null || inTok != null)
     ? (side === "buy" ? 1 - outTokens! / (inSol! / spot) : 1 - outSol! / (inTok! * spot))
     : null;
   const impactTone = impact == null ? "" : impact > 0.15 ? "bad" : impact > 0.05 ? "warn" : "";
-  const effPrice = quote && inSol != null && outTokens ? inSol / outTokens : quote && inTok && outSol != null ? outSol / inTok : null;
+  const effPrice = sameQuote && inSol != null && outTokens ? inSol / outTokens : sameQuote && inTok && outSol != null ? outSol / inTok : null;
   const stale = quote && quoteAge >= STALE_S;
   const tokenBal = bal.token != null ? tokens(bal.token, coin.decimals) : null;
   const solBal = bal.sol != null ? lamportsToSol(bal.sol) : null;
@@ -309,19 +352,30 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
 
   // The route as chips: SOL → $ROOT → … → $COIN on a buy, the reverse on a sell.
   const routeCoins = route.data ? [...route.data.coins].reverse() : [];
+  // On the Jupiter route: the mints its last quote passes (SOL → USDC → $HYPE → coin), or SOL → the asset → the coin
+  // before one; the asset is the coin's quote, named from the coin's record.
+  const jupLegs = isJup && quote?.jup && quote.jup.side === side ? quote.jup.legs : null;
+  const jupMints = !isJup ? [] : jupLegs ? (side === "sell" ? jupPath(jupLegs).reverse() : jupPath(jupLegs)) : [SOL_MINT, ...(coin.quoteMint ? [coin.quoteMint] : []), coin.mint];
+  const mintLabel = (m: string) => (m === SOL_MINT ? "SOL" : m === coin.mint ? sym(coin) : m === coin.quoteMint ? assetLabel(coin.quoteSymbol) : KNOWN_MINTS[m] ?? `${m.slice(0, 4)}…`);
   // SOL first, then the listed asset whose SOL pool the route starts in (when it does), the root, …, the coin.
-  const path: { key: string; label: string; image: string | null; symbol: string | null }[] = route.data
-    ? [{ key: "quote", label: "SOL", image: null, symbol: null },
+  const path: { key: string; label: string; image: string | null; symbol: string | null }[] = !route.data ? []
+    : isJup ? jupMints.map((m) => (m === SOL_MINT ? { key: "quote", label: "SOL", image: null, symbol: null } : { key: m, label: mintLabel(m), image: m === coin.mint ? coin.image : null, symbol: m === coin.mint ? coin.symbol : mintLabel(m).replace(/^\$/, "") }))
+    : [{ key: "quote", label: "SOL", image: null, symbol: null },
       ...(asset ? [{ key: asset.mint, label: assetLabel(asset.symbol), image: null, symbol: asset.symbol }] : []),
-      ...routeCoins.map((c) => ({ key: c.mint, label: sym(c), image: c.image, symbol: c.symbol }))]
-    : [];
+      ...routeCoins.map((c) => ({ key: c.mint, label: sym(c), image: c.image, symbol: c.symbol }))];
   if (side === "sell") path.reverse();
   const parent = coin.ancestors[0] ?? null;
   // The first coin the route passes through on the way to this one: the parent, or the asset's pool for a root.
   const via = parent ? sym(parent) : asset ? assetLabel(asset.symbol) : null;
-  const routeNote = hops <= 1 || !via ? null
+  const jupVia = isJup ? assetLabel(coin.quoteSymbol) : null;
+  const jupVenueNames = jupLegs ? [...new Set(jupLegs.map((l) => l.label))].join(", ") : null;
+  const routeNote = isJup
+    ? (side === "buy" ? `Jupiter routes your SOL into ${jupVia}, then ${sym(coin)}'s ${coin.migrated ? "pool" : "curve"}, in one transaction` : `Jupiter routes ${sym(coin)} back through ${jupVia} to SOL, in one transaction`) + (jupVenueNames ? ` (via ${jupVenueNames}).` : ".")
+    : hops <= 1 || !via ? null
     : side === "buy" ? (parent ? `Buying ${sym(coin)} also buys ${via}: your SOL routes through every parent.` : `Your SOL buys ${via} in its PumpSwap pool first, then ${sym(coin)} with it, in one transaction.`)
     : `Selling routes back through ${via} to SOL.`;
+  const legCount = jupLegs ? jupLegs.length : null;
+  const routeHops = isJup ? `Jupiter${legCount ? ` · ${legCount} leg${legCount === 1 ? "" : "s"}` : ""} · one transaction` : hops <= 1 ? "1 hop" : `${hops} hops · one transaction`;
   const tokenUsd = tokenBal != null && coin.priceUsd != null ? tokenBal * coin.priceUsd : null;
   const primary = busy ? "Working…"
     : blocker ?? (!amountIn ? (side === "buy" ? "Enter an amount of SOL" : `Enter an amount of ${sym(coin)}`)
@@ -349,7 +403,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
       {route.error && !route.data && <ErrorBox error={route.error} retry={route.reload} compact />}
       {route.data && tradable && (
         <div className="route-chips">
-          <div className="route-k"><span className="card-label">Route</span><span className="route-hops mono">{hops <= 1 ? "1 hop" : `${hops} hops · one transaction`}</span></div>
+          <div className="route-k"><span className="card-label">Route</span><span className="route-hops mono">{routeHops}</span></div>
           <ol className="sr-only" aria-label={`Route: ${path.map((p) => p.label).join(" to ")}`}>
             {path.map((p) => <li key={p.key}>{p.label}</li>)}
           </ol>
@@ -422,20 +476,23 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
 
           {!amountIn ? <p className="quote-line">Preview is simulated on-chain — exactly what the program will do.</p> : (
             <div className={`quote ${stale ? "stale" : ""}`} aria-live="polite">
-              {quoting && !quote ? <div className="quote-empty muted"><i className="spin" aria-hidden="true" /> Simulating {hops} hop{hops === 1 ? "" : "s"}…</div>
-                : quoteErr ? <div className={`quote-err ${quoteErr.startsWith("Connect a wallet") ? "muted" : "bad"}`}>{quoteErr}</div>
-                : quote ? (
+              {/* the numbers of a quote of what the field holds only: while another amount is asked, the panel says so */}
+              {!sameQuote && !quoteErr && (quoting || !settled || !!quote) ? <div className="quote-empty muted"><i className="spin" aria-hidden="true" /> {isJup ? "Asking Jupiter for a route…" : `Simulating ${hops} hop${hops === 1 ? "" : "s"}…`}</div>
+                : quoteErr ? <div className={`quote-err ${quoteErr.startsWith("Connect a wallet") ? "muted" : "bad"}`}>{quoteErr}{isJup && /no route/i.test(quoteErr) && <> <Ext href={pumpUrl(coin.mint)}>Trade on pump.fun ↗</Ext></>}{!quoteErr.startsWith("Connect a wallet") && <> <button type="button" className="linkish" disabled={quoting} onClick={() => { setRetryAt(null); requote(); }}>↻ retry</button></>}</div>
+                : sameQuote && quote ? (
                   <>
                     <div className="quote-main">
                       <span>You receive <small className="muted">(estimated)</small></span>
                       <b className={side === "buy" ? "accent" : "violet"}>{outLabel}</b>
                       {outUsd && <small className="quote-usd mono muted">≈ {outUsd}</small>}
                     </div>
-                    <div><span>Min. received <small className="muted">after {slippage / 100}%</small></span><b>{minLabel}</b></div>
+                    <div><span>Min. received <small className="muted">after {slippage / 100}%</small></span><b className={minPending ? "muted" : undefined}>{minPending ? "requoting…" : minLabel}</b></div>
                     {impactText && <div><span><Term k="impact">Price impact</Term> <small className="muted">vs spot, fees included</small></span><b className={impactTone} title={`Spot ${sol(spot)} per ${sym(coin)}; simulated fill ${effPrice != null ? sol(effPrice) : "—"}`}>{impactText}</b></div>}
                     <div><span>Network fee</span><b title={`${units.toLocaleString("en-US")} CU limit × ${micro / 1e6} lamports priority (recent fees on this route) + 5 000 base`}>{feeSol(networkFee)}{ataRent > 0n && <small className="muted"> + {feeSol(ataRent)} account rent</small>}</b></div>
                     {quote.unwrapped > 0n && <div><span>Wrapped SOL</span><b className="muted" title="Your wallet already holds a wrapped-SOL account; the route closes it, so its balance and rent come back as plain SOL in the same transaction">{sol(lamportsToSol(quote.unwrapped))} unwrapped to SOL</b></div>}
-                    <div><span>pump fees</span><b className="muted" title={`Charged inside the route (protocol fee on the SOL hop, creator fee on ${sym(coin)}), so they are already inside the figures above`}>inside the quote</b></div>
+                    {isJup
+                      ? <div><span>Route fees</span><b className="muted" title={`Each venue's fee (the pools on the way, pump's protocol and creator fees on ${sym(coin)}) comes out of the route, so it is already inside the figures above. Jupiter's /build adds no fee of its own.`}>inside the quote</b></div>
+                      : <div><span>pump fees</span><b className="muted" title={`Charged inside the route (protocol fee on the SOL hop, creator fee on ${sym(coin)}), so they are already inside the figures above`}>inside the quote</b></div>}
                     <div className="quote-age">
                       <span className={stale ? "warn" : "muted"}>{quoting ? "refreshing…" : `quoted ${quoteAge}s ago`}</span>
                       <button type="button" className="linkish" disabled={quoting} onClick={requote}>↻ refresh</button>
@@ -459,7 +516,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
               </span>
             </div>
           )}
-          <p className="trade-foot"><LockGlyph />Built in your browser, signed by your wallet.{coin.priceSol == null && " Spot price unavailable, so no impact figure."}</p>
+          <p className="trade-foot"><LockGlyph />Built in your browser, signed by your wallet.{isJup && <> Route by <Ext href="https://jup.ag">Jupiter</Ext> (Metis).</>}{coin.priceSol == null && " Spot price unavailable, so no impact figure."}</p>
         </>
       )}
 
@@ -473,12 +530,12 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
               <div><span>You receive ≈</span><b className={side === "buy" ? "accent" : "violet"}>{outLabel}{outUsd && <small> ≈ {outUsd}</small>}</b></div>
               <div><span>Minimum ({slippage / 100}% slippage)</span><b>{minLabel}</b></div>
               {impactText && <div><span>Price impact</span><b className={impactTone}>{impactText}</b></div>}
-              <div><span>Route</span><b className="route">{routeLabels(chain, refs, side).join(" → ")}</b></div>
-              <div><span>Network fee</span><b>{feeSol(networkFee + ataRent)}</b></div>
+              <div><span>Route</span><b className="route">{isJup ? `${path.map((p) => p.label).join(" → ")} · Jupiter` : routeLabels(chain, refs, side).join(" → ")}</b></div>
+              <div><span>{ataRent > 0n ? "Network fee + account rent" : "Network fee"}</span><b>{feeSol(networkFee + ataRent)}</b></div>
               {quote.unwrapped > 0n && <div><span>Wrapped SOL</span><b>{sol(lamportsToSol(quote.unwrapped))} back as SOL</b></div>}
               <div><span>Quote age</span><b className={stale ? "warn" : ""}>{quoteAge}s{stale ? " · consider refreshing" : ""}</b></div>
             </div>
-            <p className="hint">Spore simulates this exact transaction before your wallet opens; if the price has moved past the minimum, it stops and shows new numbers. On-chain, the trade fails (nothing charged beyond the network fee) if the fill falls below the minimum.</p>
+            <p className="hint">Spore simulates this exact transaction before your wallet opens; if the price has moved past the minimum, it stops and shows new numbers. On-chain, the trade fails (nothing charged beyond the network fee) if the fill falls below the minimum.{isJup && " The route and its minimum are Jupiter's; Spore checked that the transaction only swaps and sets up your own token accounts."}</p>
             <div className="confirm-actions">
               <button type="button" className="btn ghost" onClick={() => { closeConfirm(); requote(); }}>Refresh quote</button>
               <button type="button" className={`btn ${side === "buy" ? "accent" : "violet"}`} disabled={quoting || busy} onClick={go}>{side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`}</button>

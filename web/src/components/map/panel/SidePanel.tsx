@@ -243,8 +243,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
       </div>
     ) : routeFor ? (
       <div className="map-side-trade">
-        <button type="button" className="btn buy" onClick={() => onTrade("buy", c)} title={`Buy ${sym(node)} with SOL (B)`}>Buy</button>
-        <button type="button" className="btn sell" onClick={() => onTrade("sell", c)} title={`Sell ${sym(node)} for SOL`}>Sell</button>
+        <button type="button" className="btn buy" onClick={() => onTrade("buy", c)} title={`Buy ${sym(node)} with SOL${routeFor.via === "jupiter" ? " through Jupiter" : ""} (B)`}>Buy</button>
+        <button type="button" className="btn sell" onClick={() => onTrade("sell", c)} title={`Sell ${sym(node)} for SOL${routeFor.via === "jupiter" ? " through Jupiter" : ""}`}>Sell</button>
       </div>
     ) : trade.error ? (
       <div className="map-side-trade blocked">

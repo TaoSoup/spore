@@ -55,6 +55,8 @@ export function friendlyError(e: unknown): string {
   if (/user rejected|rejected the request|cancel|declined/i.test(raw) || name === "WalletSignTransactionError" || name === "WalletSendTransactionError" && /reject/i.test(raw)) return "You cancelled in the wallet. Nothing was sent.";
   // The swap's last simulation caught it before the wallet opened (flow.ts runSwap): nothing was signed.
   if (name === "PriceMovedError") return raw;
+  // The Jupiter route's own refusals (lib/jup.ts) already say what happened, in the user's words.
+  if (name === "JupPriceMovedError" || name === "JupRouteError") return raw;
   const short = text.match(/insufficient lamports (\d+), need (\d+)/i);
   if (short) return `Not enough SOL: the wallet is short by ${fmtSol(Number(short[2]) - Number(short[1]))}. Top up and try again.`;
   if (/found no record of a prior credit|AccountNotFound/i.test(text)) return "The wallet has no SOL yet. Fund it, then try again.";

@@ -85,6 +85,7 @@ The unit is sandboxed (`ProtectSystem=strict`): writable paths are only `server/
 | out | any public https host | off-chain metadata JSON of coins (DNS-checked against private ranges, redirects re-validated, 512 KB cap) |
 | out | image allowlist (ipfs.io, pinata, pump.fun, arweave, `PAGES_DOMAIN`) | image proxy `/api/img` (4 MB cap, magic-byte sniffed, an SVG logo drawn into a PNG on the image worker and never served as SVG, 24 h disk cache) |
 | out | Cloudflare API via `npx wrangler` | publishing `deploy/pages/public` after an upload (single-flight, 240 s timeout) |
+| out | `api.jup.ag` (`JUP_URL`) | quick-trade quotes for coins priced in a listed asset with no pump SOL pool: Jupiter's Swap API v2 `/build`, one request at a time at `JUP_RPS` (0.5/s keyless), 10 s timeout, 2 MB cap; `JUPITER=0` turns it off |
 | in | `:8793` from the proxy | everything else |
 
 ## 6. Backfill time and RPC budget
@@ -146,8 +147,8 @@ left to accumulate.
 - `GET /api/health` → `{ ok, status, uptimeS, indexer: { phase, lagS, backfill }, ws: { connected, lastMessageAgoMs }, rpc, meta, images, metahost, treasury, sse, memoryMb }`.
   `ok` is false when the WebSocket has been down for over two minutes or the refresh loop has not run
   for five; `GET /api/health?strict=1` then answers **503** for a load-balancer probe.
-- Rate limits per client IP (configurable `RATE_*`): API reads 300/min, image proxy 900/min, RPC proxy
-  60/min, upload 5/10 min (refunded when validation rejects), spawn report 20/10 min. Responses carry
+- Rate limits per client IP (configurable `RATE_*`): API reads 300/min, image proxy 6000/min, RPC proxy
+  60/min, Jupiter quotes 20/min (on top of the API reads), upload 120/10 min (refunded when validation rejects), spawn report 200/10 min. Responses carry
   `X-RateLimit-Limit/Remaining/Reset/Policy`; a 429 adds `Retry-After` and `{ error, retryAfter }`.
 - Logging: one line per error, per request over 1 s, and a `LOG_SAMPLE` fraction (default 10%) of the
   rest, as `http: GET /api/feed 200 3.2ms 1842B 203.0.113.9`. The RPC key is redacted. PM2 writes
