@@ -204,7 +204,9 @@ export function createDiffState(nodes: readonly BubbleNode[]): DiffState {
 
 /// A known coin's change for EngineHandle.patchCoins: the market cap always, `image` only when the logo URL changed.
 export type NodePatch = { mint: string; mcapUsd: number | null; image?: string | null };
-export type NodeDiff = { births: { coin: BubbleNode; parent: BubbleNode | null }[]; patches: NodePatch[]; unknown: number; removed: number; wanted: string[] };
+/// `relinked`: known coins whose family in the engine is not the one their parent in the page puts them in (the engine never
+/// moves a built coin: a parent learned after the build, such as a cache from before a server fix, needs a rebuild).
+export type NodeDiff = { births: { coin: BubbleNode; parent: BubbleNode | null }[]; patches: NodePatch[]; unknown: number; removed: number; wanted: string[]; relinked: string[] };
 /// A filtered (compact) build's diff rules; absent = every unknown coin counts (a mask-15 build: today's behaviour).
 export type DiffOpts = {
   /** Only these unknown coins count (their class is in the mask, or they are pinned); the rest were left out on purpose. */
@@ -213,6 +215,10 @@ export type DiffOpts = {
   wantMax?: number;
   /** A birth may hang from a parent the engine does not know but the page holds (the engine reveals the parent first). */
   pageParents?: boolean;
+  /** The engine's family top of a coin (EngineHandle.topOf): with it, known coins are checked against their page parent. */
+  topOf?: (mint: string) => string | null;
+  /** Check every known coin, not only the ones whose node changed since the last pass (the first pass after a build). */
+  checkAll?: boolean;
 };
 
 /// One pass over the node list (spec 5.7), O(n):
@@ -226,16 +232,27 @@ export type DiffOpts = {
 /// - removed: coins in the state's set (what the engine built, plus coins recorded since) that are no
 ///   longer in the list.
 /// Updates `state.seen` for the known coins. `o`: a filtered build's rules (DiffOpts).
+/// The most mismatched coins one node pass reports (NodeDiff.relinked): one is enough to rebuild.
+const RELINK_MAX = 64;
+
 export function diffNodes(state: DiffState, nodes: readonly BubbleNode[], byMint: ReadonlyMap<string, BubbleNode>, knows: (mint: string) => boolean, nowS: number, o: DiffOpts = {}): NodeDiff {
   const births: NodeDiff["births"] = [], patches: NodeDiff["patches"] = [], wanted: string[] = [];
   const seen = state.seen, want = o.wanted, wantMax = o.wantMax ?? 0, pageParents = !!o.pageParents;
   const minCreated = nowS - BIRTH_MAX_AGE_S;
   let unknown = 0, present = 0;
+  const relinked: string[] = [];
+  const topOf = o.topOf, checkAll = !!o.checkAll;
   for (const n of nodes) {
     const m = n.mint;
     const prev = seen.get(m);
     if (prev !== undefined) present++;
     if (knows(m)) {
+      // the engine's family of this coin against the page's: a page root must be its own top; a coin whose page parent the
+      // engine holds must share that parent's top (a parent outside a filtered build is not checked)
+      if (topOf && (checkAll || prev !== n)) {
+        const pm = n.parentMint, t = topOf(m);
+        if (t != null && relinked.length < RELINK_MAX && (!pm || pm === m || !byMint.has(pm) ? t !== m : knows(pm) && topOf(pm) !== t)) relinked.push(m);
+      }
       if (prev === n) continue;
       if (prev !== undefined) {
         if ((prev.image ?? null) !== (n.image ?? null)) patches.push({ mint: m, mcapUsd: n.mcapUsd, image: n.image ?? null });
@@ -253,7 +270,7 @@ export function diffNodes(state: DiffState, nodes: readonly BubbleNode[], byMint
     else if (!want) unknown++;
     else if (want(n)) { unknown++; if (wanted.length < wantMax) wanted.push(m); }
   }
-  return { births, patches, unknown, removed: Math.max(0, seen.size - present), wanted };
+  return { births, patches, unknown, removed: Math.max(0, seen.size - present), wanted, relinked };
 }
 
 /// (compact layout) A node pass's live reveals (use-engine-sync): the wanted mints in order, until `max` of them got an answer
@@ -278,7 +295,7 @@ export function filteredUnknown(unknown: number, collected: number, stillOut: nu
   return Math.max(0, unknown - Math.max(0, collected - (stillOut ?? collected)));
 }
 /// card: (compact layout) a coin card is open (the page has a selection); read by the filtered branch only.
-export type DriftInput = { unknown: number; removed: number; coins: number; idleMs: number; sinceBuildMs: number; firstSyncAfterCache: boolean; filtered?: FilteredDrift; card?: boolean };
+export type DriftInput = { unknown: number; removed: number; coins: number; idleMs: number; sinceBuildMs: number; firstSyncAfterCache: boolean; filtered?: FilteredDrift; card?: boolean; relinked?: number };
 
 /// Rebuild when the drawn set drifted from the data by max(200, 1 % of the coins) and the map is idle:
 /// 3 s idle on the first sync after a cache paint, else 10 s idle and at least 10 min since the build.
@@ -294,6 +311,9 @@ export type DriftInput = { unknown: number; removed: number; coins: number; idle
 /// (compact layout) how old a filtered build must be before a coin wanted from a family it left out re-compacts it by itself.
 export const FAMILY_WAKE_MS = 1_800_000;
 export function shouldRebuild(d: DriftInput): boolean {
+  // a coin drawn in the wrong family (NodeDiff.relinked) is wrong on screen, not drift: rebuild once the map is idle (3 s),
+  // whatever the build's age, an open coin card included (it is likely the coin drawn in the wrong place)
+  if ((d.relinked ?? 0) > 0) return d.idleMs >= 3_000;
   const f = d.filtered;
   if (f) {
     if (d.card) return false;

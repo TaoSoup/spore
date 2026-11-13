@@ -80,13 +80,17 @@ const nowLike = (t: number) => (t > 1e12 ? Date.now() : performance.now());
 /// engine of this mount; driftAt / heatAt: the last onDrift (page ms) and the last heat poll sent (unix s).
 /// unknown / removed: the last node pass's counts (the drift checks between passes reuse them); wanted: (compact layout) the
 /// wanted unknown mints of that pass (at most WANTED_KEEP), which the drift checks count once against the engine's missed set.
-type PerEngine = { engine: EngineHandle | null; errors: number; diff: DiffState | null; seq: number; driftAt: number; heatAt: number; unknown: number; removed: number; wanted: string[] };
-const perEngine = (engine: EngineHandle | null, seq: number): PerEngine => ({ engine, errors: 0, diff: null, seq, driftAt: -Infinity, heatAt: -Infinity, unknown: 0, removed: 0, wanted: [] });
+/// relinked: coins the engine draws in another family than their page parent (adapter diffNodes), summed until the rebuild;
+/// checked: the first node pass of this engine compared every known coin (later passes only the changed ones).
+type PerEngine = { engine: EngineHandle | null; errors: number; diff: DiffState | null; seq: number; driftAt: number; heatAt: number; unknown: number; removed: number; wanted: string[]; relinked: number; checked: boolean };
+const perEngine = (engine: EngineHandle | null, seq: number): PerEngine => ({ engine, errors: 0, diff: null, seq, driftAt: -Infinity, heatAt: -Infinity, unknown: 0, removed: 0, wanted: [], relinked: 0, checked: false });
 
 
 export function useEngineSync(p: EngineSyncParams): EngineSync {
   const props = useRef(p);
   props.current = p;
+  // the coins that already asked for a rebuild because the engine drew them in another family than their page parent
+  const relinkTried = useRef(new Set<string>());
   const st = useRef<EngineSyncStats>({ dataMsLast: 0, dataMsMax: 0, births: 0, patches: 0, unknown: 0, removed: 0, events: 0, heatAt: 0, feed: "down" });
   const record = (ms: number) => { const s = st.current; s.dataMsLast = ms; if (ms > s.dataMsMax) s.dataMsMax = ms; };
 
@@ -121,7 +125,7 @@ export function useEngineSync(p: EngineSyncParams): EngineSync {
       unknown, removed: c.removed, coins: q.nodes.length,
       idleMs: Math.max(0, nowLike(li) - li), sinceBuildMs,
       firstSyncAfterCache: quickAfterCache({ firstBuildFromCache: q.firstBuildFromCache, seq: c.seq, cacheInput: !!q.cacheInput, sinceBuildMs }, CACHE_SYNC_WINDOW_MS),
-      filtered, card: q.select != null,
+      filtered, card: q.select != null, relinked: c.relinked,
     };
     const now = performance.now();
     if (shouldRebuild(input)) { if (now - c.driftAt >= DRIFT_REPEAT_MS) { c.driftAt = now; q.onDrift("drift"); } return false; }
@@ -261,7 +265,12 @@ export function useEngineSync(p: EngineSyncParams): EngineSync {
           o.wanted = (n) => pin.has(n.mint) || ((mk >> coinClass(n, h)) & 1) === 1;
           o.wantMax = WANTED_KEEP; o.pageParents = true;
         }
+        o.topOf = (m) => e.topOf(m); o.checkAll = !c.checked;
         const d = diffNodes(c.diff, q.nodes, q.byMint, (m) => e.knows(m), Date.now() / 1000, o);
+        // each coin may ask for one rebuild per page: one the rebuild cannot fix (a parent cycle the build broke) never loops
+        c.checked = true;
+        for (const m of d.relinked) if (!relinkTried.current.has(m)) { relinkTried.current.add(m); c.relinked++; }
+        if (c.relinked) { try { evalDrift(); } catch (err) { fail(err); } }
         for (const b of d.births) {
           try { e.applyEvent({ name: "pair", data: { coin: b.coin, parent: b.parent } }); } catch (err) { fail(err); }
         }

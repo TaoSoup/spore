@@ -151,7 +151,10 @@ export function useMapData({ stress = 0, enabled = true }: { stress?: number; en
         fullAtRef.current = at; setFullAt(at);
         // the full set, so an empty cache is filled even when nothing "changed"; the "full" stamp only
         // once those rows are stored, so it never claims a complete cache that is not
-        void saveNodes(norm.nodes, gen.current, removed).then(() => saveFull(at));
+        // The set as merged, not the body's raw list: a nested listed asset ($baton under PUMP) is in that list twice, and
+        // the cache keeps one row per mint, so writing the list stored the copy that came last (its own top: no parent),
+        // and the next visit painted it as a root of its own until a full load (Nov 13 2026).
+        void saveNodes(Array.from(s.values()), gen.current, removed).then(() => saveFull(at));
       } else if (changed.length || removed.length) { bump(); markDirty(changed); if (removed.length) void saveNodes([], gen.current, removed); }
       else void saveNodes([], gen.current); // only the stamp moved
     }).catch((e) => {

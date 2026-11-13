@@ -47,8 +47,16 @@ export function upsert(set: NodeSet, incoming: BubbleNode[]): BubbleNode[] {
   for (const n of incoming) {
     const cur = set.get(n.mint);
     if (cur && sameNode(cur, n)) { if (n.updatedAt && n.updatedAt !== cur.updatedAt) cur.updatedAt = n.updatedAt; continue; }
+    // A listed asset that is a coin quoted in another listed asset ($baton and $pill in PUMP) comes twice: as a coin under
+    // that asset and as the top of its own family (`asset`, no parent, `migrated: false`, its family's numbers). The client
+    // keeps ONE node, the coin under its parent, whatever order the copies arrive in: the top copy never overwrites it,
+    // and the coin copy replaces a top copy held before, `asset` flag included (left on, the map would draw the coin as a
+    // family top of its own, size it as an asset, and the panel would read "migrating" for a graduated coin).
+    const topCopy = n.asset === true && !n.parentMint;
+    if (cur && topCopy && cur.parentMint && cur.asset !== true) { if (n.updatedAt && n.updatedAt !== cur.updatedAt) cur.updatedAt = n.updatedAt; continue; }
     // A delta row without a parent for a non-root keeps the parent the client already knows.
     const merged: BubbleNode = cur ? { ...cur, ...n, parentMint: n.parentMint ?? cur.parentMint, x: cur.x, y: cur.y } : n;
+    if (cur && n.asset !== true && merged.asset === true && n.parentMint) delete merged.asset;
     set.set(n.mint, merged);
     changed.push(merged);
   }
