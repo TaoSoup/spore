@@ -699,4 +699,4 @@
 
 /* Six nav items plus the API pill and the wallet button just fit from ~900 px up. In the tablet band
    above the phone sheet the items tighten instead of wrapping onto two lines. */
-@media (min-width: 761px) and (max-width: 900px) { .nav-inner { gap: 12px; } .nav-links { gap: 0; } .nav-links a { padding: 7px 8px; } }
+@media (min-width: 761px) and (max-width: 900px) { .nav-inner { gap: 12px; } .nav-links { gap: 0; } .nav-links > a { padding: 7px 8px; } }

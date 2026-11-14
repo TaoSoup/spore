@@ -183,7 +183,9 @@ test("relayKind: pump at the top, a Jupiter swap with only setup around it, or n
   assert.equal(relayKind(tx([cb, pumpIx])), "pump");
   assert.equal(relayKind(tx([cb, wrap, jupIx([PUMP])])), "jupiter");
   assert.equal(relayKind(tx([jupIx(), new TransactionInstruction({ programId: MEMO, keys: [], data: Buffer.from("hi") })])), null, "another program beside Jupiter");
-  assert.equal(relayKind(tx([cb, wrap])), null, "no swap at all");
+  const assign = SystemProgram.assign({ accountPubkey: someone(), programId: someone() });
+  assert.equal(relayKind(tx([cb, assign])), null, "no swap and no plain transfer");
+  assert.equal(relayKind(tx([cb, wrap])), "transfer", "a plain transfer is its own kind (the trading wallet's)");
   assert.equal(relayKind("not a transaction"), null);
   // what a 1,232-byte transaction can be, no more: longer strings are refused undecoded, padding after a transaction too
   const t = tx([cb, jupIx([PUMP])]);
@@ -196,7 +198,19 @@ test("relayKind: pump at the top, a Jupiter swap with only setup around it, or n
   assert.match(rpcParamsError("simulateTransaction", ["A".repeat(1_648), { encoding: "base64" }]), /too large/);
   assert.equal(rpcParamsError("simulateTransaction", [t, { encoding: "base64" }]), null);
   assert.equal(rpcParamsError("simulateTransaction", [tx([cb, jupIx()]), { encoding: "base64" }]), null, "the shape passes; the pump check is the route's");
-  assert.match(rpcParamsError("sendTransaction", [tx([cb, wrap]), { encoding: "base64" }]), /only pump\.fun/);
+  assert.match(rpcParamsError("sendTransaction", [tx([cb, assign]), { encoding: "base64" }]), /only pump\.fun/);
+});
+
+test("relayKind: one or two plain SOL transfers (the trading wallet's deposits and withdrawals), nothing more", () => {
+  const a = someone(), b = someone();
+  const send = (lamports) => SystemProgram.transfer({ fromPubkey: a, toPubkey: b, lamports });
+  assert.equal(relayKind(tx([send(1)])), "transfer");
+  assert.equal(relayKind(tx([cb, send(1), send(2)])), "transfer", "with a compute budget, two transfers");
+  assert.equal(relayKind(tx([send(1), send(2), send(3)])), null, "three is not a deposit or a withdrawal");
+  assert.equal(relayKind(tx([SystemProgram.assign({ accountPubkey: a, programId: b })])), null, "another System instruction");
+  assert.equal(relayKind(tx([SystemProgram.createAccount({ fromPubkey: a, newAccountPubkey: b, lamports: 1, space: 0, programId: b })])), null);
+  assert.equal(relayKind(tx([send(1), new TransactionInstruction({ programId: MEMO, keys: [], data: Buffer.from("x") })])), null, "a transfer beside another program");
+  assert.equal(relayKind(tx([cb])), null, "no transfer at all");
 });
 
 test("jupiterTouchesPump: a pump program among its static keys or in a lookup table it uses", async () => {

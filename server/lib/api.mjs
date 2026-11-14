@@ -102,6 +102,8 @@ const PUMP_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.t
 const JUP_TOP_PROGRAMS = new Set([JUPITER_PROGRAM, "ComputeBudget111111111111111111111111111111", "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "11111111111111111111111111111111"]);
 const ALT_PROGRAM = "AddressLookupTab1e1111111111111111111111111";
+const SYSTEM_PROGRAM = "11111111111111111111111111111111";
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
 /// A transaction is at most 1,232 bytes: 1,644 characters in base64, 1,683 in base58. Longer strings are refused before
 /// any decoding (the base58 decoder's cost grows with the square of the length), and so are bytes past 1,232.
 export const TX_MAX_BYTES = 1_232;
@@ -125,7 +127,8 @@ export function txMessage(encoded, encoding = "base64") {
 }
 /// What a serialized transaction is for the relay: "pump" (a pump program at the top level), "jupiter" (a Jupiter swap
 /// with nothing but JUP_TOP_PROGRAMS at the top level: relayed once jupiterTouchesPump finds a pump program in its
-/// accounts), or null.
+/// accounts), "transfer" (one or two plain SOL transfers, compute budget aside: the trading wallet's deposits and
+/// withdrawals, web/src/lib/trading-wallet.ts), or null.
 export function relayKind(encoded, encoding = "base64") {
   try {
     const msg = txMessage(encoded, encoding);
@@ -134,6 +137,9 @@ export function relayKind(encoded, encoding = "base64") {
     const top = msg.compiledInstructions.map((ix) => keys[ix.programIdIndex]);
     if (top.some((p) => PUMP_PROGRAMS.has(p))) return "pump";
     if (top.includes(JUPITER_PROGRAM) && top.every((p) => JUP_TOP_PROGRAMS.has(p))) return "jupiter";
+    const transfers = msg.compiledInstructions.filter((ix) => keys[ix.programIdIndex] === SYSTEM_PROGRAM);
+    if (transfers.length >= 1 && transfers.length <= 2 && top.every((p) => p === SYSTEM_PROGRAM || p === COMPUTE_BUDGET_PROGRAM)
+      && transfers.every((ix) => ix.data.length === 12 && Buffer.from(ix.data).readUInt32LE(0) === 2)) return "transfer";
     return null;
   } catch { return null; }
 }

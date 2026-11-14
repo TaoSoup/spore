@@ -1,0 +1,43 @@
+/* The trading wallet's panel (components/TradingWallet.tsx). The panel is the confirm dialog's
+   shell (.confirm in coin.css), a little wider. */
+
+.tw-panel { width: min(480px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.tw-badge { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: rgba(182,255,92,.12); color: var(--accent); }
+.tw-body { display: grid; gap: 12px; }
+.tw-points { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.tw-points b { color: var(--ink); font-weight: 600; }
+.tw-mode { justify-self: start; }
+.tw-check { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; color: var(--ink-2); line-height: 1.45; cursor: pointer; }
+.tw-check input { margin-top: 2px; accent-color: var(--accent); flex: none; }
+.tw-secret-in { resize: vertical; min-height: 64px; font-size: 12px; overflow-wrap: anywhere; }
+.tw-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tw-row > .input { flex: 1 1 140px; min-width: 0; }
+.tw-full { flex-basis: 100%; }
+.tw-small { justify-self: center; font-size: 12px; }
+.tw-key { display: grid; gap: 8px; }
+.tw-key code { display: block; padding: 10px 12px; border-radius: 10px; background: var(--bg-2, rgba(255,255,255,.04)); border: 1px dashed rgba(255,190,90,.45); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; user-select: all; }
+.tw-head-row { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.tw-head-row > div:first-child { display: grid; gap: 2px; }
+.tw-balance { font-size: 22px; font-weight: 600; color: var(--ink); }
+.tw-addr { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.tw-addr code { color: var(--ink-2); }
+.tw-section { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.tw-section .quick { display: flex; gap: 6px; flex-wrap: wrap; }
+.tw-section small { font-size: 12px; line-height: 1.45; }
+.tw-section small.bad { color: var(--bad); }
+.tw-confirm { display: grid; gap: 8px; padding: 10px 12px; border-radius: 12px; background: rgba(182,255,92,.06); border: 1px solid rgba(182,255,92,.25); font-size: 13px; }
+.tw-setting { justify-content: space-between; font-size: 13px; color: var(--ink-2); }
+.tw-instant { display: inline-flex; align-items: center; gap: 6px; }
+.tw-instant .input { width: 84px; text-align: right; }
+.tw-instant em { font-style: normal; color: var(--muted); font-size: 12px; }
+.tw-work { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 0; }
+.tw-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--line); }
+
+/* the trade widget's "Pay from" line */
+.trade-payer { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.trade-payer .seg button { font-size: 12px; }
+.trade-payer .tw-pay { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-family: var(--mono); }
+.trade-payer .linkish { display: inline-flex; align-items: center; gap: 5px; }
+.trade-tw-offer { justify-self: center; display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; margin-top: -4px; }
+.tw-check.bad { color: var(--bad); }
+.tw-check.muted { opacity: .55; }

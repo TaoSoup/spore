@@ -16,6 +16,7 @@ import { AGENT_SEED_LAMPORTS, MAX_LAUNCH_FEE_LAMPORTS, PLATFORM_WALLET, PolicyEr
 import { splitShares, type Share } from "./pump/shares";
 import { buildFeeSplitTx, buildSpawnTx, buildSwapTx, estimateFirstBuy, explainCustomError, isSlippageFailure, preflight, quoteSwap, sendAndConfirm, signatureState, ExpiredError, OnChainError, SimulationError, JUPITER_PROGRAM, type Chain, type LaunchFee, type Side } from "./pump";
 import { buildJupTx, type JupQuote } from "./jup";
+import type { TxSender } from "./pump/send";
 import { clearPendingTrade, savePendingTrade } from "./trade-store";
 import { friendlyError, stepper, type Report } from "./steps";
 import { clearPending, loadPending, savePendingSafe, type PendingLaunch } from "./launch-store";
@@ -411,7 +412,7 @@ export type SwapOpts = { units?: number; microLamports?: number; mint?: string; 
 
 /// The buy or sell: build, simulate the exact transaction (the minimum the user confirmed included: a fill that would
 /// miss it stops here as PriceMovedError, before the wallet opens), sign, confirm.
-export async function runSwap(conn: Connection, wallet: WalletContextState, chain: Chain, side: Side, amountIn: bigint, amountOutQuoted: bigint, slippageBps: number, report: Report, opts: SwapOpts = {}): Promise<{ sig: string; minOut: bigint }> {
+export async function runSwap(conn: Connection, wallet: TxSender, chain: Chain, side: Side, amountIn: bigint, amountOutQuoted: bigint, slippageBps: number, report: Report, opts: SwapOpts = {}): Promise<{ sig: string; minOut: bigint }> {
   if (!wallet.publicKey) throw new Error("Connect a wallet first");
   const st = stepper([["build", side === "buy" ? "Build the multi-hop buy" : "Build the multi-hop sell"], ["check", "Simulate the exact transaction"], ["sign", "Sign in your wallet and confirm on-chain"]], report);
   st.set("build", "active");
@@ -427,7 +428,7 @@ export async function runSwap(conn: Connection, wallet: WalletContextState, chai
 /// it with the compute limit and priority fee the widget showed; then the same checks as runSwap. Jupiter's minimum
 /// (its quote less the slippage the quote was asked with) is inside the swap instruction, so the exact-transaction
 /// simulation stops a fill that would miss it as PriceMovedError, before the wallet opens.
-export async function runJupSwap(conn: Connection, wallet: WalletContextState, q: JupQuote, report: Report, opts: SwapOpts & { units: number; microLamports: number }): Promise<{ sig: string; minOut: bigint }> {
+export async function runJupSwap(conn: Connection, wallet: TxSender, q: JupQuote, report: Report, opts: SwapOpts & { units: number; microLamports: number }): Promise<{ sig: string; minOut: bigint }> {
   if (!wallet.publicKey) throw new Error("Connect a wallet first");
   const st = stepper([["build", q.side === "buy" ? "Build the Jupiter buy" : "Build the Jupiter sell"], ["check", "Simulate the exact transaction"], ["sign", "Sign in your wallet and confirm on-chain"]], report);
   st.set("build", "active");
@@ -441,7 +442,7 @@ export async function runJupSwap(conn: Connection, wallet: WalletContextState, q
 
 /// Simulate the exact transaction (a slippage refusal is PriceMovedError), then sign, send and confirm it, recording the
 /// sent trade until it settles (lib/trade-store).
-async function checkSignConfirm(conn: Connection, wallet: WalletContextState, tx: VersionedTransaction, side: Side, st: ReturnType<typeof stepper>, opts: SwapOpts, explain: (code: number) => string | null): Promise<string> {
+async function checkSignConfirm(conn: Connection, wallet: TxSender, tx: VersionedTransaction, side: Side, st: ReturnType<typeof stepper>, opts: SwapOpts, explain: (code: number) => string | null): Promise<string> {
   st.set("check", "active", "simulating…");
   try { await preflight(conn, tx, wallet.publicKey!); st.set("check", "done", "passes with your minimum"); }
   catch (e) {

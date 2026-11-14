@@ -131,7 +131,10 @@ test("POST /api/rpc: batch cap, key caps, no parsed token scans, only pump trans
   assert.equal((await post(call("getMultipleAccounts", [Array.from({ length: 32 }, () => PLATFORM), { encoding: "base64" }]))).status, 200);
   assert.equal((await post(call("getTokenAccountsByOwner", [PLATFORM, { programId: PLATFORM }, { encoding: "jsonParsed" }]))).status, 403);
   assert.equal((await post(call("getTokenAccountsByOwner", [PLATFORM, { programId: PLATFORM }, { encoding: "base64" }]))).status, 200);
-  assert.equal((await post(call("sendTransaction", [serialized(transferIx), { encoding: "base64" }]))).status, 403, "a plain transfer is not relayed");
+  // a plain SOL transfer is relayed (the trading wallet's deposits and withdrawals); any other System instruction is not
+  assert.equal((await post(call("sendTransaction", [serialized(transferIx), { encoding: "base64" }]))).status, 200, "a plain SOL transfer is relayed");
+  const assignIx = SystemProgram.assign({ accountPubkey: Keypair.generate().publicKey, programId: Keypair.generate().publicKey });
+  assert.equal((await post(call("sendTransaction", [serialized(assignIx), { encoding: "base64" }]))).status, 403, "another System instruction is not");
   assert.equal((await post(call("sendTransaction", [serialized(pumpIx), { encoding: "base64" }]))).status, 200);
   assert.equal((await post(call("simulateTransaction", [serialized(pumpIx, "base58"), { encoding: "base58" }]))).status, 200);
   assert.equal((await post(call("simulateTransaction", ["not a transaction", { encoding: "base64" }]))).status, 403);

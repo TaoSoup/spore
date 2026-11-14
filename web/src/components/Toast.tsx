@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 type Kind = "info" | "success" | "error";
@@ -66,6 +67,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={api}>
       {children}
+      {createPortal(
       <div className="toasts" role="status" aria-live="polite">
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.kind} ${t.leaving ? "leaving" : ""}`} role={t.kind === "error" ? "alert" : undefined} onMouseEnter={() => hold(t.id)} onMouseLeave={() => release(t.id, t.kind)}>
@@ -75,7 +77,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             {t.kind !== "error" && <i key={t.cycle} className="toast-timer" aria-hidden="true" style={{ "--ttl": `${TTL}ms` } as CSSProperties} />}
           </div>
         ))}
-      </div>
+      </div>,
+      document.body)}
     </Ctx.Provider>
   );
 }

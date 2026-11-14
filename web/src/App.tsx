@@ -1,17 +1,18 @@
 import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from "react-router-dom";
-import { useWallet } from "@solana/wallet-adapter-react";
-import { BaseWalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { SPORE_COIN } from "./lib/policy";
 import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
 import { ToastProvider } from "./components/Toast";
+import { TradingWalletHost } from "./components/TradingWallet";
+import WalletMenu from "./components/WalletMenu";
 import OfficialCoin from "./components/OfficialCoin";
 import LiveNumber from "./components/LiveNumber";
 import { Sprout } from "./components/LaunchButton";
 import { LiveDot } from "./components/SpawnFeed";
 import { motionPaused, useMotionPref } from "./lib/motion";
 import SlidingPill from "./components/ui/SlidingPill";
-import { useStats } from "./lib/hooks";
+import { useMediaQuery, useStats } from "./lib/hooks";
+import { NAV_MEMO0, navFold, type NavMemo } from "./lib/nav-fit";
 import { useEvents } from "./lib/events";
 import { count } from "./lib/format";
 import { ErrorBox } from "./components/Bits";
@@ -54,7 +55,6 @@ const PRIMARY: readonly (readonly [string, string, string])[] = [
   ["/claim", "Claim fees", "Collect the creator fees your coins earned"],
 ];
 const MORE: readonly (readonly [string, string])[] = [["/fees", "Fees & rules"], ["/docs/api", "API"]];
-const WALLET_LABELS = { "no-wallet": "Connect", "has-wallet": "Connect", connecting: "Connecting…", "copy-address": "Copy address", copied: "Copied", "change-wallet": "Change wallet", disconnect: "Disconnect" } as const;
 
 /// Finds a search box on the current page and focuses it. The pages own their search components;
 /// this only knows their markup (the shared Search box and the map's find box).
@@ -144,10 +144,50 @@ function recordEntry() {
   return true;
 }
 
-/// The wallet button, quiet in the bar (see .nav in styles.css) with a lime dot once connected.
-function NavWallet({ className = "" }: { className?: string }) {
-  const { connected } = useWallet();
-  return <div className={`nav-wallet ${connected ? "on" : ""} ${className}`}><BaseWalletMultiButton labels={WALLET_LABELS} /></div>;
+/// The bar falls back to its compact form (the links in the ☰ sheet) whenever its row does not fit, at any width: a new
+/// button in the bar can never slide under the links. Folded, it unfolds as soon as the row would fit again: the bar's
+/// own parts are measured live (on wide screens the wallet stays in the bar when folded), the links at the natural width
+/// they last had on show, plus the gaps and a margin, so it does not flicker at the edge.
+function useNavFits(ref: { current: HTMLElement | null }, paused: boolean): boolean {
+  const [tight, setTight] = useState(false);
+  const folded = useRef(false), memo = useRef<NavMemo>(NAV_MEMO0), pausedRef = useRef(paused);
+  const checkRef = useRef<(() => void) | null>(null);
+  pausedRef.current = paused;
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const part = (sel: string) => el.querySelector<HTMLElement>(sel);
+    const px = (v: string) => parseFloat(v) || 0;
+    const check = () => {
+      // a phone always shows the ☰ sheet, and an open sheet is no row to measure
+      if (pausedRef.current) return;
+      const links = part(".nav-links"), right = part(".nav-right"), word = part(".wordmark");
+      if (!links || !right || !word) return;
+      const cs = getComputedStyle(el), ls = getComputedStyle(links), rs = getComputedStyle(right);
+      // the links' natural width: their items (which keep their text's width) plus the pill's padding and border, so a
+      // squeezed pill or the sheet's leftover highlight cannot pass for it
+      // (fractional widths: five rounded widths can add up to 2 px more than the one rounded width they fill)
+      const items = [...links.querySelectorAll<HTMLElement>(":scope > a.nav-item")];
+      const linksNatural = items.reduce((t, a) => t + a.getBoundingClientRect().width, 0) + px(ls.paddingLeft) + px(ls.paddingRight) + px(ls.borderLeftWidth) + px(ls.borderRightWidth);
+      const rightItems = [...right.children].filter((c): c is HTMLElement => c instanceof HTMLElement && !c.classList.contains("burger") && getComputedStyle(c).display !== "none").map((c) => c.offsetWidth);
+      const next = navFold(folded.current, {
+        innerScroll: el.scrollWidth, innerClient: el.clientWidth, linksNatural, linksClient: links.getBoundingClientRect().width,
+        gap: px(cs.columnGap) || 20, rightGap: px(rs.columnGap) || 10,
+        room: el.clientWidth - px(cs.paddingLeft) - px(cs.paddingRight), word: word.offsetWidth, rightItems,
+      }, memo.current);
+      memo.current = next.memo;
+      if (next.folded !== folded.current) { folded.current = next.folded; setTight(next.folded); }
+    };
+    checkRef.current = check;
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    for (const c of [...el.children]) ro.observe(c);
+    check();
+    return () => { ro.disconnect(); checkRef.current = null; };
+  }, [ref]);
+  // measuring resumes (the sheet closed, a phone turned wide): check now, a size may not change to trigger it
+  useLayoutEffect(() => { if (!paused) checkRef.current?.(); }, [paused]);
+  return !tight;
 }
 
 /// Restarts a one-shot CSS class (the mark's bud, the pill's ring) without re-rendering React.
@@ -225,7 +265,14 @@ function Shell() {
   const burgerRef = useRef<HTMLButtonElement>(null);
   const wordRef = useRef<HTMLAnchorElement>(null);
   const pillRef = useRef<HTMLSpanElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
   const scrolled = useScrolled();
+  // phones always use the ☰ sheet; wider screens when the row does not fit
+  const phone = useMediaQuery("(max-width: 759.98px)");
+  const fits = useNavFits(innerRef, phone || menu);
+  const compact = phone || !fits;
+  // the ☰ sheet belongs to the compact bar: it closes when the bar unfolds (a phone turned wide, a window widened)
+  useEffect(() => { if (!compact) setMenu(false); }, [compact]);
   useScrollRestoration(shown);
   useShortcuts(shown);
   useRouteMeta();
@@ -235,7 +282,7 @@ function Shell() {
   // moves focus to its first link.
   useEffect(() => {
     if (!menu) return;
-    menuRef.current?.querySelector<HTMLAnchorElement>("a[href]")?.focus();
+    menuRef.current?.querySelector<HTMLAnchorElement>(":scope > a.nav-item")?.focus();
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenu(false); burgerRef.current?.focus(); } };
     const onDown = (e: PointerEvent) => { const t = e.target as Node; if (!menuRef.current?.contains(t) && !burgerRef.current?.contains(t)) setMenu(false); };
     window.addEventListener("keydown", onKey);
@@ -258,20 +305,21 @@ function Shell() {
   return (
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
-      <header className={`nav ${scrolled ? "scrolled" : ""} ${isMap ? "solid" : ""} ${menu ? "menu-open" : ""}`}>
-        <div className="nav-inner">
+      <header className={`nav ${scrolled ? "scrolled" : ""} ${isMap ? "solid" : ""} ${menu ? "menu-open" : ""} ${compact ? "compact" : ""}`}>
+        <div className="nav-inner" ref={innerRef}>
           <NavLink ref={wordRef} to="/" className="wordmark" aria-label="Spore home"><Mark /><span className="wordmark-text" aria-hidden="true">spore</span></NavLink>
           <nav id="primary-nav" ref={menuRef} className={`nav-links ${menu ? "open" : ""}`} aria-label="Primary">
             <SlidingPill hover items="a.nav-item" />
-            {menu && <div className="nav-sheet-wallet"><NavWallet /></div>}
+            {menu && phone && <div className="nav-sheet-wallet"><WalletMenu inline onAction={() => { closeMenu(); burgerRef.current?.focus(); }} /></div>}
             {PRIMARY.map(([to, label, title], i) => <NavLink key={to} to={to} title={title} className="nav-item" style={{ "--i": i } as CSSProperties}>{label}</NavLink>)}
             {/* The phone sheet is the only nav there, so the footer's links join it. */}
             {MORE.map(([to, label], i) => <NavLink key={to} to={to} className="sheet-only" onClick={closeMenu} style={{ "--i": PRIMARY.length + i } as CSSProperties}>{label}</NavLink>)}
           </nav>
           <div className="nav-right">
-            <span ref={pillRef} className={`api-pill ${down ? "down" : stats ? "up" : ""}`} title={pillTitle}><LiveDot short /><span aria-hidden="true">{pillBody}</span><span className="sr-only">{pillTitle}</span></span>
+            {/* the API's state: only when it is down (the footer, and the map's panel, carry the live counts and indexing) */}
+            {down && <span ref={pillRef} className="api-pill down" title={pillTitle}><LiveDot short /><span aria-hidden="true">{pillBody}</span><span className="sr-only">{pillTitle}</span></span>}
             <NavLink to="/launch" className="btn sm accent nav-launch" title="Launch a coin (shortcut: L)"><Sprout />Launch</NavLink>
-            <NavWallet />
+            {!phone && <WalletMenu onOpen={closeMenu} />}
             <button ref={burgerRef} type="button" className="burger" aria-label={menu ? "Close menu" : "Open menu"} aria-expanded={menu} aria-controls="primary-nav" onClick={() => setMenu((m) => !m)}><i /><i /><i /></button>
           </div>
         </div>
@@ -298,6 +346,7 @@ function Shell() {
           </Routes></RouteBoundary>
         </div>
       </main>
+      <TradingWalletHost />
       {!isMap && <footer className="footer">
         <div className="footer-grid">
           <div className="footer-col footer-about">

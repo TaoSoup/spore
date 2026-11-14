@@ -166,11 +166,13 @@ export async function copyText(text: string): Promise<boolean> {
 }
 
 /// Locks page scroll while a sheet/modal is open (restores the previous value on close).
+/// Counted, so layers that lock the page (a dialog over a sheet) can close in any order and the page scrolls again only
+/// when the last one closed.
+let scrollLocks = 0, scrollPrev = "";
 export function useScrollLock(locked: boolean) {
   useEffect(() => {
     if (!locked) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
+    if (scrollLocks++ === 0) { scrollPrev = document.body.style.overflow; document.body.style.overflow = "hidden"; }
+    return () => { if (--scrollLocks === 0) document.body.style.overflow = scrollPrev; };
   }, [locked]);
 }

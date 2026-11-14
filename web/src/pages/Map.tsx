@@ -549,6 +549,8 @@ export default function MapPage() {
             </div>
             {ready && heatLine}
             {digestChip}
+            {/* the server still resolving curves (the header shows the API only when it is down; this page has no footer) */}
+            {stats && !stats.backfill.done && <p className="map-sync" title="The server is still reading pump.fun's curves; families fill in as it goes">indexing {count(stats.backfill.resolved)}/{count(stats.backfill.total)} curves</p>}
             {(data.syncing || data.error) && data.nodes.length > 0 && <p className="map-sync">{data.error ? <>update failed · <button type="button" className="linkish" onClick={data.reload}>retry</button></> : data.source === "cache" ? "from cache · fetching what changed…" : "fetching what changed…"}</p>}
           </div>
         ) : (

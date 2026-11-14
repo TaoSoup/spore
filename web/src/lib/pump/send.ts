@@ -1,12 +1,15 @@
 // Sends a transaction through the wallet and confirms it by polling over HTTP: the API's RPC
 // proxy has no websocket, so web3's subscription-based confirm would hang.
-import { Connection, Keypair, VersionedTransaction } from "@solana/web3.js";
-import type { WalletContextState } from "@solana/wallet-adapter-react";
+import { Connection, Keypair, VersionedTransaction, type Commitment, type PublicKey } from "@solana/web3.js";
+
+/// What sends a transaction for the flows: the connected wallet (wallet-adapter's context, which opens the extension) or
+/// Spore's trading wallet (lib/trading-wallet.ts, which signs at once).
+export type TxSender = { publicKey: PublicKey | null; sendTransaction: (tx: VersionedTransaction, conn: Connection, opts?: { preflightCommitment?: Commitment; maxRetries?: number }) => Promise<string> };
 
 /// `onSent` fires with the signature as soon as the wallet returned it, before confirmation, so a
 /// progress line can link the explorer while the network works.
 /// `explain` turns an on-chain custom error code into words (the swap passes pump-amm's and pump's tables).
-export async function sendAndConfirm(conn: Connection, wallet: WalletContextState, tx: VersionedTransaction, extraSigners: Keypair[] = [], onSent?: (sig: string) => void, explain?: (code: number) => string | null): Promise<string> {
+export async function sendAndConfirm(conn: Connection, wallet: TxSender, tx: VersionedTransaction, extraSigners: Keypair[] = [], onSent?: (sig: string) => void, explain?: (code: number) => string | null): Promise<string> {
   if (!wallet.publicKey || !wallet.sendTransaction) throw new Error("Connect a wallet first");
   // The message was compiled with a fresh blockhash by the builder; refresh it here so a slow
   // review in the wallet does not expire it, then compute the expiry height from that hash.

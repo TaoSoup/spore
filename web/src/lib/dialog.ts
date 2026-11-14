@@ -20,13 +20,16 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(open: boolean,
     const node = ref.current;
     if (!open || !node) return;
     const before = document.activeElement as HTMLElement | null;
+    // a control inside the dialog may already hold the focus (autoFocus, a child's effect): it keeps it, and it is no
+    // place to return to (the opener is: `returnFocus`, or nothing)
+    const inside = !!before && node.contains(before);
     stack.push(node);
     const root = document.getElementById("root");
     const makeInert = !!root && !root.contains(node);
     if (makeInert) root!.setAttribute("inert", "");
-    const first = initialFocus?.current ?? node.querySelector<HTMLElement>(FOCUSABLE) ?? node;
+    const first = initialFocus?.current ?? (inside ? null : node.querySelector<HTMLElement>(FOCUSABLE) ?? node);
     if (first === node && !node.hasAttribute("tabindex")) node.setAttribute("tabindex", "-1");
-    first.focus({ preventScroll: true });
+    first?.focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
       if (stack[stack.length - 1] !== node) return;
       // The wallet adapter's own modal (Connect wallet) opens over a dialog without joining this stack: its Escape
@@ -46,7 +49,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>(open: boolean,
       const i = stack.lastIndexOf(node);
       if (i >= 0) stack.splice(i, 1);
       if (makeInert && !stack.some((n) => !root!.contains(n))) root!.removeAttribute("inert");
-      (returnFocus?.current ?? before)?.focus?.({ preventScroll: true });
+      (returnFocus?.current ?? (inside ? null : before))?.focus?.({ preventScroll: true });
     };
   }, [open, initialFocus, returnFocus]);
   return ref;

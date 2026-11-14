@@ -214,13 +214,13 @@ html[data-motion="paused"] [data-reveal] { opacity: 1; transform: none; transiti
    active or hovered link) · api pill · Launch pill · wallet. At the top of a page the bar is clear; once
    the page scrolls it gains blur, a tint and a hairline (.nav.scrolled, set by the shell). */
 .shell { min-height: 100dvh; display: grid; grid-template-rows: auto auto 1fr auto; position: relative; isolation: isolate; }
-.shell > .nav { grid-row: 1; } .shell > .official { grid-row: 2; } .shell > main { grid-row: 3; } .shell > .footer { grid-row: 4; }
+.shell > .nav { grid-row: 1; min-width: 0; /* a bar wider than the screen overflows itself (and folds: App.tsx useNavFits), never widens the page */ } .shell > .official { grid-row: 2; } .shell > main { grid-row: 3; } .shell > .footer { grid-row: 4; }
 .nav { position: sticky; top: 0; z-index: var(--z-nav); border-bottom: 1px solid transparent; background: linear-gradient(180deg, rgba(3,7,4,.72), rgba(3,7,4,0));
   transition: background-color var(--dur-3) var(--ease-out), border-color var(--dur-3) var(--ease-out); }
 .nav::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: linear-gradient(90deg, transparent, rgba(182,255,92,.4) 30%, rgba(92,224,200,.28) 60%, transparent); pointer-events: none; opacity: 0; transition: opacity var(--dur-3) var(--ease-out); }
 .nav.scrolled, .nav.solid { background: color-mix(in srgb, var(--bg-00) 74%, transparent); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%); backdrop-filter: blur(var(--glass-blur)) saturate(150%); border-bottom-color: var(--rule); }
 .nav.scrolled::after, .nav.solid::after { opacity: 1; }
-.nav-inner { max-width: var(--shell-box); margin: 0 auto; padding: 0 var(--gutter); height: var(--nav-h); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 20px; }
+.nav-inner { max-width: var(--shell-box); margin: 0 auto; padding: 0 var(--gutter); height: var(--nav-h); display: grid; grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr); align-items: center; gap: 20px; }
 .wordmark { justify-self: start; display: inline-flex; align-items: center; gap: 9px; flex: none; font-weight: 600; font-size: var(--fs-lg); letter-spacing: -0.035em; color: var(--ink); padding: 6px 8px 6px 4px; margin-left: -4px; border-radius: 999px; }
 .wordmark:hover { text-decoration: none; }
 .mark { display: block; overflow: visible; filter: drop-shadow(0 0 10px rgba(182,255,92,.4)); }
@@ -234,21 +234,20 @@ html[data-motion="paused"] [data-reveal] { opacity: 1; transform: none; transiti
    to the hovered link and rests on the active one. No backdrop-filter of its own (it would nest inside
    the bar's when scrolled, which Chromium paints wrongly). */
 .nav-links { position: relative; display: flex; align-items: center; gap: 0; min-width: 0; padding: 4px; border-radius: 999px; background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025)); border: 1px solid var(--line-soft); box-shadow: var(--edge), 0 10px 30px -18px rgba(0,0,0,.9); font-size: var(--fs-base); font-weight: 500; color: var(--muted); }
-.nav-links a { position: relative; z-index: 1; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-radius: 999px; white-space: nowrap; transition: color var(--dur-2) var(--ease-out); }
-.nav-links a:hover { color: var(--ink); text-decoration: none; }
-.nav-links a.active { color: var(--accent); }
+.nav-links > a { position: relative; z-index: 1; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border-radius: 999px; white-space: nowrap; transition: color var(--dur-2) var(--ease-out); }
+.nav-links > a:hover { color: var(--ink); text-decoration: none; }
+.nav-links > a.active { color: var(--accent); }
 /* The active link also carries a dot, so it reads without colour. */
-.nav-links a.active::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.nav-links > a.active::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .nav-links .seg-pill { background: rgba(182,255,92,.1); box-shadow: inset 0 0 0 1px rgba(182,255,92,.2), inset 0 1px 0 rgba(255,255,255,.06); }
 .nav-links .seg-pill[data-hover="1"] { background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px var(--line-soft); }
 .nav-links .sheet-only, .nav-sheet-wallet, .nav-sheet-head { display: none; }
 .nav-right { justify-self: end; display: flex; align-items: center; gap: 10px; flex: none; }
-/* Tablet widths: the live pill goes first, then the bar becomes a row and the links tighten. */
-@media (max-width: 1180px) { .nav-right .api-pill { display: none; } }
+/* Tablet widths: the bar becomes a row and the links tighten. */
 @media (max-width: 1040px) and (min-width: 760px) {
   .nav-inner { display: flex; gap: 12px; }
   .nav-links { margin: 0 auto; }
-  .nav-links a { padding: 0 10px; font-size: 13.5px; }
+  .nav-links > a { padding: 0 10px; font-size: 13.5px; }
   .wordmark-text { display: none; }
 }
 .api-pill { position: relative; display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--glass); box-shadow: var(--edge); font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -262,14 +261,6 @@ html[data-motion="paused"] [data-reveal] { opacity: 1; transform: none; transiti
 .nav-launch .launch-ico { width: 15px; height: 15px; transition: transform var(--dur-3) var(--ease-spring); }
 .nav-launch:hover .launch-ico { transform: translateY(-1px) rotate(-8deg); }
 .nav-launch.active { outline: 2px solid rgba(182,255,92,.35); outline-offset: 2px; }
-/* The wallet: a quiet ghost in the bar, so the Launch pill stays the bar's one lime element. Wallet
-   buttons everywhere else (trade, launch form, claim) keep the lime look below. */
-.nav .wallet-adapter-button-trigger { background: transparent !important; color: var(--ink-2) !important; border: 1px solid var(--line-soft) !important; height: 36px !important; line-height: 34px !important; padding: 0 15px !important; font-weight: 500 !important; box-shadow: var(--edge) !important; }
-.nav .wallet-adapter-button-trigger:hover, .nav .wallet-adapter-button:not([disabled]):hover { background: var(--glass-2) !important; color: var(--ink) !important; border-color: var(--line-2) !important; transform: none; }
-.nav .wallet-adapter-button-trigger:focus-visible { outline-color: var(--accent); }
-.nav .wallet-adapter-button-start-icon { width: 18px; height: 18px; margin-right: 8px; }
-.nav .wallet-adapter-button-start-icon img { width: 18px; height: 18px; }
-.nav-wallet.on .wallet-adapter-button-trigger::before { content: ""; flex: none; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px rgba(182,255,92,.6); }
 .burger { display: none; width: 42px; height: 42px; flex: none; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--glass); box-shadow: var(--edge); flex-direction: column; justify-content: center; gap: 4px; align-items: center; transition: border-color var(--dur-1), background var(--dur-1); }
 .burger i { display: block; width: 16px; height: 1.5px; background: var(--ink); border-radius: 2px; transition: transform var(--dur-3) var(--ease-expo), opacity var(--dur-1), width var(--dur-3) var(--ease-expo); }
 .burger i:nth-child(3) { width: 10px; margin-left: 6px; }
@@ -282,36 +273,35 @@ main { padding: 40px var(--gutter) 110px; }
 /* Grid items default to min-width:auto, so one wide section (a four-up stat row, a table) would
    widen the page past a phone's viewport while html's overflow-x:clip hid the fact. */
 .container > * { min-width: 0; }
-@media (max-width: 759.98px) {
-  /* Phone bar: wordmark · Launch pill · burger. The menu is a glass sheet floating under the bar with the
-     wallet on top. No backdrop-filter of its own (nested inside the bar's, Chromium paints the page
-     through it and drops the bar's buttons): it is a near-opaque raised surface that reads as glass. */
-  .nav-inner { display: flex; gap: 12px; }
-  .nav.menu-open { background: var(--bg-00); border-bottom-color: var(--rule); transition: none; }
-  .nav-links { display: none; position: absolute; top: calc(var(--nav-h) + 1px + 8px); left: 8px; right: 8px; flex-direction: column; align-items: stretch; gap: 0; max-height: calc(100dvh - var(--nav-h) - 24px); overflow-y: auto; overscroll-behavior: contain;
-    padding: 10px 16px 14px; border-radius: var(--radius-xl); border: 1px solid var(--line-soft);
-    background: radial-gradient(120% 60% at 0% 0%, rgba(182,255,92,.07), transparent 60%), radial-gradient(100% 60% at 100% 100%, rgba(176,140,255,.07), transparent 60%), #09120c;
-    box-shadow: var(--edge), var(--shadow-pop); animation: menu-in var(--dur-3) var(--ease-expo); transform-origin: top right; }
-  .nav-links.open { display: flex; }
-  .nav-links .seg-pill { display: none; }
-  .nav-links a { height: auto; padding: 14px 2px; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: transparent !important; font-size: var(--fs-lg); font-weight: 500; letter-spacing: -0.015em; color: var(--ink-2); justify-content: space-between; animation: sheet-item var(--dur-4) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 35ms + 60ms); }
-  .nav-links a::before { content: "→"; order: 2; font-family: var(--mono); font-size: var(--fs-sm); color: var(--faint); transition: transform var(--dur-2) var(--ease-out), color var(--dur-2); }
-  .nav-links a:hover::before, .nav-links a.active::before { color: var(--accent); transform: translateX(2px); }
-  .nav-links a:last-child { border-bottom: 0; }
-  .nav-links a.active::after { display: none; }
-  .nav-links a.active { color: var(--accent); }
-  .nav-links .sheet-only { display: flex; font-size: var(--fs-md); color: var(--muted); }
-  .nav-sheet-head { display: block; padding: 6px 2px 10px; }
-  .nav-sheet-wallet { display: block; padding-bottom: 10px; }
-  .nav-sheet-wallet .wallet-adapter-dropdown { display: block; width: 100%; }
-  .nav-sheet-wallet .wallet-adapter-button-trigger { width: 100% !important; justify-content: center; height: var(--h-lg) !important; line-height: 46px !important; font-size: var(--fs-base) !important; }
-  .nav-sheet-wallet .wallet-adapter-dropdown-list { left: 0; right: 0; top: 100%; }
-  .burger { display: flex; }
-  .nav-right { gap: 8px; margin-left: auto; }
-  .nav-right .api-pill, .nav-right .nav-wallet { display: none; }
-  main { padding-top: var(--s4); padding-bottom: 72px; }
-}
-@media (max-width: 360px) { .wordmark-text { display: none; } .nav-inner { gap: 10px; } }
+/* The compact bar: wordmark · Launch pill · burger, the links (and the wallet menu) in a sheet under the bar. Phones,
+   and any width where the bar's row does not fit (App.tsx useNavFits). The sheet: no backdrop-filter of its own (nested
+   inside the bar's, Chromium paints the page through it and drops the bar's buttons): it is a near-opaque raised
+   surface that reads as glass. */
+.nav.compact .nav-inner { display: flex; gap: 12px; }
+.nav.compact.menu-open { background: var(--bg-00); border-bottom-color: var(--rule); transition: none; }
+.nav.compact .nav-links { display: none; position: absolute; top: calc(var(--nav-h) + 1px + 8px); left: 8px; right: 8px; flex-direction: column; align-items: stretch; gap: 0; max-height: calc(100dvh - var(--nav-h) - 24px); overflow-y: auto; overscroll-behavior: contain;
+  padding: 10px 16px 14px; border-radius: var(--radius-xl); border: 1px solid var(--line-soft);
+  background: radial-gradient(120% 60% at 0% 0%, rgba(182,255,92,.07), transparent 60%), radial-gradient(100% 60% at 100% 100%, rgba(176,140,255,.07), transparent 60%), #09120c;
+  box-shadow: var(--edge), var(--shadow-pop); animation: menu-in var(--dur-3) var(--ease-expo); transform-origin: top right; }
+.nav.compact .nav-links.open { display: flex; }
+.nav.compact .nav-links .seg-pill { display: none; }
+.nav.compact .nav-links > a { height: auto; padding: 14px 2px; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: transparent !important; font-size: var(--fs-lg); font-weight: 500; letter-spacing: -0.015em; color: var(--ink-2); justify-content: space-between; animation: sheet-item var(--dur-4) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 35ms + 60ms); }
+.nav.compact .nav-links > a::before { content: "→"; order: 2; font-family: var(--mono); font-size: var(--fs-sm); color: var(--faint); transition: transform var(--dur-2) var(--ease-out), color var(--dur-2); }
+.nav.compact .nav-links > a:hover::before, .nav.compact .nav-links > a.active::before { color: var(--accent); transform: translateX(2px); }
+.nav.compact .nav-links > a:last-child { border-bottom: 0; }
+.nav.compact .nav-links > a.active::after { display: none; }
+.nav.compact .nav-links > a.active { color: var(--accent); }
+.nav.compact .nav-links .sheet-only { display: flex; font-size: var(--fs-md); color: var(--muted); }
+.nav.compact .nav-sheet-head { display: block; padding: 6px 2px 10px; }
+.nav.compact .nav-sheet-wallet { display: block; padding-bottom: 10px; }
+.nav.compact .burger { display: flex; }
+.nav.compact .nav-right { gap: 8px; margin-left: auto; }
+/* wider than a phone, the sheet keeps a menu's width at the right edge */
+@media (min-width: 760px) { .nav.compact .nav-links { left: auto; width: min(400px, calc(100vw - 16px)); } }
+/* phones: the wallet lives in the sheet; wider, it stays in the bar (and the sheet holds only the links) */
+@media (max-width: 759.98px) { .nav.compact .nav-right .api-pill, .nav.compact .nav-right .wm { display: none; } main { padding-top: var(--s4); padding-bottom: 72px; } }
+@media (min-width: 760px) { .nav.compact .nav-sheet-wallet { display: none; } }
+@media (max-width: 360px) { .wordmark-text { display: none; } .nav.compact .nav-inner { gap: 10px; } }
 @media (pointer: coarse) { .burger { width: var(--tap); height: var(--tap); } .wordmark { min-height: var(--tap); } }
 @keyframes menu-in { from { opacity: 0; transform: translateY(-8px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes sheet-item { from { opacity: 0; transform: translateY(-6px); } }

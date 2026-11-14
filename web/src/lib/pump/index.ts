@@ -5,7 +5,7 @@ export { hopsFor, isSolRooted, withSolPool, type Chain, type ChainLink, type Sid
 export { quoteSwap, buildSwapTx, explainSimulationError, explainCustomError, failedProgram, isSlippageFailure, swapUnits, swapFeeLamports, priorityMicroLamports, routeVenues, ataRentLamports, compileV0, txBytes, MAX_TX_BYTES, CU_PRICE_MICRO, CU_PRICE_MAX_MICRO, QUOTE_CU_LIMIT, JUPITER_PROGRAM, type Quote } from "./trade";
 export { buildSpawnTx, buildFeeSplitTx, type SpawnForm, type SpawnBuild, type LaunchFee } from "./spawn";
 export { LOOKUP_TABLE, lookupTables } from "./alt";
-export { sendAndConfirm, confirm, signatureState, ExpiredError, UnconfirmedError, OnChainError } from "./send";
+export { sendAndConfirm, confirm, signatureState, ExpiredError, UnconfirmedError, OnChainError, type TxSender } from "./send";
 export { preflight, SimulationError, type Preflight } from "./simulate";
 export { estimateFirstBuy, type FirstBuyEstimate } from "./estimate";
 export { readClaimState, claimInstructions, buildClaimTx, parseClaimLogs, perShare, ClaimError, type ClaimState, type ClaimPayout } from "./claim";
