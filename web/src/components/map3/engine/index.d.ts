@@ -6,7 +6,12 @@ export type EngineCoin = { mint: string; symbol: string | null; name: string | n
   children?: number };
 export type EngineTree = { coin: EngineCoin; children: EngineTree[] };
 /** /api/map/heat wire shape: parallel arrays, unix seconds. */
-export type EngineHeat = { at: number; mint: string[]; last: number[]; n24: number[]; t1h: number[]; v24: number[]; buys1h: number[] };
+export type EngineHeat = { at: number; mint: string[]; last: number[]; n24: number[]; t1h: number[]; v24: number[]; buys1h: number[];
+  /** (colour by volume, lib/map/volume.ts) Sent together while the map is coloured by 24 h volume rank inside each family.
+   * clast: a made-up "last trade" (unix s) per row that puts the coin in its tier's heat class (0 = the lowest tier): the
+   * engine colours and lays out by it, while the Key's filter, the counts and the tooltips keep reading `last`.
+   * vrank: the row's rank in its family (1 = most traded; 0 = unranked). Absent: coloured by last trade, as always. */
+  clast?: number[]; vrank?: number[] };
 export type EngineTrade = { mint: string; time: number; isBuy: boolean; valueUsd?: number | null };
 export type EnginePair = { coin: EngineCoin; parent: EngineCoin | null };
 export type EngineEvent = { name: "trade"; data: EngineTrade } | { name: "pair"; data: EnginePair };
@@ -38,6 +43,9 @@ export type EngineOptions = {
    * the order do not move with prices that ticked between the two builds; families it does not list follow in the computed order. */
   order?: readonly string[];
   tagOf: (topMint: string) => string | null; nPlanets?: number;
+  /** (copycat stacking, lib/map/copies.ts) How many same-ticker siblings the page left out behind this drawn coin (0 = none):
+   * its child label carries "×N" (the stack's size) and its tooltip a Copies row. Read when a label or a tooltip is written. */
+  copiesOf?: (mint: string) => number;
   /** The look, fixed per mount: "galaxy" (the default: lit spheres, glowing veins, bloom) or "flat" (the 2.5D colony plate). */
   look?: "galaxy" | "flat";
   inset: EngineInset; fitInset: EngineInset; obstacles: EngineRect[];

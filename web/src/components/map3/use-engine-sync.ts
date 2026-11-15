@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { subscribe, type StreamStatus } from "../../lib/events";
 import type { HeatIndex } from "../../lib/map/heat";
+import type { VolRank } from "../../lib/map/volume";
 import type { BubbleNode } from "../../lib/map/types";
 import { createDiffState, diffNodes, filteredUnknown, heatPayload, highlightTest, quickAfterCache, reducedMotionNow, revealWanted, shouldRebuild, tagFn, type DiffOpts, type DiffState, type DriftInput } from "./adapter";
 import { coinClass } from "../../lib/map/visibility";
@@ -33,6 +34,8 @@ export type EngineSyncParams = {
   families?: FamilyStore | null;
   /** The Key's last-trade filter (bit k = show heat class k, 15 = all) and the mints always shown (the selection's lineage). */
   last: number; pinned: readonly string[];
+  /** Coloured by volume rank (lib/map/volume.ts): every heat payload then carries these ranks. Null = by last trade. */
+  volRanks?: ReadonlyMap<string, VolRank> | null;
   builtAt: number;
   firstBuildFromCache: boolean;
   lastInteract: () => number;
@@ -175,7 +178,7 @@ export function useEngineSync(p: EngineSyncParams): EngineSync {
     if (!(heat.at > c.heatAt)) return;
     c.heatAt = heat.at;
     const t0 = performance.now();
-    try { const payload = heatPayload(heat); if (payload) engine.setHeat(payload); } catch (e) { fail(e); }
+    try { const q = props.current, payload = heatPayload(heat, q.volRanks ? { ranks: q.volRanks, byMint: q.byMint } : null); if (payload) engine.setHeat(payload); } catch (e) { fail(e); }
     st.current.heatAt = heat.at;
     record(performance.now() - t0);
     // (compact layout) a heat poll ages coins out of a filtered build and reveals others: its drift may have moved
@@ -213,13 +216,15 @@ export function useEngineSync(p: EngineSyncParams): EngineSync {
   }, [engine]);
 
   // Highlight: on a new predicate (births are re-covered by the node pass while one is set).
-  const { highlight, byMint, families } = p;
+  const { highlight, families } = p;
   const nodeOf = useMemo(() => (families ? (m: string) => families.node(m) : undefined), [families]);
   useEffect(() => {
     if (!engine) return;
-    try { engine.setHighlight(highlightTest(highlight, byMint, nodeOf)); } catch (e) { fail(e); }
+    // the index is read when a coin is tested (the latest one): a node pass that only replaces the Map does not re-run the
+    // engine's O(n) pass (colour by volume keeps a highlight on all the time: the spotlight)
+    try { engine.setHighlight(highlightTest(highlight, { get: (m) => props.current.byMint.get(m) }, nodeOf)); } catch (e) { fail(e); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engine, highlight, byMint, nodeOf]);
+  }, [engine, highlight, nodeOf]);
 
   // The last-trade filter: on a new mask or a new selection (the engine started with both, EngineOptions.last; the call is
   // idempotent there). The engine recomputes the levels once, O(n); trades and heat polls move coins across it by themselves.
@@ -280,7 +285,8 @@ export function useEngineSync(p: EngineSyncParams): EngineSync {
         let unknown = d.unknown;
         if (q.filtered) { try { const ds = e.driftStats(d.wanted); unknown = filteredUnknown(d.unknown, d.wanted.length, ds?.wanted); } catch (err) { fail(err); } }
         if (d.patches.length) e.patchCoins(d.patches);
-        if (q.highlight) e.setHighlight(highlightTest(q.highlight, q.byMint, q.families ? (m: string) => q.families!.node(m) : undefined));
+        // new coins take their highlight bit (a pass with no birth changes nothing a test reads: the tests are by mint)
+        if (q.highlight && d.births.length) e.setHighlight(highlightTest(q.highlight, { get: (m) => props.current.byMint.get(m) }, q.families ? (m: string) => q.families!.node(m) : undefined));
         const s = st.current;
         s.births += d.births.length; s.patches += d.patches.length; s.unknown = Math.max(0, unknown); s.removed = d.removed;
         c.unknown = d.unknown; c.removed = d.removed; c.wanted = d.wanted;

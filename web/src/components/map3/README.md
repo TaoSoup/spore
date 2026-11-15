@@ -80,6 +80,53 @@ enter layout, links, the family value or the sim.
 - QA: `test/make-swarm-fixture.mts` (prod counts, Σ ghost ≥ 300k), `test/map3-swarm.mts` (look / perf / phone / sw / build /
   mem / correct; mocks GET /api/map/family when the API answers 404), `test/map3-swarm.test.mts` (slots, ghost count).
 
+## Colour by volume and copycat stacking (2026-11-15)
+
+Two switches in the Key, both for reading a big family.
+
+- **Colour: last trade | volume** (volume is the default; `?colour=last` is the other; `lib/map/volume.ts`; the QA harness's
+  `withLast` adds `colour=last` to /map URLs, so the pixel checks keep the last-trade colours). By last trade a family where everything traded in the
+  last half hour is one colour. By volume every coin is ranked by 24 h volume INSIDE its family (the root is not ranked;
+  ties: trades in the last hour, then the mint) and drawn in four tiers, the four heat colours: top 5 % (at least one
+  coin), next 15 %, next 30 %, the rest. The heat sidecar has no 1 h volume, so the rank is on `v24`.
+  - The engine colours by a clock, so the shell hands it a second one: `EngineHeat.clast` (a made-up "last trade" per row
+    inside its tier's heat class, 0 = cold) and `vrank` (`adapter.heatPayload(heat, { nodes, byMint })`). `S.age` is the
+    COLOUR clock (bubbles, links, the seed heads' wedges, so the leaders sit together); `S.ageReal` / `f.ageReal` stay the
+    real last trade: the Key's filter (`vis.js`), the counts and the tooltips read those. Without `clast` the two are equal
+    and nothing changes. `S.rankMode` says which is on.
+  - A live trade pulses but does not recolour (`motion.js tradeNow`); the next heat payload re-ranks. Specks of a capped
+    family are unranked: drawn in the dust colour (`swarm.js colOf`; their filter class is its own array, `rc`).
+  - Spotlight: the page narrows the highlight to tiers 0 and 1 and the roots (`volume.ts spotlight`), so the tail is
+    drawn dim, as `?hl` dims what does not match. The family's ten leaders are named first, however small, with
+    "#rank · volume" as their second line (`labels.js LEAD_N`).
+  - A switch rebuilds (BuildReason "colour": big broods are laid out by colour) and keeps the view and the family order.
+  - The side panel lists the selection's family's ten most traded coins in both modes (`volume.ts familyLeaders`).
+- **Copies: stacked | all** (`?copies=all`, `lib/map/copies.ts`). Under one parent, coins with the same ticker (the symbol
+  without "$", upper-cased) are one stack: the map is built from the list WITHOUT the copies, only the most traded one
+  is drawn (ties: market cap, age, mint). A copy with children on the map and a pinned one (the selection's lineage) stay.
+  The leader's label carries "×N" and its tooltip a Copies row (`EngineOptions.copiesOf`, read lazily); the side panel
+  lists the stack, and picking a copy pins it, so it is drawn. Measured on the local index: 43.8k of 120.8k drawn coins
+  are such copies; the full map (`?last=all`) builds from 75k coins in 3.0 s instead of 118.9k in 4.2 s, the default view
+  (≤ 24 h) from 6.9k instead of 9.5k. The stack is recomputed from a node list at most 4 s old and at each heat poll (a
+  pass over 120k coins is ~60 ms), never per trade, so a leader does not flip between two busy copies.
+- Tests: `test/map-volume-copies.test.mts` (the pure rules, the payload, ingest, and the engine headless in volume mode).
+- The classic Canvas map knows neither switch.
+- Rules settled by the review (2026-11-15, 18 findings fixed):
+  - A family's clock (`f.age`) is the REAL last trade in both modes (dust dots, the planet labels' live bonus, the galaxy
+    roots); only per-coin `S.age` is the colour clock. A family top is not ranked: it wears its own last trade and goes
+    live on its own trade, also in volume mode. Coins added live keep their tier on a trade.
+  - The ranks are computed ONCE, in Map.tsx, over the list the map draws (the stacked one), per heat poll, and handed to
+    the engine (`ThreeMapProps.volRanks` → `heatPayload(heat, { ranks, byMint })`): the spotlight, the "#rank" labels and the
+    panel's list agree. A `?hl` chip takes over from the spotlight (its count is what lights up).
+  - The engine's O(n) highlight pass runs when the predicate changes (a heat poll, a chip) or a coin is born, not per node pass.
+  - The Copies switch is a build part (reason "copies"), like the colour; the stacked list carries the roots limit it was
+    made under, and a selection restacks only when it IS a hidden copy. Under the last-trade filter a copy the Key shows
+    leads its stack; the Key's bucket counts leave the stacked copies out. The arrow-key walk skips hidden copies.
+  - A coin that left the stacked list stays drawn until the next build and stays clickable (`allByMint`). A copy picked in
+    the panel is drawn live on a filtered build; on `?last=all` it is drawn by the next rebuild.
+  - The first build waits for the heat in volume mode too (as for a filter), and `colour` no longer depends on the heat
+    being in, so a late heat never causes a second build.
+
 ## Switching renderers
 
 | What | How |

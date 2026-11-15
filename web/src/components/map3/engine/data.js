@@ -42,7 +42,11 @@ export function ingest(S, opts) {
   const heat = heatOk ? opts.heat : emptyHeat();
   const heatIdx = new Map(); const nowS = Number(heat.at) || Date.now() / 1000;
   for (let i = 0; i < heat.mint.length; i++) heatIdx.set(heat.mint[i], i);
-  const sym = [], img = [], mint = [], par = [], gen = [], famOf = [], kids = [], mc = [], val = [], age = [], n24 = [], crt = [];
+  // (colour by volume, 2026-11-15) heat.clast: a second clock for the COLOUR only (the page's volume rank, lib/map/volume.ts,
+  // as a made-up "last trade" per row; 0 = the lowest tier). S.age is what every coin, link and wedge is coloured and laid
+  // out by; S.ageReal stays the true last trade (the Key's filter, tooltips, counts). Without clast the two are the same.
+  const clast = heatOk && Array.isArray(heat.clast) ? heat.clast : null;
+  const sym = [], img = [], mint = [], par = [], gen = [], famOf = [], kids = [], mc = [], val = [], age = [], ageReal = [], n24 = [], crt = [];
   const fams = [];
   // (map3 port; size modes 2026-10-21) a coin's part of its family value in each mode: sizing.familyValueOf through the
   // adapter (opts.values), the same rules built in when absent; opts.valueOf = the current mode's. Non-finite or negative = 0.
@@ -59,7 +63,8 @@ export function ingest(S, opts) {
     f.valueL += num(fnL, c); f.valueM += num(fnM, c);
     crt.push(Number(c.createdAt) > 0 ? Number(c.createdAt) : 0);
     const h = heatIdx.get(c.mint);
-    age.push(h === undefined ? Infinity : Math.max(0, nowS - heat.last[h])); n24.push(h === undefined ? 0 : Number(heat.n24 && heat.n24[h]) || 0);
+    const real = h === undefined ? Infinity : Math.max(0, nowS - heat.last[h]);
+    ageReal.push(real); age.push(!clast ? real : h !== undefined && clast[h] > 0 ? Math.max(0, nowS - clast[h]) : Infinity); n24.push(h === undefined ? 0 : Number(heat.n24 && heat.n24[h]) || 0);
     if (p >= 0) kids[p].push(i);
     f.members.push(i); if (g > f.maxGen) f.maxGen = g;
     return i;
@@ -110,7 +115,7 @@ export function ingest(S, opts) {
     ghostTotal += f.ghost;
   }
   let total = 0;
-  for (const f of fams) { let v = 0, a = Infinity, t = 0; for (const i of f.members) { v += val[i]; if (age[i] < a) a = age[i]; t += n24[i]; } f.value = v; f.age = a; f.n24 = t; total += v; }
+  for (const f of fams) { let v = 0, a = Infinity, t = 0; for (const i of f.members) { v += val[i]; if (ageReal[i] < a) a = ageReal[i]; t += n24[i]; } f.value = v; f.age = a; f.ageReal = a; f.n24 = t; total += v; }   // a family's clock is the real one in both colour modes
   // (compact) the whole family's value in the current mode, over the whole map's total (dropped families included)
   if (C) {
     const mcapMode = opts.mode === "mcap";
@@ -159,7 +164,7 @@ export function ingest(S, opts) {
     return ranked.find((x) => bare(sym[x.top]) === q);
   };
   Object.assign(S, {
-    heat, heatStatus: heatOk ? "ok" : "offline", nowS, heatIdx, sym, img, mint, mintIdx, par, gen, famOf, kids, mc, val, age, n24, crt,
+    heat, heatStatus: heatOk ? "ok" : "offline", nowS, heatIdx, sym, img, mint, mintIdx, par, gen, famOf, kids, mc, val, age, ageReal, rankMode: !!clast, n24, crt,
     fams, N, total, ranked, planets, dust, ghostTotal,
     dustShare: dust.reduce((s, f) => s + f.share, 0),
     maxShare: maxShare || 1,

@@ -18,6 +18,8 @@ import { sharePct } from "../../../lib/map/dominance";
 import { SIZE_MODE_LINE } from "../../../lib/map/sizing";
 import { LAST_ALL, LAST_DEFAULT, LAST_SHORT, lastKeysOf, lastMask, lastShownOf, lastTag, type LastCounts } from "../../../lib/map/visibility";
 import type { SizeMode } from "../../../lib/map/types";
+import type { ColourMode } from "../../../lib/map/volume";
+import type { CopiesMode } from "../../../lib/map/copies";
 import { COLORS } from "../store";
 import { useCamK, type CamStore } from "./cam";
 
@@ -82,6 +84,39 @@ const GAL_TRADE: { c: string; t: string; glow?: boolean }[] = [
   { c: "#7f68c4", t: "quiet < 24 h" },
   { c: "#4a4466", t: "cold" },
 ];
+/// Colour by volume (lib/map/volume.ts): the four tiers of a coin's rank by 24 h volume inside its family, in the same four
+/// colours. A legend only; the last-trade buckets under it stay the filter.
+const tiersOf = (items: { c: string; t: string; glow?: boolean }[]) => ["top 5%", "next 15%", "next 30%", "rest"].map((t, i) => ({ ...items[i], t }));
+/// The last-trade filter's nodes while the colours mean volume: one quiet colour, so a bucket never reads as a map colour.
+const plainOf = (items: { c: string; t: string }[]) => items.map((x) => ({ c: "#7d8a84", t: x.t }));
+/// The Key's colour switch (the WebGL map, with the heat sidecar): last trade or volume rank.
+export type ColourProps = { colour?: ColourMode; onColour?: ((c: ColourMode) => void) | null };
+function ColourSeg({ colour, onColour }: { colour: ColourMode; onColour: (c: ColourMode) => void }) {
+  return (
+    <span className="seg inline map-key-colour" role="group" aria-label="Colour the coins by">
+      <button type="button" aria-pressed={colour === "last"} onClick={() => onColour("last")} title="Colour every coin by how long ago it last traded">last trade</button>
+      <button type="button" aria-pressed={colour === "volume"} onClick={() => onColour("volume")} title="Colour every coin by its rank in its family by 24 h volume">volume</button>
+    </span>
+  );
+}
+/// The Key's copycat switch (the WebGL map, lib/map/copies.ts): same-ticker siblings stacked behind their most traded one,
+/// or every one drawn. `copiesHidden`: how many the stacks hold right now.
+export type CopiesProps = { copies?: CopiesMode; onCopies?: ((c: CopiesMode) => void) | null; copiesHidden?: number };
+function CopiesSec({ copies, onCopies, copiesHidden = 0 }: { copies: CopiesMode; onCopies: (c: CopiesMode) => void; copiesHidden?: number }) {
+  return (
+    <section className="map-key-sec">
+      <h4>Copies
+        <span className="seg inline map-key-colour" role="group" aria-label="Coins with the same ticker under one parent">
+          <button type="button" aria-pressed={copies === "stack"} onClick={() => onCopies("stack")} title="Draw one coin per ticker under each parent: the most traded one">stacked</button>
+          <button type="button" aria-pressed={copies === "all"} onClick={() => onCopies("all")} title="Draw every coin, copies included">all</button>
+        </span>
+      </h4>
+      <p className="map-key-note">{copies === "stack"
+        ? <>Coins with the same ticker under one parent are one bubble: the most traded (the largest when none traded). Its label says ×N; its panel lists the copies.{copiesHidden > 0 && <> <b>{count(copiesHidden)}</b> stacked now.</>}</>
+        : "Every coin is drawn, same-ticker copies included."}</p>
+    </section>
+  );
+}
 /// The Key's last-trade filter: the buckets shown (4-bit mask, bit k = heat class k), the writer, the coins per bucket
 /// (drawn + the asset families' undrawn ones in "older"; null until the heat is in) and whether the heat sidecar answered.
 /// `onLast` takes a mask, or a function of the current one (a bucket toggle: a quick second click must not read a stale mask).
@@ -109,7 +144,7 @@ function TradeScale({ items, label, last = LAST_ALL, onLast = null, counts = nul
           const only = toggles && mask === 1 << i;
           const body = <><i className="map-key-node" aria-hidden="true" /><span>{x.t}</span>{toggles && <b className="map-key-n">{counts ? count(counts[i]) : "—"}</b>}</>;
           return (
-            <li key={x.c} className={[i === 0 ? "hot" : "", on ? "" : "off"].filter(Boolean).join(" ") || undefined} style={{ "--c": x.c } as CSSProperties}>
+            <li key={i} className={[i === 0 ? "hot" : "", on ? "" : "off"].filter(Boolean).join(" ") || undefined} style={{ "--c": x.c } as CSSProperties}>
               {toggles
                 ? <button type="button" aria-pressed={on} aria-disabled={only || undefined} data-last={i}
                     title={only ? "At least one bucket stays on" : `${on ? "Hide" : "Show"} the coins whose last trade is ${x.t}`}
@@ -192,11 +227,34 @@ function ThreeSizeKey({ mode, cam, worldRadius, chipRadius }: { mode: SizeMode; 
 /// for the phone popover the page opens from its "Key" pill. `renderer` picks which map it explains;
 /// `chipRadius` (the WebGL map's planet-chip radius for a share, CSS px) draws the chip sizes.
 /// `last` / `onLast` / `counts` / `heatOn`: the last-trade filter (LastProps); without `onLast` the scale is a legend only.
-export default function MapKey({ mode, cam, worldRadius, variant = "dock", defaultOpen = false, renderer = "classic", chipRadius = null, look = "flat", last = LAST_ALL, onLast = null, counts = null, heatOn = false }: { mode: SizeMode; cam: CamStore; worldRadius: ((v: number) => number) | null; variant?: "dock" | "pop"; defaultOpen?: boolean; renderer?: "classic" | "three"; chipRadius?: ((share: number) => number) | null; look?: "galaxy" | "flat" } & LastProps) {
+export default function MapKey({ mode, cam, worldRadius, variant = "dock", defaultOpen = false, renderer = "classic", chipRadius = null, look = "flat", last = LAST_ALL, onLast = null, counts = null, heatOn = false, colour = "last", onColour = null, copies = "stack", onCopies = null, copiesHidden = 0 }: { mode: SizeMode; cam: CamStore; worldRadius: ((v: number) => number) | null; variant?: "dock" | "pop"; defaultOpen?: boolean; renderer?: "classic" | "three"; chipRadius?: ((share: number) => number) | null; look?: "galaxy" | "flat" } & LastProps & ColourProps & CopiesProps) {
   const [open, setOpen] = useState(defaultOpen);
   const three = renderer === "three";
   const galaxy = three && look === "galaxy";
   const filter: LastProps = { last, onLast, counts, heatOn };
+  // The colour sections of the WebGL key. By last trade: the scale is the legend and the filter in one. By volume: the tiers
+  // (a legend), then the last-trade buckets as a plain filter.
+  const copiesSec = three && onCopies ? <CopiesSec copies={copies} onCopies={onCopies} copiesHidden={copiesHidden} /> : null;
+  const byVolume = three && heatOn && colour === "volume";
+  const seg = three && heatOn && onColour ? <ColourSeg colour={colour} onColour={onColour} /> : null;
+  const colourSecs = (items: { c: string; t: string; glow?: boolean }[]) => byVolume ? (
+    <>
+      <section className="map-key-sec">
+        <h4>Colour {seg}</h4>
+        <p className="map-key-note">Each coin's rank in its family by 24 h volume. The ten leaders are named, with their volume.</p>
+        <TradeScale items={tiersOf(items)} label="Colour by 24 h volume rank in the family" />
+      </section>
+      <section className="map-key-sec">
+        <h4>Last trade <span>show · hide</span></h4>
+        <TradeScale items={plainOf(items)} label="Coins by last trade" {...filter} />
+      </section>
+    </>
+  ) : (
+    <section className="map-key-sec">
+      <h4>{seg ? <>Colour {seg}</> : <>Last trade <span>fresh → cold</span></>}</h4>
+      <TradeScale items={items} label="Colour by last trade" {...filter} />
+    </section>
+  );
   // what the filter hides right now (the pill's hollow dots and its tag): nothing until the heat is in
   const mask = heatOn && onLast ? last & LAST_ALL : LAST_ALL;
   const tag = lastTag(lastKeysOf(mask));
@@ -237,10 +295,8 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
   );
   const threeBody = (
     <div className="map-key-body" id="map-key-body">
-      <section className="map-key-sec">
-        <h4>Last trade <span>fresh → cold</span></h4>
-        <TradeScale items={TRADE} label="Colour by last trade" {...filter} />
-      </section>
+      {colourSecs(TRADE)}
+      {copiesSec}
       <ThreeSizeKey mode={mode} cam={cam} worldRadius={worldRadius} chipRadius={chipRadius} />
       <section className="map-key-sec">
         <h4>Rim</h4>
@@ -255,10 +311,8 @@ export default function MapKey({ mode, cam, worldRadius, variant = "dock", defau
   // the galaxy look (?look=galaxy; the default flat look draws threeBody): lit spheres by last trade, a rim ring by 24 h trades
   const galaxyBody = (
     <div className="map-key-body" id="map-key-body">
-      <section className="map-key-sec">
-        <h4>Last trade <span>fresh → cold</span></h4>
-        <TradeScale items={GAL_TRADE} label="Colour by last trade" {...filter} />
-      </section>
+      {colourSecs(GAL_TRADE)}
+      {copiesSec}
       <section className="map-key-sec">
         <h4>Rings</h4>
         <ul className="map-key-list">

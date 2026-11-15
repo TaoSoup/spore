@@ -81,6 +81,7 @@
 /* children: 500 11/14 ink-2, traded-recently (.lv) in ink; second line = mono mcap */
 .m3 .lb.kid .t { font-weight: 500; font-size: 11px; line-height: 14px; color: var(--m3-ink-2); }
 .m3 .lb.kid.lv .t { color: var(--m3-ink); }
+.m3 .lb.kid .t .cx { margin-left: 4px; font-family: var(--m3-mono, var(--mono)); font-size: 10px; font-weight: 500; color: var(--m3-muted, var(--muted)); }
 /* event labels: a birth ('new') or a whale trade ('+$12k'); the event word in mono, ink-2.
    (map3 port) the prototype's font shorthand is spelled out so the mono group's tabular-nums survives it */
 .m3 .lb.evt .t { color: var(--m3-ink); }

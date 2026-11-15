@@ -327,7 +327,7 @@ void main(){
   S.life.onDispose(() => { scene.remove(points); if (!S.contextLost) { try { geo.dispose(); mat.dispose(); tex.dispose(); } catch { /* ignore */ } } });
 
   // ---------- generated arrays (after the first frame) ----------
-  let posA = null, aS = null, aR = null, aF = null, index = null, inIdx = null, idxN = 0;
+  let posA = null, aS = null, aR = null, aF = null, rc = null /* (colour by volume) each slot's REAL heat class: the filter's */, index = null, inIdx = null, idxN = 0;
   let attrR = null, attrF = null, attrI = null;
   const ranges = { r: [Infinity, -1], f: [Infinity, -1], i: [Infinity, -1] };
   const touch = (key, g) => { const rr = ranges[key]; if (g < rr[0]) rr[0] = g; if (g > rr[1]) rr[1] = g; };
@@ -360,7 +360,7 @@ void main(){
     if (genState !== "wait" || S.dead) return;
     genState = "run"; genT0 = nowMs();
     posA = new Float32Array(Math.max(1, M) * 2); aS = new Float32Array(Math.max(1, M) * 4);
-    aR = new Float32Array(Math.max(1, M) * 4); aF = new Float32Array(Math.max(1, M) * 3);
+    aR = new Float32Array(Math.max(1, M) * 4); aF = new Float32Array(Math.max(1, M) * 3); rc = new Uint8Array(Math.max(1, M)).fill(3);
     for (let g = 0; g < M; g++) { aR[g * 4 + 1] = -1e4; aR[g * 4 + 2] = 3; aF[g * 3] = -1e4; aF[g * 3 + 1] = 1; aF[g * 3 + 2] = 1; }
     index = new Uint32Array(Math.max(1, M)); inIdx = new Uint8Array(Math.max(1, M));
     S.life.timeout(genSlice, 0);
@@ -467,6 +467,9 @@ void main(){
     if (h === undefined || !S.heat) return -Infinity;
     const v = Number(S.heat.last[h]); return Number.isFinite(v) ? v : -Infinity;
   };
+  // (colour by volume) clsOf is the filter's class, always the real last trade; a speck is unranked, so while the map is
+  // coloured by volume (S.rankMode) it is drawn in the dust colour (colOf), never lime or teal
+  const colOf = (c) => (S.rankMode ? Math.max(2, c) : c);
   const clsOf = (last) => heatClass(last > -Infinity ? Math.max(0, (S.nowS || Date.now() / 1000) - last) : Infinity);
   const hlOf = (m) => { if (!hlTest) return 1; try { return hlTest(m) ? 1 : 0; } catch { return 0; } };
   // (last-trade filter) a real speck's alpha: 0 when the Key hides its class (and it is not pinned), else the highlight's
@@ -511,8 +514,8 @@ void main(){
       const g = sf.base + j;
       const last = heatOf(m);
       sf.lastT[j] = last;
-      aR[g * 4] = 1; aR[g * 4 + 1] = t; aR[g * 4 + 2] = clsOf(last); aR[g * 4 + 3] = sizeT(mc);
-      const h = Math.fround(alphaOf(m, aR[g * 4 + 2])); aF[g * 3 + 1] = h; aF[g * 3 + 2] = h; countShown(sf, 0, h);   // (last-trade filter)
+      aR[g * 4] = 1; aR[g * 4 + 1] = t; rc[g] = clsOf(last); aR[g * 4 + 2] = colOf(rc[g]); aR[g * 4 + 3] = sizeT(mc);
+      const h = Math.fround(alphaOf(m, rc[g])); aF[g * 3 + 1] = h; aF[g * 3 + 2] = h; countShown(sf, 0, h);   // (last-trade filter)
       touch("r", g); touch("f", g);
       if (ghostShownAt(sf, j)) sf.realOnGhost++; else pushIdx(g);
       sf.grid = null;
@@ -584,10 +587,10 @@ void main(){
           if (jb.kind === "heat") {
             const last = Math.max(sf.lastT[j], heatOf(m)); sf.lastT[j] = last;
             // (last-trade filter) a class that crosses the Key's line: the speck appears / goes at once
-            const c = clsOf(last); if (aR[g * 4 + 2] !== c) { aR[g * 4 + 2] = c; touch("r", g); if (vMask !== 15) snapAlpha(sf, g, m, c); }
+            const c = clsOf(last), cc = colOf(c), crossed = rc[g] !== c; rc[g] = c; if (aR[g * 4 + 2] !== cc) { aR[g * 4 + 2] = cc; touch("r", g); } if (crossed && vMask !== 15) snapAlpha(sf, g, m, c);
           } else {   // "hl": the highlight or the filter changed (one crossfade for every speck, from what it shows now)
             const e = Math.max(0, Math.min(1, (jb.t - jb.t0) / HL_S)), s = e * e * (3 - 2 * e), was = aF[g * 3 + 2];
-            aF[g * 3 + 1] = aF[g * 3 + 1] + (was - aF[g * 3 + 1]) * s; aF[g * 3 + 2] = alphaOf(m, aR[g * 4 + 2]); touch("f", g);
+            aF[g * 3 + 1] = aF[g * 3 + 1] + (was - aF[g * 3 + 1]) * s; aF[g * 3 + 2] = alphaOf(m, rc[g]); touch("f", g);
             countShown(sf, was, aF[g * 3 + 2]);
           }
         }
@@ -633,7 +636,7 @@ void main(){
     vPins = next;
     if (!aR || genState !== "done") return;
     let any = false;
-    for (const m of diff) { const o = slotOf(indexOf(m)); if (o && aR[o.g * 4] > 0.5 && snapAlpha(o.sf, o.g, m, aR[o.g * 4 + 2])) any = true; }
+    for (const m of diff) { const o = slotOf(indexOf(m)); if (o && aR[o.g * 4] > 0.5 && snapAlpha(o.sf, o.g, m, rc[o.g])) any = true; }
     if (any) { flush(); S.invalidate(); hoverCheck(); }
   }
   const isShown = (i) => { const o = realAt(i); return !!o && aF[o.g * 3 + 2] > 0; };
@@ -736,7 +739,7 @@ void main(){
     const o = slotOf(i); const { sf, j, g } = o;
     sf.lastT[j] = Math.max(sf.lastT[j], Number(tS) || Date.now() / 1000);
     let snapped = false;
-    if (aR[g * 4 + 2] !== 0) { aR[g * 4 + 2] = 0; touch("r", g); snapped = snapAlpha(sf, g, m, 0); }
+    if (rc[g] !== 0) { rc[g] = 0; aR[g * 4 + 2] = colOf(0); touch("r", g); snapped = snapAlpha(sf, g, m, 0); }
     const shown = aF[g * 3 + 2] > 0;
     if (!reduced() && shown) { aF[g * 3] = tSec(); touch("f", g); }
     flush();

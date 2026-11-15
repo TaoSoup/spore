@@ -4,6 +4,7 @@
 // under tsx in node. The engine never fetches; everything it draws comes through here.
 import { familyValueOf, isThinFamily } from "../../lib/map/sizing";
 import type { HeatIndex } from "../../lib/map/heat";
+import { colourLast, type VolRank } from "../../lib/map/volume";
 import type { BubbleNode, SizeMode } from "../../lib/map/types";
 import type { EngineCoin, EngineHeat, EngineTree } from "./engine/index.js";
 
@@ -177,14 +178,20 @@ export function familyShares(input: BuiltInput, valueOf: (c: EngineCoin) => numb
   return out;
 }
 
-/// The heat index as the wire's parallel arrays (rows in Map order); null in, null out.
-export function heatPayload(h: HeatIndex | null): EngineHeat | null {
+/// The heat index as the wire's parallel arrays (rows in Map order); null in, null out. `rank` (colour by volume,
+/// lib/map/volume.ts): the page's ranks by 24 h volume inside each family (volumeRanks, once per heat poll); the payload then carries the
+/// colour clock (`clast`) and the ranks (`vrank`), and the engine colours by tier instead of by last trade.
+export function heatPayload(h: HeatIndex | null, rank: { ranks: ReadonlyMap<string, VolRank>; byMint: ReadonlyMap<string, BubbleNode> } | null = null): EngineHeat | null {
   if (!h) return null;
   const n = h.rows.size;
   const mint = new Array<string>(n), last = new Array<number>(n), n24 = new Array<number>(n), t1h = new Array<number>(n), v24 = new Array<number>(n), buys1h = new Array<number>(n);
   let k = 0;
   for (const [m, r] of h.rows) { mint[k] = m; last[k] = r.last; n24[k] = r.n24; t1h[k] = r.t1h; v24[k] = r.v24; buys1h[k] = r.buys1h; k++; }
-  return { at: h.at, mint, last, n24, t1h, v24, buys1h };
+  if (!rank) return { at: h.at, mint, last, n24, t1h, v24, buys1h };
+  const ranks = rank.ranks;
+  const clast = new Array<number>(n), vrank = new Array<number>(n);
+  for (let i = 0; i < n; i++) { clast[i] = colourLast(mint[i], last[i], h.at, ranks, rank.byMint); vrank[i] = ranks.get(mint[i])?.rank ?? 0; }
+  return { at: h.at, mint, last, n24, t1h, v24, buys1h, clast, vrank };
 }
 
 /// Family-top mint → the dominance tag the page prints ("23%"), or null (no percent).
@@ -359,7 +366,7 @@ export function movedLanded(mv: MovedMaps, filtered: boolean, mask: number, map:
 /// The page's highlight predicate as a per-mint test for the engine's mask (a mint the page does not
 /// hold never matches); null when there is no highlight. (family-all) `extra` resolves a coin the page holds outside
 /// the node list (a loaded speck of a capped family: the family store's node).
-export function highlightTest(pred: ((n: BubbleNode) => boolean) | null, byMint: ReadonlyMap<string, BubbleNode>, extra?: (mint: string) => BubbleNode | null | undefined): ((mint: string) => boolean) | null {
+export function highlightTest(pred: ((n: BubbleNode) => boolean) | null, byMint: { get(mint: string): BubbleNode | undefined }, extra?: (mint: string) => BubbleNode | null | undefined): ((mint: string) => boolean) | null {
   if (!pred) return null;
   return (mint) => { const n = byMint.get(mint) ?? (extra ? extra(mint) : undefined); return !!n && pred(n); };
 }

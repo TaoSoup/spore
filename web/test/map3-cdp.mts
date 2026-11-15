@@ -64,8 +64,13 @@ export function withLook(url: string, look: string = LOOK): string {
 export function withLast(url: string, last = "all"): string {
   const [p, h] = url.split("#", 2);
   const path = p.replace(/^[a-z]+:\/\/[^/]+/i, "");
-  if (!/^\/map(\?|$)/.test(path) || /[?&]last=/.test(p)) return url;
-  return `${p}${p.includes("?") ? "&" : "?"}last=${last}${h !== undefined ? `#${h}` : ""}`;
+  if (!/^\/map(\?|$)/.test(path)) return url;
+  // (2026-11-15) the map colours by volume rank by default (lib/map/volume.ts): the checks and the shots were made with the
+  // last-trade colours, so a URL without `colour=` gets `colour=last` the same way
+  let q = p;
+  if (!/[?&]last=/.test(q)) q += `${q.includes("?") ? "&" : "?"}last=${last}`;
+  if (!/[?&]colour=/.test(q)) q += `${q.includes("?") ? "&" : "?"}colour=last`;
+  return `${q}${h !== undefined ? `#${h}` : ""}`;
 }
 
 /// EventSource mock (same as map-interact / map-perf): every instance in window.__es, dispatch(type, json)

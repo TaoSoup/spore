@@ -1235,8 +1235,14 @@ export function buildMotion(S) {
   const cls = new Uint8Array(N), boost = new Float64Array(N), lastT = new Float64Array(N).fill(-Infinity);   // Float64: coreBoost values must compare exactly
   const famCls = new Uint8Array(fams.length);
   // (final polish) every coin, planet tops included, shows its OWN last trade (bubbles.js does the same at build)
+  // (colour by volume) S.age is the COLOUR clock (data.js: the volume rank's made-up age while heat.clast is sent, else the
+  // real one); S.ageReal is always the true last trade: the Key's filter, the counts and the tooltips read that one.
   const coinClass = (i) => heatClass(S.age[i]);
   const coinBoost = (i) => coreBoost(S.age[i]);
+  const ageReal = S.ageReal || (S.ageReal = S.age);
+  const clastOf = (p) => (p && Array.isArray(p.clast) ? p.clast : null);
+  /// the colour age of one heat row of payload p on the colour clock (rank mode), given the real age otherwise
+  const colourAge = (p, r, at, real) => { const cl = clastOf(p); return !cl ? real : r !== undefined && cl[r] > 0 ? Math.max(0, at - cl[r]) : Infinity; };
   for (let i = 0; i < N; i++) { cls[i] = coinClass(i); boost[i] = coinBoost(i); }
   for (const f of fams) famCls[f.id] = heatClass(f.age);
   if (S.heat && Array.isArray(S.heat.mint)) for (let r = 0; r < S.heat.mint.length; r++) { const i = S.mintIdx.get(S.heat.mint[r]); if (i !== undefined) lastT[i] = S.heat.last[r]; }
@@ -1367,7 +1373,7 @@ export function buildMotion(S) {
   S.links.onSparkArrive = () => { animUntil = Math.max(animUntil, performance.now() + 600); };
   function heatCounts() {
     const c = { live: 0, cooling: 0, quiet: 0, cold: 0 };
-    for (let i = 0; i < N; i++) { const h = heatClass(S.age[i]); if (h === 0) c.live++; else if (h === 1) c.cooling++; else if (h === 2) c.quiet++; else c.cold++; }
+    for (let i = 0; i < N; i++) { const h = heatClass(ageReal[i]); if (h === 0) c.live++; else if (h === 1) c.cooling++; else if (h === 2) c.quiet++; else c.cold++; }
     return c;
   }
   function pushStats() {
@@ -1381,9 +1387,22 @@ export function buildMotion(S) {
   function tradeNow(i, tSrv, now, v = null, buy = null) {
     if (tSrv > lastT[i]) lastT[i] = tSrv;
     sseT[i] = Math.max(sseT[i], tSrv);
-    S.age[i] = 0; S.n24[i] += 1;
-    const f = fams[famOf[i]]; f.age = 0; f.n24 += 1;
-    const b = coreBoost(0), tS = now / 1000;
+    S.n24[i] += 1;
+    // the family's clock is always the real one (f.age === f.ageReal: the dust dots, the planet labels' live bonus)
+    const f = fams[famOf[i]]; f.n24 += 1; f.age = 0; f.ageReal = 0;
+    const tS = now / 1000;
+    const famLive = () => { if (!f.planet && famCls[f.id] !== 0) { S.overview.setDustHeat(f.id, 0); famCls[f.id] = 0; } else if (f.planet) famCls[f.id] = 0; };
+    if (S.rankMode && par[i] >= 0) {
+      // (colour by volume) a trade does not change a coin's volume tier (the next heat payload may): it pulses, and the
+      // filter learns it is live. A family top is not ranked: it shows its own last trade, so it takes the path below.
+      ageReal[i] = 0;
+      if (V.cls[i] !== 0) { V.cls[i] = 0; visOne(i, tS); statsDirty = true; }
+      famLive();
+      schedulePulse(i, now + rnd(i, tSrv % 997) * 120, "sse", now, v, buy);
+      return;
+    }
+    S.age[i] = 0; ageReal[i] = 0;
+    const b = coreBoost(0);
     if (cls[i] !== 0) {
       S.bubbles.setCoinHeat(i, 0, b, tS); if (par[i] >= 0) S.links.setLinkHeat(i, 0, tS); cls[i] = 0; boost[i] = b; animUntil = Math.max(animUntil, now + DUR.xl + 100); statsDirty = true;
       // (last-trade filter) the coin is live now: a hidden one whose new class the Key shows appears at once, its chain
@@ -1391,8 +1410,7 @@ export function buildMotion(S) {
       V.cls[i] = 0; visOne(i, tS);
     }
     else if (boost[i] !== b) { S.bubbles.setCoinHeat(i, 0, b, tS); boost[i] = b; }
-    if (!f.planet && famCls[f.id] !== 0) { S.overview.setDustHeat(f.id, 0); famCls[f.id] = 0; }
-    else if (f.planet) famCls[f.id] = 0;
+    famLive();
     schedulePulse(i, now + rnd(i, tSrv % 997) * 120, "sse", now, v, buy);
   }
   function onFeed(name, d) {
@@ -1408,7 +1426,7 @@ export function buildMotion(S) {
         if (b) {
           b.lastT = Math.max(b.lastT || 0, Number(d.time) || Date.now() / 1000);
           // (compact layout) a coin added live wears its heat: live again
-          if (b.reveal && b.idx >= 0 && b.hc !== 0) { S.bubbles.setCoinHeat(b.idx, 0, coreBoost(0), now / 1000); try { S.links.setBornAge?.(b.idx, 0); } catch (e) { if (errors++ < 3) console.error(e); } b.hc = 0; }
+          /* (colour by volume) its tier does not move on a trade */ if (!S.rankMode && b.reveal && b.idx >= 0 && b.hc !== 0) { S.bubbles.setCoinHeat(b.idx, 0, coreBoost(0), now / 1000); try { S.links.setBornAge?.(b.idx, 0); } catch (e) { if (errors++ < 3) console.error(e); } b.hc = 0; }
           // (last-trade filter) a newborn past its first 30 min is filed under its heat class (applyHeat): a trade makes it live
           if (b.idx >= 0 && b.idx < V.st.n && V.cls[b.idx] !== 0) { V.cls[b.idx] = 0; visOne(b.idx, now / 1000); }
           if (!rm && b.idx >= 0 && !hid(b.idx)) { S.bubbles.flashRim(b.idx, now / 1000); fxMark(now); animUntil = Math.max(animUntil, now + 400); }
@@ -1629,15 +1647,16 @@ export function buildMotion(S) {
     const famId = pb ? pb.fam : famOf[q], a = pb ? pb.p : q, g = pb ? pb.gen + 1 : S.gen[q] + 1, tS = now / 1000;
     const hr = S.heatIdx ? S.heatIdx.get(v.mint) : undefined, last = hr !== undefined && S.heat ? Number(S.heat.last[hr]) || 0 : 0;
     const ageS = last > 0 && heatAt > 0 ? Math.max(0, heatAt - last) : Infinity, crt = Number(v.createdAt) > 0 ? Number(v.createdAt) : 0;
+    const ageC = colourAge(S.heat, hr, heatAt, ageS);   // (colour by volume) what it is drawn with; ageS stays the filter's
     if (idx < hlMask.length) { let m = 1; if (hlTest) { try { m = hlTest(v.mint) ? 1 : 0; } catch { m = 0; } } hlMask[idx] = m; if (m && famId >= 0) famMatch[famId]++; }
     V.a[idx] = 0;   // hidden until the levels below say otherwise (visOne crossfades it in)
     let added = -1;
-    try { added = S.bubbles.addCoin(idx, { x, y, r, fam: famId, age: ageS, n24: hr !== undefined && S.heat && S.heat.n24 ? Number(S.heat.n24[hr]) || 0 : 0, sym: v.symbol || v.name || String(v.mint).slice(0, 4), img: v.image || null, mint: v.mint }); } catch (e) { if (errors++ < 3) console.error(e); }
+    try { added = S.bubbles.addCoin(idx, { x, y, r, fam: famId, age: ageC, n24: hr !== undefined && S.heat && S.heat.n24 ? Number(S.heat.n24[hr]) || 0 : 0, sym: v.symbol || v.name || String(v.mint).slice(0, 4), img: v.image || null, mint: v.mint }); } catch (e) { if (errors++ < 3) console.error(e); }
     if (added < 0) return -1;
     nextBorn++;
-    try { if (typeof S.links.addBornLink === "function") S.links.addBornLink(a, x, y, r, idx, { from: pb ? { x: pb.x, y: pb.y, r: pb.r, gen: pb.gen } : null, ageS }); } catch (e) { if (errors++ < 3) console.error(e); }
+    try { if (typeof S.links.addBornLink === "function") S.links.addBornLink(a, x, y, r, idx, { from: pb ? { x: pb.x, y: pb.y, r: pb.r, gen: pb.gen } : null, ageS: ageC }); } catch (e) { if (errors++ < 3) console.error(e); }
     S.bubbles.birth?.(idx, tS, "fade");
-    const entry = { idx, x, y, r, p: a, par: q, gen: g, fam: famId, sym: v.symbol || "", t: now, sparked: false, mint: v.mint, crt, lastT: last > 0 ? last : 0, reveal: true, hc: heatClass(ageS) };
+    const entry = { idx, x, y, r, p: a, par: q, gen: g, fam: famId, sym: v.symbol || "", t: now, sparked: false, mint: v.mint, crt, lastT: last > 0 ? last : 0, reveal: true, hc: heatClass(ageC) };
     born.set(v.mint, entry); bornIdx.set(idx, entry); bornGridAdd(entry);
     V.par[idx] = q; V.fam[idx] = famId; V.cls[idx] = visClassOf(ageS, crt, heatAt > 0 ? heatAt : 0); visGrow(V.st, idx + 1); visOne(idx, tS);
     animUntil = Math.max(animUntil, now + 700); S.invalidate();
@@ -1725,6 +1744,7 @@ export function buildMotion(S) {
     if (!p || !Array.isArray(p.mint) || !(p.at > 0)) return null;
     const now = performance.now(), tS = now / 1000, at = p.at, prevAt = heatAt, spread = opts.spreadMs ?? pollMs();
     const newLast = new Float64Array(N).fill(-Infinity), newN24 = new Float64Array(N), heatIdx = new Map();
+    const cl = clastOf(p), rowOf = cl ? new Int32Array(N).fill(-1) : null;   // (colour by volume) each coin's row, for its colour age
     // (compact layout) the rows of page coins the build left out whose class both the build's mask and the Key show: reveal
     // candidates (not a speck, a page node; most recent trades first, REVEAL_HEAT_MAX per poll, the rest counted as missed)
     const cand = C ? [] : null, mk = buildMask & V.mask;
@@ -1738,7 +1758,7 @@ export function buildMotion(S) {
       if (S.swarm && S.swarm.on && S.swarm.indexOf(m) >= DUST0) return;
       if (lookup(m)) cand.push([m, lt]);
     };
-    for (let r = 0; r < p.mint.length; r++) { heatIdx.set(p.mint[r], r); const i = S.mintIdx.get(p.mint[r]); if (i === undefined) { if (cand) candOf(r); continue; } newLast[i] = p.last[r]; newN24[i] = (p.n24 && p.n24[r]) || 0; }
+    for (let r = 0; r < p.mint.length; r++) { heatIdx.set(p.mint[r], r); const i = S.mintIdx.get(p.mint[r]); if (i === undefined) { if (cand) candOf(r); continue; } newLast[i] = p.last[r]; newN24[i] = (p.n24 && p.n24[r]) || 0; if (rowOf) rowOf[i] = r; }
     if (cand) {
       // a missed coin without a row this poll is class 3: no longer wanted unless the masks show class 3
       if (missed.size && !(mk & 8)) for (const m of missed) {
@@ -1758,9 +1778,14 @@ export function buildMotion(S) {
       if (newLast[i] > lastT[i] && newLast[i] > prevAt - 1 && !(seen >= newLast[i] - 1)) traded.push([i, newN24[i] - S.n24[i]]);
       const nl = Math.max(newLast[i], seen);   // the stream can know a later trade than the 15 s heat snapshot
       lastT[i] = nl;
-      S.age[i] = nl > -Infinity ? Math.max(0, at - nl) : Infinity; S.n24[i] = newN24[i];
+      const real = nl > -Infinity ? Math.max(0, at - nl) : Infinity;
+      ageReal[i] = real; S.n24[i] = newN24[i];
+      const ca = rowOf ? colourAge(p, rowOf[i] >= 0 ? rowOf[i] : undefined, at, real) : real;
+      // a family top is not ranked (its colour clock is its own last trade): a later trade the stream knows counts for it
+      S.age[i] = rowOf && par[i] < 0 ? Math.min(ca, real) : ca;
     }
-    for (const f of fams) { let a = Infinity, t = 0; for (const i of f.members) { if (S.age[i] < a) a = S.age[i]; t += S.n24[i]; } f.age = a; f.n24 = t; }
+    S.rankMode = !!cl;
+    for (const f of fams) { let ar = Infinity, t = 0; for (const i of f.members) { if (ageReal[i] < ar) ar = ageReal[i]; t += S.n24[i]; } f.age = ar; f.ageReal = ar; f.n24 = t; }
     let changed = 0, flashed = 0, dustChanged = 0, scheduled = 0, visCross = false;
     const newlyLive = [], crt = S.crt;
     // (last-trade filter) the filter's class (vis.js visClassOf: the heat class, or 0 for a coin created within 30 min of
@@ -1774,7 +1799,7 @@ export function buildMotion(S) {
         if (c === 0 && cls[i] > 0 && !rm && prevAt > 0) newlyLive.push(i);
         cls[i] = c; boost[i] = b; changed++;
       } else if (b !== boost[i]) { S.bubbles.setCoinHeat(i, c, b, tS); boost[i] = b; }
-      visCls(i, visClassOf(S.age[i], crt ? crt[i] : 0, at));
+      visCls(i, visClassOf(ageReal[i], crt ? crt[i] : 0, at));
     }
     // newborns: their own trades (stream + this payload's row), the same rule
     for (const bb of bornIdx.values()) {
@@ -1783,7 +1808,7 @@ export function buildMotion(S) {
       visCls(bb.idx, visClassOf(last > -Infinity ? Math.max(0, at - last) : Infinity, bb.crt, at));
       // (compact layout) a coin added live wears its real heat (colour, rim, boost and its link), as a built coin does
       if (bb.reveal) {
-        const ag = last > 0 ? Math.max(0, at - last) : Infinity, hc = heatClass(ag);
+        const ag = colourAge(p, r, at, last > 0 ? Math.max(0, at - last) : Infinity), hc = heatClass(ag);
         if (hc !== bb.hc) { S.bubbles.setCoinHeat(bb.idx, hc, coreBoost(ag), tS); try { S.links.setBornAge?.(bb.idx, ag); } catch (e) { if (errors++ < 3) console.error(e); } bb.hc = hc; }
       }
     }
@@ -1986,7 +2011,7 @@ export function buildMotion(S) {
     if (!tickId) tickId = life.raf(tick);
     pushStats();
     const t0 = performance.now();
-    if (!rm) for (let i = 0; i < N; i++) if (S.age[i] < 60) { const due = t0 + 700 + rnd(i, 77) * 7000; schedulePulse(i, due, "load", due); }
+    if (!rm) for (let i = 0; i < N; i++) if (ageReal[i] < 60) { const due = t0 + 700 + rnd(i, 77) * 7000; schedulePulse(i, due, "load", due); }
   };
 
   // ---------- highlight (map3 port): a mask over every engine coin, births included; 1 = matches, 0 = dimmed ----------

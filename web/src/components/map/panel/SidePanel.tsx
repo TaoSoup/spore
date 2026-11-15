@@ -31,6 +31,7 @@ import DominanceLine from "../../DominanceLine";
 import SlidingPill from "../../ui/SlidingPill";
 import Sparkline, { candleChange, spanLabel } from "./Sparkline";
 import Brood from "./Brood";
+import type { Leader } from "../../../lib/map/volume";
 
 const PAGE = 40;
 /// The price line's height: tall enough to read, short enough that the children list starts above the fold at 900 px.
@@ -96,6 +97,14 @@ type Props = {
   node: BubbleNode; byMint: Map<string, BubbleNode>;
   /// Direct children on the map, in kidCmp order.
   kids: BubbleNode[];
+  /// The most traded coins of the selection's whole family by 24 h volume (lib/map/volume.ts familyLeaders); absent or
+  /// empty = no list.
+  leaders?: Leader[];
+  /// The selection's stack: its same-ticker siblings, itself included, the most traded first (lib/map/copies.ts copyGroup);
+  /// fewer than two = no section.
+  copyList?: BubbleNode[];
+  /// The stack's first coin has 24 h volume (else the order is by market cap: "largest", not "most traded").
+  copyTraded?: boolean;
   coin: Coin | null; coinError: string | null;
   heat: HeatRow | null; heatOn: boolean;
   maxDepth: number | undefined;
@@ -122,7 +131,7 @@ type Props = {
   trade?: { data: TradeRoute | null; error: string | null; reload: () => void } | null;
 };
 
-export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
+export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
   const [sparkRef, sparkW] = useWidth();
@@ -141,6 +150,12 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   }, [node, byMint]);
   const root = chain[0] ?? node;
   const [sort, setSort] = useState<KidSort>("mcap");
+  // the stack's first 50, the selection always among them
+  const shownCopies = useMemo(() => {
+    const out = copyList.slice(0, 50);
+    if (copyList.length > 50 && !out.some((k) => k.mint === node.mint)) { const me = copyList.find((k) => k.mint === node.mint); if (me) out[49] = me; }
+    return out;
+  }, [copyList, node.mint]);
   const [shown, setShown] = useState(PAGE);
   useEffect(() => setShown(PAGE), [node.mint]);
   const sorted = useMemo(() => (sort === "mcap" ? kids : kids.slice().sort(SORTS[sort])), [kids, sort]);
@@ -333,6 +348,43 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           <button type="button" className="btn ghost sm" onClick={() => map.current?.fit()} title="Zoom back out to the whole map (0)">Whole map</button>
         </div>
       </div>
+      {copyList.length > 1 && (
+        <section className="map-kids map-active" aria-label={`Coins named ${sym(node)} under the same parent`}>
+          <header><em>{count(copyList.length)} named {sym(node)} · same parent</em></header>
+          <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>mcap</span><span>age</span></div>
+          <ol className="map-copies" onMouseLeave={() => map.current?.hoverNode(null)}>
+            {shownCopies.map((k) => (
+              <li key={k.mint}>
+                <button type="button" className="map-kid" aria-current={k.mint === node.mint || undefined} onClick={() => onPick(k.mint)} onMouseEnter={() => map.current?.hoverNode(k.mint)} onFocus={() => map.current?.hoverNode(k.mint)} title={`${nameOf(k)} · ${k.mint}`}>
+                  <Logo src={k.image} label={k.symbol} size={18} />
+                  <b>{sym(k)}{k === copyList[0] && <span className="map-copy-lead">{copyTraded ? "most traded" : "largest"}</span>}</b>
+                  <span className="mono" title="market cap">{usd(k.mcapUsd)}</span>
+                  <span className="mono muted" title="age">{k.createdAt ? age(k.createdAt) : "—"}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+          {copyList.length > 50 && <p className="map-kids-note">{copyTraded ? "the 50 most traded" : "the first 50"} of {count(copyList.length)}</p>}
+        </section>
+      )}
+      {leaders.length > 0 && (
+        <section className="map-kids map-active" aria-label={`Most active coins in the ${family ? sym(family.top) : sym(node)} family`}>
+          <header><em>most active · {family ? sym(family.top) : sym(node)} family</em></header>
+          <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>24h vol</span><span>1h</span></div>
+          <ol onMouseLeave={() => map.current?.hoverNode(null)}>
+            {leaders.map((l) => (
+              <li key={l.node.mint}>
+                <button type="button" className="map-kid" aria-current={l.node.mint === node.mint || undefined} onClick={() => onPick(l.node.mint)} onMouseEnter={() => map.current?.hoverNode(l.node.mint)} onFocus={() => map.current?.hoverNode(l.node.mint)} title={`#${l.rank} in the family by 24 h volume · ${nameOf(l.node)}`}>
+                  <i className="map-active-rank mono" aria-hidden="true">{l.rank}</i>
+                  <b>{sym(l.node)}</b>
+                  <span className="mono" title="24 h volume">{usd(l.v24)}</span>
+                  <span className="mono muted" title="trades in the last hour">{count(l.t1h)}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
       {(kids.length > 0 || (assetTop && node.children > 0)) && (
         <section className="map-kids" aria-label={`Coins under ${sym(node)}`} ref={broodRef}>
           <header>

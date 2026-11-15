@@ -78,7 +78,7 @@ const counters = { live: 0, created: 0, destroyed: 0 };
 export function engineCounters() { return { live: counters.live, created: counters.created, destroyed: counters.destroyed }; }
 
 // S fields that hold the data / layout arrays and objects: dropped on destroy so a stray reference to S keeps nothing alive
-const HEAVY = ["heat", "heatIdx", "sym", "img", "mint", "mintIdx", "par", "gen", "famOf", "kids", "mc", "val", "age", "n24", "crt",
+const HEAVY = ["heat", "heatIdx", "sym", "img", "mint", "mintIdx", "par", "gen", "famOf", "kids", "mc", "val", "age", "ageReal", "n24", "crt",
   "fams", "ranked", "planets", "dust", "R", "X", "Y", "TH", "NR", "notable", "planetHulls", "worldGrid", "drag", "api", "engineDebug",
   "gl", "layers", "container", "images", "callbacks", "opts", "debugFns", "gfx", "overview", "bubbles", "links", "labels", "motion", "rad",
   "swarm", "vis", "seed", "whole"];

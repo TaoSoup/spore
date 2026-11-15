@@ -49,11 +49,11 @@ import type { BubbleNode, RootsLimit, SizeMode } from "../../lib/map/types";
 import type { FallbackReason, ThreeMapHandle, ThreeMapProps } from "./types";
 import "./map3.css";
 
-type BuildReason = "first" | "mode" | "limit" | "band" | "last" | "select-unknown" | "drift" | "context";
+type BuildReason = "first" | "mode" | "limit" | "band" | "last" | "colour" | "copies" | "select-unknown" | "drift" | "context";
 type Rebuild = { n: number; reason: BuildReason };
 /// mask: the Key's last-trade mask the build was made from (15 = the whole node list); filtered: set once its engine landed
 /// (it was built from buildSet's filtered set)
-type BuildParts = { mode: SizeMode; limit: RootsLimit; band: boolean; mask: number; n: number; filtered?: boolean };
+type BuildParts = { mode: SizeMode; limit: RootsLimit; band: boolean; mask: number; n: number; filtered?: boolean; byVolume: boolean; stacked: boolean };
 /// (compact layout) the whole-family inputs of one node list, reused by every build of the same list (a quick run of toggles)
 type FullPrep = { nodes: readonly BubbleNode[]; full: BuiltInput; fns: ReturnType<typeof valueFns>; whole: WholeTotals | null };
 type Job = { ctrl: AbortController; settled: boolean };
@@ -136,6 +136,9 @@ function collectObstacles(root: HTMLElement | null): EngineRect[] {
 export default function ThreeMap(props: ThreeMapProps) {
   const { nodes, byMint, limit, source, mode, onModeChange, inset, fitInset, select, fresh, highlight, heat, streamStatus, titleTags, titleTagsCompact, last, pinned } = props;
   const lastWant = props.lastWant ?? last;
+  const byVolume = props.colour === "volume", stacked = props.copies != null;
+  const volRanksRef = useRef(props.volRanks ?? null); volRanksRef.current = props.volRanks ?? null;
+  const allByMintRef = useRef(props.allByMint ?? null); allByMintRef.current = props.allByMint ?? null;
   const families = props.families ?? null;
   const familiesRef = useRef(families); familiesRef.current = families;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -148,6 +151,7 @@ export default function ThreeMap(props: ThreeMapProps) {
   const nodesRef = useRef(nodes); nodesRef.current = nodes;
   const byMintRef = useRef(byMint); byMintRef.current = byMint;
   const heatRef = useRef(heat); heatRef.current = heat;
+  const copiesRef = useRef(props.copies ?? null); copiesRef.current = props.copies ?? null;
   const selectRef = useRef(select); selectRef.current = select;
   const insetRef = useRef(inset); insetRef.current = inset;
   const fitInsetRef = useRef(fitInset); fitInsetRef.current = fitInset;
@@ -267,10 +271,11 @@ export default function ThreeMap(props: ThreeMapProps) {
   useEffect(() => {
     if (gate) return;
     if (heat) { setGate(true); return; }
-    const wait = wantsFilter ? FIRST_BUILD_WAIT_FILTERED_MS : FIRST_BUILD_WAIT_MS;
+    // (colour by volume) the ranks come with the heat too: big broods are laid out by colour, so that build waits as well
+    const wait = wantsFilter || byVolume ? FIRST_BUILD_WAIT_FILTERED_MS : FIRST_BUILD_WAIT_MS;
     const t = setTimeout(() => setGate(true), Math.max(0, wait - (performance.now() - mountedAt)));
     return () => clearTimeout(t);
-  }, [gate, heat, mountedAt, wantsFilter]);
+  }, [gate, heat, mountedAt, wantsFilter, byVolume]);
 
   // (compact layout) the node list's source has answered (cache or network), or FIRST_BUILD_WAIT_SOURCE_MS passed: flips once
   const [sourced, setSourced] = useState(() => source !== null);
@@ -326,13 +331,13 @@ export default function ThreeMap(props: ThreeMapProps) {
     const root = rootRef.current;
     if (!root || nodesRef.current.length === 0) return;
     const mask = buildLast & LAST_ALL;
-    const parts: BuildParts = { mode, limit, band, mask, n: rebuild.n };
-    const same = (a: BuildParts | null) => !!a && a.mode === mode && a.limit === limit && a.band === band && a.mask === mask && a.n === rebuild.n;
+    const parts: BuildParts = { mode, limit, band, mask, n: rebuild.n, byVolume, stacked };
+    const same = (a: BuildParts | null) => !!a && a.mode === mode && a.limit === limit && a.band === band && a.mask === mask && a.n === rebuild.n && a.byVolume === byVolume && a.stacked === stacked;
     // A key that went away and came back while its build was pending (a quick double toggle) needs no new engine.
     if (engineRef.current && same(builtPartsRef.current)) { startedPartsRef.current = parts; return; }
     const was = startedPartsRef.current;
     startedPartsRef.current = parts;
-    const reason: BuildReason = !was ? "first" : was.mode !== mode ? "mode" : was.limit !== limit ? "limit" : was.band !== band ? "band" : was.mask !== mask ? "last" : rebuild.reason;
+    const reason: BuildReason = !was ? "first" : was.mode !== mode ? "mode" : was.limit !== limit ? "limit" : was.band !== band ? "band" : was.mask !== mask ? "last" : was.byVolume !== byVolume ? "colour" : was.stacked !== stacked ? "copies" : rebuild.reason;
     if (dataAtRef.current === 0) { dataAtRef.current = performance.now(); setFromCache(sourceRef.current === "cache"); }
 
     const ctrl = new AbortController();
@@ -358,7 +363,8 @@ export default function ThreeMap(props: ThreeMapProps) {
         if (!current()) return;
         if (mint == null) { onSelectRef.current(null); return; }
         // a drawn coin, else a loaded speck of a capped family (the store's node)
-        const n = byMintRef.current.get(mint) ?? familiesRef.current?.node(mint) ?? null;
+        // (copycat stacking) a coin that left the stacked list is drawn until the next build: it is still the page's coin
+        const n = byMintRef.current.get(mint) ?? allByMintRef.current?.get(mint) ?? familiesRef.current?.node(mint) ?? null;
         if (n) onSelectRef.current(n);
       },
       onHover: (mint) => { if (current()) onHoverRef.current?.(mint); },
@@ -416,18 +422,18 @@ export default function ThreeMap(props: ThreeMapProps) {
       let focusFamily: string | null = null;
       try { focusFamily = engineRef.current?.focusedFamily() ?? null; } catch { focusFamily = null; }
       // a bucket toggle while zoomed in keeps the family the view is on (null at the overview: the new build fits all)
-      if (!focusFamily && reason === "last") { try { focusFamily = engineRef.current?.viewFamily() ?? null; } catch { focusFamily = null; } }
+      if (!focusFamily && (reason === "last" || reason === "colour" || reason === "copies")) { try { focusFamily = engineRef.current?.viewFamily() ?? null; } catch { focusFamily = null; } }
       // A size-mode switch keeps the family order of the engine on screen (SPEC 3.3: the planet set and order are mode-independent);
       // only an engine built with this mask (the last build started may be an aborted one of another), and not a filtered
       // engine's order into a full build (it lists only the families it held): adapter.ts keepsOrder.
       let order: string[] | undefined;
       const shown = builtPartsRef.current;
-      if (reason === "mode" && keepsOrder(shown ? { mask: shown.mask, filtered: !!shown.filtered } : null, mask, filtered)) { try { order = engineRef.current?.familyOrder() ?? undefined; } catch { order = undefined; } }
+      if ((reason === "mode" || reason === "colour" || reason === "copies") && keepsOrder(shown ? { mask: shown.mask, filtered: !!shown.filtered } : null, mask, filtered)) { try { order = engineRef.current?.familyOrder() ?? undefined; } catch { order = undefined; } }
       w0 = root.clientWidth; h0 = root.clientHeight;
       // rootsKept: buildSet's families (the engine's own `families` build stat stays as it is)
       buildInfo = { filtered, mask, built: input.count, all: builtNodes.length, shown: set.shown, anchors: set.anchors, pins: set.pins, kept: set.kept, rootsKept: set.families, dropped: set.dropped, prepMs: Math.round(busy * 10) / 10 };
       return mountEngine(layer, {
-        roots: input.roots, heat: heatPayload(heatRef.current), valueOf: valueFn(mode, prep.full.roots), values: prep.fns, order, mode, tagOf: tagFn(tagsRef.current),
+        roots: input.roots, heat: heatPayload(heatRef.current, byVolume && volRanksRef.current ? { ranks: volRanksRef.current, byMint: byMintRef.current } : null), valueOf: valueFn(mode, prep.full.roots), values: prep.fns, order, mode, tagOf: tagFn(tagsRef.current), copiesOf: (m: string) => copiesRef.current?.get(m) ?? 0,
         inset: insetRef.current, fitInset: fitInsetRef.current, obstacles: collectObstacles(root),
         reducedMotion: reducedMotionNow(), feed: streamRef.current === "live" ? "up" : "down", images: IMAGES,
         select: selectRef.current, focusFamily, callbacks, look: lookRef.current, moved: moved.map, swarm: SWARM_ON,
@@ -474,7 +480,7 @@ export default function ThreeMap(props: ThreeMapProps) {
     });
 
     return () => { if (!job.settled) { clearTimeout(slowT); ctrl.abort(); } };
-  }, [gate, sourced, band, mode, limit, buildLast, rebuild, fail, guard, onContextLost]);
+  }, [gate, sourced, band, mode, limit, buildLast, rebuild, byVolume, stacked, fail, guard, onContextLost]);
 
   // (compact layout) the tiny-build safety net: an engine built from a node list far smaller than the one now (a few live pairs
   // that beat the snapshot, past the source wait) is rebuilt at once, not after the drift rule's 10 min
@@ -626,7 +632,7 @@ export default function ThreeMap(props: ThreeMapProps) {
   // ---- live data: trades, pairs, heat, nodes, stream, reduced motion, highlight, tags
   useEffect(() => { registerLogoMints(nodes); }, [nodes]); // patched images arrive as new sources: keep source -> mint current for the logo sheets
   const sync = useEngineSync({
-    engine, nodes, byMint, fresh, heat, streamStatus, highlight, tags, families, last, pinned,
+    engine, nodes, byMint, fresh, heat, streamStatus, highlight, tags, families, last, pinned, volRanks: byVolume ? props.volRanks ?? null : null,
     builtAt: live?.builtAt ?? 0, firstBuildFromCache: fromCache, lastInteract, onDrift,
     filtered: live?.filtered ?? false, buildMask: live?.mask ?? LAST_ALL, select, cacheInput: live?.cacheInput ?? false,
   });

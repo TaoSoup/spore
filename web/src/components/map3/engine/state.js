@@ -165,6 +165,8 @@ export function createState(container, layers, opts, life = createLife()) {
     mode: opts.mode === "mcap" ? "mcap" : "locked",
     modeWord: opts.mode === "mcap" ? "market cap" : "locked value",
     tagOf: typeof opts.tagOf === "function" ? opts.tagOf : () => null,
+    // (copycat stacking, lib/map/copies.ts) how many same-ticker siblings a drawn coin stands for (0 = none); read lazily
+    copiesOf: typeof opts.copiesOf === "function" ? opts.copiesOf : () => 0,
     callbacks: opts.callbacks || {},
     images: opts.images,
 

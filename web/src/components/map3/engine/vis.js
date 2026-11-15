@@ -132,7 +132,7 @@ export function createVis(S, last = null) {
   const par = new Int32Array(cap).fill(-1), fam = new Int32Array(cap).fill(-1), cls = new Uint8Array(cap).fill(3), virt = new Int32Array(cap);
   // the filter's class (visClassOf): no heat at build (an empty payload stamped now) = no heat clock, as on the page
   const crt = S.crt || null, nowS = S.heatStatus === "offline" ? 0 : Number(S.nowS) || 0;
-  for (let i = 0; i < N; i++) { par[i] = S.par[i]; fam[i] = S.famOf[i]; cls[i] = visClassOf(S.age[i], crt ? crt[i] : 0, nowS); }
+  for (let i = 0; i < N; i++) { par[i] = S.par[i]; fam[i] = S.famOf[i]; cls[i] = visClassOf((S.ageReal || S.age)[i], crt ? crt[i] : 0, nowS); }
   const mask = cleanMask(last ? last.mask : MASK_ALL);
   const idx = (m) => { const i = typeof m === "string" && S.mintIdx ? S.mintIdx.get(m) : undefined; return i === undefined ? -1 : i; };
   const pins = new Set(), pinMints = [];

@@ -1,6 +1,7 @@
 import type { Ref } from "react";
 import type { BubbleNode, RootsLimit, SizeMode } from "../../lib/map/types";
 import type { HeatIndex } from "../../lib/map/heat";
+import type { ColourMode, VolRank } from "../../lib/map/volume";
 import type { StreamStatus } from "../../lib/events";
 import type { MapSource } from "../../lib/map/use-map-data";
 import type { BubbleMapHandle } from "../BubbleMap";
@@ -31,6 +32,19 @@ export type ThreeMapProps = {
    * compactly around what is shown; between builds the engine hides in place (EngineHandle.setLastFilter) and a rebuild
    * starts with it (EngineOptions.last). */
   last: number;
+  /** What the coins are coloured by (the Key's switch, `?colour=`): their last trade or (the page's default) their rank by 24 h
+   * volume inside their family (lib/map/volume.ts). A change rebuilds (reason "colour"): big broods are laid out by colour. */
+  colour?: ColourMode;
+  /** (copycat stacking, lib/map/copies.ts) Leader mint → the copies the page left out of `nodes` behind it. The engine
+   * reads it when it writes a label or a tooltip ("×N"). Null = not stacked; a switch between stacked and not rebuilds
+   * (reason "copies"). */
+  copies?: ReadonlyMap<string, number> | null;
+  /** The page's volume ranks of the drawn coins (lib/map/volume.ts volumeRanks, once per heat poll); null = none yet, or
+   * coloured by last trade. Sent to the engine with every heat payload. */
+  volRanks?: ReadonlyMap<string, VolRank> | null;
+  /** The page's whole node index when `byMint` is the stacked one: a click on a coin that left the stacked list (still
+   * drawn until the next build) resolves through it, so it can be selected (and so pinned, and back in the list). */
+  allByMint?: ReadonlyMap<string, BubbleNode> | null;
   /** The mask the reader asked for, heat or not (Map.tsx lastWant): while it is not 15 the first build waits longer for the
    * heat, so it is built filtered once. Absent = `last`. */
   lastWant?: number;

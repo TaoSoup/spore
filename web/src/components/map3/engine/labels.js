@@ -148,13 +148,25 @@ export async function buildLabels(S) {
     L.fill(); L.measure();
     return L;
   });
+  // (colour by volume, 2026-11-15) while the page sends its volume ranks (heat.vrank: 1 = the family's most traded coin by
+  // 24 h volume, 0 = unranked; S.rankMode), a ranked child's second line is its rank and volume, and the family's ten
+  // leaders are named first (LEAD_N). Otherwise everything reads as before.
+  const LEAD_N = 10;
+  const rowOf = (i) => (S.heatIdx && mint ? S.heatIdx.get(mint[i]) : undefined);
+  const vrankOf = (i) => { if (!S.rankMode || !S.heat || !Array.isArray(S.heat.vrank)) return 0; const r = rowOf(i); return r === undefined ? 0 : +S.heat.vrank[r] || 0; };
+  const volOf = (i) => { const r = rowOf(i); return r !== undefined && S.heat && S.heat.v24 ? +S.heat.v24[r] || 0 : 0; };
+  // (copycat stacking) the stack a drawn coin leads: its size (itself + the copies the page left out), 0 = no stack
+  const stackOf = (i) => { let n = 0; try { n = Number(S.copiesOf && mint ? S.copiesOf(mint[i]) : 0) || 0; } catch { n = 0; } return n > 0 ? n + 1 : 0; };
+  const kidHead = (i) => { const n = stackOf(i); return tickerHTML(sym[i]) + (n ? `<span class="cx">×${fmtN(n)}</span>` : ""); };
+  const isLead = (i) => { const rk = vrankOf(i); return rk > 0 && rk <= LEAD_N; };
+  const kidSub = (i) => (isLead(i) ? `#${vrankOf(i)} · ${fmtUsd(volOf(i))} vol` : fmtUsd(mc[i]));
   // children: lazily pooled by coin index (LRU-trimmed)
   const kidPool = new Map();
   const kidL = (i) => {
     let L = kidPool.get(i);
     if (!L) {
-      L = { kind: "kid", i, fam: famOf[i], own: i, e: mk("kid", `<div class="t">${tickerHTML(sym[i])}</div><div class="s">${esc(fmtUsd(mc[i]))}</div>`), on: false, slot: null, want: 0, o: 1 };
-      L.measure = () => { L.w1 = tickW(sym[i], F.kid) + HALO[11]; L.w2 = Math.max(L.w1, mw(fmtUsd(mc[i]), F.mono10) + HALO[10]); };
+      L = { kind: "kid", i, fam: famOf[i], own: i, e: mk("kid", `<div class="t">${kidHead(i)}</div><div class="s">${esc(kidSub(i))}</div>`), on: false, slot: null, want: 0, o: 1, sub: kidSub(i), cx: stackOf(i) };
+      L.measure = () => { L.w1 = tickW(sym[i], F.kid) + HALO[11] + (L.cx ? mw(`×${fmtN(L.cx)}`, F.mono10) + 4 : 0); L.w2 = Math.max(L.w1, mw(L.sub, F.mono10) + HALO[10]); };
       L.measure(); kidPool.set(i, L);
     }
     L.used = layN;
@@ -443,7 +455,15 @@ export async function buildLabels(S) {
 
   // ---------- stats (map3 port): the app owns the HUD; this keeps the 'Most active' callout and the canvas label ----------
   let stats = { counts: null, at: S.nowS || null, offline: false };
-  const countsNow = () => { const c = [0, 0, 0, 0]; for (let i = 0; i < N; i++) c[heatClass(S.age[i])]++; return c; };
+  const countsNow = () => { const c = [0, 0, 0, 0], a = S.ageReal || S.age; for (let i = 0; i < N; i++) c[heatClass(a[i])]++; return c; };
+  // a pooled child label's second line, rewritten when what it says changed (a heat payload moved a rank, a patched cap)
+  const kidResub = (L) => {
+    const t = kidSub(L.i), cx = stackOf(L.i);
+    if (t === L.sub && cx === L.cx) return;
+    if (t !== L.sub) { L.sub = t; const s = L.e.querySelector(".s"); if (s) s.textContent = t; }
+    if (cx !== L.cx) { L.cx = cx; const h = L.e.querySelector(".t"); if (h) h.innerHTML = kidHead(L.i); }
+    L.measure();
+  };
   const normCounts = (c) => Array.isArray(c) ? c : c && typeof c === "object" ? [c.live ?? c[0] ?? 0, c.cooling ?? c.cool ?? c[1] ?? 0, c.quiet ?? c[2] ?? 0, c.cold ?? c[3] ?? 0] : null;
   function renderStats() {
     const c = stats.counts || [0, 0, 0, 0], cv = S.layers.canvas;
@@ -457,6 +477,7 @@ export async function buildLabels(S) {
     if (c) stats.counts = c;
     if (heatAt) stats.at = heatAt;
     computeActive(); for (const L of annL) L.sig = "";
+    for (const L of kidPool.values()) kidResub(L);   // (colour by volume) ranks and volumes move with every heat payload
     renderStats();
   };
 
@@ -527,7 +548,7 @@ export async function buildLabels(S) {
       const r = drawnR(i, f);
       if (r >= 1 && (typeof sR !== "function" || sR(i) >= 1)) drawn++;
       if (r >= 6) obs.push(i); else if (r >= 2.5 && kidsOK) smallI.push(i);
-      if (kidsOK && (r >= 3.5 || (r >= 3.0 && lastShownKids.has(i)))) cand.push(i);   // (final polish) 5 -> 3.5 px: the airier seed heads draw their coins smaller
+      if (kidsOK && (r >= 3.5 || (r >= 3.0 && lastShownKids.has(i)) || (r >= 1.5 && S.rankMode && isLead(i)))) cand.push(i);   // (colour by volume) a leader is named however small   // (final polish) 5 -> 3.5 px: the airier seed heads draw their coins smaller
     };
     const cellW = S.worldGrid?.cell || 24;
     // (focus lane) coins on the move (a held coin and its trailing chain) are visited by their live X/Y, not by the grid
@@ -665,7 +686,9 @@ export async function buildLabels(S) {
     const shownKids = new Set(), insideKids = [];
     if (kidsOK || hov >= 0) {
       const live = (i) => S.age[i] <= 1800;
-      const pri = (i) => mc[i] * (1 + 1.5 * live(i));
+      // (colour by volume) the family's LEAD_N most traded coins come first, in rank order
+      const lead = (i) => { const rk = vrankOf(i); return rk > 0 && rk <= LEAD_N ? rk : 0; };
+      const pri = (i) => { const rk = lead(i); return rk ? 1e18 / rk : mc[i] * (1 + 1.5 * live(i)); };
       if (hov >= 0 && !hidI(hov)) { const f = fams[famOf[hov]]; if (!(f.planet && hov === f.top) && (f.planet || showDust) && R[hov] * k >= 1 && !cand.includes(hov)) cand.push(hov); }
       cand.sort((a, b) => (b === hov) - (a === hov) || pri(b) - pri(a) || n24[b] - n24[a]);
       const budget = ph ? 16 : kB > 4 ? 64 : 40, two = kB > 4;   // (look fix) keyed to the frame fit (kB), see above
@@ -686,7 +709,7 @@ export async function buildLabels(S) {
       // callout forest on one side
       const SEED_LAB = 10, seedN = new Map(), seedSec = new Map();
       const seedOK = (i) => {
-        const p = S.par[i]; if (p < 0 || S.kids[p].length <= 60 || i === hov) return true;
+        const p = S.par[i]; if (p < 0 || S.kids[p].length <= 60 || i === hov || lead(i)) return true;
         const n = seedN.get(p) || 0; if (n >= SEED_LAB) return false;
         const a = Math.atan2(Y[i] - Y[p], X[i] - X[p]), sec = ((Math.floor((a + Math.PI) / (TAU / 10)) % 10) + 10) % 10, m = seedSec.get(p) || 0;
         if (m & (1 << sec)) return false;
@@ -866,7 +889,7 @@ export async function buildLabels(S) {
   // the parent. A footer says what a click does. (map3 port) the 'Family' row carries the app's dominance tag.
   function tipHTML(i) {
     const f = fams[famOf[i]], isTop = i === f.top;
-    const a = S.age[i], c = heatClass(a);
+    const a = (S.ageReal || S.age)[i], c = heatClass(a), fAge = f.ageReal ?? f.age, rk = vrankOf(i);
     const im = img[i] && imgReady(img[i]) ? `<img src="${esc(img[i])}" alt="" decoding="async">` : "";
     const mono = esc((tickerBody(sym[i])[0] || "?").toUpperCase());
     const p = S.par[i];
@@ -876,8 +899,8 @@ export async function buildLabels(S) {
     const foot = phone() ? `<div class="tp-act"><button type="button" class="tp-open">${focused ? "Select" : "Open family"}</button><button type="button" class="tp-x" aria-label="Close">×</button></div>`
       : `<div class="tp-foot">${focused ? "click to select" : "click to open the family"}</div>`;
     // (round 2 final) a family top whose family traded more recently than the top itself leads with the family's recency
-    const famLead = isTop && f.members.length > 1 && f.age < a;
-    const chip = famLead ? `<span class="tp-chip ${CLS_CHIP[heatClass(f.age)]}">family · ${agoChip(f.age)}</span>` : `<span class="tp-chip ${CLS_CHIP[c]}">${agoChip(a)}</span>`;
+    const famLead = isTop && f.members.length > 1 && fAge < a;
+    const chip = famLead ? `<span class="tp-chip ${CLS_CHIP[heatClass(fAge)]}">family · ${agoChip(fAge)}</span>` : `<span class="tp-chip ${CLS_CHIP[c]}">${agoChip(a)}</span>`;
     let tag = null; try { tag = tagText(S.tagOf(mint[f.top])); } catch { tag = null; }
     // (final fix) one line, as the prototype: 'N coins · 37%'. The size toggle, the Key and the side panel say which value
     // the share is of; the mode word wrapped the row onto two lines and made the card taller than the prototype's.
@@ -885,8 +908,9 @@ export async function buildLabels(S) {
     return `<div class="tp-h"><span class="tp-logo">${mono}${im}</span><span class="tp-sym">${tickerHTML(sym[i])}</span>${chip}</div>` +
       `<div class="tp-rows"><span class="tp-k">Market cap</span><span class="tp-v">${esc(fmtUsd(mc[i]))}</span>` +
       `<span class="tp-k">24h trades</span><span class="tp-v">${fmtN(n24[i] || 0)}</span>` +
-      (vol > 0 ? `<span class="tp-k">24h volume</span><span class="tp-v">${esc(fmtUsd(vol))}</span>` : "") +
-      (isTop && f.members.length > 1 ? `<span class="tp-k">Family 24h</span><span class="tp-v">${fmtN(f.n24 || 0)} trades</span><span class="tp-k">Family last trade</span><span class="tp-v">${agoChip(f.age)}</span>` : "") +
+      (stackOf(i) ? `<span class="tp-k">Copies</span><span class="tp-v">${fmtN(stackOf(i) - 1)} more ${tickerHTML(sym[i])} stacked here</span>` : "") +
+      (vol > 0 ? `<span class="tp-k">24h volume</span><span class="tp-v">${esc(fmtUsd(vol))}${rk > 0 ? `${SEP}#${rk} in family` : ""}</span>` : "") +
+      (isTop && f.members.length > 1 ? `<span class="tp-k">Family 24h</span><span class="tp-v">${fmtN(f.n24 || 0)} trades</span><span class="tp-k">Family last trade</span><span class="tp-v">${agoChip(fAge)}</span>` : "") +
       `<span class="tp-k">Lineage</span><span class="tp-v">${g}</span>` +
       `<span class="tp-k">Family</span><span class="tp-v">${famRow}</span>` +
       `<span class="tp-k">Mint</span><span class="tp-v mint">${esc(shortMint(mint?.[i]))}</span></div>` + foot;
@@ -997,7 +1021,7 @@ export async function buildLabels(S) {
   // a patched market cap: the pooled child label's second line follows (radius and layout wait for a rebuild)
   const patched = (i) => {
     const L = kidPool.get(i);
-    if (L) { const s = L.e.querySelector(".s"); if (s) s.textContent = fmtUsd(mc[i]); L.measure(); }
+    if (L) kidResub(L);
     if (tip && tipI === i) fillTip(i);
   };
   const setInsets = () => { readHud(); setDock(); if (readyDone) layoutLabels(); };
