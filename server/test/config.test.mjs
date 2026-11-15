@@ -106,3 +106,23 @@ test("root agents config (DESIGN §13): off by default, gates and tick validated
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("RPC_USER_URL: a metered RPC for the request-driven lanes only, paced for Helius' free plan; its URL never echoed", () => {
+  const dir = tmp();
+  try {
+    const base = { DATA_DIR: join(dir, "d"), META_DIR: join(dir, "m") };
+    assert.equal(loadConfig(base, { here: dir }).rpcUser, null, "unset: everything on RPC_URL, as before");
+    const c = loadConfig({ ...base, RPC_USER_URL: "https://mainnet.helius-rpc.com/?api-key=SECRET" }, { here: dir });
+    assert.deepEqual(c.rpcUser, { url: "https://mainnet.helius-rpc.com/?api-key=SECRET", rps: 5, sendRps: 1, dailyCredits: 15_000 });
+    assert.equal(c.rpcUrl, "https://api.mainnet-beta.solana.com", "the indexer stays on the free RPC");
+    assert.equal(c.wsUrl, "wss://api.mainnet-beta.solana.com", "and so does the live socket");
+    const o = loadConfig({ ...base, RPC_USER_URL: "https://h.example/?api-key=S", RPC_USER_RPS: "3", RPC_USER_SEND_RPS: "0.5", RPC_USER_DAILY_CREDITS: "0" }, { here: dir });
+    assert.deepEqual(o.rpcUser, { url: "https://h.example/?api-key=S", rps: 3, sendRps: 0.5, dailyCredits: 0 });
+    assert.equal(loadConfig({ ...base, RPC_URL: "https://h.example/?api-key=S", RPC_USER_URL: "https://h.example/?api-key=S" }, { here: dir }).rpcUser, null, "the same URL as RPC_URL is no second endpoint");
+    assert.throws(() => loadConfig({ ...base, RPC_USER_URL: "ftp://SECRET-KEY", RPC_USER_DAILY_CREDITS: "-1" }, { here: dir }), (e) => {
+      assert.match(e.message, /RPC_USER_URL must be a http\/https URL/);
+      assert.ok(!e.message.includes("SECRET-KEY"), "the bad URL (it may hold a key) is not echoed");
+      return true;
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

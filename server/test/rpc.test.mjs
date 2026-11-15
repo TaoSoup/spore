@@ -3,7 +3,10 @@
 // own lanes so their traffic (and the 429s it provokes) never stalls the indexer.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Rpc, deriveWsUrl, redact } from "../lib/rpc.mjs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Rpc, CreditBudget, creditCost, deriveWsUrl, redact } from "../lib/rpc.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
 const json = (result, status = 200, headers = {}) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), { status, headers: { "content-type": "application/json", ...headers } });
@@ -66,4 +69,123 @@ test("network failures retry with backoff then surface; budget stats are reporte
 test("deriveWsUrl keeps the key in the query; redact hides it", () => {
   assert.equal(deriveWsUrl("https://mainnet.helius-rpc.com/?api-key=K"), "wss://mainnet.helius-rpc.com/?api-key=K");
   assert.equal(redact("wss://mainnet.helius-rpc.com/?api-key=K"), "wss://mainnet.helius-rpc.com/?api-key=…");
+});
+
+// ---- the metered endpoint (RPC_USER_URL): request-driven lanes only, within a daily credit budget, and never slower
+// than without it (every refusal there is retried at once on RPC_URL)
+const FREE = "https://free.example", PAID = "https://paid.example/?api-key=K";
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const routed = (answer = () => json("ok")) => {
+  const hits = [];
+  const fetchImpl = async (url, init) => { const b = JSON.parse(init.body); hits.push({ url, method: Array.isArray(b) ? "batch" : b.method }); return answer(url, b); };
+  return { hits, fetchImpl };
+};
+const recorder = () => { const lines = []; return { lines, log: { info: (m) => lines.push(m), warn: (m) => lines.push(m), error() {} } }; };
+const fast = { rps: 1000, sendRps: 1000 };
+
+test("user route: the api and proxy lanes use RPC_USER_URL, the indexer stays on RPC_URL; batches stay on RPC_URL", async () => {
+  const { hits, fetchImpl } = routed();
+  const rpc = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, proxyRps: 1000, log: quiet, fetchImpl, user: { url: PAID, ...fast } });
+  await rpc.call("getSlot");
+  await rpc.lane("api").call("getSlot");
+  await rpc.proxy({ jsonrpc: "2.0", id: 1, method: "getLatestBlockhash" });
+  await rpc.proxy([{ jsonrpc: "2.0", id: 1, method: "getSlot" }, { jsonrpc: "2.0", id: 2, method: "getSlot" }]);
+  assert.deepEqual(hits.map((h) => h.url), [FREE, PAID, PAID, FREE]);
+  const u = rpc.userSnapshot();
+  assert.equal(u.host, "paid.example"); assert.equal(u.calls, 2); assert.equal(u.credits.used, 2);
+  assert.ok(!JSON.stringify(u).includes("api-key"), "health never carries the URL (the key is in it)");
+  assert.equal(new Rpc({ url: FREE, log: quiet, user: { url: FREE } }).user, null, "the same URL is no second endpoint");
+  assert.equal(new Rpc({ url: FREE, log: quiet }).userSnapshot(), null);
+});
+
+test("user route: past the day's credits, requests go to RPC_URL until the next UTC day (said once); costs counted high", async () => {
+  let now = Date.parse("2026-11-14T23:59:00Z");
+  const { hits, fetchImpl } = routed();
+  const { lines, log } = recorder();
+  const rpc = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, proxyRps: 1000, log, fetchImpl, user: { url: PAID, ...fast, dailyCredits: 12, now: () => now } });
+  const api = rpc.lane("api");
+  await api.call("getTransaction", ["sig"]); // 10
+  await api.call("getSlot"); // 11
+  await api.call("getSlot"); // 12: the limit
+  await api.call("getSlot"); // over: free
+  await rpc.proxy({ method: "getBalance" }); // over: free
+  assert.deepEqual(hits.map((h) => h.url), [PAID, PAID, PAID, FREE, FREE]);
+  assert.equal(lines.filter((l) => /used today's 12 credits/.test(l)).length, 1, "said once a day");
+  assert.equal(creditCost("getProgramAccounts"), 10); assert.equal(creditCost("getSignaturesForAddress"), 10); assert.equal(creditCost("sendTransaction"), 1);
+  now = Date.parse("2026-11-15T00:00:01Z");
+  await api.call("getSlot");
+  assert.equal(hits.at(-1).url, PAID, "a new UTC day, a new budget");
+  assert.equal(rpc.userSnapshot().credits.day, "2026-11-15");
+  const z = routed();
+  await new Rpc({ url: FREE, rps: 1000, apiRps: 1000, log: quiet, fetchImpl: z.fetchImpl, user: { url: PAID, dailyCredits: 0 } }).lane("api").call("getSlot");
+  assert.equal(z.hits[0].url, FREE, "a zero budget never uses it");
+});
+
+test("user route: a 429, a refused key, an error answer or a network failure there is retried at once on RPC_URL", async () => {
+  let paid = [];
+  const { fetchImpl } = routed((url) => url === PAID ? (paid.shift() ?? (() => json("paid")))() : json("free"));
+  const { lines, log } = recorder();
+  const rpc = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, proxyRps: 1000, log, fetchImpl, backoffMinMs: 60, backoffMaxMs: 60, user: { url: PAID, ...fast } });
+  const api = rpc.lane("api");
+  // HTTP 429: this call goes to RPC_URL at once, and so do the next while the pause lasts; the indexer is untouched
+  paid = [() => new Response("", { status: 429, headers: { "retry-after": "0" } })];
+  const t0 = Date.now();
+  assert.equal(await api.call("getSlot"), "free");
+  assert.ok(Date.now() - t0 < 50, "no waiting out the paid endpoint's pause");
+  assert.equal(await api.call("getSlot"), "free", "paused: straight to RPC_URL");
+  assert.equal(rpc.laneSnapshot().main.pausedMs, 0);
+  await wait(80);
+  assert.equal(await api.call("getSlot"), "paid", "used again after the pause");
+  // Helius' JSON envelope for a spent plan counts as a 429
+  paid = [() => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32429, message: "max usage reached" } }))];
+  assert.equal(await api.call("getSlot"), "free");
+  await wait(80);
+  // a refused key: off for 10 minutes, said once, by host
+  paid = [() => new Response("unauthorized", { status: 401 })];
+  assert.equal(JSON.parse((await rpc.proxy({ method: "getSlot" })).text).result, "free");
+  assert.ok(rpc.userSnapshot().offMs > 9 * 60_000);
+  assert.equal(await api.call("getSlot"), "free");
+  assert.equal(lines.filter((l) => /HTTP 401/.test(l)).length, 1);
+  assert.ok(lines.every((l) => !l.includes("api-key")), "logs name the host, never the URL");
+  // a network failure, and a 5xx: that request on RPC_URL
+  const n = routed((url) => { if (url === PAID) throw new Error("ECONNRESET"); return json("free"); });
+  const r2 = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, proxyRps: 1000, log: quiet, fetchImpl: n.fetchImpl, user: { url: PAID, ...fast } });
+  assert.equal(await r2.lane("api").call("getSlot"), "free");
+  assert.equal(JSON.parse((await r2.proxy({ method: "getSlot" })).text).result, "free");
+  const e = routed((url) => url === PAID ? new Response("bad gateway", { status: 502 }) : json("free"));
+  const r3 = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, proxyRps: 1000, log: quiet, fetchImpl: e.fetchImpl, user: { url: PAID, ...fast } });
+  assert.equal(await r3.lane("api").call("getSlot"), "free");
+  assert.equal(JSON.parse((await r3.proxy({ method: "getSlot" })).text).result, "free");
+  assert.equal(r3.userSnapshot().fallbacks, 2);
+  assert.equal(r3.stats.errors, 0, "a fallback is not an error");
+});
+
+test("user route: sendTransaction is paced at the provider's per-second cap, with no burst; other calls are not", async () => {
+  const { hits, fetchImpl } = routed();
+  const rpc = new Rpc({ url: FREE, rps: 1000, proxyRps: 1000, log: quiet, fetchImpl, user: { url: PAID, rps: 1000, sendRps: 10 } });
+  const t0 = Date.now();
+  for (const tx of ["x", "y", "z"]) await rpc.proxy({ method: "sendTransaction", params: [tx] });
+  const took = Date.now() - t0;
+  assert.ok(took >= 180, `three sends at 10/s took ${took} ms (the first at once, then 100 ms apart)`);
+  assert.ok(hits.every((h) => h.url === PAID));
+  const t1 = Date.now();
+  await rpc.proxy({ method: "getBalance" });
+  assert.ok(Date.now() - t1 < 50, "other calls do not wait for the send cap");
+});
+
+test("credit budget: kept on disk across restarts for the same UTC day, started over on the next", () => {
+  const dir = mkdtempSync(join(tmpdir(), "spore-credits-"));
+  try {
+    const file = join(dir, "c.json");
+    let now = Date.parse("2026-11-14T10:00:00Z");
+    const a = new CreditBudget({ limit: 100, file, now: () => now, log: quiet, saveDelayMs: 60_000 });
+    assert.equal(a.take(40), true); assert.equal(a.take(61), false, "nothing booked when it does not fit"); assert.equal(a.used, 40);
+    a.flush();
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { day: "2026-11-14", used: 40 });
+    assert.equal(new CreditBudget({ limit: 100, file, now: () => now, log: quiet }).used, 40, "a restart keeps the day's count");
+    now = Date.parse("2026-11-15T00:00:00Z");
+    assert.equal(new CreditBudget({ limit: 100, file, now: () => now, log: quiet }).used, 0, "yesterday's count is not today's");
+    writeFileSync(file, "not json");
+    assert.equal(new CreditBudget({ limit: 100, file, now: () => now, log: quiet }).used, 0, "an unreadable file starts at 0");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

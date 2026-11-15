@@ -8,6 +8,13 @@
 // lanes are small and separate so that one client hammering the API, or a burst of 429s its
 // traffic provoked upstream, can slow its own lane but never stall the indexer. Paid RPCs just get
 // a higher RPC_RPS.
+//
+// A second, metered endpoint (`user`, RPC_USER_URL: a Helius key on its free plan) can carry the
+// request-driven lanes (api and proxy) while the indexer stays on RPC_URL. It is used sparingly: a
+// daily credit budget (kept on disk across restarts), its own request rate under the provider's limit,
+// and every refusal (over budget, a 429, a refused key, an error answer) sends the request to RPC_URL
+// instead, so a user request is never slower than it was without the second endpoint.
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 
 export class RpcError extends Error {
   constructor(method, code, message, data) { super(`${method}: ${message} (${code})`); this.name = "RpcError"; this.code = code; this.data = data; }
@@ -21,6 +28,47 @@ export function deriveWsUrl(rpcUrl) {
 }
 export const redact = (url) => String(url).replace(/(api[-_]?key=)[^&]+/i, "$1…");
 export const PROXY_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Credits a call costs on the metered endpoint. Helius bills most RPC calls 1 credit and getProgramAccounts 10; the
+ * history reads are counted at 10 too, on purpose: counting high only ever spends less than the budget says.
+ */
+export const CREDIT_COST = { getProgramAccounts: 10, getTransaction: 10, getSignaturesForAddress: 10, getBlock: 10, getBlocks: 10 };
+export const creditCost = (method) => CREDIT_COST[method] ?? 1;
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/**
+ * Credits spent today (UTC) on the metered endpoint, against a daily limit. Kept in a small JSON file (written at most
+ * every few seconds, and on `flush()`), so restarting the server does not start the day's count over.
+ */
+export class CreditBudget {
+  constructor({ limit, file = null, now = Date.now, log = console, saveDelayMs = 5_000 }) {
+    this.limit = limit; this.file = file; this.now = now; this.log = log; this.saveDelayMs = saveDelayMs; this.timer = null;
+    this.day = utcDay(now()); this.used = 0;
+    if (file) {
+      try {
+        const saved = JSON.parse(readFileSync(file, "utf8"));
+        if (saved?.day === this.day && Number.isFinite(saved.used) && saved.used >= 0) this.used = saved.used;
+      } catch { /* no file yet, or unreadable: today starts at 0 */ }
+    }
+  }
+  #roll() { const d = utcDay(this.now()); if (d !== this.day) { this.day = d; this.used = 0; } }
+  /** Books `cost` credits when they fit in today's limit; false (nothing booked) when they do not. */
+  take(cost) {
+    this.#roll();
+    if (this.used + cost > this.limit) return false;
+    this.used += cost;
+    if (this.file && !this.timer) { this.timer = setTimeout(() => { this.timer = null; this.flush(); }, this.saveDelayMs); this.timer.unref?.(); }
+    return true;
+  }
+  flush() {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (!this.file) return;
+    try { writeFileSync(`${this.file}.tmp`, JSON.stringify({ day: this.day, used: this.used })); renameSync(`${this.file}.tmp`, this.file); }
+    catch (e) { this.log.warn?.(`rpc: could not save the credit count: ${e.message}`); }
+  }
+  snapshot() { this.#roll(); return { day: this.day, used: this.used, limit: this.limit }; }
+}
 
 /** One token bucket + concurrency gate + 429 pause. */
 class Lane {
@@ -48,7 +96,7 @@ async function readText(res, max) {
 }
 
 export class Rpc {
-  constructor({ url, rps = 6, concurrency = 4, timeoutMs = 30_000, log = console, fetchImpl = fetch, backoffMinMs = 1_000, backoffMaxMs = 30_000, apiRps = null, proxyRps = null, apiConcurrency = 2, proxyConcurrency = 2 } = {}) {
+  constructor({ url, rps = 6, concurrency = 4, timeoutMs = 30_000, log = console, fetchImpl = fetch, backoffMinMs = 1_000, backoffMaxMs = 30_000, apiRps = null, proxyRps = null, apiConcurrency = 2, proxyConcurrency = 2, user = null } = {}) {
     if (!url) throw new Error("RPC url required");
     this.url = url; this.log = log; this.gpaV2 = false; this.timeoutMs = timeoutMs; this.fetch = fetchImpl;
     this.backoffMinMs = backoffMinMs; this.backoffMaxMs = backoffMaxMs;
@@ -62,7 +110,52 @@ export class Rpc {
     };
     this.stats = { calls: 0, errors: 0, rateLimited: 0, lastError: null };
     this.id = 0;
+    // The metered endpoint for the api and proxy lanes (see the top of this file). Its own lane holds its rate, and a
+    // one-at-a-time "send" lane its sendTransaction rate (Helius' free plan: 10 requests/s, 1 sendTransaction/s).
+    this.user = null;
+    if (user?.url && user.url !== url) {
+      const { url: userUrl, rps: userRps = 5, concurrency: userConcurrency = 4, sendRps = 1, dailyCredits = 15_000, creditsFile = null, now = Date.now } = user;
+      this.user = { url: userUrl, host: new URL(userUrl).host, budget: new CreditBudget({ limit: dailyCredits, file: creditsFile, now, log }), offUntil: 0, calls: 0, fallbacks: 0, overDay: null };
+      this.lanes.user = new Lane("user", { rps: userRps, concurrency: userConcurrency });
+      this.lanes.send = new Lane("send", { rps: sendRps, concurrency: 1 });
+      this.lanes.send.capacity = 1; this.lanes.send.tokens = 1; // no burst: the provider counts sends per second
+    }
   }
+
+  /**
+   * Whether this request goes to the metered endpoint: only for the api and proxy lanes, while the endpoint is neither
+   * paused by a 429 nor switched off by a refused key, and only when its credits fit in today's budget (booked here).
+   */
+  #useUser(lane, methods) {
+    const u = this.user;
+    if (!u || (lane !== "api" && lane !== "proxy")) return false;
+    const now = Date.now();
+    if (now < u.offUntil || now < this.lanes.user.pausedUntil || (methods.includes("sendTransaction") && now < this.lanes.send.pausedUntil)) return false;
+    if (!u.budget.take(methods.reduce((t, m) => t + creditCost(m), 0))) {
+      const day = u.budget.day;
+      if (u.overDay !== day) { u.overDay = day; this.log.info?.(`rpc: ${u.host} used today's ${u.budget.limit} credits; user requests go to the free RPC until 00:00 UTC`); }
+      return false;
+    }
+    u.calls++;
+    return true;
+  }
+  /** The metered endpoint refused this request: the caller retries it on RPC_URL. A refused key switches it off for 10 min. */
+  #userRefused(status) {
+    const u = this.user;
+    u.fallbacks++;
+    if (status === 401 || status === 403) {
+      if (Date.now() >= u.offUntil) this.log.warn?.(`rpc: ${u.host} refused the request (HTTP ${status}: a wrong or disabled key?); user requests go to the free RPC for 10 min`);
+      u.offUntil = Date.now() + 10 * 60_000;
+    }
+  }
+  /** The metered endpoint's state for /api/health: its host only, never the URL (the key is in it). */
+  userSnapshot() {
+    const u = this.user;
+    if (!u) return null;
+    return { host: u.host, credits: u.budget.snapshot(), calls: u.calls, fallbacks: u.fallbacks, offMs: Math.max(0, u.offUntil - Date.now()), pausedMs: Math.max(0, this.lanes.user.pausedUntil - Date.now()) };
+  }
+  /** Saves the day's credit count now (shutdown). */
+  close() { this.user?.budget.flush(); }
 
   // The main lane's state stays reachable under its historical names (health, tests).
   get pausedUntil() { return this.lanes.main.pausedUntil; }
@@ -110,18 +203,22 @@ export class Rpc {
   }
 
   async call(method, params = [], { timeoutMs = this.timeoutMs, retries = 3, lane = "main" } = {}) {
-    const L = this.lanes[lane] ?? this.lanes.main;
-    let attempt = 0, rateLimitHits = 0;
+    let attempt = 0, rateLimitHits = 0, free = false;
     for (;;) {
+      // The metered endpoint first (api and proxy lanes only); once it refused this request, RPC_URL takes the rest of it.
+      const user = !free && this.#useUser(lane, [method]);
+      const L = user ? this.lanes.user : (this.lanes[lane] ?? this.lanes.main);
+      if (user && method === "sendTransaction") await this.#take(this.lanes.send);
       await this.#take(L);
       await this.#enter(L);
       this.stats.calls++;
       let res, text;
       try {
-        res = await this.fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params }), signal: AbortSignal.timeout(timeoutMs) });
+        res = await this.fetch(user ? this.user.url : this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params }), signal: AbortSignal.timeout(timeoutMs) });
         text = await res.text();
       } catch (e) {
         this.#leave(L);
+        if (user) { this.#userRefused(0); free = true; continue; }
         this.stats.errors++; this.stats.lastError = `${method}: ${e.message}`;
         if (attempt++ >= retries) throw e;
         await sleep(1_000 * 2 ** attempt);
@@ -130,20 +227,31 @@ export class Rpc {
       this.#leave(L);
       if (res.status === 429) {
         this.#rateLimited(L, Number(res.headers.get("retry-after")));
+        if (user) { this.#userRefused(429); free = true; continue; }
         if (++rateLimitHits > 12) throw new Error(`${method}: rate limited ${rateLimitHits} times`);
         continue;
       }
       if (!res.ok) {
+        if (user) { this.#userRefused(res.status); free = true; continue; }
         this.stats.errors++; this.stats.lastError = `${method}: HTTP ${res.status}`;
         if (attempt++ >= retries) throw new Error(`${method}: HTTP ${res.status}`);
         await sleep(1_000 * 2 ** attempt);
         continue;
       }
       let json;
-      try { json = JSON.parse(text); } catch { this.stats.errors++; if (attempt++ >= retries) throw new Error(`${method}: bad JSON from RPC`); continue; }
+      try { json = JSON.parse(text); } catch {
+        if (user) { this.#userRefused(0); free = true; continue; }
+        this.stats.errors++; if (attempt++ >= retries) throw new Error(`${method}: bad JSON from RPC`); continue;
+      }
       if (json.error) {
-        // Some providers answer rate limits inside the JSON envelope rather than with HTTP 429.
-        if (json.error.code === 429 || /too many requests|rate limit/i.test(json.error.message ?? "")) { this.#rateLimited(L); if (++rateLimitHits > 12) throw new RpcError(method, json.error.code, json.error.message); continue; }
+        // Some providers answer rate limits inside the JSON envelope rather than with HTTP 429 (Helius: -32429).
+        if (json.error.code === 429 || json.error.code === -32429 || /too many requests|rate limit|max usage/i.test(json.error.message ?? "")) {
+          this.#rateLimited(L);
+          if (user) { this.#userRefused(429); free = true; continue; }
+          if (++rateLimitHits > 12) throw new RpcError(method, json.error.code, json.error.message);
+          continue;
+        }
+        if (json.error.code === -32005 && user) { this.#userRefused(0); free = true; continue; } // behind: the other endpoint
         if (json.error.code === -32005 && attempt++ < retries) { await sleep(1_000); continue; } // node is behind / unhealthy
         this.stats.errors++; this.stats.lastError = `${method}: ${json.error.message}`;
         throw new RpcError(method, json.error.code, json.error.message, json.error.data);
@@ -240,17 +348,28 @@ export class Rpc {
    * browser legitimately asks for is).
    */
   async proxy(body, { timeoutMs = 20_000, maxBytes = PROXY_MAX_BYTES } = {}) {
-    const L = this.lanes.proxy;
-    await this.#take(L);
-    await this.#enter(L);
-    this.stats.calls++;
-    try {
-      const res = await this.fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
-      const text = await readText(res, maxBytes);
-      if (res.status === 429) this.#rateLimited(L, Number(res.headers.get("retry-after")));
+    // A single call may go to the metered endpoint; a batch stays on RPC_URL (free plans may refuse batches).
+    const methods = Array.isArray(body) ? null : [String(body?.method)];
+    for (let free = !methods; ; free = true) {
+      const user = !free && this.#useUser("proxy", methods);
+      const L = user ? this.lanes.user : this.lanes.proxy;
+      if (user && methods.includes("sendTransaction")) await this.#take(this.lanes.send);
+      await this.#take(L);
+      await this.#enter(L);
+      this.stats.calls++;
+      let res, text;
+      try {
+        try { res = await this.fetch(user ? this.user.url : this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) }); }
+        catch (e) { if (user) { this.#userRefused(0); continue; } throw e; }
+        text = await readText(res, maxBytes);
+      } finally { this.#leave(L); }
+      if (res.status === 429) {
+        this.#rateLimited(L, Number(res.headers.get("retry-after")));
+        if (user) { if (methods.includes("sendTransaction")) this.#rateLimited(this.lanes.send); this.#userRefused(429); continue; }
+      } else if (user && !res.ok) { this.#userRefused(res.status); continue; }
       else L.backoffMs = 0;
       return { status: res.status, text };
-    } finally { this.#leave(L); }
+    }
   }
 
   snapshot() { return { ...this.stats, ...this.lanes.main.snapshot() }; }

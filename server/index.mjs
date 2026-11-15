@@ -42,7 +42,12 @@ const model = new Model(db, { platformWallet: cfg.platformWallet, splitBps: cfg.
 model.load();
 configureLocalMetaHost({ domain: cfg.pagesDomain, dir: join(cfg.metaDir, "m") });
 const metahost = new MetaHost({ root: cfg.metaDir, domain: cfg.pagesDomain, project: cfg.pagesProject, log, ledger: db, quota: new DailyQuota(cfg.uploadQuota) });
-const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, log });
+const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, log,
+  user: cfg.rpcUser && { ...cfg.rpcUser, creditsFile: join(cfg.dataDir, "rpc-user-credits.json") } });
+if (rpc.user) {
+  const c = rpc.user.budget.snapshot();
+  log.info(`rpc: user requests (lookups, the browser's /api/rpc) go to ${rpc.user.host} at ${cfg.rpcUser.rps}/s, at most ${c.limit} credits a day (${c.used} used today); the indexer stays on ${new URL(cfg.rpcUrl).host}`);
+}
 const hub = new EventHub({ maxClients: cfg.sseMaxClients, maxPerIp: cfg.ssePerIp });
 const imgWork = new ImgWork({ log }); // thumbnails and logo sheets render on a worker thread, never on this loop
 // 8 origin downloads at once (map logos from far), at most half of them for background work (first sight, warm
@@ -147,7 +152,7 @@ function shutdown(signal) {
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
   indexer.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
-  server.close(() => { try { apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
+  server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();
   setTimeout(() => { log.warn("forced exit"); try { apiKeys.flush(); db.close(); } catch { /* ignore */ } process.exit(process.exitCode ?? 0); }, 8_000).unref();

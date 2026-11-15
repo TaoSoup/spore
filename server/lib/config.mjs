@@ -60,6 +60,17 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // Request-driven lanes (unknown-coin lookups, eligibility, the browser proxy) get their own small budgets.
   const rpcApiRps = num("RPC_API_RPS", Math.max(1, rpcRps / 4), { min: 0.1, max: 10_000 });
   const rpcProxyRps = num("RPC_PROXY_RPS", Math.max(1, rpcRps / 4), { min: 0.1, max: 10_000 });
+  // An optional metered RPC (a Helius key) for those request-driven lanes only, while the indexer stays on RPC_URL:
+  // at most RPC_USER_RPS requests/s (sends at RPC_USER_SEND_RPS) and RPC_USER_DAILY_CREDITS credits a day (UTC), then
+  // RPC_URL again. The defaults fit Helius' free plan (10 requests/s, 1 send/s, 1M credits a month): 15 000 a day is
+  // under half of it. The URL itself (it holds the key) is never logged or reported; errors name the variable only.
+  const rpcUserUrl = get("RPC_USER_URL", "") ? url("RPC_USER_URL", "", ["http:", "https:"]) : "";
+  const rpcUser = rpcUserUrl && rpcUserUrl !== rpcUrl ? {
+    url: rpcUserUrl,
+    rps: num("RPC_USER_RPS", 5, { min: 0.1, max: 10_000 }),
+    sendRps: num("RPC_USER_SEND_RPS", 1, { min: 0.1, max: 10_000 }),
+    dailyCredits: num("RPC_USER_DAILY_CREDITS", 15_000, { min: 0, integer: true }),
+  } : null;
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
@@ -157,5 +168,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter };
 }
