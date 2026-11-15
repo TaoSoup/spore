@@ -146,7 +146,7 @@ export async function buildLabels(S) {
       const t1 = S.rankMode && famT1h ? famT1h[f.id] || 0 : 0, hr = t1 > 0 ? hotOf(f) : 0;
       L.hot = hr;
       if (t1 > 0) {   // '#1 · 29.1k trades 1h' for the busiest five, '10% · 1,204 trades 1h' for the others
-        const act = `${fmtCount(t1)} trades 1h`, pre = hr ? `#${hr}` : tag;
+        const act = `${fmtCount(t1)} trade${t1 === 1 ? "" : "s"} 1h`, pre = hr ? `#${hr}` : tag;
         L.stTxt = pre ? `${pre} · ${act}` : act;
         L.e.innerHTML = `<div class="t">${tickerHTML(s)}</div><div class="s">${pre ? `${hr ? `<b class="hr">${esc(pre)}</b>` : esc(pre)}${SEP}` : ""}${act}</div>`;
         return;
@@ -646,7 +646,8 @@ export async function buildLabels(S) {
       const st = ph ? k >= 1.6 * k0 || !!L.hot : G || tier === "A" || !!L.hot;   // galaxy: the stat line on every planet, as the reference; (activity first) and on the busiest five
       const v = L.v[tier], w = Math.max(v.w, st ? L.v.sw : 0), h = v.h + (st ? 12 : 0);
       plSpec.push({ L, j, tier, st, w, h });
-      reserveL(L, chipX[j], chipY[j], chipR[j], 6, w, h);
+      const rv = L.on && L.redT ? L.v[L.redT] : null;   // a title shown reduced (below) holds the box it is shown in, not its full one
+      reserveL(L, chipX[j], chipY[j], chipR[j], 6, rv ? rv.w : w, rv ? rv.h : h);
     }
     let nP = 0;
     for (const p of plSpec) {
@@ -655,13 +656,15 @@ export async function buildLabels(S) {
       if (nP >= budgetP && hov !== L.f.top) { hideL(L); continue; }
       if (overview && !ph && !L.hot && L.f.rank >= (G ? 64 : 32 + 8)) { hideL(L); continue; }
       setCls(L, "tierc", "t" + tier); setCls(L, "stc", st ? "st" : ""); setCls(L, "hotc", L.hot ? "hot" : "");
-      L.w = w; L.h = h;
+      L.w = w; L.h = h; L.redT = null;
       // (compact layout) a build made from the Key's filtered set packs a family's shown children tight around its chip: at the
       // family's own fit (focused) every slot next to the chip can touch a child, so its title may sit over its own children
       // rather than be dropped (a full build's looser tree keeps the first try)
       if (tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id) || (S.filtered && L.f.Rc * k >= 0.3 * minWH && tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id, L.f.id))) { nP++; setO(L, 1); applyDim(L); }
-      else if (ph && st && L.hot && (() => { const v = L.v[tier]; setCls(L, "stc", ""); L.w = v.w; L.h = v.h; return tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, v.w, v.h, false, L.f.id); })()) { nP++; setO(L, 1); applyDim(L); }   // (activity first) a phone: the busiest five keep their title, without the line, when both lines find no slot
-      else hideL(L);
+      // (activity first) the busiest five keep their title when both lines find no slot: first without the line, then (a
+      // large title) in the smaller size. A phone held sideways or a short window packs the overview as tight as a phone does.
+      else if (st && L.hot && (tier === "A" ? ["A", "B"] : [tier]).some((t) => { const v = L.v[t]; L.redT = t; setCls(L, "tierc", "t" + t); setCls(L, "stc", ""); L.w = v.w; L.h = v.h; return tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, v.w, v.h, false, L.f.id); })) { nP++; setO(L, 1); applyDim(L); }
+      else { setCls(L, "tierc", "t" + tier); setCls(L, "stc", st ? "st" : ""); hideL(L); }   // fades out in the look it had
     }
 
     // ---- 2. generation tags: on the arc at the occupied angle nearest 12 o'clock, sliding +-36 deg ----

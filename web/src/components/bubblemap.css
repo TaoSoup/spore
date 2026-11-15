@@ -532,6 +532,9 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-sheet-handle:hover i, .map-sheet-handle:focus-visible i { opacity: 1; width: 40px; background: var(--accent); }
 .map-sheet .map-side-close { top: 24px; right: 12px; }
 .map-sheet .map-side-in > * { animation: mc-in .42s var(--ease-expo) both; }
+/* the full sheet scrolls as one: a list that scrolled inside it (260 px, no chaining) trapped the finger.
+   The lists are paged ("show more"), so they stay short. */
+.map-sheet .map-kids ul, .map-sheet .map-active ol.map-copies { max-height: none; overflow: visible; }
 .map-side-in.peek { gap: 12px; }
 .map-side-in.peek .map-side-head { gap: 12px; }
 .map-side-in.peek .map-side-head .map-chg { margin-right: 4px; }
@@ -543,6 +546,15 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
   .map-side-links .linkish { display: inline-flex; align-items: center; min-height: 40px; padding: 0 8px; }
   .map-hl-chip { height: 32px; }
   .map-crumbs li button { min-height: 32px; }
+  /* small pills in the head and the family line keep their look; an unseen margin makes them a finger wide
+     (taller than wide: the copy pill, the badge and the links sit 5 px apart) */
+  .map-soc, .map-frame { position: relative; }
+  .map-ca::after, .map-soc::after, .map-frame::after { content: ""; position: absolute; inset: -9px -2px; }
+  /* the pills' row clips (it is a span of the title column) and wraps on a phone: let the margins count, and keep a
+     wrapped row far enough below that its pills' margins stay off the row above (2 x 9 px) */
+  .map-side-title > .map-side-ids { overflow: visible; row-gap: 18px; }
+  /* the family link's span clips (ellipsis), so the span and the link grow instead and pull back by the same margin */
+  .map-fam-line > span:first-child, .map-fam-line .linkish { padding-block: 12px; margin-block: -12px; }
   /* 44 px touch targets (DESIGN-ELEVATE §0.6). The engine measures these boxes live (label obstacles and the
      overlay inset), so growing them only moves labels and fits clear of the larger chrome. */
   .map-page .bm-controls button { width: 44px; height: 44px; }
@@ -578,6 +590,9 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
   .map-results { max-height: min(360px, 50dvh); }
 }
 @media (max-width: 480px) { .bm-legend { display: none; } }
+/* a phone on its side: the 480 px floor made the page taller than the screen, so the sheet and the zoom buttons sat below the fold */
+@media (max-height: 480px) and (orientation: landscape) { .map-page { min-height: 280px; } }
+@media (max-width: 340px) { .map-side-stats em { letter-spacing: .02em; } }
 @media (max-width: 360px) { .map-line { font-size: 11px; letter-spacing: -0.02em; gap: 7px; } .map-line-sep { margin: 0 4px; } .map-pill { padding: 0 10px; } }
 
 /* the hovered tree's dominance in its tooltip, with the share in view as a thin bar */

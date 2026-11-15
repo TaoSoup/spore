@@ -6,6 +6,7 @@ import { ago, count, usd } from "../lib/format";
 import { useMapData } from "../lib/map/use-map-data";
 import { assetTopIn, coinNode, softwareGl, undrawnByTop, useFamilyNode, useFamilyStore, type FamilyTier } from "../lib/map/family";
 import { useMapHeat, type HeatIndex } from "../lib/map/heat";
+import { besideOverlay, mapInsets } from "../lib/map/insets";
 import { copyGroup, parseCopies, stackCopies, type CopiesMode } from "../lib/map/copies";
 import { familyLeaders, formatColour, parseColour, spotlight, volumeRanks, type ColourMode } from "../lib/map/volume";
 import { formatHl, parseHl, type HlKey } from "../lib/map/highlight";
@@ -419,11 +420,11 @@ export default function MapPage() {
 
   // ---- measured insets: what the overlays cover, so fits and flights centre in what is visible
   const overlayRef = useRef<HTMLDivElement>(null);
-  const [ov, setOv] = useState({ right: 336, bottom: 0 });
+  const [ov, setOv] = useState({ right: 336, bottom: 0, w: 0, h: 0, beside: false });
   useLayoutEffect(() => {
     const el = overlayRef.current, page = pageRef.current;
     if (!el || !page || typeof ResizeObserver === "undefined") return;
-    const measure = () => { const r = el.getBoundingClientRect(), p = page.getBoundingClientRect(); pageWRef.current = Math.round(p.width); const next = { right: Math.round(r.right - p.left), bottom: Math.round(r.bottom - p.top) }; setOv((o) => (o.right === next.right && o.bottom === next.bottom ? o : next)); };
+    const measure = () => { const r = el.getBoundingClientRect(), p = page.getBoundingClientRect(); pageWRef.current = Math.round(p.width); const next = { right: Math.round(r.right - p.left), bottom: Math.round(r.bottom - p.top), w: Math.round(p.width), h: Math.round(p.height) }; setOv((o) => { const beside = besideOverlay({ ovRight: next.right, ovBottom: next.bottom, pageW: next.w, pageH: next.h }, o.beside); return o.right === next.right && o.bottom === next.bottom && o.w === next.w && o.h === next.h && o.beside === beside ? o : { ...next, beside }; }); };
     const ro = new ResizeObserver(measure);
     ro.observe(el); ro.observe(page);
     measure();
@@ -443,15 +444,16 @@ export default function MapPage() {
   useEffect(() => setSheet("peek"), [focus]);
   const onSheetHeight = useCallback((h: number) => { if (sheetRef.current === "peek" && h > 0) setPeekH(h); }, []);
   const hasSel = !!selected;
-  // Desktop: the column's right edge and the side panel's width. Phone: the overlay's bottom and the
-  // sheet's peek height (a full sheet covers the map anyway, so the camera keeps the peek framing).
-  const edge = wide ? ov.right : ov.bottom, side = wide ? sideW : peekH;
-  const inset = useMemo(() => (wide
-    ? { left: edge + 12, top: 16, bottom: 16, right: hasSel ? side + 28 : 16 }
-    : { top: edge + 8, bottom: hasSel ? side + 8 : 56 }), [wide, edge, hasSel, side]);
-  // The WebGL map's overview fit ignores the side panel and the sheet: "fit" frames the whole map in the
-  // area the left column (or the phone overlay) leaves, whatever is selected.
-  const fitInset = useMemo(() => (wide ? { left: edge + 12, top: 16, bottom: 16, right: 16 } : { top: edge + 8, bottom: 56 }), [wide, edge]);
+  // What the chrome covers (lib/map/insets.ts). Desktop: the left column and the side panel. Narrow: the band under the
+  // overlay and the sheet's peek height (a full sheet covers the map anyway, so the camera keeps the peek framing), or,
+  // on a phone held sideways, the area beside the overlay. `fitInset` frames the whole map, whatever is selected.
+  const { left: inL, top: inT, right: inR, bottom: inB, fitL, fitT, fitR, fitB } = useMemo(() => {
+    const { inset: a, fitInset: b } = mapInsets({ wide, ovRight: ov.right, ovBottom: ov.bottom, pageW: ov.w, pageH: ov.h, sideW, peekH, hasSel, beside: ov.beside });
+    return { ...a, fitL: b.left, fitT: b.top, fitR: b.right, fitB: b.bottom };
+  }, [wide, ov, sideW, peekH, hasSel]);
+  // the same object while the numbers hold (the engine re-fits on a new one)
+  const inset = useMemo(() => ({ left: inL, top: inT, right: inR, bottom: inB }), [inL, inT, inR, inB]);
+  const fitInset = useMemo(() => ({ left: fitL, top: fitT, right: fitR, bottom: fitB }), [fitL, fitT, fitR, fitB]);
 
   // ---- keyboard: walk the tree, open, launch, frame; zoom and pan without a selection
   // The last-trade filter's part: ↓ ← → step only onto coins the map draws (shown, anchors, the pins); ↑ may climb to a
