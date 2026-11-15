@@ -41,6 +41,8 @@ test("volTier: top 5 % (at least one), next 15 %, next 30 %, the rest", () => {
   assert.deepEqual([1, 2, 3, 8, 9, 20, 21, 40].map((r) => volTier(r, 40)), [0, 0, 1, 1, 2, 2, 3, 3]);
   assert.equal(volTier(1, 1), 0, "a family's only traded coin leads it");
   assert.deepEqual([1, 2, 3].map((r) => volTier(r, 3)), [0, 1, 3]);
+  // a big family: ten leaders and twenty-four lit, not a hundred and four hundred
+  assert.deepEqual([1, 10, 11, 24, 25, 1000, 1001].map((r) => volTier(r, 2000)), [0, 0, 1, 1, 2, 2, 3]);
 });
 
 test("volumeRanks: ranked inside the family by 24 h volume; roots, coins without volume and other families apart", () => {

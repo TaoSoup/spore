@@ -124,6 +124,13 @@ export async function buildLabels(S) {
   // ---------- planets: one pooled element, variants measured up front ----------
   // (map3 port) second line: '<tag> · 1,481 coins' with the app's dominance tag for the family top, else '1,481 coins'
   const tagOfTop = (f) => { try { return tagText(S.tagOf(mint[f.top])); } catch { return null; } };
+  // (activity first, 2026-11-15) trades in the last hour per family (the heat rows summed), the HOT_N busiest planet
+  // families' places, and the busiest coin on the map. Coloured by volume (S.rankMode) a family's second line is its
+  // trades in the last hour, and the busiest five are flagged: from the overview the eye lands on where the trading is.
+  const HOT_N = 5;
+  let famT1h = null, hotCoin = null, hotDirty = false;
+  const hotRank = new Map();
+  const hotOf = (f) => (S.rankMode ? hotRank.get(f.id) || 0 : 0);
   const planetLab = planets.map((f) => {
     const s = sym[f.top];
     const L = { kind: "pl", f, fam: f.id, own: f.top, e: mk("pl", ""), on: false, slot: null, want: 0, o: 1, tag: null };
@@ -134,6 +141,14 @@ export async function buildLabels(S) {
         const c = fmtCount(sizeOf(f)), sh = tag ?? (Number.isFinite(f.share) ? sharePct(f.share) : null);   // (lead) share for every planet, as the reference
         L.stTxt = sh ? `${c} · ${sh}` : n;
         L.e.innerHTML = `<div class="t">${tickerHTML(s)}</div><div class="s">${sh ? `${esc(c)}${SEP}${esc(sh)}` : n}</div>`;
+        return;
+      }
+      const t1 = S.rankMode && famT1h ? famT1h[f.id] || 0 : 0, hr = t1 > 0 ? hotOf(f) : 0;
+      L.hot = hr;
+      if (t1 > 0) {   // '#1 · 29.1k trades 1h' for the busiest five, '10% · 1,204 trades 1h' for the others
+        const act = `${fmtCount(t1)} trades 1h`, pre = hr ? `#${hr}` : tag;
+        L.stTxt = pre ? `${pre} · ${act}` : act;
+        L.e.innerHTML = `<div class="t">${tickerHTML(s)}</div><div class="s">${pre ? `${hr ? `<b class="hr">${esc(pre)}</b>` : esc(pre)}${SEP}` : ""}${act}</div>`;
         return;
       }
       L.stTxt = tag ? `${tag} · ${n}` : n;
@@ -157,16 +172,21 @@ export async function buildLabels(S) {
   const volOf = (i) => { const r = rowOf(i); return r !== undefined && S.heat && S.heat.v24 ? +S.heat.v24[r] || 0 : 0; };
   // (copycat stacking) the stack a drawn coin leads: its size (itself + the copies the page left out), 0 = no stack
   const stackOf = (i) => { let n = 0; try { n = Number(S.copiesOf && mint ? S.copiesOf(mint[i]) : 0) || 0; } catch { n = 0; } return n > 0 ? n + 1 : 0; };
-  const kidHead = (i) => { const n = stackOf(i); return tickerHTML(sym[i]) + (n ? `<span class="cx">×${fmtN(n)}</span>` : ""); };
   const isLead = (i) => { const rk = vrankOf(i); return rk > 0 && rk <= LEAD_N; };
-  const kidSub = (i) => (isLead(i) ? `#${vrankOf(i)} · ${fmtUsd(volOf(i))} vol` : fmtUsd(mc[i]));
+  const leadOf = (i) => (isLead(i) ? vrankOf(i) : 0);
+  const kidHead = (i) => { const n = stackOf(i), rk = leadOf(i); return (rk ? `<span class="rk">${rk}</span>` : "") + tickerHTML(sym[i]) + (n ? `<span class="cx">×${fmtN(n)}</span>` : ""); };
+  const kidSub = (i) => (isLead(i) ? `${fmtUsd(volOf(i))} vol` : fmtUsd(mc[i]));
+  // (activity first) coloured by volume, a coin that is not one of its family's leaders is named only once its disc is this
+  // big on screen (px; the second number keeps a shown one): at a family's distance the names are the leaders'
+  const NAME_R = 20, NAME_R_KEEP = 17;
+  const ranked = () => !!(S.rankMode && S.heat && Array.isArray(S.heat.vrank));
   // children: lazily pooled by coin index (LRU-trimmed)
   const kidPool = new Map();
   const kidL = (i) => {
     let L = kidPool.get(i);
     if (!L) {
-      L = { kind: "kid", i, fam: famOf[i], own: i, e: mk("kid", `<div class="t">${kidHead(i)}</div><div class="s">${esc(kidSub(i))}</div>`), on: false, slot: null, want: 0, o: 1, sub: kidSub(i), cx: stackOf(i) };
-      L.measure = () => { L.w1 = tickW(sym[i], F.kid) + HALO[11] + (L.cx ? mw(`×${fmtN(L.cx)}`, F.mono10) + 4 : 0); L.w2 = Math.max(L.w1, mw(L.sub, F.mono10) + HALO[10]); };
+      L = { kind: "kid", i, fam: famOf[i], own: i, e: mk("kid", `<div class="t">${kidHead(i)}</div><div class="s">${esc(kidSub(i))}</div>`), on: false, slot: null, want: 0, o: 1, sub: kidSub(i), cx: stackOf(i), rk: leadOf(i) };
+      L.measure = () => { L.w1 = tickW(sym[i], F.kid) + HALO[11] + (L.cx ? mw(`×${fmtN(L.cx)}`, F.mono10) + 4 : 0) + (L.rk ? mw(String(L.rk), F.mono10) + 13 : 0); L.w2 = Math.max(L.w1, mw(L.sub, F.mono10) + HALO[10]); };
       L.measure(); kidPool.set(i, L);
     }
     L.used = layN;
@@ -222,19 +242,28 @@ export async function buildLabels(S) {
     }
     const sig = i + "|" + l2 + "|" + s; if (pinL.sig === sig) return true;
     pinL.sig = sig; pinL.i = i;
-    pinL.e.innerHTML = `<div class="t">${tickerHTML(s)}</div><div class="s">${l2.split(" · ").map(esc).join(SEP)}</div>`;
+    pinL.e.innerHTML = `<div class="t">${tickerHTML(s)}</div><div class="s">${l2.split(" · ").map((p, q) => (q === 0 && /^#\d+$/.test(p) ? `<b class="hr">${esc(p)}</b>` : esc(p))).join(SEP)}</div>`;
     pinL.w = Math.max(tickW(s, F.pin) + HALO[13], mw(l2, F.mono10) + HALO[10]); pinL.h = 30;
     return true;
   };
   let active = null;   // { f, n } most active planet family in the last hour (sum of heat.t1h)
   const computeActive = () => {
-    const h = S.heat; active = null;
+    const h = S.heat; active = null; famT1h = null; hotCoin = null; hotRank.clear();
     if (!h || !Array.isArray(h.t1h) || !h.mint) return;
     const sums = new Float64Array(fams.length);
-    for (let r = 0; r < h.mint.length; r++) { const i = S.mintIdx?.get(h.mint[r]); if (i !== undefined) sums[famOf[i]] += +h.t1h[r] || 0; }
+    for (let r = 0; r < h.mint.length; r++) {
+      const i = S.mintIdx?.get(h.mint[r]); if (i === undefined) continue;
+      const n = +h.t1h[r] || 0; sums[famOf[i]] += n;
+      // the busiest coin: one of a planet family, drawn, with a name that may be printed
+      if (n > 0 && (!hotCoin || n > hotCoin.n) && fams[famOf[i]].planet && !hidI(i) && !unlabelable(sym[i])) hotCoin = { i, n };
+    }
+    famT1h = sums;
     for (const f of planets) if (sums[f.id] > 0 && (!active || sums[f.id] > active.n)) active = { f, n: sums[f.id] };
+    planets.filter((f) => sums[f.id] > 0 && !hidF(f.id)).sort((a, b) => sums[b.id] - sums[a.id] || a.rank - b.rank).slice(0, HOT_N).forEach((f, q) => hotRank.set(f.id, q + 1));
   };
-  computeActive();
+  // a family's second line follows the sums (and the colour mode): rewritten only when it changed
+  const refillPlanets = () => { for (const L of planetLab) { const was = L.stTxt; L.fill(); if (L.stTxt !== was) L.measure(); } };
+  computeActive(); refillPlanets();
 
   // remeasure everything once the real faces are in (first measure may have used fallbacks)
   const remeasure = () => { if (S.dead) return; for (const L of planetLab) L.measure(); for (const L of kidPool.values()) L.measure(); for (const L of genPool.values()) L.measure(); capL.measure(); for (const L of annL) L.sig = ""; if (readyDone) layoutLabels(); };
@@ -458,10 +487,10 @@ export async function buildLabels(S) {
   const countsNow = () => { const c = [0, 0, 0, 0], a = S.ageReal || S.age; for (let i = 0; i < N; i++) c[heatClass(a[i])]++; return c; };
   // a pooled child label's second line, rewritten when what it says changed (a heat payload moved a rank, a patched cap)
   const kidResub = (L) => {
-    const t = kidSub(L.i), cx = stackOf(L.i);
-    if (t === L.sub && cx === L.cx) return;
+    const t = kidSub(L.i), cx = stackOf(L.i), rk = leadOf(L.i);
+    if (t === L.sub && cx === L.cx && rk === L.rk) return;
     if (t !== L.sub) { L.sub = t; const s = L.e.querySelector(".s"); if (s) s.textContent = t; }
-    if (cx !== L.cx) { L.cx = cx; const h = L.e.querySelector(".t"); if (h) h.innerHTML = kidHead(L.i); }
+    if (cx !== L.cx || rk !== L.rk) { L.cx = cx; L.rk = rk; const h = L.e.querySelector(".t"); if (h) h.innerHTML = kidHead(L.i); }
     L.measure();
   };
   const normCounts = (c) => Array.isArray(c) ? c : c && typeof c === "object" ? [c.live ?? c[0] ?? 0, c.cooling ?? c.cool ?? c[1] ?? 0, c.quiet ?? c[2] ?? 0, c.cold ?? c[3] ?? 0] : null;
@@ -476,7 +505,7 @@ export async function buildLabels(S) {
     stats.offline = status === "offline" || c == null;
     if (c) stats.counts = c;
     if (heatAt) stats.at = heatAt;
-    computeActive(); for (const L of annL) L.sig = "";
+    computeActive(); refillPlanets(); for (const L of annL) L.sig = "";
     for (const L of kidPool.values()) kidResub(L);   // (colour by volume) ranks and volumes move with every heat payload
     renderStats();
   };
@@ -485,6 +514,7 @@ export async function buildLabels(S) {
   let lastShownKids = new Set(), knockSig = "", drawnN = 0;
   function layoutLabels() {
     if (S.dead || !readyDone) return;
+    if (hotDirty) { hotDirty = false; if (S.rankMode) { computeActive(); refillPlanets(); for (const L of annL) L.sig = ""; } }
     layN++;
     { const dr = S.drag, moving = !!(dr && (dr.active || dr.settling));
       if (moving && !dragMem) { dragMem = new Map(); for (const L of allLabels()) if (L.on && L.slot) dragMem.set(L, { ...L.slot }); }
@@ -540,15 +570,16 @@ export async function buildLabels(S) {
     // layout radius: it is measured by that drawn radius (candidate gate, obstacle, label anchor), so the dust-family tops are
     // labelable at 4x as in the old locked view ($QQQx, $GIGA, $OTC ...). Planets stay chips; children keep R k.
     const drawnR = (i, f) => { const r0 = R[i] * k; return !G && !f.planet && i === f.top && typeof sR === "function" ? Math.max(r0, sR(i)) : r0; };   // flat only (galaxy untouched)
+    const rkOn = ranked();
     const visit = (i) => {
-      const f = fams[famOf[i]];
+      const f = fams[famOf[i]], famTop = !f.planet && i === f.top;   // a small family's top is unranked: it keeps its name at the old size
       if (f.planet ? i === f.top : !showDust) return;
       if (hidI(i)) return;   // (last-trade filter) not drawn: no obstacle, no label, not counted
       const x = X[i], y = Y[i]; if (x < wx0 || x > wx1 || y < wy0 || y > wy1) return;
       const r = drawnR(i, f);
       if (r >= 1 && (typeof sR !== "function" || sR(i) >= 1)) drawn++;
       if (r >= 6) obs.push(i); else if (r >= 2.5 && kidsOK) smallI.push(i);
-      if (kidsOK && (r >= 3.5 || (r >= 3.0 && lastShownKids.has(i)) || (r >= 1.5 && S.rankMode && isLead(i)))) cand.push(i);   // (colour by volume) a leader is named however small   // (final polish) 5 -> 3.5 px: the airier seed heads draw their coins smaller
+      if (kidsOK && (rkOn && !famTop ? r >= NAME_R || (r >= NAME_R_KEEP && lastShownKids.has(i)) || (r >= 1.5 && isLead(i)) : r >= 3.5 || (r >= 3.0 && lastShownKids.has(i)))) cand.push(i);   // (activity first) by volume: the leaders, and what is big on screen   // (colour by volume) a leader is named however small   // (final polish) 5 -> 3.5 px: the airier seed heads draw their coins smaller
     };
     const cellW = S.worldGrid?.cell || 24;
     // (focus lane) coins on the move (a held coin and its trailing chain) are visited by their live X/Y, not by the grid
@@ -606,13 +637,13 @@ export async function buildLabels(S) {
     // ---- 1. planets: priority = share rank, live gets an 8-rank bonus; hovered first ----
     const budgetP = ph ? 8 : G ? 64 : 32;   // (final polish) 24 -> 32; galaxy: every planet carries its title (M labels all 60)
     const plOrder = [];
-    planetLab.forEach((L, j) => { if (!chipOn[j]) return; const f = L.f; let p = f.rank - (f.age <= 1800 ? 8 : 0); if (hov === f.top) p = -1e9; plOrder.push({ L, j, p }); });
+    planetLab.forEach((L, j) => { if (!chipOn[j]) return; const f = L.f; let p = f.rank - (f.age <= 1800 ? 8 : 0); if (L.hot) p = -1e6 + L.hot; if (hov === f.top) p = -1e9; plOrder.push({ L, j, p }); });   // (activity first) the busiest five first
     plOrder.sort((a, b) => a.p - b.p);
     const plSpec = [];
     for (const { L, j } of plOrder) {
       const f = L.f, focused = f.Rc * k >= 0.3 * minWH;
       const tier = ph ? "P" : f.rank < 10 || focused ? "A" : "B";
-      const st = ph ? k >= 1.6 * k0 : G || tier === "A";   // galaxy: the stat line on every planet, as the reference
+      const st = ph ? k >= 1.6 * k0 || !!L.hot : G || tier === "A" || !!L.hot;   // galaxy: the stat line on every planet, as the reference; (activity first) and on the busiest five
       const v = L.v[tier], w = Math.max(v.w, st ? L.v.sw : 0), h = v.h + (st ? 12 : 0);
       plSpec.push({ L, j, tier, st, w, h });
       reserveL(L, chipX[j], chipY[j], chipR[j], 6, w, h);
@@ -622,13 +653,15 @@ export async function buildLabels(S) {
       const { L, j, tier, st, w, h } = p;
       if (pinOn && L.f.top === pinI) { hideL(L); continue; }   // (focus lane) the pinned name carries this title
       if (nP >= budgetP && hov !== L.f.top) { hideL(L); continue; }
-      if (overview && !ph && L.f.rank >= (G ? 64 : 32 + 8)) { hideL(L); continue; }
-      setCls(L, "tierc", "t" + tier); setCls(L, "stc", st ? "st" : "");
+      if (overview && !ph && !L.hot && L.f.rank >= (G ? 64 : 32 + 8)) { hideL(L); continue; }
+      setCls(L, "tierc", "t" + tier); setCls(L, "stc", st ? "st" : ""); setCls(L, "hotc", L.hot ? "hot" : "");
       L.w = w; L.h = h;
       // (compact layout) a build made from the Key's filtered set packs a family's shown children tight around its chip: at the
       // family's own fit (focused) every slot next to the chip can touch a child, so its title may sit over its own children
       // rather than be dropped (a full build's looser tree keeps the first try)
-      if (tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id) || (S.filtered && L.f.Rc * k >= 0.3 * minWH && tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id, L.f.id))) { nP++; setO(L, 1); applyDim(L); } else hideL(L);
+      if (tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id) || (S.filtered && L.f.Rc * k >= 0.3 * minWH && tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, w, h, false, L.f.id, L.f.id))) { nP++; setO(L, 1); applyDim(L); }
+      else if (ph && st && L.hot && (() => { const v = L.v[tier]; setCls(L, "stc", ""); L.w = v.w; L.h = v.h; return tryPlace(L, chipX[j], chipY[j], chipR[j], DIRS_PL, 6, v.w, v.h, false, L.f.id); })()) { nP++; setO(L, 1); applyDim(L); }   // (activity first) a phone: the busiest five keep their title, without the line, when both lines find no slot
+      else hideL(L);
     }
 
     // ---- 2. generation tags: on the arc at the occupied angle nearest 12 o'clock, sliding +-36 deg ----
@@ -688,13 +721,15 @@ export async function buildLabels(S) {
       const live = (i) => S.age[i] <= 1800;
       // (colour by volume) the family's LEAD_N most traded coins come first, in rank order
       const lead = (i) => { const rk = vrankOf(i); return rk > 0 && rk <= LEAD_N ? rk : 0; };
-      const pri = (i) => { const rk = lead(i); return rk ? 1e18 / rk : mc[i] * (1 + 1.5 * live(i)); };
+      // (activity first) leaders before everything, the most traded first: with several families in view the names go to
+      // the coins that carry the volume, not to the number one of every small family
+      const pri = (i) => (lead(i) ? 1e15 + volOf(i) : mc[i] * (1 + 1.5 * live(i)));
       if (hov >= 0 && !hidI(hov)) { const f = fams[famOf[hov]]; if (!(f.planet && hov === f.top) && (f.planet || showDust) && R[hov] * k >= 1 && !cand.includes(hov)) cand.push(hov); }
       cand.sort((a, b) => (b === hov) - (a === hov) || pri(b) - pri(a) || n24[b] - n24[a]);
       const budget = ph ? 16 : kB > 4 ? 64 : 40, two = kB > 4;   // (look fix) keyed to the frame fit (kB), see above
       const top = cand.slice(0, Math.min(cand.length, budget * 6));
       const spec = top.map((i) => {
-        const L = kidL(i), r = drawnR(i, fams[famOf[i]]), ar = r + (r >= TOK.arcMinR && n24[i] > 0 ? TOK.arcGap + 1.5 : 0), t2 = two && r >= 14;
+        const L = kidL(i), r = drawnR(i, fams[famOf[i]]), ar = r + (r >= TOK.arcMinR && n24[i] > 0 ? TOK.arcGap + 1.5 : 0), t2 = (two && r >= 14) || (lead(i) > 0 && r >= 5);
         const [sx, sy] = toS(X[i], Y[i]);
         const w = t2 ? L.w2 : L.w1, h = t2 ? 26 : 14;
         reserveL(L, sx, sy, ar, 4, w, h);
@@ -730,6 +765,7 @@ export async function buildLabels(S) {
         // (final polish) when a family owns the view, only its children (and the hovered coin) are named
         if (focFam >= 0 && famOf[s.i] !== focFam && s.i !== hov && !(hov >= 0 && famOf[s.i] === famOf[hov])) continue;
         setCls(L, "livec", live(s.i) ? "lv" : "");   // (map3 port) 'lv': the app has a global .live
+        setCls(L, "leadc", lead(s.i) ? "lead" : ""); setCls(L, "ovc", "");
         // a disc big enough for its own name carries it inside (bubble-chart convention): the biggest children are named
         // first, where there is never room around them; the bubble hides its core / monogram under the text
         const r = R[s.i] * k, logo = S.bubbles.hasLogo && S.bubbles.hasLogo(s.i);
@@ -743,10 +779,23 @@ export async function buildLabels(S) {
             continue;
           }
         }
-        setCls(L, "inc", ""); setCls(L, "stc", s.t2 ? "st" : "");
+        setCls(L, "inc", ""); setCls(L, "stc", s.t2 ? "st" : ""); setCls(L, "ovc", "");
         if (L.slot && L.slot.d === "C") L.slot = null;
         L.w = s.w; L.h = s.h;
         if (tryPlace(L, s.sx, s.sy, s.ar, DIRS_KID, 4, s.w, s.h, s.i !== hov)) { n++; shownKids.add(s.i); seenSym.add(key); seedTake(s.i); setO(L, 1); applyDim(L); }
+        else if (lead(s.i) && 2 * r >= 0.6 * (L.w2 - HALO[10]) && !hudRects.some((q) => s.sx >= q.x0 && s.sx <= q.x1 && s.sy >= q.y0 && s.sy <= q.y1)) {
+          // (activity first) a leader in a crowd has no free slot beside its disc (its neighbours are discs too): it carries
+          // its place and volume as a plate over its own lower rim. The disc must be about as wide as the plate (a small
+          // one's plate would sit on its neighbours and read as theirs); a label, the page chrome, another leader's disc
+          // or a disc at least as large stops it.
+          const w = L.w2 - HALO[10], h = 26, y0 = s.sy + Math.min(r - 8, r * 0.55);
+          const b = { x0: s.sx - w / 2, y0, x1: s.sx + w / 2, y1: y0 + h };
+          if (b.x0 > 2 && b.y0 > 2 && b.x1 < Wd - 2 && b.y1 < Hd - 2 && !query(grid, items, b, PAD + 3, (it) => it.kind === "lab" || it.kind === "hud" || (it.kind === "bub" && it.own !== s.i && (it.r >= r || lead(it.own) > 0)))) {
+            setCls(L, "stc", "st"); setCls(L, "ovc", "ov"); L.w = w; L.h = h;
+            commit(L, { d: "C", disp: 0 }, b, null); L.want = 0;
+            n++; shownKids.add(s.i); seenSym.add(key); seedTake(s.i); setO(L, 1); applyDim(L);
+          }
+        }
       }
     }
     S.bubbles.setInside?.(insideKids);
@@ -793,7 +842,12 @@ export async function buildLabels(S) {
       if (!ph && Wd >= 1024 && o > 0.02 && big) {
         // (final polish) line 2 never repeats the planet label ('37% · 1,481 coins'): it adds the family's market cap / trades
         const famMc = (f) => { let v = 0; for (const i of f.members) v += mc[i] || 0; return v; };
-        if (active && active.f === big) list.push({ f: big, l1: "Largest family · most active", l2: `${esc(fmtUsd(famMc(big)))} market cap${SEP}${fmtCount(active.n)} trades in 1h` });
+        // (activity first) coloured by volume the family titles carry their trades, so the second callout names the busiest
+        // COIN on the map: the runner, which no title shows
+        if (ranked() && hotCoin) {
+          list.push({ f: big, l1: "Largest family", l2: `${esc(fmtUsd(famMc(big)))} combined market cap` });
+          list.push({ f: fams[famOf[hotCoin.i]], l1: "Hottest coin · $" + tickerBody(sym[hotCoin.i]), l2: `${fmtN(hotCoin.n)} trades in the last hour` });
+        } else if (active && active.f === big) list.push({ f: big, l1: "Largest family · most active", l2: `${esc(fmtUsd(famMc(big)))} market cap${SEP}${fmtCount(active.n)} trades in 1h` });
         else {
           list.push({ f: big, l1: "Largest family", l2: `${esc(fmtUsd(famMc(big)))} combined market cap` });
           if (active) list.push({ f: active.f, l1: "Most active in the last hour", l2: `${fmtN(active.n)} trades` });
@@ -1017,7 +1071,7 @@ export async function buildLabels(S) {
     if (tip && tipI >= 0) fillTip(tipI);
     if (readyDone) layoutLabels();
   };
-  const setHl = () => { for (const L of allLabels()) applyDim(L); fadeKick(); };
+  const setHl = () => { hotDirty = true; for (const L of allLabels()) applyDim(L); fadeKick(); };   // (activity first) what is drawn changed: the busiest five and the hottest coin are re-read in the next pass
   // a patched market cap: the pooled child label's second line follows (radius and layout wait for a rebuild)
   const patched = (i) => {
     const L = kidPool.get(i);

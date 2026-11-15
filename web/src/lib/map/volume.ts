@@ -3,7 +3,9 @@
 // all one colour; by rank the few coins that carry the volume stand out and the tail goes quiet.
 //   - A family is a root and everything under it; the root itself is not ranked (it keeps its own last-trade colour).
 //   - Only coins with volume in the last 24 h are ranked: most first, ties by trades in the last hour, then by mint.
-//   - Four tiers, the engine's four heat colours: the top 5 % (at least one coin), the next 15 %, the next 30 %, the rest.
+//   - Four tiers, the engine's four heat colours: the top 5 % (at least one coin, at most 10), up to the top 20 % (at most
+//     24), the rest of the top half, the rest. The caps (2026-11-15): once graduated coins reported their trades a big
+//     family ranked 2,000 coins, and 5 % of that is a hundred "leaders": nobody finds the runner among a hundred.
 // The WebGL engine colours by a clock, so a tier is handed to it as a made-up "last trade" (`clast`, engine/index.d.ts
 // EngineHeat) inside that tier's heat class; the real `last` still drives the Key's last-trade filter, the counts and the
 // tooltips. Pure: the map shell calls it once per heat poll.
@@ -18,14 +20,16 @@ export const formatColour = (c: ColourMode): string | null => (c === "last" ? "l
 export type VolRank = { /** 1 = the family's most traded coin. */ rank: number; /** Ranked coins in the family. */ of: number; tier: 0 | 1 | 2 | 3 };
 /// Cumulative shares of a family's ranked coins that end tiers 0, 1 and 2.
 export const VOL_TIER_END: readonly [number, number, number] = [0.05, 0.2, 0.5];
+/// The most coins tiers 0 and 0-1 hold, however large the family.
+export const VOL_TIER_MAX: readonly [number, number] = [10, 24];
 /// The made-up age (s) a tier is drawn with: inside heat classes 0, 1 and 2 (engine/tokens.js heatClass: ≤ 30 min, ≤ 3 h,
 /// ≤ 24 h). The family's three leaders get the engine's brightest core (≤ 5 min). Tier 3 has no age: the cold colour.
 export const VOL_TIER_AGE: readonly [number, number, number] = [900, 5_400, 43_200];
 export const VOL_LEAD_AGE = 60, VOL_LEADERS = 3;
 
 export function volTier(rank: number, of: number): 0 | 1 | 2 | 3 {
-  if (rank <= Math.max(1, Math.ceil(of * VOL_TIER_END[0]))) return 0;
-  if (rank <= Math.max(2, Math.ceil(of * VOL_TIER_END[1]))) return 1;
+  if (rank <= Math.max(1, Math.min(VOL_TIER_MAX[0], Math.ceil(of * VOL_TIER_END[0])))) return 0;
+  if (rank <= Math.max(2, Math.min(VOL_TIER_MAX[1], Math.ceil(of * VOL_TIER_END[1])))) return 1;
   if (rank <= Math.ceil(of * VOL_TIER_END[2])) return 2;
   return 3;
 }
@@ -84,7 +88,7 @@ export function colourLast(mint: string, last: number, at: number, ranks: Readon
 }
 
 /// The spotlight of the volume colours: the map's highlight test (lib/map/highlight.ts hlPredicate, null = none) narrowed
-/// to the coins that carry a family's volume (tiers 0 and 1, its top 20 %) and the roots, so the tail is drawn dim, as a
+/// to the coins that carry a family's volume (tiers 0 and 1: its top 20 %, at most 24) and the roots, so the tail is drawn dim, as a
 /// highlight dims what does not match. `ranks` null (coloured by last trade) returns `base` itself.
 export function spotlight(base: ((n: BubbleNode) => boolean) | null, ranks: ReadonlyMap<string, VolRank> | null, byMint: { has(mint: string): boolean }): ((n: BubbleNode) => boolean) | null {
   if (!ranks) return base;

@@ -5,7 +5,7 @@ import { useStreamStatus } from "../lib/events";
 import { ago, count, usd } from "../lib/format";
 import { useMapData } from "../lib/map/use-map-data";
 import { assetTopIn, coinNode, softwareGl, undrawnByTop, useFamilyNode, useFamilyStore, type FamilyTier } from "../lib/map/family";
-import { useMapHeat } from "../lib/map/heat";
+import { useMapHeat, type HeatIndex } from "../lib/map/heat";
 import { copyGroup, parseCopies, stackCopies, type CopiesMode } from "../lib/map/copies";
 import { familyLeaders, formatColour, parseColour, spotlight, volumeRanks, type ColourMode } from "../lib/map/volume";
 import { formatHl, parseHl, type HlKey } from "../lib/map/highlight";
@@ -456,8 +456,8 @@ export default function MapPage() {
   // ---- keyboard: walk the tree, open, launch, frame; zoom and pan without a selection
   // The last-trade filter's part: ↓ ← → step only onto coins the map draws (shown, anchors, the pins); ↑ may climb to a
   // hidden parent, which the selection then pins. K toggles the filter between the default and everything.
-  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, hiddenCopies: (stacked?.leaderOf ?? null) as ReadonlyMap<string, string> | null });
-  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, hiddenCopies: stacked?.leaderOf ?? null };
+  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat: heat as HeatIndex | null, hiddenCopies: (stacked?.leaderOf ?? null) as ReadonlyMap<string, string> | null });
+  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat, hiddenCopies: stacked?.leaderOf ?? null };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // A dialog (the quick trade, a confirm sheet) owns the keyboard: arrows, L or B must not act on the map behind it.
@@ -478,9 +478,12 @@ export default function MapPage() {
       else if (e.key === "-" || e.key === "_") m?.scaleBy(1 / 1.5);
       else if ((e.key === "k" || e.key === "K") && s.heatOn) setLast((cur) => (cur === LAST_ALL ? lastMask(LAST_DEFAULT) : LAST_ALL));
       else if (n) {
-        const siblings = () => (n.parentMint && s.byMint.has(n.parentMint) ? s.kidsOf(n.parentMint) : s.nodes.filter((x) => isRoot(x, s.byMint)).sort(rootWalkCmp));
+        // the walk follows the panel's default children list: most traded in 24 h first while the heat is in, else market cap
+        const h = s.heat, vol = (x: BubbleNode) => h?.rows.get(x.mint)?.v24 ?? 0, t1 = (x: BubbleNode) => h?.rows.get(x.mint)?.t1h ?? 0;
+        const walk = (mint: string) => { const ks = s.kidsOf(mint); return h ? ks.slice().sort((a, b) => vol(b) - vol(a) || t1(b) - t1(a) || kidCmp(a, b)) : ks; };
+        const siblings = () => (n.parentMint && s.byMint.has(n.parentMint) ? walk(n.parentMint) : s.nodes.filter((x) => isRoot(x, s.byMint)).sort(rootWalkCmp));
         if (e.key === "ArrowUp") { if (n.parentMint && s.byMint.has(n.parentMint)) select(n.parentMint); }
-        else if (e.key === "ArrowDown") { const k = s.kidsOf(n.mint).find(drawnCoin); if (k) select(k.mint); }
+        else if (e.key === "ArrowDown") { const k = walk(n.mint).find(drawnCoin); if (k) select(k.mint); }
         else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
           const all = siblings(), sib = all.filter(drawnCoin); const i = sib.findIndex((x) => x.mint === n.mint);
           if (sib.length > 1 && i >= 0) select(sib[(i + (e.key === "ArrowRight" ? 1 : sib.length - 1)) % sib.length].mint);
@@ -560,7 +563,7 @@ export default function MapPage() {
   // the side panel's "most active" list: the ten most traded coins of the selection's family (per heat poll)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const leaders = useMemo(() => (famTop && heat ? familyLeaders(famTop.mint, mapByMint, heat) : []), [famTop?.mint, heatAt, mapByMint]);
-  const panelProps = selected ? { leaders, copyList, copyTraded, node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast, solUsd: stats?.solUsd ?? null, onTrade: openTrade, trade: { data: tradeRoute.data, error: tradeRoute.error, reload: tradeRoute.reload } } : null;
+  const panelProps = selected ? { leaders, copyList, copyTraded, node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, heatIndex: heat, volRank: volRanks?.get(selected.mint) ?? null, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast, solUsd: stats?.solUsd ?? null, onTrade: openTrade, trade: { data: tradeRoute.data, error: tradeRoute.error, reload: tradeRoute.reload } } : null;
   // the lead's one line on the filter (only while it hides something): the default reads as "no trade in 24 h"
   const lastOn = !!heat && lastWant !== LAST_ALL;
   const lastLead = lastOn ? (lastWant === lastMask(LAST_DEFAULT) ? " Coins with no trade in 24 h are hidden by default; the Key brings them back." : " Some last-trade buckets are hidden; the Key brings them back.") : "";
@@ -589,7 +592,7 @@ export default function MapPage() {
             </div>
             <h1>Ecosystem <em>map</em></h1>
             {renderer === "three"
-              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of {mode === "locked" ? "locked value" : "market cap"}; the coins inside are sized by {mode === "locked" ? "the value they lock" : "market cap"}. {heat && colour === "volume" ? "Colour is each coin's rank in its family by 24 h volume, lime for the top 5 %, and the tail is dimmed;" : "Colour is the last trade, lime within 30 min;"} the rim's bright arc counts trades in 24 h. A pulse runs along a link when a coin trades and a ring marks a new pair. Drag a coin and the map flows around it.{lastLead}</p>
+              ? <p className="lead">Each colony is a root coin and every pair under it. A family's chip is sized by its share of {mode === "locked" ? "locked value" : "market cap"}; the coins inside are sized by {mode === "locked" ? "the value they lock" : "market cap"}. {heat && colour === "volume" ? "Colour is each coin's rank in its family by 24 h volume: its leaders are lime and numbered, the tail is dimmed." : "Colour is the last trade, lime within 30 min."} A pulse runs along a link when a coin trades.{lastLead}</p>
               : <p className="lead">Clusters are root coins and every pair under them. The big bubble in the middle is the root: its size is the whole family. Every other bubble is sized by {mode === "locked" ? "the value it locks" : "its own market cap"}. Rings flash on trades; dots flow on pairs that traded in the last 30 min. Lime ring = launched on Spore.{lastLead}</p>}
             <div className="map-stats">
               <div><em>roots</em><strong><LiveNumber value={ready ? drawn.roots : null} format={countOrDash} kind="count" /></strong></div>

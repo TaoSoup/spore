@@ -304,7 +304,7 @@ main.map-main { padding: 0; }
 .map-side.card, .map-pop.card { border-top-color: rgba(var(--accent-rgb), .2); }
 .map-side { position: absolute; right: 16px; top: 16px; z-index: 4; width: min(340px, calc(100% - 32px)); max-height: calc(100% - 32px); overflow: auto; overscroll-behavior: contain; padding: 16px; border-color: var(--mc-border); background: var(--mc-glass-hi); -webkit-backdrop-filter: var(--mc-blur); backdrop-filter: var(--mc-blur); box-shadow: var(--mc-edge), var(--shadow-pop); animation: side-in .36s var(--ease-expo) both; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
 @keyframes side-in { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
-.map-side-in { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.map-side-in { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
 /* the instrument card's sections arrive in a short cascade on every selection */
 .map-side .map-side-in > * { animation: mc-in .42s var(--ease-expo) both; }
 .map-side .map-side-in > :nth-child(3) { animation-delay: 30ms; }
@@ -322,7 +322,7 @@ main.map-main { padding: 0; }
 .map-side-title { display: grid; gap: 2px; min-width: 0; flex: 1; }
 .map-side-title b { font-size: 17px; font-weight: 600; letter-spacing: var(--tracking-tight); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-side-title > span { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.map-side-ids { display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+.map-side-ids { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 5px; margin-top: 4px; }
 /* the CA pill: copying turns the icon into a check and flashes "copied" inside the pill */
 .map-ca { position: relative; display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--line-soft); background: rgba(255,255,255,.035); color: var(--muted); font-family: var(--mono); font-size: var(--fs-2xs); transition: color var(--dur-2), border-color var(--dur-2), background var(--dur-2); }
 .map-ca:hover { color: var(--ink); border-color: var(--line-2); }
@@ -354,7 +354,6 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-crumbs .sep { flex: none; width: 14px; height: 1px; margin: 0 2px 0 6px; background: linear-gradient(90deg, rgba(255,255,255,.08), var(--node)); opacity: .6; }
 .map-frame { flex: none; height: 24px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line-soft); background: rgba(255,255,255,.035); color: var(--ink-2); font-family: var(--mono); font-size: var(--fs-2xs); transition: color var(--dur-2), border-color var(--dur-2), transform var(--dur-2) var(--ease-out); }
 .map-frame:hover { color: var(--accent); border-color: var(--line-2); transform: translateY(-1px); }
-.map-side-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 /* price: the big mono number, the change chip, and the full-width line under it */
 .map-side-market { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--rule); position: relative; }
 .map-side-market::before { content: ""; position: absolute; left: 0; top: -1px; width: 56px; height: 1px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .65; }
@@ -378,20 +377,18 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-spark-read b { color: var(--ink); font-weight: 500; }
 .map-spark-none { display: grid; place-items: center; height: 42px; border-radius: 8px; border: 1px dashed var(--line-soft); font-family: var(--mono); color: var(--faint); font-size: var(--fs-2xs); }
 .map-side-heat { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
-.map-side-heat b { color: var(--ink-2); font-weight: 500; }
 /* the selected coin's last-trade bucket is off in the Key: drawn only because it is selected */
 .map-side-hidden { margin: -4px 0 0; font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.5; color: var(--muted); }
 .map-side-hidden .linkish { color: var(--accent); font: inherit; cursor: pointer; }
 /* the four numbers: an instrument grid between hairlines, no boxes */
-.map-side-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-top: 1px solid var(--line-soft); }
-.map-side-stats div { display: grid; gap: 2px; min-width: 0; padding: 8px 0; }
-.map-side-stats div:nth-child(odd) { padding-right: 12px; border-right: 1px solid var(--line-soft); }
-.map-side-stats div:nth-child(even) { padding-left: 12px; }
-.map-side-stats div:nth-child(n+3) { border-top: 1px solid var(--line-soft); }
-.map-side-stats div:last-child:nth-child(odd) { grid-column: 1 / -1; padding-right: 0; border-right: 0; }
+/* one row of three (2026-11-15: was two rows, the third cell alone on its own) */
+.map-side-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--line-soft); }
+.map-side-stats div { display: grid; gap: 2px; min-width: 0; padding: 8px 10px; }
+.map-side-stats div:first-child { padding-left: 0; }
+.map-side-stats div:last-child { padding-right: 0; }
+.map-side-stats div + div { border-left: 1px solid var(--line-soft); }
 .map-side-stats strong { font-family: var(--mono); font-weight: 500; font-size: 16px; letter-spacing: -0.01em; font-variant-numeric: tabular-nums slashed-zero; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-side-stats strong.accent { color: var(--accent); }
-.map-side-stats small { color: var(--muted); font-weight: 400; font-size: var(--fs-2xs); }
 .map-side-progress { display: grid; gap: 7px; }
 .map-side-progress span { display: flex; justify-content: space-between; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 .map-side-progress em { font-style: normal; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
@@ -419,12 +416,38 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 .map-side-trade .btn.buy:disabled, .map-side-trade .btn.sell:disabled { opacity: .5; }
 .map-side-trade.blocked { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
 .map-side-why { min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.map-side-links { display: grid; grid-template-columns: repeat(4, auto); gap: 6px; }
-.map-side-links .btn { height: 28px; padding: 0 8px; font-size: 12px; }
+/* quiet text links under the two real actions */
+.map-side-links { display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: center; padding-top: 2px; }
+.map-side-links .linkish { border: 0; padding: 2px 0; background: none; font: inherit; font-size: 12px; color: var(--muted); text-decoration: none; cursor: pointer; transition: color var(--dur-2); }
+.map-side-links .linkish:hover, .map-side-links .linkish:focus-visible { color: var(--accent); }
+/* the coin's state beside its last trade */
+.map-side-state { flex: none; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.map-side-state.good, .map-side-state.accent { color: var(--accent); border-color: rgba(var(--accent-rgb), .35); }
+.map-side-state.warn { color: var(--warn); }
+/* the family in two lines and a bar */
+.map-side-dom { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.map-fam-line { margin: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+.map-fam-line span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-fam-line span:last-child { flex: none; }
+.map-fam-line b { color: var(--ink); font-weight: 500; }
+.map-fam-line .is-lead b { color: var(--accent); }
+.map-fam-line .linkish { border: 0; padding: 0; background: none; font: inherit; color: var(--ink); cursor: pointer; }
+.map-fam-line .linkish:hover { color: var(--accent); }
+.map-fam-bar { display: block; height: 2px; border-radius: 2px; background: var(--line-soft); overflow: hidden; }
+.map-fam-bar i { display: block; height: 100%; min-width: 2px; border-radius: 2px; background: var(--accent); }
+/* one list at a time */
+.map-tabs { display: flex; gap: 2px; margin: 0 0 2px; padding: 2px; border-radius: 10px; background: rgba(0,0,0,.28); }
+.map-tabs button { flex: 1 1 0; min-width: 0; height: 26px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; transition: color var(--dur-2), background var(--dur-2); }
+.map-tabs button:hover { color: var(--ink); }
+.map-tabs button[aria-pressed="true"] { background: rgba(255,255,255,.07); color: var(--ink); }
+.map-tabs button i { margin-left: 5px; font-style: normal; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--faint); }
+.map-tabs button[aria-pressed="true"] i { color: var(--accent); }
+.map-kids .map-active { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
 /* the selected coin's family dominance (DominanceLine draws the line and bar) */
-.map-side-dom { padding-top: 10px; border-top: 1px solid var(--line-soft); }
-.map-kids { display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
-.map-kids header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.map-kids { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.map-kids header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.map-kids header em { min-width: 0; }
+.map-kids header .seg { flex: none; }
 .map-kids .seg { background: rgba(0,0,0,.32); }
 .map-kids .seg button { height: 22px; padding: 0 8px; font-size: var(--fs-2xs); }
 /* the brood (Brood.tsx): the children on a time axis, joined to the coin by filaments */
@@ -515,6 +538,9 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 
 @media (pointer: coarse) {
   .map-kid, .map-rail-row { min-height: 40px; }
+  .map-tabs button { height: 40px; }
+  .map-side-links { gap: 0; }
+  .map-side-links .linkish { display: inline-flex; align-items: center; min-height: 40px; padding: 0 8px; }
   .map-hl-chip { height: 32px; }
   .map-crumbs li button { min-height: 32px; }
   /* 44 px touch targets (DESIGN-ELEVATE §0.6). The engine measures these boxes live (label obstacles and the
@@ -550,7 +576,6 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
   .map-toast { bottom: 16px; }
   .map-page.has-side .map-toast { display: none; }
   .map-results { max-height: min(360px, 50dvh); }
-  .map-side-links { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) { .bm-legend { display: none; } }
 @media (max-width: 360px) { .map-line { font-size: 11px; letter-spacing: -0.02em; gap: 7px; } .map-line-sep { margin: 0 4px; } .map-pill { padding: 0 10px; } }

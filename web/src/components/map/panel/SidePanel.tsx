@@ -5,7 +5,9 @@
 // debounced so an arrow-key walk does not fire a request per step; the sparkline reads
 // /api/candles?scope=all and shows "—" when the server has none (or predates the route). The family block
 // shows the dominance of the coin's family (its top's share of the whole map, lib/map/dominance.ts) and its true size
-// (drawn members + the asset family's undrawn coins). A listed asset's kids list is one sorted sequence over every coin
+// (drawn members + the asset family's undrawn coins). Under the actions there is ONE list at a time, picked by tabs: the
+// coin's children (most traded first while the heat sidecar is in), its family's most active coins, its same-name
+// copies. A listed asset's kids list is one sorted sequence over every coin
 // the family store has paged in (lib/map/family.ts, DESIGN-FAMILY-ALL §6), the drawn kids among them (a drawn one shows
 // its live node); until the family is in, it is the drawn kids with a note saying how many of the family it sorts.
 // Only the rows shown become nodes.
@@ -16,9 +18,9 @@ import { blockText, hardBlock, type TradeRoute } from "../../../lib/trade-route"
 import type { Side } from "../../../lib/pump";
 import { copyText, useAsync, useDebounced } from "../../../lib/hooks";
 import { age, ago, count, pct, short, signedPct, usd } from "../../../lib/format";
-import type { HeatRow } from "../../../lib/map/heat";
+import type { HeatIndex, HeatRow } from "../../../lib/map/heat";
 import { mapLink, shareText } from "../../../lib/map/share";
-import { shareOf, type DomRow } from "../../../lib/map/dominance";
+import { shareOf, sharePct, type DomRow } from "../../../lib/map/dominance";
 import type { BubbleNode, SizeMode } from "../../../lib/map/types";
 import type { BubbleMapHandle } from "../../BubbleMap";
 import { DepthBadge, Logo, ProgressBar, Skeleton, listedQuoteOf, nameOf, sym, Firstborn } from "../../Bits";
@@ -27,7 +29,6 @@ import { familyOrder, mintAtPos, useFamilyInfo } from "../../../lib/map/family";
 import type { FamilyChunk, FamilyStore } from "../../../lib/map/family-types";
 import LaunchButton, { launchBlock } from "../../LaunchButton";
 import { useToast } from "../../Toast";
-import DominanceLine from "../../DominanceLine";
 import SlidingPill from "../../ui/SlidingPill";
 import Sparkline, { candleChange, spanLabel } from "./Sparkline";
 import Brood from "./Brood";
@@ -37,7 +38,13 @@ const PAGE = 40;
 /// The price line's height: tall enough to read, short enough that the children list starts above the fold at 900 px.
 const SPARK_H = 42;
 export type KidSort = "mcap" | "new";
-/// The children-list order (and what ↓ / ← / → walk): market cap, then locked value.
+/// The children list's orders: the family store's two (KidSort), and by 24 h volume over the coins on the map.
+type ListSort = KidSort | "vol";
+/// The list under the actions.
+type PanelTab = "kids" | "active" | "copies";
+/// The reader's last tab, kept across coins and panel mounts.
+let lastTab: PanelTab = "kids";
+/// The market-cap order (the list's "mcap" sort; the page's ↓ / ← / → walk it when there is no heat): market cap, then locked value.
 export const kidCmp = (a: BubbleNode, b: BubbleNode) => (b.mcapUsd ?? 0) - (a.mcapUsd ?? 0) || (b.lockedUsd ?? 0) - (a.lockedUsd ?? 0) || (a.mint < b.mint ? -1 : a.mint > b.mint ? 1 : 0);
 const SORTS: Record<KidSort, (a: BubbleNode, b: BubbleNode) => number> = {
   mcap: kidCmp,
@@ -107,6 +114,10 @@ type Props = {
   copyTraded?: boolean;
   coin: Coin | null; coinError: string | null;
   heat: HeatRow | null; heatOn: boolean;
+  /// The whole heat sidecar: the children list sorts by 24 h volume with it (absent = market cap, as before).
+  heatIndex?: HeatIndex | null;
+  /// The coin's place in its family by 24 h volume (lib/map/volume.ts), while the map is coloured by volume.
+  volRank?: { rank: number; of: number } | null;
   maxDepth: number | undefined;
   map: RefObject<BubbleMapHandle | null>;
   onPick: (mint: string) => void; onClose: () => void;
@@ -131,7 +142,7 @@ type Props = {
   trade?: { data: TradeRoute | null; error: string | null; reload: () => void } | null;
 };
 
-export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
+export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, heatIndex = null, volRank = null, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
   const [sparkRef, sparkW] = useWidth();
@@ -149,7 +160,11 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
     return out;
   }, [node, byMint]);
   const root = chain[0] ?? node;
-  const [sort, setSort] = useState<KidSort>("mcap");
+  // most traded first once the heat is in; the reader's own pick stays
+  const [sortWant, setSortWant] = useState<ListSort | null>(null);
+  const sorts: ListSort[] = heatIndex ? ["vol", "mcap", "new"] : ["mcap", "new"];
+  const sort: ListSort = sortWant && sorts.includes(sortWant) ? sortWant : sorts[0];
+  const [tabWant, setTabWant] = useState<PanelTab>(lastTab);
   // the stack's first 50, the selection always among them
   const shownCopies = useMemo(() => {
     const out = copyList.slice(0, 50);
@@ -158,7 +173,14 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   }, [copyList, node.mint]);
   const [shown, setShown] = useState(PAGE);
   useEffect(() => setShown(PAGE), [node.mint]);
-  const sorted = useMemo(() => (sort === "mcap" ? kids : kids.slice().sort(SORTS[sort])), [kids, sort]);
+  const sorted = useMemo(() => {
+    if (sort === "mcap") return kids;
+    if (sort === "new") return kids.slice().sort(SORTS.new);
+    const v = (k: BubbleNode) => heatIndex?.rows.get(k.mint)?.v24 ?? 0, t = (k: BubbleNode) => heatIndex?.rows.get(k.mint)?.t1h ?? 0;
+    return kids.slice().sort((a, b) => v(b) - v(a) || t(b) - t(a) || kidCmp(a, b));
+    // the order follows the poll (`at`), like the rank and the most-active list; the live bumps between two polls do not reorder
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kids, sort, heatIndex?.at]);
   // A listed asset drawn as a family top: its `children` is the true count. Once the store holds some of its rows the
   // list is ONE order over all of them (sorted once per sort and per batch of pages; a drawn mint keeps its row, sorted
   // by and shown as its live node), plus any drawn kid the rows lack (born since the snapshot). "show more" past what
@@ -173,7 +195,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
     families.want(assetTop && wantMore ? [node.mint] : [], "panel");
   }, [families, assetTop, wantMore, node.mint]);
   useEffect(() => () => { families?.want([], "panel"); }, [families]);
-  const hasRows = assetTop && !!families && !!fam.info && fam.info.loaded > 0;
+  // by volume the list is the coins on the map (the store's rows carry no volume)
+  const hasRows = assetTop && sort !== "vol" && !!families && !!fam.info && fam.info.loaded > 0;
   // the drawn kids the loaded rows do not hold, as a stable key (kids is a new array on every live event; the order is not)
   const extraKey = useMemo(() => {
     if (!hasRows || !families) return "";
@@ -204,7 +227,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
     // `sorted` moves with every live event: the drawn rows re-read their live numbers
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sorted, shown, rows, families, byMint]);
-  const famLoading = assetTop && fam.info?.state === "loading";
+  // by volume the list is complete over the coins on the map: nothing is loading for it
+  const famLoading = assetTop && sort !== "vol" && fam.info?.state === "loading";
   const partial = assetTop && kidsTotal > listLen;
   // screen readers: "loading the rest" when the pages start, "N coins listed" once they have stopped (not every step)
   const [said, setSaid] = useState("");
@@ -290,6 +314,17 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   }
 
   const tw = httpUrl(c?.twitter), tg = httpUrl(c?.telegram), web = httpUrl(c?.website);
+  const hasKids = kids.length > 0 || (assetTop && node.children > 0);
+  // One list at a time (2026-11-15: the three were stacked, 1,000 px of rows under the fold). The reader's last choice
+  // is kept across coins; a coin without that list shows the first it has: its children, the family's most active, its copies.
+  const tabs: { k: PanelTab; label: string; n?: number }[] = [];
+  if (hasKids) tabs.push({ k: "kids", label: "Children", n: Math.max(node.children, kids.length) });
+  if (leaders.length > 0) tabs.push({ k: "active", label: "Most active" });
+  if (copyList.length > 1) tabs.push({ k: "copies", label: "Same name", n: copyList.length });
+  const tab = tabs.some((t) => t.k === tabWant) ? tabWant : tabs[0]?.k ?? null;
+  const pickTab = (k: PanelTab) => { lastTab = k; setTabWant(k); };
+  const hover = (m: string | null) => map.current?.hoverNode(m);
+  const volOf = (k: BubbleNode) => heatIndex?.rows.get(k.mint)?.v24 ?? 0;
   return (
     <div className="map-side-in">
       {close}
@@ -300,6 +335,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           <span className="mono muted">{sym(node)}{created ? ` · ${age(created)}` : ""}{firstborn.has(node.mint) && <Firstborn parent={parent} className="ml" />}</span>
           <span className="map-side-ids">
             <button type="button" className={`map-ca ${copied ? "done" : ""}`} onClick={() => copy(node.mint, "Contract address")} title={`Copy ${node.mint}`}><span className="map-ca-text">{short(node.mint, 4)}</span><span className="map-ca-ok" aria-hidden="true">copied</span>{Icon.copy}{Icon.check}</button>
+            {node.migrated ? <span className="map-side-state good">graduated</span> : c?.complete ? <span className="map-side-state warn">migrating</span> : null}
+            {ours ? <span className="map-side-state accent" title="Launched on Spore">Spore</span> : c?.oursPending ? <span className="map-side-state warn">verifying</span> : null}
             {tw && <a className="map-soc" href={tw} target="_blank" rel="noopener noreferrer" aria-label="X / Twitter" title={tw}>{Icon.x}</a>}
             {tg && <a className="map-soc" href={tg} target="_blank" rel="noopener noreferrer" aria-label="Telegram" title={tg}>{Icon.tg}</a>}
             {web && <a className="map-soc" href={web} target="_blank" rel="noopener noreferrer" aria-label="Website" title={web}>{Icon.web}</a>}
@@ -315,106 +352,109 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
         </ol>
         <button type="button" className="map-frame" onClick={() => map.current?.fitCluster(root.mint, { select: false })} title={`Frame the whole ${sym(root)} tree (F)`}>Frame tree</button>
       </nav>
-      {(node.migrated || c?.complete || ours || c?.oursPending) && (
-        <div className="map-side-row">
-          {node.migrated ? <span className="chip good">graduated</span> : c?.complete ? <span className="chip warn">migrating</span> : null}
-          {ours ? <span className="chip accent">launched on Spore</span> : c?.oursPending ? <span className="chip warn">verifying</span> : null}
-        </div>
-      )}
       <div className="map-side-market">
         <div className="map-side-price">
           <em>price</em>
           <strong>{c ? usd(c.priceUsd) : coinError ? "—" : <Skeleton w={96} h={22} />}</strong>
           {candles === undefined ? <Skeleton w={70} h={18} r={999} /> : changeEl}
-          {heatOn && <p className="map-side-heat">{heat && heat.t1h > 0 ? <><b>{count(heat.t1h)}</b> trade{heat.t1h === 1 ? "" : "s"} 1h</> : "no trades 1h"}{heat && heat.last > 0 ? <> · last trade {ago(heat.last)}</> : null}</p>}
+          {heatOn && <p className="map-side-heat">{heat && heat.last > 0 ? <>last trade {ago(heat.last)}{c && c.trades24h > 0 ? <> · {count(c.trades24h)} tx 24h</> : null}</> : "no trade in 24 h"}</p>}
         </div>
         <div className="map-side-spark" ref={sparkRef}>{candles === undefined || sparkW === 0 ? <Skeleton h={SPARK_H} r={8} /> : candles && candles.candles.length >= 2 ? <Sparkline candles={candles.candles} w={sparkW} h={SPARK_H} unit={candles.priceKey} title={`${sym(node)} price, last ${spanLabel(change?.spanS ?? 0)}, ${change ? signedPct(change.ratio) : "no change"}`} /> : <span className="map-spark-none">no candles yet</span>}</div>
       </div>
       {lastHidden && <p className="map-side-hidden">Hidden by the Key filter · {heat && heat.last > 0 ? <>last trade {ago(heat.last)}</> : "no trade on record"}{onShowAll && <> · <button type="button" className="linkish" onClick={onShowAll} title="Show every coin, whatever its last trade (?last=all)">show all</button></>}</p>}
       <div className="map-side-stats">
         <div><em>mcap</em><strong>{usd(node.mcapUsd)}</strong></div>
-        <div><em>children</em><strong>{count(node.children)}{(node.descendants ?? 0) > node.children ? <small> / {count(node.descendants)}</small> : null}</strong></div>
-        <div><em>24h volume</em><strong>{c ? usd(c.volume24hUsd) : coinError ? "—" : <Skeleton w={48} h={14} />}{c && c.trades24h > 0 ? <small> · {count(c.trades24h)} tx</small> : null}</strong></div>
+        <div><em>24h volume</em><strong title={c && c.trades24h > 0 ? `${count(c.trades24h)} trades in 24 h` : undefined}>{c ? usd(c.volume24hUsd) : coinError ? "—" : <Skeleton w={48} h={14} />}</strong></div>
+        <div><em>trades 1h</em><strong className={heat && heat.t1h > 0 ? "accent" : undefined}>{heatOn ? count(heat?.t1h ?? 0) : "—"}</strong></div>
       </div>
-      {family && <FamilyBlock family={family} mode={mode} />}
+      {family && <FamilyBlock family={family} mode={mode} node={node} rank={volRank} onPick={onPick} />}
       {c && !c.migrated && <div className="map-side-progress"><span><em>curve</em><strong>{pct(c.progress)}</strong></span><ProgressBar value={c.progress} /></div>}
       <div className="map-side-actions">
         {tradeActs}
         {mainActs}
         <div className="map-side-links">
-          <button type="button" className="btn ghost sm" onClick={() => copy(link, "Map link")} title={link}>Share</button>
-          <a className="btn ghost sm" href={xShareUrl(post, link)} target="_blank" rel="noopener noreferrer" title="Post this coin's family tree on X">Post on X</a>
-          <button type="button" className="btn ghost sm" onClick={() => copy(node.mint, "Contract address")}>Copy CA</button>
-          <button type="button" className="btn ghost sm" onClick={() => map.current?.fit()} title="Zoom back out to the whole map (0)">Whole map</button>
+          <button type="button" className="linkish" onClick={() => copy(link, "Map link")} title={link}>Share</button>
+          <a className="linkish" href={xShareUrl(post, link)} target="_blank" rel="noopener noreferrer" title="Post this coin's family tree on X">Post on X</a>
+          <button type="button" className="linkish" onClick={() => map.current?.fit()} title="Zoom back out to the whole map (0)">Whole map</button>
         </div>
       </div>
-      {copyList.length > 1 && (
-        <section className="map-kids map-active" aria-label={`Coins named ${sym(node)} under the same parent`}>
-          <header><em>{count(copyList.length)} named {sym(node)} · same parent</em></header>
-          <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>mcap</span><span>age</span></div>
-          <ol className="map-copies" onMouseLeave={() => map.current?.hoverNode(null)}>
-            {shownCopies.map((k) => (
-              <li key={k.mint}>
-                <button type="button" className="map-kid" aria-current={k.mint === node.mint || undefined} onClick={() => onPick(k.mint)} onMouseEnter={() => map.current?.hoverNode(k.mint)} onFocus={() => map.current?.hoverNode(k.mint)} title={`${nameOf(k)} · ${k.mint}`}>
-                  <Logo src={k.image} label={k.symbol} size={18} />
-                  <b>{sym(k)}{k === copyList[0] && <span className="map-copy-lead">{copyTraded ? "most traded" : "largest"}</span>}</b>
-                  <span className="mono" title="market cap">{usd(k.mcapUsd)}</span>
-                  <span className="mono muted" title="age">{k.createdAt ? age(k.createdAt) : "—"}</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-          {copyList.length > 50 && <p className="map-kids-note">{copyTraded ? "the 50 most traded" : "the first 50"} of {count(copyList.length)}</p>}
-        </section>
-      )}
-      {leaders.length > 0 && (
-        <section className="map-kids map-active" aria-label={`Most active coins in the ${family ? sym(family.top) : sym(node)} family`}>
-          <header><em>most active · {family ? sym(family.top) : sym(node)} family</em></header>
-          <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>24h vol</span><span>1h</span></div>
-          <ol onMouseLeave={() => map.current?.hoverNode(null)}>
-            {leaders.map((l) => (
-              <li key={l.node.mint}>
-                <button type="button" className="map-kid" aria-current={l.node.mint === node.mint || undefined} onClick={() => onPick(l.node.mint)} onMouseEnter={() => map.current?.hoverNode(l.node.mint)} onFocus={() => map.current?.hoverNode(l.node.mint)} title={`#${l.rank} in the family by 24 h volume · ${nameOf(l.node)}`}>
-                  <i className="map-active-rank mono" aria-hidden="true">{l.rank}</i>
-                  <b>{sym(l.node)}</b>
-                  <span className="mono" title="24 h volume">{usd(l.v24)}</span>
-                  <span className="mono muted" title="trades in the last hour">{count(l.t1h)}</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
-      {(kids.length > 0 || (assetTop && node.children > 0)) && (
-        <section className="map-kids" aria-label={`Coins under ${sym(node)}`} ref={broodRef}>
-          <header>
-            <em>under {sym(node)} · {count(assetTop ? node.children : kids.length)}</em>
-            <div className="seg sm" role="group" aria-label="Sort children"><SlidingPill />{(["mcap", "new"] as const).map((k) => <button type="button" key={k} aria-pressed={sort === k} onClick={() => { setSort(k); if (partial) setWantFor(node.mint); }}>{k}</button>)}</div>
-          </header>
-          {broodW > 0 && <Brood node={node} kids={kids} width={broodW} onPick={onPick} onHover={(m) => map.current?.hoverNode(m)} />}
-          {/* the order covers only what is loaded: say so, so the top of an mcap or new sort never claims the whole family */}
-          {partial && <p className="map-kids-note">sorted over {count(listLen)} of {count(kidsTotal)}{famLoading ? " · loading the rest…" : rows.pos.length === 0 ? " (the drawn coins)" : ""}</p>}
-          <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>mcap</span><span>age</span></div>
-          <p className="map-sr" aria-live="polite" aria-atomic="true">{said}</p>
-          <ul onMouseLeave={() => map.current?.hoverNode(null)} aria-busy={famLoading || undefined}>
-            {shownKids.map((k) => (
-              <li key={k.mint}>
-                <button type="button" className="map-kid" onClick={() => onPick(k.mint)} onMouseEnter={() => map.current?.hoverNode(k.mint)} onFocus={() => map.current?.hoverNode(k.mint)} title={nameOf(k)}>
-                  <Logo src={k.image} label={k.symbol} size={18} />
-                  <b>{sym(k)}{firstborn.has(k.mint) && <Firstborn parent={node} className="ml" />}</b>
-                  <span className="mono" title="market cap">{usd(k.mcapUsd)}</span>
-                  <span className="mono muted" title="age">{k.createdAt ? age(k.createdAt) : "—"}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          {listLen > shown ? <button type="button" className="map-more linkish" onClick={() => setShown((s) => s + PAGE)}>show {Math.min(PAGE, listLen - shown)} more of {count(kidsTotal - shown)}</button>
-            : assetTop && kidsTotal > listLen ? (
-              fam.info?.state === "error" ? <p className="map-more-note">the rest did not load · <button type="button" className="linkish" onClick={() => { families?.want([], "panel"); families?.want([node.mint], "panel"); }}>retry</button></p>
-              : fam.info?.state === "done" && fam.info.loaded < fam.info.total ? <p className="map-more-note">{count(listLen)} of {count(kidsTotal)} listed on this screen</p>
-              : wantMore ? <p className="map-more-note">loading… {count(fam.info?.loaded ?? 0)} of {count(fam.info?.total ?? node.children)}</p>
-              : <button type="button" className="map-more linkish" onClick={() => { setShown(listLen + PAGE); setWantFor(node.mint); }}>show {Math.min(PAGE, kidsTotal - listLen)} more of {count(kidsTotal - listLen)}</button>
-            ) : null}
+      {tab && (
+        <section className="map-kids" aria-label={tab === "kids" ? `Coins under ${sym(node)}` : tab === "active" ? `Most active coins in the ${family ? sym(family.top) : sym(node)} family` : `Coins named ${sym(node)} under the same parent`} ref={broodRef}>
+          {tabs.length > 1 ? (
+            <div className="map-tabs" role="group" aria-label="Lists">
+              {tabs.map((t) => <button type="button" key={t.k} aria-pressed={tab === t.k} onClick={() => pickTab(t.k)}>{t.label}{t.n != null && <i>{count(t.n)}</i>}</button>)}
+            </div>
+          ) : <header><em>{tabs[0].label}{tabs[0].n != null ? ` · ${count(tabs[0].n)}` : ""}</em></header>}
+          {tab === "kids" && (
+            <>
+              <header>
+                <em>under {sym(node)}{(node.descendants ?? 0) > node.children ? ` · ${count(node.descendants)} in tree` : ""}</em>
+                <div className="seg sm" role="group" aria-label="Sort children"><SlidingPill />{sorts.map((k) => <button type="button" key={k} aria-pressed={sort === k} onClick={() => { setSortWant(k); if (partial && k !== "vol") setWantFor(node.mint); }} title={k === "vol" ? "Most traded in 24 h first" : k === "mcap" ? "Largest market cap first" : "Newest first"}>{k === "vol" ? "volume" : k}</button>)}</div>
+              </header>
+              {sort === "new" && broodW > 0 && <Brood node={node} kids={kids} width={broodW} onPick={onPick} onHover={hover} />}
+              {/* the order covers only what is loaded: say so, so the top of a sort never claims the whole family */}
+              {partial && <p className="map-kids-note">sorted over {count(listLen)} of {count(kidsTotal)}{famLoading ? " · loading the rest…" : rows.pos.length === 0 ? " (the coins on the map)" : ""}</p>}
+              <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>{sort === "vol" ? "24h vol" : "mcap"}</span><span>age</span></div>
+              <p className="map-sr" aria-live="polite" aria-atomic="true">{said}</p>
+              <ul onMouseLeave={() => hover(null)} aria-busy={famLoading || undefined}>
+                {shownKids.map((k) => (
+                  <li key={k.mint}>
+                    <button type="button" className="map-kid" onClick={() => onPick(k.mint)} onMouseEnter={() => hover(k.mint)} onFocus={() => hover(k.mint)} title={nameOf(k)}>
+                      <Logo src={k.image} label={k.symbol} size={18} />
+                      <b>{sym(k)}{firstborn.has(k.mint) && <Firstborn parent={node} className="ml" />}</b>
+                      {sort === "vol" ? <span className="mono" title="24 h volume">{volOf(k) > 0 ? usd(volOf(k)) : "—"}</span> : <span className="mono" title="market cap">{usd(k.mcapUsd)}</span>}
+                      <span className="mono muted" title="age">{k.createdAt ? age(k.createdAt) : "—"}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {listLen > shown ? <button type="button" className="map-more linkish" onClick={() => setShown((s) => s + PAGE)}>show {Math.min(PAGE, listLen - shown)} more of {count((sort === "vol" ? listLen : kidsTotal) - shown)}</button>
+                : assetTop && kidsTotal > listLen ? (
+                  sort === "vol" ? <p className="map-more-note">by volume lists the coins on the map · mcap or new lists all {count(kidsTotal)}</p>
+                  : fam.info?.state === "error" ? <p className="map-more-note">the rest did not load · <button type="button" className="linkish" onClick={() => { families?.want([], "panel"); families?.want([node.mint], "panel"); }}>retry</button></p>
+                  : fam.info?.state === "done" && fam.info.loaded < fam.info.total ? <p className="map-more-note">{count(listLen)} of {count(kidsTotal)} listed on this screen</p>
+                  : wantMore ? <p className="map-more-note">loading… {count(fam.info?.loaded ?? 0)} of {count(fam.info?.total ?? node.children)}</p>
+                  : <button type="button" className="map-more linkish" onClick={() => { setShown(listLen + PAGE); setWantFor(node.mint); }}>show {Math.min(PAGE, kidsTotal - listLen)} more of {count(kidsTotal - listLen)}</button>
+                ) : null}
+            </>
+          )}
+          {tab === "active" && (
+            <div className="map-active">
+              <header><em>{family ? sym(family.top) : sym(node)} family · by 24 h volume</em></header>
+              <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>24h vol</span><span>1h</span></div>
+              <ol onMouseLeave={() => hover(null)}>
+                {leaders.map((l) => (
+                  <li key={l.node.mint}>
+                    <button type="button" className="map-kid" aria-current={l.node.mint === node.mint || undefined} onClick={() => onPick(l.node.mint)} onMouseEnter={() => hover(l.node.mint)} onFocus={() => hover(l.node.mint)} title={`#${l.rank} in the family by 24 h volume · ${nameOf(l.node)}`}>
+                      <i className="map-active-rank mono" aria-hidden="true">{l.rank}</i>
+                      <b>{sym(l.node)}</b>
+                      <span className="mono" title="24 h volume">{usd(l.v24)}</span>
+                      <span className="mono muted" title="trades in the last hour">{count(l.t1h)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {tab === "copies" && (
+            <div className="map-active">
+              <header><em>named {sym(node)} · same parent</em></header>
+              <div className="map-kids-cols" aria-hidden="true"><span>coin</span><span>mcap</span><span>age</span></div>
+              <ol className="map-copies" onMouseLeave={() => hover(null)}>
+                {shownCopies.map((k) => (
+                  <li key={k.mint}>
+                    <button type="button" className="map-kid" aria-current={k.mint === node.mint || undefined} onClick={() => onPick(k.mint)} onMouseEnter={() => hover(k.mint)} onFocus={() => hover(k.mint)} title={`${nameOf(k)} · ${k.mint}`}>
+                      <Logo src={k.image} label={k.symbol} size={18} />
+                      <b>{sym(k)}{k === copyList[0] && <span className="map-copy-lead">{copyTraded ? "most traded" : "largest"}</span>}</b>
+                      <span className="mono" title="market cap">{usd(k.mcapUsd)}</span>
+                      <span className="mono muted" title="age">{k.createdAt ? age(k.createdAt) : "—"}</span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              {copyList.length > 50 && <p className="map-kids-note">{copyTraded ? "the 50 most traded" : "the first 50"} of {count(copyList.length)}</p>}
+            </div>
+          )}
         </section>
       )}
       {coinError && !c && <p className="hint">{coinError}</p>}
@@ -422,17 +462,23 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   );
 }
 
-/// The coin's family and its share of the whole map: both modes' numbers, the bar and rank in the map's size mode.
-function FamilyBlock({ family, mode }: { family: Family; mode: SizeMode }) {
+/// The coin's family in two lines: whose it is, how big, where it ranks on the map with its share (in the map's size
+/// mode) on a thin bar; and, coloured by volume, the coin's own place in that family by 24 h volume.
+function FamilyBlock({ family, mode, node, rank, onPick }: { family: Family; mode: SizeMode; node: BubbleNode; rank: { rank: number; of: number } | null; onPick: (mint: string) => void }) {
   const row = (mode === "mcap" ? family.mcap : family.locked) ?? family.locked ?? family.mcap;
-  const locked = shareOf(family.locked), mcap = shareOf(family.mcap);
-  if (!row || (locked == null && mcap == null)) return null;
+  const share = shareOf(mode === "mcap" ? family.mcap : family.locked) ?? shareOf(family.locked) ?? shareOf(family.mcap);
+  if (!row || share == null) return null;
   // the true size: the drawn members and the coins the map leaves out of a listed asset's family
   const size = row.members + (family.ghost ?? 0);
+  const isTop = family.top.mint === node.mint;
   return (
-    <section className="map-side-dom" aria-label={`${sym(family.top)} family dominance`}>
-      <DominanceLine locked={locked} mcap={mcap} mode={mode} only={mode === "mcap" ? "mcap" : undefined}
-        label={<><b>{sym(family.top)}</b> family · {count(size)} coin{size === 1 ? "" : "s"} · #{count(row.rank)} of {count(family.families)}</>} />
+    <section className="map-side-dom" aria-label={`${sym(family.top)} family`}>
+      <p className="map-fam-line">
+        <span>{isTop ? <b>{sym(family.top)}</b> : <button type="button" className="linkish" onClick={() => onPick(family.top.mint)} title={`Select ${nameOf(family.top)}`}>{sym(family.top)}</button>} family · {count(size)} coin{size === 1 ? "" : "s"}</span>
+        <span title={`#${count(row.rank)} of ${count(family.families)} families · ${sharePct(share)} of all ${mode === "mcap" ? "market cap" : "locked value"} on the map`}>#{count(row.rank)} · <b>{sharePct(share)}</b></span>
+      </p>
+      <span className="map-fam-bar" aria-hidden="true"><i style={{ width: `${Math.min(100, Math.max(0, share * 100))}%` }} /></span>
+      {rank && <p className="map-fam-line"><span>volume rank in family</span><span className={rank.rank <= 10 ? "is-lead" : undefined}><b>#{count(rank.rank)}</b> of {count(rank.of)}</span></p>}
     </section>
   );
 }

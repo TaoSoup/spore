@@ -88,7 +88,7 @@ Two switches in the Key, both for reading a big family.
   `withLast` adds `colour=last` to /map URLs, so the pixel checks keep the last-trade colours). By last trade a family where everything traded in the
   last half hour is one colour. By volume every coin is ranked by 24 h volume INSIDE its family (the root is not ranked;
   ties: trades in the last hour, then the mint) and drawn in four tiers, the four heat colours: top 5 % (at least one
-  coin), next 15 %, next 30 %, the rest. The heat sidecar has no 1 h volume, so the rank is on `v24`.
+  coin, at most 10), up to the top 20 % (at most 24), the rest of the top half, the rest. The heat sidecar has no 1 h volume, so the rank is on `v24`.
   - The engine colours by a clock, so the shell hands it a second one: `EngineHeat.clast` (a made-up "last trade" per row
     inside its tier's heat class, 0 = cold) and `vrank` (`adapter.heatPayload(heat, { nodes, byMint })`). `S.age` is the
     COLOUR clock (bubbles, links, the seed heads' wedges, so the leaders sit together); `S.ageReal` / `f.ageReal` stay the

@@ -86,7 +86,7 @@ const GAL_TRADE: { c: string; t: string; glow?: boolean }[] = [
 ];
 /// Colour by volume (lib/map/volume.ts): the four tiers of a coin's rank by 24 h volume inside its family, in the same four
 /// colours. A legend only; the last-trade buckets under it stay the filter.
-const tiersOf = (items: { c: string; t: string; glow?: boolean }[]) => ["top 5%", "next 15%", "next 30%", "rest"].map((t, i) => ({ ...items[i], t }));
+const tiersOf = (items: { c: string; t: string; glow?: boolean }[]) => ["leaders", "next", "top half", "rest"].map((t, i) => ({ ...items[i], t }));
 /// The last-trade filter's nodes while the colours mean volume: one quiet colour, so a bucket never reads as a map colour.
 const plainOf = (items: { c: string; t: string }[]) => items.map((x) => ({ c: "#7d8a84", t: x.t }));
 /// The Key's colour switch (the WebGL map, with the heat sidecar): last trade or volume rank.
