@@ -125,8 +125,8 @@ export class Model {
     this.lockMemo = new WeakMap();  // coin → bigint it locks in its parent
     this.structVersion = 0; this.descVersion = -1; this.descCache = new Map();
     // Exact 24 h / 1 h trade counters per mint, seeded from sqlite at load and fed by recordTrade.
-    // They include trades the 2 000-rows-per-mint SQL trim later deletes (db.insertTrade), so a mint
-    // with more than 2 000 trades in 24 h can exceed a SQL recount until the next restart re-seeds.
+    // sqlite keeps every trade of the last 24 h up to 50 000 a mint (db.insertTrade), so the seed is exact below
+    // that; a mint above it reads higher than a SQL recount until the next restart re-seeds.
     this.activity = new Activity({ now: () => Math.floor(this.now() / 1000) });
     this.heatCache = null;
     this.touched = new Map();       // mint → last API access (ms); the refresh loop prioritises these
@@ -382,7 +382,7 @@ export class Model {
   setGlobal(g) { this.global = g; this.db.kvSet("global", g); this.#bump(); }
   setBackfill(b) { this.backfill = { ...this.backfill, ...b }; }
   /** Stores a trade; only a row sqlite did not have yet is counted (a replayed event never counts twice). */
-  recordTrade(t) { if (this.db.insertTrade(t)) this.activity.record(t); this.#bump(); }
+  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) this.activity.record(t); this.#bump(); return fresh; }
   touch(mint) { this.touched.set(mint, Date.now()); }
 
   // ---------------------------------------------------------------- "ours" (DESIGN §11.1)

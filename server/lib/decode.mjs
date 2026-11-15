@@ -23,27 +23,30 @@ export function eventNameOf(buf) {
 }
 
 const PROGRAM_DATA = "Program data: ";
+const INSTRUCTION = "Program log: Instruction: ";
 /** Every tracked event in a transaction's log lines, in emission order, with its raw bytes. */
 /**
  * Anchor events in a transaction's log lines, each with the program whose frame emitted it
  * (`Program X invoke [n]` … `Program X success|failed`), so a foreign program cannot pass off a
  * fabricated "Program data:" line as a pump.fun event. `programs` (a Set of base58 ids) keeps only
- * events emitted by those programs; without it every event is returned, tagged with its program.
+ * events emitted by those programs; without it every event is returned, tagged with its program. `ix` is the
+ * instruction that frame logged before the event (`Program log: Instruction: SellV2`), null when it logged none.
  */
 export function eventsInLogs(logs, programs = null) {
   const out = [];
-  const stack = [];
+  const stack = [], ixs = [];
   for (const line of logs ?? []) {
     let m;
-    if ((m = /^Program (\S+) invoke \[\d+\]$/.exec(line))) { stack.push(m[1]); continue; }
-    if ((m = /^Program (\S+) (success|failed)(?::|$)/.exec(line))) { const i = stack.lastIndexOf(m[1]); if (i >= 0) stack.splice(i); continue; }
+    if ((m = /^Program (\S+) invoke \[\d+\]$/.exec(line))) { stack.push(m[1]); ixs.push(null); continue; }
+    if ((m = /^Program (\S+) (success|failed)(?::|$)/.exec(line))) { const i = stack.lastIndexOf(m[1]); if (i >= 0) { stack.splice(i); ixs.splice(i); } continue; }
+    if (line.startsWith(INSTRUCTION)) { if (ixs.length) ixs[ixs.length - 1] = line.slice(INSTRUCTION.length); continue; }
     if (!line.startsWith(PROGRAM_DATA)) continue;
     const program = stack.length ? stack[stack.length - 1] : null;
     if (programs && !programs.has(program)) continue;
     let buf;
     try { buf = Buffer.from(line.slice(PROGRAM_DATA.length), "base64"); } catch { continue; }
     const name = eventNameOf(buf);
-    if (name) out.push({ name, data: buf, program });
+    if (name) out.push({ name, data: buf, program, ix: ixs.length ? ixs[ixs.length - 1] : null });
   }
   return out;
 }
@@ -61,12 +64,19 @@ export function plain(v) {
 }
 
 // ---------------------------------------------------------------- events
+/** A reserve after a trade moved `amount` in (sign 1n) or out (-1n) of it; the reported reserve when that cannot be (a field an older event lacks, a negative result). */
+const OLD_BUYS = new Set(["buy", "buy_exact_quote_in"]);
+const sum = (...xs) => xs.reduce((a, x) => a + BigInt(x ?? 0), 0n);
+function after(reserve, amount, sign) {
+  try { const v = BigInt(reserve) + sign * BigInt(amount ?? 0); return v >= 0n ? v.toString() : reserve; } catch { return reserve; }
+}
 /**
  * Decodes one tracked event from its `Program data:` payload. The SDK's event decoders take the
  * borsh body only, so the 8-byte discriminator in front is dropped here. A SOL quote is reported
- * as `quoteMint: null` to match the API.
+ * as `quoteMint: null` to match the API. `ix` is the instruction that emitted a pump-amm event (eventsInLogs), which
+ * decides where its fees went.
  */
-export function decodeEvent(name, payload) {
+export function decodeEvent(name, payload, ix = null) {
   const data = Buffer.from(payload).subarray(8);
   switch (name) {
     case "CreateEvent": {
@@ -93,13 +103,25 @@ export function decodeEvent(name, payload) {
       const e = plain(PUMP_SDK.decodeCompleteEventBc(data));
       return { ...e, timestamp: Number(e.timestamp), quoteMint: e.quoteMint === ZERO_KEY ? null : e.quoteMint };
     }
+    // pump-amm reports the pool's vault balances BEFORE the swap (measured 2026-11-15 on mainnet: the event's reserves
+    // equal the vaults' pre balances exactly). What the vaults hold after it is those plus the trade's own amounts, and
+    // the quote side depends on the instruction (70 transactions compared with the vaults' post balances):
+    //   - `buy`, `buy_exact_quote_in`, `Sell`: the protocol and creator fees are paid out at once; the LP fee stays.
+    //   - the v2 instructions and `multi_hop_swap`: every fee stays in the quote vault (the pool's own unswept
+    //     buckets) except the buyback share, which leaves.
+    // A sell's event does not name its instruction: the frame's `Instruction:` log line does. Unknown = the v2 path
+    // (two trades in three); the other path then differs by that trade's fees (about 1 % of it) until the next read.
     case "BuyEvent": {
       const e = plain(PUMP_SDK.decodeBuyEventAmm(data));
-      return { pool: e.pool, isBuy: true, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountOut, quoteAmount: e.quoteAmountIn, poolBaseReserves: e.poolBaseTokenReserves, poolQuoteReserves: e.poolQuoteTokenReserves };
+      return { pool: e.pool, isBuy: true, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountOut, quoteAmount: e.quoteAmountIn,
+        poolBaseReserves: after(e.poolBaseTokenReserves, e.baseAmountOut, -1n),
+        poolQuoteReserves: after(e.poolQuoteTokenReserves, OLD_BUYS.has(e.ixName) ? e.quoteAmountInWithLpFee : sum(e.quoteAmountInWithLpFee, e.protocolFee, e.coinCreatorFee) - sum(e.buybackFee), 1n) };
     }
     case "SellEvent": {
       const e = plain(PUMP_SDK.decodeSellEventAmm(data));
-      return { pool: e.pool, isBuy: false, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountIn, quoteAmount: e.quoteAmountOut, poolBaseReserves: e.poolBaseTokenReserves, poolQuoteReserves: e.poolQuoteTokenReserves };
+      return { pool: e.pool, isBuy: false, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountIn, quoteAmount: e.quoteAmountOut,
+        poolBaseReserves: after(e.poolBaseTokenReserves, e.baseAmountIn, 1n),
+        poolQuoteReserves: after(e.poolQuoteTokenReserves, ix === "Sell" ? e.quoteAmountOutWithoutLpFee : sum(e.userQuoteAmountOut, e.buybackFee), -1n) };
     }
     default:
       throw new Error(`unknown event ${name}`);

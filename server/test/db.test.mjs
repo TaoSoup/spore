@@ -87,8 +87,24 @@ test("trades: dedupe on (sig, mint, idx), 24 h volume, trimming to the cap", () 
   assert.deepEqual(db.volume24h("M1"), { trades: 1, usd: 1.5 });
   assert.equal(db.volume24hAll().get("M1").trades, 1);
   for (let i = 3; i < 2300; i++) db.insertTrade(t(i), 2000);
-  assert.ok(db.tradesFor("M1", 5000).length <= 2000);
+  assert.equal(db.tradesFor("M1", 5000).length, 2298, "the last 24 h are kept past the cap (the boot seed of the 24 h counters reads them)");
   assert.equal(db.tradesSince("M1", now - 10).length, 9); // S1, S3..S10 (S2 is the day-old one)
+  // older than 24 h: only what fits in the newest `keep` rows stays; the trim runs once per 200 new rows
+  const old = (i) => ({ ...t(i), sig: `O${i}`, mint: "M2", time: now - 100_000 - i });
+  for (let i = 0; i < 2600; i++) db.insertTrade(old(i), 2000);
+  const kept = db.tradesFor("M2", 5000);
+  assert.ok(kept.length >= 2000 && kept.length < 2200, String(kept.length));
+  assert.equal(kept[0].sig, "O0", "the newest stay");
+  // a hard ceiling whatever the age
+  for (let i = 0; i < 1000; i++) db.insertTrade({ ...t(i), sig: `H${i}`, mint: "M3" }, 100, { max: 300 });
+  const hard = db.tradesFor("M3", 5000).length;
+  assert.ok(hard >= 300 && hard < 500, String(hard));
+  // the window read is an iterator in time order
+  const win = db.tradesWindow(now - 86_400);
+  assert.equal(typeof win.next, "function");
+  let prev = 0, n = 0;
+  for (const r of win) { assert.ok(r.time >= prev); prev = r.time; n++; }
+  assert.equal(n, 2298 + hard);
   db.close();
 });
 

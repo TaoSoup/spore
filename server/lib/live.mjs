@@ -1,14 +1,26 @@
-// `logsSubscribe` on the pump program over a WebSocket, with reconnect and backoff.
+// `logsSubscribe` on one program over a WebSocket, with reconnect and backoff. The indexer runs one for the pump
+// (bonding curve) program and one for pump-amm (the pools graduated coins trade on): a subscription takes a single
+// address, and a pool trade does not mention the curve program.
 //
 // Uses Node's built-in WebSocket (no extra dependency). It has no ping API, so liveness is judged
-// by traffic: the pump program logs many transactions per second, and a socket silent for
+// by traffic: both programs log many transactions per second, and a socket silent for
 // `staleMs` is treated as dead and reopened. Every (re)connection calls `onConnect` so the indexer
 // can run a refresh and close the gap the outage left.
+//
+// `mustInclude` (a string) drops a frame that does not contain it before it is parsed: the indexer only reads
+// `Program data:` events, and a failed transaction or one that emitted nothing is 40 % of the pool stream (measured
+// 2026-11-15: 278 frames/s, 1 MB/s). A dropped frame still counts as traffic for the watchdog. The reply to the
+// subscribe request is read before that filter: a provider that refuses the subscription leaves the socket open and
+// silent, and the refusal is the only thing that says why (`lastError`, a warning).
 export class LogsSubscriber {
-  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000 }) {
+  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000, name = "live", mustInclude = null }) {
     this.wsUrl = wsUrl; this.programId = programId; this.onLogs = onLogs; this.onConnect = onConnect; this.log = log; this.staleMs = staleMs;
+    this.name = name; this.mustInclude = mustInclude;
     this.ws = null; this.stopped = false; this.backoffMs = 0; this.connectedAt = 0; this.lastMessageAt = 0; this.reconnectTimer = null;
-    this.stats = { connects: 0, messages: 0, notifications: 0, errors: 0, lastError: null };
+    this.openedAt = 0;            // when the socket in use opened (0: none opened since the last reconnect was scheduled)
+    this.subscribed = false;      // the provider acknowledged the subscription on this socket (or a notification arrived)
+    this.lastNotificationAt = 0;  // the last logsNotification parsed: `connected` only says the socket is open
+    this.stats = { connects: 0, messages: 0, notifications: 0, skipped: 0, errors: 0, lastError: null };
     this.watchdog = setInterval(() => this.#checkStale(), 10_000); this.watchdog.unref();
   }
 
@@ -20,21 +32,32 @@ export class LogsSubscriber {
     if (this.stopped) return;
     let ws;
     try { ws = new WebSocket(this.wsUrl); } catch (e) { this.#failed(e); return; }
-    this.ws = ws;
+    this.ws = ws; this.subscribed = false;
     ws.onopen = () => {
-      this.stats.connects++; this.connectedAt = Date.now(); this.lastMessageAt = Date.now();
+      this.stats.connects++; this.connectedAt = Date.now(); this.lastMessageAt = Date.now(); this.openedAt = Date.now();
       ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "logsSubscribe", params: [{ mentions: [this.programId] }, { commitment: "confirmed" }] }));
-      this.log.info?.(`live: subscribed to ${this.programId} logs`);
-      try { this.onConnect?.(); } catch (e) { this.log.warn?.(`live: onConnect failed: ${e.message}`); }
+      this.log.info?.(`${this.name}: subscribed to ${this.programId} logs`);
+      try { this.onConnect?.(); } catch (e) { this.log.warn?.(`${this.name}: onConnect failed: ${e.message}`); }
     };
     ws.onmessage = (ev) => {
       this.lastMessageAt = Date.now(); this.stats.messages++;
+      const text = typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8");
+      if (!this.subscribed && text.length < 1024 && text.includes('"id":1')) {
+        let r = null;
+        try { r = JSON.parse(text); } catch { /* not the reply */ }
+        if (r?.id === 1 && r.method === undefined) {
+          if (r.error) { this.stats.errors++; this.stats.lastError = `logsSubscribe refused: ${r.error.message ?? JSON.stringify(r.error)}`; this.log.warn?.(`${this.name}: ${this.stats.lastError}`); }
+          else this.subscribed = true;
+          return;
+        }
+      }
+      if (this.mustInclude && !text.includes(this.mustInclude)) { this.stats.skipped++; return; }
       let msg;
-      try { msg = JSON.parse(typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8")); } catch { return; }
+      try { msg = JSON.parse(text); } catch { return; }
       if (msg.method !== "logsNotification") return;
       const v = msg.params?.result?.value; const slot = msg.params?.result?.context?.slot;
       if (!v || !Array.isArray(v.logs)) return;
-      this.stats.notifications++;
+      this.stats.notifications++; this.subscribed = true; this.lastNotificationAt = Date.now();
       try { this.onLogs({ slot, signature: v.signature, err: v.err, logs: v.logs }); } catch (e) { this.stats.errors++; this.stats.lastError = e.message; }
     };
     ws.onerror = (ev) => { this.stats.errors++; this.stats.lastError = ev?.message ?? "socket error"; };
@@ -43,20 +66,23 @@ export class LogsSubscriber {
   #failed(e) { this.stats.errors++; this.stats.lastError = e.message; this.#reconnect(); }
   #reconnect() {
     if (this.stopped || this.reconnectTimer) return;
-    // A connection that lived a while resets the backoff; a flapping one keeps doubling up to 30 s.
+    // A connection that opened and lived a while resets the backoff; a flapping one, and one that never opens (the
+    // endpoint down or refusing: there are two of these sockets now), keeps doubling up to 30 s.
     // Jitter spreads reconnects so several instances behind one provider never retry in lockstep.
-    this.backoffMs = Date.now() - this.connectedAt > 60_000 ? 1_000 : Math.min(30_000, Math.max(1_000, this.backoffMs * 2));
+    const lived = this.openedAt > 0 && Date.now() - this.openedAt > 60_000;
+    this.openedAt = 0;
+    this.backoffMs = lived ? 1_000 : Math.min(30_000, Math.max(1_000, this.backoffMs * 2));
     const delay = jitter(this.backoffMs);
-    this.log.warn?.(`live: disconnected, reconnecting in ${delay} ms`);
+    this.log.warn?.(`${this.name}: disconnected, reconnecting in ${delay} ms`);
     this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.#connect(); }, delay);
     this.reconnectTimer.unref();
   }
   #checkStale() {
-    if (this.ws && this.connected && Date.now() - this.lastMessageAt > this.staleMs) { this.log.warn?.("live: no messages for a minute, reopening the socket"); this.#close(); this.#reconnect(); }
+    if (this.ws && this.connected && Date.now() - this.lastMessageAt > this.staleMs) { this.log.warn?.(`${this.name}: no messages for a minute, reopening the socket`); this.#close(); this.#reconnect(); }
   }
   #close() { const ws = this.ws; this.ws = null; try { ws?.close(); } catch { /* already closed */ } }
 
-  snapshot() { return { ...this.stats, connected: this.connected, lastMessageAgoMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null, backoffMs: this.backoffMs, reconnecting: !!this.reconnectTimer }; }
+  snapshot() { return { ...this.stats, connected: this.connected, subscribed: this.subscribed, lastNotificationAgoMs: this.lastNotificationAt ? Date.now() - this.lastNotificationAt : null, lastMessageAgoMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null, backoffMs: this.backoffMs, reconnecting: !!this.reconnectTimer }; }
 }
 
 /** Full jitter: a uniform delay in [base/2, base]. */

@@ -17,6 +17,10 @@ const SOL_MINT = NATIVE_MINT.toBase58(); // encoded once: toBase58() is a base58
 const USDC_MINT_STR = String(USDC_MINT);
 /** Programs whose events the live subscription acts on; a CPI into another program cannot inject events. */
 const LIVE_EVENT_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.toBase58()]);
+/** What the pool stream acts on: a transaction that also touches a curve reaches the curve stream too, which takes the curve's events. */
+export const POOL_EVENT_PROGRAMS = new Set([PUMP_AMM_PROGRAM_ID.toBase58()]);
+/** A frame without this carries no event (a failed transaction, or one that emitted nothing): not parsed. */
+const EVENT_MARK = "Program data: ";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const chunks = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
 const DEPTH_OFFSET = 141; // BondingCurve.depth (DESIGN §2)
@@ -100,8 +104,8 @@ export class Indexer {
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
-      mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
-    this.live = null; this.timers = []; this.stopped = false;
+      livePools: true, mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
+    this.live = null; this.livePools = null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
     this.hot = new Set(); this.cursor = 0; this.cursorRestored = false; this.pricingCursor = 0; this.refreshing = false;
@@ -112,6 +116,7 @@ export class Indexer {
     this.notCurve = new Map();   // quote mint → when the chain said it is no pump curve (ensureAncestors, NOT_CURVE_TTL_MS)
     this.pairSent = new Map();   // mint → when its `pair` event went out (dedupe)
     this.assetScanning = false;  // the asset walk (scanAssetQuotes) in flight
+    this.poolStats = { events: 0, tracked: 0, trades: 0 }; // pump-amm Buy/SellEvents seen, of tracked pools, stored as new trades (health)
     this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 },
       mints: { batchRead: 0, batchFailed: 0, catchUpRuns: 0, catchUpRead: 0, unread: null, lastCatchUpAt: null } };
   }
@@ -119,7 +124,16 @@ export class Indexer {
   // ---------------------------------------------------------------- lifecycle
   async start() {
     await this.loadGlobal();
-    this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, onLogs: (n) => this.onLogs(n), onConnect: () => { this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
+    // Two streams (live.mjs): the curve program's, and pump-amm's for the pools graduated coins trade on. A pool trade
+    // does not mention the curve program, so the first stream alone saw one only inside a transaction that also touched
+    // a curve (measured 2026-11-15: $DTC, 519 pool transactions in 24 h, 1 trade stored). The curve stream keeps acting
+    // on the pool events it happens to see, whatever the pool stream's state (an open socket proves no delivery): both
+    // number a transaction's events the same way, so a trade both deliver is one row (sig, mint, idx) and one
+    // announcement. The pool stream leaves the curve's events alone.
+    this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK,
+      onLogs: (n) => this.onLogs(n), onConnect: () => { this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
+    if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK,
+      onLogs: (n) => this.onLogs(n, POOL_EVENT_PROGRAMS) }).start();
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
     this.refreshQuoteUsd().catch(() => {});
@@ -135,9 +149,9 @@ export class Indexer {
     if (this.opts.backfill) this.runBackfill().catch((e) => { this.state.lastError = e.message; this.log.error(`backfill failed: ${e.stack ?? e}`); });
     else { this.model.setBackfill({ done: true, ...this.model.db.backfillStats() }); this.state.phase = "live"; }
   }
-  stop() { this.stopped = true; this.live?.stop(); for (const t of this.timers) clearInterval(t); }
+  stop() { this.stopped = true; this.live?.stop(); this.livePools?.stop(); for (const t of this.timers) clearInterval(t); }
 
-  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null }; }
+  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null }; }
 
   // ---------------------------------------------------------------- map stream (DESIGN §11.5)
   /**
@@ -862,16 +876,27 @@ export class Indexer {
   }
 
   // ---------------------------------------------------------------- live
-  onLogs({ slot, signature, err, logs }) {
+  /**
+   * One transaction's logs. `accept` is the set of programs whose events this call acts on (a stream's share, see
+   * start()); `idx` counts every tracked event of the transaction whichever stream delivers it.
+   */
+  onLogs({ slot, signature, err, logs }, accept = LIVE_EVENT_PROGRAMS) {
     if (err) return;
     const events = eventsInLogs(logs, LIVE_EVENT_PROGRAMS);
     if (!events.length) return;
-    events.forEach(({ name, data }, idx) => {
+    events.forEach(({ name, data, program, ix }, idx) => {
+      if (!accept.has(program)) return;
       try {
         if (name === "CreateEvent") this.#onCreate(decodeEvent(name, data), slot);
         else if (name === "TradeEvent") { if (this.model.coins.has(peekMint(data))) this.#onTrade(decodeEvent(name, data), signature, slot, idx); }
         else if (name === "CompleteEvent") { const e = decodeEvent(name, data); if (this.model.coins.has(e.mint)) this.#onComplete(e); }
-        else if (name === "BuyEvent" || name === "SellEvent") { const e = decodeEvent(name, data); const mint = this.model.pools.get(e.pool); if (mint) this.#onPoolTrade(mint, e, signature, slot, idx); }
+        else if (name === "BuyEvent" || name === "SellEvent") {
+          // Most of pump-amm's trades are pools of coins outside the tree: the pool's key is read in place, the event decoded only for ours.
+          const counted = accept === POOL_EVENT_PROGRAMS; // health counts the pool stream's own share
+          if (counted) this.poolStats.events++;
+          const mint = this.model.pools.get(peekPool(data));
+          if (mint) { if (counted) this.poolStats.tracked++; if (this.#onPoolTrade(mint, decodeEvent(name, data, ix), signature, slot, idx) && counted) this.poolStats.trades++; }
+        }
       } catch (e) { this.state.lastError = `${name}: ${e.message}`; }
     });
   }
@@ -933,18 +958,23 @@ export class Indexer {
     const c = this.model.upsertCoin({ mint, poolBase: e.poolBaseReserves, poolQuote: e.poolQuoteReserves });
     const baseDecimals = this.model.decimalsOf(mint), quoteDecimals = this.model.quoteDecimals(c);
     const priceQuote = poolPriceQuote(e.poolQuoteReserves, e.poolBaseReserves, baseDecimals, quoteDecimals, c.poolVirtualQuote);
-    if (priceQuote == null) return;
-    this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, priceQuote });
+    if (priceQuote == null) return false;
+    // Not hot: the event gives the pool's reserves after the trade (decode.mjs), so the next tick has nothing to
+    // re-read for it (and the pool stream names hundreds of coins a tick). The pool's virtual quote is not in the event:
+    // the rolling pass and the pricing-pool pass re-read it as before.
+    return this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, priceQuote }, { hot: false });
   }
-  #recordTrade(c, t) {
+  /** Stores and announces a trade; false for one already stored (both streams delivered it). */
+  #recordTrade(c, t, { hot = true } = {}) {
     // One coin's chain, not the whole forest: the upsert just bumped the version, and a full
     // recompute per trade (≈ 90 ms at 15k coins) would eat the live path.
     const d = this.model.priceOf(c.mint);
     const quoteUsd = this.#quoteUsd(c);
     const trade = { ...t, mint: c.mint, priceUsd: d?.priceUsd ?? null, valueUsd: quoteUsd != null ? units(t.quoteAmount, this.model.quoteDecimals(c)) * quoteUsd : null };
-    this.model.recordTrade(trade);
-    this.hot.add(c.mint);
+    if (!this.model.recordTrade(trade)) return false;
+    if (hot) this.hot.add(c.mint);
     this.hub?.emit("trade", { sig: trade.sig, mint: trade.mint, slot: trade.slot, time: trade.time, isBuy: trade.isBuy, user: trade.user, baseAmount: trade.baseAmount, quoteAmount: trade.quoteAmount, priceQuote: trade.priceQuote, priceUsd: trade.priceUsd, valueUsd: trade.valueUsd });
+    return true;
   }
   #quoteUsd(c) { return this.model.quoteUsdOf(c.quoteMint); }
   #onComplete(e) {
@@ -1077,3 +1107,6 @@ export function bs58(buf) {
 }
 /** The `mint` field of a TradeEvent is its first field: 32 bytes after the discriminator. */
 export const peekMint = (data) => new PublicKey(data.subarray(8, 40)).toBase58();
+/** The pool of a pump-amm BuyEvent / SellEvent without decoding it: both put it after the discriminator and fourteen 8-byte fields. */
+export const POOL_EVENT_POOL_OFFSET = 8 + 14 * 8;
+export const peekPool = (data) => (data.length >= POOL_EVENT_POOL_OFFSET + 32 ? new PublicKey(data.subarray(POOL_EVENT_POOL_OFFSET, POOL_EVENT_POOL_OFFSET + 32)).toBase58() : null);

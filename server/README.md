@@ -42,6 +42,7 @@ npm run fixtures                # re-capture test/fixtures from mainnet (read-on
 | `RPC_USER_RPS` / `RPC_USER_SEND_RPS` | `5` / `1` | Its request rate, and its `sendTransaction` rate (no burst), under Helius' free plan (10 requests/s, 1 send/s). |
 | `RPC_USER_DAILY_CREDITS` | `15000` | Credits it may use per UTC day (under half of the free plan's 1M a month), counted high: 1 a call, 10 for `getProgramAccounts` and history reads. Kept in `DATA_DIR/rpc-user-credits.json` across restarts. `0` never uses it. |
 | `CREATED_AT_PROBE` | `1` | `0` skips the per-coin `getSignaturesForAddress` creation-time lookup. |
+| `LIVE_POOLS` | `1` | A second log stream on `WS_URL` for pump-amm, where graduated coins trade: without it their trades (candles, 24 h volume) are seen only when a transaction also touches a bonding curve. About 280 frames/s and 1 MB/s (Nov 2026), three times the curve stream; `0` turns it off, e.g. on a metered WebSocket. `/api/health` `wsPools` shows it (`subscribed`, `lastNotificationAgoMs`, trades stored). It stores a few million more trades a day: the `trades` table grows by 1-2 GB. |
 | `ORIGINS` (alias `ORIGIN`) | empty | Comma-separated CORS allowlist (`scheme://host[:port]`) for a separate dev origin; production is same-origin. |
 | `TRUST_PROXY` | `loopback` | express `trust proxy`: `loopback`, `true`, a hop count or IPs/subnets. Client IPs (rate limits, logs) and `req.secure` come from `X-Forwarded-*` only through a trusted proxy. |
 | `HSTS` | `auto` | `Strict-Transport-Security`: `auto` = only on requests the trusted proxy marks https, `1` always, `0` never. |
@@ -367,7 +368,7 @@ first (see the security notes in the fix report).
 
 ## Storage
 
-`node:sqlite`, WAL mode: `coins`, `mints`, `trades` (≤ 2 000 per mint, 24 h volume and candles),
+`node:sqlite`, WAL mode: `coins`, `mints`, `trades` (per mint: its newest 2 000 plus the last 24 h up to 50 000; 24 h volume and candles),
 `meta` (off-chain JSON cache with `attempts` and `dead_streak`; weekly re-read of a resolved image, backoff retries from
 15 min to 24 h (10 to 60 min for a gateway deferral, weekly for a dead host), IPFS gateway rotation), `img_fail` (the image proxy's failed urls with kind and next
 retry), `backfill_curves`, `backfill_state`, `kv` (SOL price,

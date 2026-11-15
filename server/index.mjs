@@ -56,7 +56,7 @@ const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.img
 // First sight: every image url the model learns (a metadata image, an asset icon) gets its 64 px thumbnail queued at once.
 model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe } });
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });

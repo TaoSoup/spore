@@ -228,9 +228,9 @@ test("a pump-amm trade is recorded at the pool's effective price (vault reserves
   ix.onLogs({ slot: 5, signature: "SIG1", err: null, logs: [`Program ${amm} invoke [1]`, `Program data: ${payload.toString("base64")}`, `Program ${amm} success`] });
   const [row] = m.db.tradesFor(M);
   assert.ok(row, "the trade was stored");
-  near(row.priceQuote, 3 * 85 / 200_000_000); // (85 + 170) SOL / 200M tokens
+  near(row.priceQuote, 3 * 85 / 199_999_999); // (85 + 170) SOL / the 200M tokens less the one bought: the pool after the trade
   near(row.priceUsd, row.priceQuote * 100);
-  assert.equal(m.get(M).poolQuote, "85000000000"); assert.equal(m.get(M).poolVirtualQuote, "170000000000", "the event does not overwrite the stored vq");
+  assert.equal(m.get(M).poolQuote, "85000000000"); assert.equal(m.get(M).poolBase, "199999999000000"); assert.equal(m.get(M).poolVirtualQuote, "170000000000", "the event does not overwrite the stored vq");
   const trade = events.find(([ev]) => ev === "trade")?.[1];
   near(trade.priceQuote, row.priceQuote); near(m.view(m.get(M)).mcapUsd, row.priceUsd * 1e9);
 });

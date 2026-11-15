@@ -72,6 +72,7 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     dailyCredits: num("RPC_USER_DAILY_CREDITS", 15_000, { min: 0, integer: true }),
   } : null;
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
+  const livePools = bool("LIVE_POOLS", true);
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
   const jupApiKey = get("JUP_API_KEY", "");
@@ -168,5 +169,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter };
 }

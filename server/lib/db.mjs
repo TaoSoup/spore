@@ -94,6 +94,7 @@ export class Db {
   constructor(file, { busyMs = 2_000 } = {}) {
     if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
+    this.tradeAdds = new Map(); // mint → rows inserted since its last trim (insertTrade)
     this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyMs))}; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = OFF; PRAGMA temp_store = MEMORY;`);
     this.migrate();
     this.#prepare();
@@ -160,6 +161,7 @@ export class Db {
       tradeInsert: p(`INSERT OR IGNORE INTO trades (sig, mint, idx, slot, time, is_buy, user, base_amount, quote_amount, price_quote, price_usd, value_usd)
         VALUES (@sig, @mint, @idx, @slot, @time, @isBuy, @user, @baseAmount, @quoteAmount, @priceQuote, @priceUsd, @valueUsd)`),
       tradeTrim: p("DELETE FROM trades WHERE mint = ? AND rowid NOT IN (SELECT rowid FROM trades WHERE mint = ? ORDER BY time DESC, rowid DESC LIMIT ?)"),
+      tradeTrimOld: p("DELETE FROM trades WHERE mint = ?1 AND time < ?2 AND rowid NOT IN (SELECT rowid FROM trades WHERE mint = ?1 ORDER BY time DESC, rowid DESC LIMIT ?3)"),
       tradeCount: p("SELECT COUNT(*) AS n FROM trades WHERE mint = ?"),
       tradesFor: p("SELECT * FROM trades WHERE mint = ? ORDER BY time DESC, rowid DESC LIMIT ?"),
       tradesSince: p("SELECT * FROM trades WHERE mint = ? AND time >= ? ORDER BY time ASC, rowid ASC"),
@@ -241,21 +243,31 @@ export class Db {
   }
 
   /**
-   * Inserts a trade and keeps at most `keep` rows per mint (DESIGN §6.5: 2 000); the count is an
-   * indexed lookup. Returns whether the row is new: a replayed (sig, mint, idx) — the live stream
-   * re-delivers after a reconnect — is ignored, so the in-memory activity counters never count it twice.
+   * Inserts a trade. Returns whether the row is new: a replayed (sig, mint, idx) — both live streams can
+   * deliver one transaction — is ignored, so the in-memory activity counters never count it twice.
+   *
+   * Retention per mint (DESIGN §6.5): its newest `keep` rows (2 000) whatever their age, and every row of the last
+   * 24 h up to `max` (50 000). The 24 h part is what the activity counters are seeded from at boot: a graduated coin
+   * makes thousands of pool trades a day, and capped at 2 000 its 24 h volume fell to its last hour or two on every
+   * restart. The trim runs once per `every` new rows of a mint, not per insert: on a mint at the cap it used to cost
+   * 1.5 ms a trade (a 2 000-row subquery to delete one row).
    */
-  insertTrade(t, keep = 2000) {
+  insertTrade(t, keep = 2000, { max = 50_000, every = 200, dayS = 86_400 } = {}) {
     const r = this.q.tradeInsert.run({ sig: t.sig, mint: t.mint, idx: t.idx ?? 0, slot: t.slot, time: t.time, isBuy: t.isBuy ? 1 : 0, user: t.user, baseAmount: t.baseAmount, quoteAmount: t.quoteAmount, priceQuote: t.priceQuote, priceUsd: t.priceUsd ?? null, valueUsd: t.valueUsd ?? null });
     if (!(Number(r.changes) > 0)) return false;
-    if (this.q.tradeCount.get(t.mint).n > keep) this.q.tradeTrim.run(t.mint, t.mint, keep);
+    const n = (this.tradeAdds.get(t.mint) ?? 0) + 1;
+    if (n < every) { this.tradeAdds.set(t.mint, n); return true; }
+    this.tradeAdds.delete(t.mint);
+    this.q.tradeTrimOld.run(t.mint, Math.floor(Date.now() / 1000) - dayS, keep);
+    if (max > keep) this.q.tradeTrim.run(t.mint, t.mint, max);
     return true;
   }
   static trade(r) { return { sig: r.sig, mint: r.mint, slot: r.slot, time: r.time, isBuy: !!r.is_buy, user: r.user, baseAmount: r.base_amount, quoteAmount: r.quote_amount, priceQuote: r.price_quote, priceUsd: r.price_usd, valueUsd: r.value_usd }; }
   tradesFor(mint, limit = 50) { return this.q.tradesFor.all(mint, limit).map(Db.trade); }
   tradesSince(mint, since) { return this.q.tradesSince.all(mint, since).map(Db.trade); }
   /** Every stored trade at or after `sinceS`, oldest first (trades_time index): what seeds the activity counters at boot. */
-  tradesWindow(sinceS) { return this.q.tradesWindow.all(sinceS).map((r) => ({ mint: r.mint, time: r.time, isBuy: !!r.is_buy, valueUsd: r.value_usd })); }
+  /** Trades since `sinceS` in time order, one at a time: the boot seed reads millions of rows, and as one array they were 1.7 GB of heap at 3M. */
+  *tradesWindow(sinceS) { for (const r of this.q.tradesWindow.iterate(sinceS)) yield { mint: r.mint, time: r.time, isBuy: !!r.is_buy, valueUsd: r.value_usd }; }
   volume24h(mint) { const r = this.q.vol24.get(mint, now() - 86_400); return { trades: r.n, usd: r.usd }; }
   /** A fresh GROUP BY over 24 h of trades; the API reads the in-memory counters (activity.mjs) instead, this is their reference. */
   volume24hAll() { return new Map(this.q.vol24All.all(now() - 86_400).map((r) => [r.mint, { trades: r.n, usd: r.usd }])); }
