@@ -400,10 +400,21 @@ html[data-motion="paused"] .map-ca.done .ic-check path { stroke-dashoffset: 0; }
 /* Buy / Sell (the quick trade over the map) above Launch / Open: outlined in the trade widget's colours so Launch stays the one lime fill */
 .map-side-trade { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .map-side-trade .btn { min-width: 0; height: 40px; padding: 0 16px; font-size: 13px; font-weight: 600; }
-.map-side-trade .btn.buy { color: var(--accent); border-color: rgba(var(--accent-rgb), .5); background: rgba(var(--accent-rgb), .08); }
-.map-side-trade .btn.buy:hover { border-color: rgba(var(--accent-rgb), .8); background: rgba(var(--accent-rgb), .14); }
-.map-side-trade .btn.sell { color: var(--violet-2); border-color: rgba(var(--violet-rgb), .5); background: rgba(var(--violet-rgb), .08); }
-.map-side-trade .btn.sell:hover { border-color: rgba(var(--violet-rgb), .8); background: rgba(var(--violet-rgb), .14); }
+/* Buy / Sell: one quiet segmented bar, like the trade widget's own Buy / Sell tabs and the size toggle: a sunken track,
+   two neutral halves marked by a small lime or violet dot, each taking its colour only on hover. The lime "Launch under"
+   below stays the panel's one bright action. */
+.map-side-trade:not(.blocked) { gap: 3px; padding: 3px; border-radius: 999px; border: 1px solid var(--line-soft); background: var(--surface-sunken); box-shadow: inset 0 1px 2px rgba(0,0,0,.3); }
+.map-side-trade .btn.buy, .map-side-trade .btn.sell { height: 34px; gap: 8px; border: 0; background: transparent; box-shadow: none; color: var(--ink-2); font-weight: 500; letter-spacing: -0.005em; }
+.map-side-trade .btn.buy::before, .map-side-trade .btn.sell::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; transition: box-shadow var(--dur-2) var(--ease-out); }
+.map-side-trade .btn.buy::before { background: var(--accent); }
+.map-side-trade .btn.sell::before { background: var(--violet-2); }
+.map-side-trade .btn.buy:hover:not(:disabled), .map-side-trade .btn.sell:hover:not(:disabled) { transform: none; box-shadow: none; }
+.map-side-trade .btn.buy:hover:not(:disabled) { color: var(--accent); background: rgba(var(--accent-rgb), .1); }
+.map-side-trade .btn.buy:hover:not(:disabled)::before { box-shadow: 0 0 8px rgba(var(--accent-rgb), .7); }
+.map-side-trade .btn.sell:hover:not(:disabled) { color: var(--violet-2); background: rgba(var(--violet-rgb), .12); }
+.map-side-trade .btn.sell:hover:not(:disabled)::before { box-shadow: 0 0 8px rgba(var(--violet-rgb), .7); }
+.map-side-trade .btn.buy:focus-visible, .map-side-trade .btn.sell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.map-side-trade .btn.buy:disabled, .map-side-trade .btn.sell:disabled { opacity: .5; }
 .map-side-trade.blocked { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
 .map-side-why { min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-side-links { display: grid; grid-template-columns: repeat(4, auto); gap: 6px; }
