@@ -11,7 +11,7 @@ import { DEFAULT_PAGES_DOMAIN, DEFAULT_PAGES_PROJECT, DEFAULT_META_DIR, DEFAULT_
 export const DEFAULT_PLATFORM_WALLET = "FcbEAMqBvJVsfcFWDbED7geyBLR88ypcY88BoUSgmeT5";
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 // Per-IP rate limits (requests per window) — DEPLOY.md documents each.
-export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000] };
+export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000], portfolio: [20, 60_000] };
 // Command-line flags that stand in for a variable, so a package.json script needs no POSIX
 // `VAR=value node …` prefix (cmd.exe cannot run one): `npm run dev` passes --backfill-limit=150.
 // A flag wins over the environment, as that prefix did; other arguments are ignored, as before.

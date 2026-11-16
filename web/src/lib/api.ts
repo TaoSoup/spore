@@ -82,6 +82,26 @@ export type Fees = {
 export type ClaimCoin = CoinRef & Fees & { yourBps?: number; yourAmount?: string; yourUsd?: number | null };
 export type ClaimTotals = { usd: number; byQuote: { quoteMint: string | null; quoteSymbol: string; quoteDecimals: number; amount: string; usd: number }[] };
 export type Claims = { wallet?: string; coins: ClaimCoin[]; totals: ClaimTotals; updatedAt: number };
+/// `GET /api/portfolio/:wallet`: what one wallet holds and the coins it launched. A coin's parent is the coin it is
+/// priced in (null for a root); a parent the index does not track still comes with its mint (name and image null,
+/// symbol = the quote symbol when known). Times are unix seconds.
+export type PortfolioParent = { mint: string; name: string | null; symbol: string | null; image: string | null };
+export type PortfolioCoin = {
+  mint: string; name: string | null; symbol: string | null; image: string | null; depth: number;
+  parent: PortfolioParent | null; creator: string | null;
+  mcapUsd: number | null; priceUsd: number | null; vol24Usd: number | null; trades1h: number | null; trades24h?: number | null; lastTradeAt: number | null;
+  graduated: boolean; createdAt: number | null;
+};
+/// `amount` is raw units as a string, `uiAmount` the same in whole tokens; `valueUsd` is null without a USD price.
+export type PortfolioHolding = { mint: string; amount: string; decimals: number; uiAmount: number; valueUsd: number | null; coin: PortfolioCoin };
+/// `solLamports`: null when the balance read failed. `holdingsOk`: false when the token-account read failed (`holdings`
+/// is then empty). `holdings`: only mints the index tracks, amount > 0, largest value first; `untracked` counts the
+/// other token accounts with a balance. `launched`: coins whose creator is the wallet, newest first, at most 200 of
+/// `launchedTotal`.
+export type Portfolio = {
+  wallet: string; at: number; solLamports: string | null; holdingsOk: boolean; holdings: PortfolioHolding[];
+  untracked: number; launched: PortfolioCoin[]; launchedTotal: number;
+};
 /// Root agents (DESIGN §13 + §13.1, live): every root launched on Spore gets an agent with its own
 /// Solana wallet. The root's fee split sends the agent 0.20 % of every trade; the agent claims its
 /// fees, thinks with a language model, launches coins under its root and pays its surplus to the
@@ -248,6 +268,8 @@ export const api = {
   fees: (mint: string) => request<Fees>(`/fees/${encodeURIComponent(mint)}`),
   claimsFor: (wallet: string) => request<Claims>(`/claims/${encodeURIComponent(wallet)}`, {}, 30_000),
   claims: (limit = 50) => request<Claims>(`/claims${qs({ limit })}`, {}, 30_000),
+  /// One wallet's holdings and launched coins; 400 on a bad address. The server reads the wallet's token accounts.
+  portfolio: (wallet: string) => request<Portfolio>(`/portfolio/${encodeURIComponent(wallet)}`, {}, 30_000),
   search: (q: string, signal?: AbortSignal) => request<{ coins: Coin[] }>(`/search${qs({ q })}`, { signal }),
   eligibility: (mint: string, creator?: string | null) => request<Eligibility>(`/eligibility/${encodeURIComponent(mint)}${qs({ creator })}`),
   /// The SOL pool: a root coin needs no parent, but the split and launch fee are still the server's.

@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS coins (
   created_at INTEGER, created_slot INTEGER, created_probe INTEGER NOT NULL DEFAULT 0,
   shares TEXT, shares_at INTEGER NOT NULL DEFAULT 0,
   refreshed_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
-  fee_paid TEXT, pool_vquote TEXT
+  fee_paid TEXT, pool_vquote TEXT, launcher TEXT
 );
 CREATE INDEX IF NOT EXISTS coins_quote ON coins(quote_mint);
 CREATE INDEX IF NOT EXISTS coins_depth ON coins(depth);
@@ -110,6 +110,10 @@ export class Db {
     // A migrated coin's pool `virtual_quote_reserves` (signed i128 as decimal TEXT), part of its pool price
     // (pricing.mjs poolPriceQuote). Guarded by the column's absence alone, so it needs no version bump.
     if (!this.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "pool_vquote")) this.db.exec("ALTER TABLE coins ADD COLUMN pool_vquote TEXT");
+    // `coins.launcher`: the wallet of the coin's CreateEvent (`creator` follows the curve, which names the fee-sharing
+    // config's PDA once one exists). Guarded by the column's absence alone, like pool_vquote; rows from before stay
+    // NULL, and the model then goes by `creator` and the fee shares (lib/model.mjs #launchWallets).
+    if (!this.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "launcher")) this.db.exec("ALTER TABLE coins ADD COLUMN launcher TEXT");
     // v3: `coins.updated_at` moves from seconds to milliseconds (the map's delta-sync stamp,
     // DESIGN §11.5: `since=<ms>` returns the rows with `updated_at > since`) and `meta.attempts`
     // counts consecutive failed fetches so the retry backoff survives a restart.
@@ -146,16 +150,16 @@ export class Db {
         name = COALESCE(excluded.name, name), symbol = COALESCE(excluded.symbol, symbol), uri = COALESCE(excluded.uri, uri), onchain_at = MAX(excluded.onchain_at, onchain_at)`),
       mintsAll: p("SELECT * FROM mints"),
       coinUpsert: p(`INSERT INTO coins (mint, curve, depth, quote_mint, creator, tracked, vtr, vqr, rtr, rqr, supply, ivqr, complete, migrated, mayhem, holder_reward, creator_fee_bps,
-          pool, pool_base_vault, pool_quote_vault, pool_base, pool_quote, pool_vquote, created_at, created_slot, created_probe, shares, shares_at, refreshed_at, updated_at, fee_paid)
+          pool, pool_base_vault, pool_quote_vault, pool_base, pool_quote, pool_vquote, created_at, created_slot, created_probe, shares, shares_at, refreshed_at, updated_at, fee_paid, launcher)
         VALUES (@mint, @curve, @depth, @quoteMint, @creator, @tracked, @vtr, @vqr, @rtr, @rqr, @supply, @ivqr, @complete, @migrated, @mayhem, @holderReward, @creatorFeeBps,
-          @pool, @poolBaseVault, @poolQuoteVault, @poolBase, @poolQuote, @poolVirtualQuote, @createdAt, @createdSlot, @createdProbe, @shares, @sharesAt, @refreshedAt, @updatedAt, @feePaid)
+          @pool, @poolBaseVault, @poolQuoteVault, @poolBase, @poolQuote, @poolVirtualQuote, @createdAt, @createdSlot, @createdProbe, @shares, @sharesAt, @refreshedAt, @updatedAt, @feePaid, @launcher)
         ON CONFLICT(mint) DO UPDATE SET curve = excluded.curve, depth = excluded.depth, quote_mint = excluded.quote_mint, creator = excluded.creator, tracked = MAX(excluded.tracked, tracked),
           vtr = excluded.vtr, vqr = excluded.vqr, rtr = excluded.rtr, rqr = excluded.rqr, supply = excluded.supply, ivqr = excluded.ivqr,
           complete = excluded.complete, migrated = excluded.migrated, mayhem = excluded.mayhem, holder_reward = excluded.holder_reward, creator_fee_bps = excluded.creator_fee_bps,
           pool = excluded.pool, pool_base_vault = excluded.pool_base_vault, pool_quote_vault = excluded.pool_quote_vault, pool_base = excluded.pool_base, pool_quote = excluded.pool_quote, pool_vquote = excluded.pool_vquote,
           created_at = COALESCE(excluded.created_at, created_at), created_slot = COALESCE(excluded.created_slot, created_slot), created_probe = MAX(excluded.created_probe, created_probe),
           shares = COALESCE(excluded.shares, shares), shares_at = MAX(excluded.shares_at, shares_at), refreshed_at = excluded.refreshed_at, updated_at = excluded.updated_at,
-          fee_paid = COALESCE(excluded.fee_paid, fee_paid)`),
+          fee_paid = COALESCE(excluded.fee_paid, fee_paid), launcher = COALESCE(excluded.launcher, launcher)`),
       coinsAll: p("SELECT * FROM coins"),
       coinTouch: p("UPDATE coins SET updated_at = ? WHERE mint = ? AND updated_at < ?"),
       tradeInsert: p(`INSERT OR IGNORE INTO trades (sig, mint, idx, slot, time, is_buy, user, base_amount, quote_amount, price_quote, price_usd, value_usd)
@@ -226,7 +230,7 @@ export class Db {
       complete: c.complete ? 1 : 0, migrated: c.migrated ? 1 : 0, mayhem: c.mayhem ? 1 : 0, holderReward: c.holderReward ? 1 : 0, creatorFeeBps: c.creatorFeeBps ?? 0,
       pool: c.pool ?? null, poolBaseVault: c.poolBaseVault ?? null, poolQuoteVault: c.poolQuoteVault ?? null, poolBase: c.poolBase ?? null, poolQuote: c.poolQuote ?? null, poolVirtualQuote: c.poolVirtualQuote ?? null,
       createdAt: c.createdAt ?? null, createdSlot: c.createdSlot ?? null, createdProbe: c.createdProbe ? 1 : 0, shares: c.shares ? JSON.stringify(c.shares) : null, sharesAt: c.sharesAt ?? 0,
-      refreshedAt: c.refreshedAt ?? 0, updatedAt: c.updatedAt ?? Date.now(), feePaid: c.feePaid ?? null,
+      refreshedAt: c.refreshedAt ?? 0, updatedAt: c.updatedAt ?? Date.now(), feePaid: c.feePaid ?? null, launcher: c.launcher ?? null,
     });
   }
   /** Moves a coin's `updated_at` (ms) forward without rewriting the row (a child's trade changes the parent's locked value). */
@@ -238,7 +242,7 @@ export class Db {
       complete: !!r.complete, migrated: !!r.migrated, mayhem: !!r.mayhem, holderReward: !!r.holder_reward, creatorFeeBps: r.creator_fee_bps,
       pool: r.pool, poolBaseVault: r.pool_base_vault, poolQuoteVault: r.pool_quote_vault, poolBase: r.pool_base, poolQuote: r.pool_quote, poolVirtualQuote: r.pool_vquote ?? null,
       createdAt: r.created_at, createdSlot: r.created_slot, createdProbe: !!r.created_probe, shares: r.shares ? JSON.parse(r.shares) : null, sharesAt: r.shares_at,
-      refreshedAt: r.refreshed_at, updatedAt: r.updated_at, feePaid: r.fee_paid ?? null,
+      refreshedAt: r.refreshed_at, updatedAt: r.updated_at, feePaid: r.fee_paid ?? null, launcher: r.launcher ?? null,
     }));
   }
 

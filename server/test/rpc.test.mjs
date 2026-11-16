@@ -189,3 +189,42 @@ test("credit budget: kept on disk across restarts for the same UTC day, started 
     assert.equal(new CreditBudget({ limit: 100, file, now: () => now, log: quiet }).used, 0, "an unreadable file starts at 0");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("call: maxBytes stops an oversized answer at once; signal ends the request under way and every wait", async () => {
+  // maxBytes: thrown without a retry, counted as an error, the lane left; a smaller answer is unaffected.
+  let n = 0;
+  const big = new Rpc({ url: "https://rpc.example", rps: 1000, log: quiet, fetchImpl: async () => { n++; return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "x".repeat(3000) })); } });
+  await assert.rejects(big.call("getTokenAccountsByOwner", [], { maxBytes: 2000 }), (e) => e.tooLarge === true && /getTokenAccountsByOwner: response over 2000 bytes/.test(e.message));
+  assert.equal(n, 1); assert.equal(big.inFlight, 0); assert.equal(big.stats.errors, 1);
+  assert.equal((await big.call("getTokenAccountsByOwner", [], { maxBytes: 4000 })).length, 3000);
+  assert.equal((await big.call("getTokenAccountsByOwner")).length, 3000);
+  // The metered endpoint's oversized answer is not asked again on RPC_URL.
+  const seen = [];
+  const two = new Rpc({ url: "https://free.example", rps: 1000, apiRps: 1000, log: quiet, user: { url: "https://user.example/?api-key=k", rps: 1000 }, fetchImpl: async (url) => { seen.push(new URL(url).host); return new Response("y".repeat(3000)); } });
+  await assert.rejects(two.lane("api").call("getTokenAccountsByOwner", [], { maxBytes: 2000 }), /response over 2000 bytes/);
+  assert.deepEqual(seen, ["user.example"]); assert.equal(two.userSnapshot().fallbacks, 0);
+
+  // signal, request under way: the fetch is cut and the call throws without a retry.
+  const hang = new Rpc({ url: "https://rpc.example", rps: 1000, concurrency: 1, log: quiet, fetchImpl: (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })) });
+  const ac = new AbortController();
+  const first = hang.call("getSlot", [], { signal: ac.signal }), queued = hang.call("getSlot", [], { signal: ac.signal });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(hang.inFlight, 1); assert.equal(hang.waiters.length, 1);
+  const t0 = Date.now();
+  ac.abort(new Error("no answer within 20 ms"));
+  await assert.rejects(first, (e) => e.aborted === true && /getSlot: no answer within 20 ms/.test(e.message));
+  await assert.rejects(queued, (e) => e.aborted === true); // it left the concurrency queue without a request
+  assert.ok(Date.now() - t0 < 500);
+  assert.equal(hang.inFlight, 0); assert.equal(hang.waiters.length, 0); assert.equal(hang.stats.calls, 1); assert.equal(hang.stats.errors, 0);
+  await assert.rejects(hang.call("getSlot", [], { signal: ac.signal }), (e) => e.aborted === true); // already aborted: no request at all
+  assert.equal(hang.stats.calls, 1);
+
+  // signal, a 429 pause: the call does not sleep through it, and no token is taken for it.
+  let m = 0;
+  const limited = new Rpc({ url: "https://rpc.example", rps: 1000, log: quiet, backoffMinMs: 30_000, fetchImpl: async () => { m++; return new Response("", { status: 429 }); } });
+  const t1 = Date.now();
+  await assert.rejects(limited.call("getBalance", [], { signal: AbortSignal.timeout(60) }), (e) => e.aborted === true);
+  assert.ok(Date.now() - t1 < 1_000, `gave up after ${Date.now() - t1} ms`);
+  assert.equal(m, 1); assert.equal(limited.inFlight, 0);
+  assert.ok(limited.snapshot().pausedMs > 20_000, "the lane's pause itself stands");
+});

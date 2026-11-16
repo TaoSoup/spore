@@ -31,6 +31,7 @@ test("adopt inserts a verified spawn from its CreateEvent, tracked at any depth,
   const c = await indexer.adopt(K.X, { create, slot: 123, feePaid: 20_000_000n });
   assert.ok(c); assert.equal(c.tracked, true); assert.equal(c.feePaid, "20000000"); assert.equal(c.createdSlot, 123); assert.equal(c.createdAt, create.timestamp);
   assert.equal(c.quoteMint, create.quoteMint); assert.equal(c.curve, create.bondingCurve); assert.equal(c.creator, create.creator);
+  assert.equal(c.launcher, create.creator); assert.equal(db.allCoins().find((x) => x.mint === K.X).launcher, create.creator); // the wallet of the create, kept apart from the curve's creator
   assert.equal(model.nameOf(K.X).symbol, "ponzi");
   assert.equal(model.mint(K.X).uri, create.uri);
   assert.equal(db.allCoins().find((x) => x.mint === K.X).feePaid, "20000000", "persisted (tracked)");

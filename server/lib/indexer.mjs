@@ -924,7 +924,7 @@ export class Indexer {
   #insertCreate(e, slot, extra = {}) {
     const quoted = e.virtualQuoteReserves !== "0";
     this.model.upsertCoin({
-      mint: e.mint, curve: e.bondingCurve, depth: e.depth, quoteMint: e.quoteMint, creator: e.creator, tracked: true,
+      mint: e.mint, curve: e.bondingCurve, depth: e.depth, quoteMint: e.quoteMint, creator: e.creator, launcher: e.creator, tracked: true,
       virtualTokenReserves: e.virtualTokenReserves, virtualQuoteReserves: quoted ? e.virtualQuoteReserves : e.virtualSolReserves,
       realTokenReserves: e.realTokenReserves, realQuoteReserves: "0", tokenTotalSupply: e.tokenTotalSupply, initialVirtualQuoteReserves: quoted ? e.virtualQuoteReserves : e.virtualSolReserves,
       complete: false, migrated: false, mayhem: !!e.isMayhemMode, holderReward: !!e.isHolderReward, creatorFeeBps: e.creatorFeeBps,

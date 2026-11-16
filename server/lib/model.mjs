@@ -89,7 +89,7 @@ export const HEAT_CACHE_MS = 15_000;
 // a refresh tick that re-reads an unchanged curve does not mark the coin as updated.
 // `creatorFee` (fees accrued on the curve, read by the treasury) lives in memory only and moves
 // with every trade without touching a bubble.
-const STAMP_SKIP = new Set(["refreshedAt", "sharesAt", "createdProbe", "updatedAt", "mint", "creatorFee"]);
+const STAMP_SKIP = new Set(["refreshedAt", "sharesAt", "createdProbe", "updatedAt", "mint", "creatorFee", "launcher"]);
 // Fields of a child that move its parent's locked value / child count.
 const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
@@ -110,6 +110,7 @@ export class Model {
     this.children = new Map();      // quoteMint → Set<child mint>
     this.curves = new Map();        // bonding curve address → mint (the curve itself does not store it)
     this.pools = new Map();         // pool address → mint (graduated coins; maps pump-amm events back)
+    this.creators = new Map();      // wallet → Set<mint> of the coins it launched: launcher, curve creator, share of a coin without a launcher (/api/portfolio)
     this.solUsd = null; this.solUsdAt = 0;
     this.quoteUsd = new Map();      // USD price of listed non-SOL quote mints we can price (PUMP, …)
     this.quoteMcap = new Map();     // circulating USD market cap of a listed quote asset, where the price feed gives one (PUMP)
@@ -188,11 +189,32 @@ export class Model {
   #index(c) {
     const prev = this.coins.get(c.mint);
     if (prev && prev.quoteMint !== c.quoteMint) this.children.get(prev.quoteMint)?.delete(c.mint);
+    // `shares` is compared by reference: an upsert that does not carry them keeps the previous array.
+    const moved = !prev || prev.creator !== c.creator || prev.launcher !== c.launcher || prev.shares !== c.shares;
+    if (prev && moved) this.#unindexCreator(prev);
     if (!prev || prev.quoteMint !== c.quoteMint || prev.tracked !== c.tracked) this.structVersion++;
     this.coins.set(c.mint, c);
     if (c.quoteMint) { if (!this.children.has(c.quoteMint)) this.children.set(c.quoteMint, new Set()); this.children.get(c.quoteMint).add(c.mint); }
     if (c.curve) this.curves.set(c.curve, c.mint);
     if (c.pool) this.pools.set(c.pool, c.mint);
+    if (moved) for (const w of this.#launchWallets(c)) { let s = this.creators.get(w); if (!s) this.creators.set(w, s = new Set()); s.add(c.mint); }
+  }
+  /**
+   * The wallets `creators` lists a coin under. `launcher` is the wallet of the CreateEvent, known for a
+   * coin created while the indexer listened (or reported by the Spawn page). `creator` is the curve's
+   * field: the launching wallet until a fee-sharing config exists, the config's PDA after, so a re-read
+   * replaces the wallet. A coin indexed without its CreateEvent (backfill) has no launcher; the wallets
+   * its fee shares name stand in for it, except the platform wallet, which every Spore split names.
+   */
+  #launchWallets(c) {
+    const out = [];
+    if (c.launcher) out.push(c.launcher);
+    if (c.creator && c.creator !== c.launcher) out.push(c.creator);
+    if (!c.launcher && c.shares) for (const s of c.shares) if (s.address && s.address !== this.platformWallet && !out.includes(s.address)) out.push(s.address);
+    return out;
+  }
+  #unindexCreator(c) {
+    for (const w of this.#launchWallets(c)) { const s = this.creators.get(w); if (s) { s.delete(c.mint); if (!s.size) this.creators.delete(w); } }
   }
   byCurve(curve) { const m = this.curves.get(curve); return m ? this.coins.get(m) ?? null : null; }
 
@@ -210,7 +232,7 @@ export class Model {
       tracked: true, complete: false, migrated: false, mayhem: false, holderReward: false, creatorFeeBps: 0,
       virtualTokenReserves: "0", virtualQuoteReserves: "0", realTokenReserves: "0", realQuoteReserves: "0", tokenTotalSupply: "0", initialVirtualQuoteReserves: "0",
       pool: null, poolBaseVault: null, poolQuoteVault: null, poolBase: null, poolQuote: null, poolVirtualQuote: null,
-      createdAt: null, createdSlot: null, createdProbe: false, shares: null, sharesAt: 0, refreshedAt: 0, feePaid: null,
+      createdAt: null, createdSlot: null, createdProbe: false, shares: null, sharesAt: 0, refreshedAt: 0, feePaid: null, launcher: null,
       ...prev, ...patch, updatedAt: prev?.updatedAt ?? 0,
     };
     // Tracked only ever turns on: an explicit `tracked: true` (or a brand-new coin without the flag)
@@ -249,6 +271,7 @@ export class Model {
       if (c.curve) this.curves.delete(c.curve);
       if (c.pool) this.pools.delete(c.pool);
       if (c.quoteMint) this.children.get(c.quoteMint)?.delete(c.mint);
+      this.#unindexCreator(c);
       this.touched.delete(c.mint);
       n++;
     }
@@ -718,6 +741,16 @@ export class Model {
   }
   childrenOf(mint) {
     const out = [], set = this.children.get(mint);
+    if (set) for (const m of set) { const c = this.coins.get(m); if (c && c.tracked) out.push(c); }
+    return out;
+  }
+  /**
+   * Tracked coins this wallet launched, from the `creators` index (#index keeps it, so no scan over all
+   * coins): its `launcher` or curve `creator` is the wallet, or, for a coin without a launcher, one of
+   * its fee shares names the wallet (#launchWallets).
+   */
+  createdBy(wallet) {
+    const out = [], set = this.creators.get(wallet);
     if (set) for (const m of set) { const c = this.coins.get(m); if (c && c.tracked) out.push(c); }
     return out;
   }

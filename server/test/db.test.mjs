@@ -54,6 +54,23 @@ test("fee_paid round-trips and is never erased by a later upsert without it; the
   db.close();
 });
 
+test("launcher: the column is added to a database from before it, round-trips and is never erased by an upsert without it", () => {
+  const db = new Db(":memory:");
+  assert.ok(db.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "launcher"), "present on a fresh database");
+  db.db.exec("ALTER TABLE coins DROP COLUMN launcher");
+  db.db.exec("INSERT INTO coins (mint, curve, depth, creator) VALUES ('OLD', 'C0', 0, 'PDA')"); // a row from before
+  db.migrate(); db.migrate();
+  assert.equal(db.db.prepare("PRAGMA table_info(coins)").all().filter((c) => c.name === "launcher").length, 1);
+  const fresh = new Db(":memory:"); // the statements are prepared against the migrated table
+  fresh.db.exec("INSERT INTO coins (mint, curve, depth, creator) VALUES ('OLD', 'C0', 0, 'PDA')");
+  assert.equal(fresh.allCoins()[0].launcher, null);
+  fresh.upsertCoin({ ...coin(), launcher: "WALLET" });
+  fresh.upsertCoin({ ...coin(), creator: "PDA" }); // a curve re-read: another creator, no launcher
+  const c = fresh.allCoins().find((x) => x.mint === "M1");
+  assert.equal(c.launcher, "WALLET"); assert.equal(c.creator, "PDA");
+  db.close(); fresh.close();
+});
+
 test("coins round-trip with u64 precision and merge on conflict", () => {
   const db = new Db(":memory:");
   db.upsertCoin(coin());

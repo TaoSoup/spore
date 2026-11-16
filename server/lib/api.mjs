@@ -29,6 +29,7 @@ import { AgentLedger } from "./agents-live/ledger.mjs";
 import { createBriefStore } from "./agents/brief.mjs";
 import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
+import { createPortfolio } from "./portfolio.mjs";
 
 export { RateLimiter };
 
@@ -322,7 +323,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     return keys.map((k) => knownTable(k) ?? read.get(k) ?? null);
   };
   const limitOf = (name) => ({ limit: rates?.[name]?.limit ?? DEFAULT_RATES[name][0], windowMs: rates?.[name]?.windowMs ?? DEFAULT_RATES[name][1], name, now });
-  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")), jup: rateLimit(limitOf("jup")) };
+  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")), jup: rateLimit(limitOf("jup")), portfolio: rateLimit(limitOf("portfolio")) };
   // Share cards (lib/card.mjs: `cardData`, `renderCard`) load on first use: the renderer carries fonts
   // and a wasm rasterizer no other route needs, and a test injects its own `card`. A failed load is
   // retried after CARD_RETRY_MS; meanwhile the card route answers 503 and pages keep the static tags.
@@ -644,6 +645,17 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
         .sort((a, b) => (b.yourUsd ?? -1) - (a.yourUsd ?? -1) || Number(BigInt(b.yourAmount) - BigInt(a.yourAmount)));
       sendCachedJson(req, res, { wallet, coins: rows, totals: claimTotals(rows, "yourAmount"), updatedAt: nowS() }, { maxAge: 5 });
     } catch (e) { res.status(503).json({ error: `claims unavailable: ${String(e.message ?? e).slice(0, 200)}` }); }
+  }));
+  // The Portfolio page: what one wallet holds (its token accounts under both token programs and its SOL,
+  // read on the api lane) and the coins it created (the model's creator index), each with its parent so
+  // the page can group them (lib/portfolio.mjs). Cached 10 s per wallet, concurrent requests share one
+  // read, and the route has its own per-IP limit on top of the api one. A failed chain read answers
+  // 200 with holdingsOk false / solLamports null. Nothing is signed.
+  const portfolio = createPortfolio({ model, rpc: apiRpc, now, log });
+  app.get("/api/portfolio/:wallet", limits.portfolio, wrap(async (req, res) => {
+    const { wallet } = req.params;
+    if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
+    sendCachedJson(req, res, await portfolio.get(wallet), { maxAge: 3 });
   }));
   app.get("/api/claims", wrap(async (req, res) => {
     const limit = clampInt(req.query.limit, 50, 1, CLAIMS_MAX);

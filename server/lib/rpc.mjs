@@ -20,7 +20,16 @@ export class RpcError extends Error {
   constructor(method, code, message, data) { super(`${method}: ${message} (${code})`); this.name = "RpcError"; this.code = code; this.data = data; }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Resolves after `ms`, or as soon as `signal` aborts (the caller then checks the signal itself). */
+const sleep = (ms, signal = null) => new Promise((r) => {
+  if (!signal) return void setTimeout(r, ms);
+  if (signal.aborted) return void r();
+  const done = () => { clearTimeout(t); signal.removeEventListener("abort", done); r(); };
+  const t = setTimeout(done, ms);
+  signal.addEventListener("abort", done, { once: true });
+});
+/** The error of a call whose caller aborted it (`signal` of `call`): not an RPC failure, so it is not counted as one. */
+const abortedError = (method, signal) => Object.assign(new Error(`${method}: ${signal.reason?.message ?? "aborted by the caller"}`), { aborted: true });
 
 export function deriveWsUrl(rpcUrl) {
   // Keep path and query: Helius-style keys live in the query string and are valid on the socket too.
@@ -89,7 +98,7 @@ async function readText(res, max) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > max) { reader.cancel().catch(() => {}); throw new Error(`response over ${max} bytes`); }
+    if (size > max) { reader.cancel().catch(() => {}); throw Object.assign(new Error(`response over ${max} bytes`), { tooLarge: true }); }
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -176,20 +185,30 @@ export class Rpc {
   }
 
   // ---- budget: token bucket + semaphore, per lane
-  async #take(L) {
+  // With a `signal` (a caller's deadline) both waits end when it aborts: #take then returns without a token and
+  // #enter answers false without a slot, so an abandoned call neither sleeps through a 429 pause nor queues.
+  async #take(L, signal = null) {
     for (;;) {
+      if (signal?.aborted) return;
       const now = Date.now();
-      if (now < L.pausedUntil) { await sleep(L.pausedUntil - now); continue; }
+      if (now < L.pausedUntil) { await sleep(L.pausedUntil - now, signal); continue; }
       L.tokens = Math.min(L.capacity, L.tokens + ((now - L.refilledAt) / 1000) * L.rps);
       L.refilledAt = now;
       if (L.tokens >= 1) { L.tokens -= 1; return; }
-      await sleep(Math.ceil(((1 - L.tokens) / L.rps) * 1000));
+      await sleep(Math.ceil(((1 - L.tokens) / L.rps) * 1000), signal);
     }
   }
-  async #enter(L) {
-    if (L.inFlight < L.concurrency) { L.inFlight++; return; }
-    await new Promise((resolve) => L.waiters.push(resolve));
-    L.inFlight++;
+  async #enter(L, signal = null) {
+    if (signal?.aborted) return false;
+    if (L.inFlight < L.concurrency) { L.inFlight++; return true; }
+    const got = await new Promise((resolve) => {
+      const turn = () => { signal?.removeEventListener("abort", quit); resolve(true); };
+      const quit = () => { const i = L.waiters.indexOf(turn); if (i >= 0) { L.waiters.splice(i, 1); resolve(false); } };
+      L.waiters.push(turn);
+      signal?.addEventListener("abort", quit, { once: true });
+    });
+    if (got) L.inFlight++;
+    return got;
   }
   #leave(L) { L.inFlight--; const next = L.waiters.shift(); if (next) next(); }
   #rateLimited(L, retryAfterSec) {
@@ -202,26 +221,37 @@ export class Rpc {
     L.tokens = 0;
   }
 
-  async call(method, params = [], { timeoutMs = this.timeoutMs, retries = 3, lane = "main" } = {}) {
+  /**
+   * One JSON-RPC call on a lane's budget, retried as described at the top of this file. Two options bound a call
+   * made for a request (lib/portfolio.mjs): `maxBytes` stops reading an answer larger than that and throws at once
+   * (the other endpoint or a retry would answer the same; 0 = no cap), and `signal` is the caller's overall deadline:
+   * once it aborts, the request under way is cut, no wait (429 pause, token bucket, concurrency queue, retry delay)
+   * goes on and the call throws.
+   */
+  async call(method, params = [], { timeoutMs = this.timeoutMs, retries = 3, lane = "main", maxBytes = 0, signal = null } = {}) {
     let attempt = 0, rateLimitHits = 0, free = false;
     for (;;) {
+      if (signal?.aborted) throw abortedError(method, signal);
       // The metered endpoint first (api and proxy lanes only); once it refused this request, RPC_URL takes the rest of it.
       const user = !free && this.#useUser(lane, [method]);
       const L = user ? this.lanes.user : (this.lanes[lane] ?? this.lanes.main);
-      if (user && method === "sendTransaction") await this.#take(this.lanes.send);
-      await this.#take(L);
-      await this.#enter(L);
+      if (user && method === "sendTransaction") await this.#take(this.lanes.send, signal);
+      await this.#take(L, signal);
+      if (!(await this.#enter(L, signal))) throw abortedError(method, signal);
       this.stats.calls++;
       let res, text;
       try {
-        res = await this.fetch(user ? this.user.url : this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params }), signal: AbortSignal.timeout(timeoutMs) });
-        text = await res.text();
+        res = await this.fetch(user ? this.user.url : this.url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: ++this.id, method, params }), signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs) });
+        text = maxBytes ? await readText(res, maxBytes) : await res.text();
+        if (maxBytes && text.length > maxBytes) throw Object.assign(new Error(`response over ${maxBytes} bytes`), { tooLarge: true }); // a body without a stream reader
       } catch (e) {
         this.#leave(L);
+        if (signal?.aborted) throw abortedError(method, signal);
+        if (e?.tooLarge) { this.stats.errors++; this.stats.lastError = `${method}: ${e.message}`; throw Object.assign(new Error(`${method}: ${e.message}`), { tooLarge: true }); }
         if (user) { this.#userRefused(0); free = true; continue; }
         this.stats.errors++; this.stats.lastError = `${method}: ${e.message}`;
         if (attempt++ >= retries) throw e;
-        await sleep(1_000 * 2 ** attempt);
+        await sleep(1_000 * 2 ** attempt, signal);
         continue;
       }
       this.#leave(L);
@@ -235,7 +265,7 @@ export class Rpc {
         if (user) { this.#userRefused(res.status); free = true; continue; }
         this.stats.errors++; this.stats.lastError = `${method}: HTTP ${res.status}`;
         if (attempt++ >= retries) throw new Error(`${method}: HTTP ${res.status}`);
-        await sleep(1_000 * 2 ** attempt);
+        await sleep(1_000 * 2 ** attempt, signal);
         continue;
       }
       let json;
@@ -252,7 +282,7 @@ export class Rpc {
           continue;
         }
         if (json.error.code === -32005 && user) { this.#userRefused(0); free = true; continue; } // behind: the other endpoint
-        if (json.error.code === -32005 && attempt++ < retries) { await sleep(1_000); continue; } // node is behind / unhealthy
+        if (json.error.code === -32005 && attempt++ < retries) { await sleep(1_000, signal); continue; } // node is behind / unhealthy
         this.stats.errors++; this.stats.lastError = `${method}: ${json.error.message}`;
         throw new RpcError(method, json.error.code, json.error.message, json.error.data);
       }

@@ -24,6 +24,8 @@ Dependencies are already installed; do not run `npm install` here. The RPC endpo
 
 ## Routes
 
+The header links are Map and Portfolio (plus the Launch pill and the wallet). Coins (`/explore`), Agents (`/agents`), How it works (`/how`), Fees & rules (`/fees`) and API (`/docs/api`) keep their routes and are linked from the footer.
+
 | Path | Page | What it shows |
 |---|---|---|
 | `/` | `pages/Home.tsx` | Hero over the spore canvas, search, stats strip, live launch feed (SSE), "Launched on Spore" cards (top 6 of `/api/feed` by locked then mcap, each with the Launch button), 3-step summary |
@@ -33,6 +35,8 @@ Dependencies are already installed; do not run `npm install` here. The RPC endpo
 | `/launch` (`?parent=<mint>`) | `pages/Launch.tsx` | Pool card (SOL root by default; a coin via `?parent=`, "Change" search, "Use SOL instead"), eligibility + split preview, form, optional first buy, cost box with balance check, step-by-step progress, success screen with "Launch a coin under $NEW" + coin page / pump.fun / share links |
 | `/spawn` | alias | Renders the same Launch page (old links and share posts) |
 | `/how` | `pages/How.tsx` | Mechanism diagram, spawn steps, fee table (creator 50 / Spore 50), depth limits (live from `/api/stats`), trading, risks |
+| `/portfolio` (`?wallet=<address>`) | `pages/Portfolio.tsx` | One wallet in two lists (`/api/portfolio/:wallet` + `/api/claims/:wallet`, sorted in `lib/portfolio.ts`, refreshed every 15 s). Summary: total value, SOL, fees to claim with "Claim all". **Holdings**: the coins the wallet bought and did not launch, one flat list by value (symbol, its pair, amount, value, 24 h volume, Buy / Sell). **Your spores**: the pairs the wallet launched, plus coins whose creator fees it shares (tagged "fee share"), one card per parent coin with market cap, volume, what is still held, per-coin Claim, Buy / Sell, "View on map" and "Launch a child". A coin is in one list only. Shows the trading wallet or the connected wallet; `?wallet=` is a read-only view of any address. The ticket trades with the active wallet (`lib/trader.ts`), so Sell shows only while that wallet is the one on the page; otherwise Buy only, with a line naming the wallet that trades, or an Unlock button when the trading wallet shown is locked. 10 holdings, 12 parent cards and 5 rows a card at first, the rest behind "Show all n" / "Show more" |
+| `/claim` | `pages/Claim.tsx` | The older fee page (your coins' fees and the fees waiting across Spore); no longer linked from the header, claiming is on `/portfolio` |
 
 ## Launch flow (`lib/flow.ts → runSpawn`)
 

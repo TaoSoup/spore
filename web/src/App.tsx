@@ -25,6 +25,7 @@ import Launch from "./pages/Launch";
 import How from "./pages/How";
 import Fees from "./pages/Fees";
 import Claim from "./pages/Claim";
+import Portfolio from "./pages/Portfolio";
 import NotFound from "./pages/NotFound";
 import ApiDocs from "./pages/ApiDocs";
 import Agents from "./pages/Agents";
@@ -47,14 +48,15 @@ class RouteBoundary extends Component<{ children: ReactNode }, { failed: boolean
 export const BRAND = { name: "Spore", tagline: "Coins that grow coins.", title: "Spore — coins that grow coins" };
 /// The nav labels name what a visitor came to do; the titles say it in plain words (redesign
 /// 2026-10-20). Launch is not a link here: it is the bar's lime pill.
+/// The header is Map and Portfolio only (Nov 15 2026). Coins, Agents and How it works keep their pages and
+/// routes and are linked from the footer; fee claiming lives on the Portfolio page (/claim stays as a route).
 const PRIMARY: readonly (readonly [string, string, string])[] = [
   ["/map", "Map", "Every pump.fun coin pair, live"],
-  ["/explore", "Coins", "Every coin launched on Spore"],
-  ["/agents", "Agents", "AI agents launching coins on their own"],
-  ["/how", "How it works", "How launches, fees and agents work"],
-  ["/claim", "Claim fees", "Collect the creator fees your coins earned"],
+  ["/portfolio", "Portfolio", "What your wallet holds and launched, with its fees to claim"],
 ];
 const MORE: readonly (readonly [string, string])[] = [["/fees", "Fees & rules"], ["/docs/api", "API"]];
+/// The footer's own list: the pages that left the header, then MORE.
+const FOOTER_LINKS: readonly (readonly [string, string])[] = [["/explore", "Coins"], ["/agents", "Agents"], ["/how", "How it works"], ...MORE];
 
 /// Finds a search box on the current page and focuses it. The pages own their search components;
 /// this only knows their markup (the shared Search box and the map's find box).
@@ -339,6 +341,7 @@ function Shell() {
             <Route path="/how" element={<How />} />
             <Route path="/fees" element={<Fees />} />
             <Route path="/claim" element={<Claim />} />
+            <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/docs/api" element={<ApiDocs />} />
             <Route path="/agents" element={<Agents />} />
             <Route path="/agents/:root" element={<AgentDetail />} />
@@ -360,7 +363,7 @@ function Shell() {
             <nav className="footer-nav cols" aria-label="Footer">
               {PRIMARY.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
               <NavLink to="/launch">Launch a coin</NavLink>
-              {MORE.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
+              {FOOTER_LINKS.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
             </nav>
           </div>
           <div className="footer-col">
