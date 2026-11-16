@@ -1,5 +1,5 @@
-// The instant trade of a page's Buy / Sell presets (TradePresets.tsx), shared by the Portfolio page and the map's side
-// panel: the wallet step before a trade, one trade at a time, the toasts, and what follows each answer of
+// The instant trade of a page's Buy / Sell presets (TradePresets.tsx), shared by the Portfolio page, the coin page and
+// the map's side panel: the wallet step before a trade, one trade at a time, the toasts, and what follows each answer of
 // lib/instant-trade.ts (lib/instant-outcome.ts says which). The page supplies what only it can do: open its ticket with
 // the amount filled in, show a "not tradable here" reason where its buttons are, and refresh what it shows once a trade
 // landed. Nothing here signs: instantTrade() runs every check and signs only after all of them passed.
@@ -26,7 +26,8 @@ export type InstantCallbacks = {
   onLanded?: () => void;
 };
 
-/// `signer`: "portfolio" (default; the Portfolio page) or "chosen" (the map), see lib/instant-outcome.ts instantSigner.
+/// `signer`: "portfolio" (default; the Portfolio page) or "chosen" (the map, the coin page), see
+/// lib/instant-outcome.ts instantSigner.
 export function useInstantTrade(cb: InstantCallbacks, opts?: { signer?: "portfolio" | "chosen" }) {
   const { connection } = useConnection();
   const wallet = useWallet();

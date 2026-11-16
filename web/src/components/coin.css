@@ -529,3 +529,23 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 /* the widget's note about the last trade this browser sent and never saw settle */
 .trade-last { align-items: start; }
 .trade-last .sheet-close { width: 24px; height: 24px; font-size: 15px; }
+
+/* ---------- instant presets above the trade widget (desktop; components/coin/InstantRow.tsx): one quiet row, the
+   presets as the popover's buttons (trade-presets.css .tp-preset), wrapping inside the side column, never wider */
+.coin-instant { display: grid; gap: 8px; min-width: 0; padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--line-soft); background: var(--glass); }
+.coin-instant:focus:not(:focus-visible) { outline: none; }
+.coin-instant-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.coin-instant-settings { font-size: var(--fs-xs); }
+.coin-instant-settings:hover { text-decoration: underline; }
+.coin-instant-sides { display: flex; flex-wrap: wrap; gap: 8px 14px; min-width: 0; }
+.coin-instant-side { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.coin-instant-k { min-width: 26px; font-size: var(--fs-xs); font-weight: 600; }
+.coin-instant-side.buy .coin-instant-k { color: var(--accent); }
+.coin-instant-side.sell .coin-instant-k { color: var(--violet-2); }
+.coin-instant-unit { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.coin-instant .tp-preset { padding: 0 10px; }
+.coin-instant-side.buy .tp-preset:hover:not(:disabled), .coin-instant-side.buy .tp-preset:focus-visible { border-color: rgba(var(--accent-rgb), .5); color: var(--accent); }
+.coin-instant-side.sell .tp-preset:hover:not(:disabled), .coin-instant-side.sell .tp-preset:focus-visible { border-color: rgba(var(--violet-rgb), .5); color: var(--violet-2); }
+.coin-instant .btn.is-busy:disabled { opacity: 1; }
+.coin-instant-why { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; font-size: var(--fs-xs); color: var(--muted); }
+.coin-instant-why span { min-width: 0; overflow-wrap: anywhere; }

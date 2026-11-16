@@ -1,6 +1,6 @@
 // What a page does with the answer of an instant trade (lib/instant-trade.ts), as data: the toast it shows and the step
 // after it. Pure, so the mapping is tested without React (test/instant-outcome.test.mts); components/useInstantTrade.ts
-// carries it out for the Portfolio page and the map's side panel alike.
+// carries it out for the Portfolio page, the map's side panel and the coin page alike.
 import { solscanTx, type Coin } from "./api";
 import { amount, lamportsToSol, short, sol, tokens } from "./format";
 import type { InstantResult, InstantSpec } from "./instant-trade";
@@ -46,9 +46,10 @@ export function instantStep(r: InstantResult, viaTrading: boolean): InstantStep 
 /// Which wallet signs an instant trade, decided before the presets open and again when one is pressed.
 /// - "portfolio" (the Portfolio page, which shows the trading wallet's holdings): a trading wallet in this browser
 ///   trades, as the wallet shown; once unlocked it is also made the Trade-with choice (`setTrading`).
-/// - "chosen" (the map, which shows no wallet): the user's Trade-with choice, by the same rule as useTrader (lib/trader.ts):
-///   the trading wallet when it is chosen or no extension is connected, else the connected wallet. The choice is never
-///   changed here, and a locked trading wallet is asked to unlock only when it is the one chosen.
+/// - "chosen" (the map, which shows no wallet; the coin page, whose ticket shows the switch): the user's Trade-with
+///   choice, by the same rule as useTrader (lib/trader.ts): the trading wallet when it is chosen or no extension is
+///   connected, else the connected wallet. The choice is never changed here, and a locked trading wallet is asked to
+///   unlock only when it is the one chosen.
 /// "unlock": the trading wallet must be unlocked first (nothing is traded); "none": no wallet can sign.
 export type InstantSigner = { use: "trading" | "wallet" | "unlock" | "none"; setTrading: boolean };
 export function instantSigner(o: { mode: "portfolio" | "chosen"; trading: boolean; unlocked: boolean; tradeWith: "trading" | "wallet"; walletConnected: boolean }): InstantSigner {
@@ -58,4 +59,21 @@ export function instantSigner(o: { mode: "portfolio" | "chosen"; trading: boolea
     return { use: "trading", setTrading: o.mode === "portfolio" && o.tradeWith !== "trading" };
   }
   return { use: o.walletConnected ? "wallet" : "none", setTrading: false };
+}
+
+/// One preset as a button: its full text ("0.1 SOL", "25%": the popover), its short text for a row that names the unit
+/// once ("0.1", "25%": the coin page's instant row), and the trade it is.
+export type PresetChoice = { text: string; short: string; spec: InstantSpec };
+export function presetChoices(side: Side, presets: readonly number[]): PresetChoice[] {
+  return presets.map((v): PresetChoice => (side === "buy"
+    ? { text: `${v} SOL`, short: String(v), spec: { side: "buy", sol: v } }
+    : { text: `${v}%`, short: `${v}%`, spec: { side: "sell", pct: v } }));
+}
+
+/// Whether a press on presets that stay on screen (the coin page's instant row, no popover in between) is one the user
+/// meant: only once the buttons have been pressable for `guardMs` (`armedAt`: when they last appeared, re-enabled or
+/// changed their amounts; null while they are off), and never from a held key (`repeat`).
+export function pressCounts(o: { armedAt: number | null; now: number; guardMs: number; repeat?: boolean }): boolean {
+  if (o.repeat || o.armedAt === null) return false;
+  return o.now - o.armedAt >= o.guardMs;
 }

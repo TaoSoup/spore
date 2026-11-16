@@ -61,13 +61,18 @@ const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/
 /// instant trade falls back to opens with the amount that was asked for.
 export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?: Side; initialAmount?: string; sheet?: boolean; onClose?: () => void; amountRef?: RefObject<HTMLInputElement | null>; titleId?: string; current?: () => Coin;
   /// Told whether a trade is in flight, so the dialog around the widget (the map's quick trade) never closes under it.
-  onBusy?: (busy: boolean) => void };
+  onBusy?: (busy: boolean) => void;
+  /// Another trade of the page is running (the coin page's instant trade): nothing is sent from here meanwhile, one
+  /// trade at a time.
+  hold?: boolean;
+  /// A change of this number reads the wallet's balances again now (the coin page, after an instant trade landed).
+  refresh?: number };
 
 /// Buy from SOL / sell to SOL through every hop of the chain in one multi_hop_swap, or, for a coin priced in a listed
 /// asset with no pump SOL pool, through Jupiter (lib/jup.ts). Quotes come from a simulation (no local curve math), so
 /// the preview is what the programs do; the widget adds what a terminal needs around it: balances, impact against spot,
 /// slippage, fees, the reason a trade is blocked, and a confirm step before the wallet opens.
-export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", initialAmount = "", sheet = false, onClose, amountRef, titleId, current, onBusy }: TradeWidgetProps) {
+export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", initialAmount = "", sheet = false, onClose, amountRef, titleId, current, onBusy, hold = false, refresh = 0 }: TradeWidgetProps) {
   // Identity fields (mint, decimals, ancestors) are the same in both; prices come from the live one.
   const live = current?.();
   const coin = live && live.mint === base.mint ? live : base;
@@ -168,6 +173,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
     setBal(await readTradeBalances(connection, user, { mint: coin.mint, tokenProgram: coin.tokenProgram }));
   }, [connection, user, coin.mint, coin.tokenProgram]);
   useEffect(() => { refreshBalances(); const t = setInterval(refreshBalances, 20_000); return () => clearInterval(t); }, [refreshBalances]);
+  useEffect(() => { if (refresh) void refreshBalances(); }, [refresh, refreshBalances]);
 
   const [quote, setQuote] = useState<QuoteState | null>(null);
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
@@ -271,7 +277,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
     // Built from the quote the sheet shows, for the amount and side that quote was made for.
     const q = quoteFor;
     const sender = trader.sender;
-    if (!chain || !q || quoting || busy || !sender) { closeConfirm(); return; }
+    if (!chain || !q || quoting || busy || !sender || hold) { closeConfirm(); return; }
     setConfirm(false); setBusy(true); setSteps([]);
     try {
       const { sig } = await sendTrade(connection, sender, coin, chain, q, slippage, micro, setSteps);
@@ -291,7 +297,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
         setMoved(false);
       }
     }
-    finally { setBusy(false); }
+    // also told here: a widget unmounted mid-flight (a layout switch) runs no effect, and the page must not stay held
+    finally { setBusy(false); onBusy?.(false); }
   }
 
   const switchSide = (s: Side) => { if (s === side || busy) return; resetConfirm(); setSide(s); setInput(""); setQuote(null); setQuoteErr(null); setSteps([]); };
@@ -346,7 +353,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
     : insufficient ? (side === "buy" ? "Not enough SOL" : `Not enough ${sym(coin)}`)
     : side === "sell" && bal.token === 0n ? `No ${sym(coin)} in this wallet`
     : null;
-  const canTrade = !!quoteFor && !blocker && !quoting && !busy;
+  const canTrade = !!quoteFor && !blocker && !quoting && !busy && !hold;
   // The amount, its presets and the side stay put while a confirmation waits for its quote or a trade is in flight.
   const locked = busy || confirmWhenFresh;
 
@@ -378,6 +385,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
   const routeHops = isJup ? `Jupiter${legCount ? ` · ${legCount} leg${legCount === 1 ? "" : "s"}` : ""} · one transaction` : hops <= 1 ? "1 hop" : `${hops} hops · one transaction`;
   const tokenUsd = tokenBal != null && coin.priceUsd != null ? tokenBal * coin.priceUsd : null;
   const primary = busy ? "Working…"
+    : hold ? "Another trade is running…"
     : blocker ?? (!amountIn ? (side === "buy" ? "Enter an amount of SOL" : `Enter an amount of ${sym(coin)}`)
     : quoting && !quote ? "Quoting…"
     : quoteFor ? (side === "buy" ? `Buy ≈ ${amount(outTokens)} ${sym(coin)}` : `Sell for ≈ ${sol(outSol)}`)
@@ -562,7 +570,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
             <p className="hint">Spore simulates this exact transaction before {trader.kind === "trading" ? "it is signed" : "your wallet opens"}; if the price has moved past the minimum, it stops and shows new numbers. On-chain, the trade fails (nothing charged beyond the network fee) if the fill falls below the minimum.{isJup && " The route and its minimum are Jupiter's; Spore checked that the transaction only swaps and sets up your own token accounts."}</p>
             <div className="confirm-actions">
               <button type="button" className="btn ghost" onClick={() => { closeConfirm(); requote(); }}>Refresh quote</button>
-              <button type="button" className={`btn ${side === "buy" ? "accent" : "violet"}`} disabled={quoting || busy} onClick={go}>{side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`}</button>
+              <button type="button" className={`btn ${side === "buy" ? "accent" : "violet"}`} disabled={quoting || busy || hold} onClick={go}>{side === "buy" ? `Buy ${sym(coin)}` : `Sell ${sym(coin)}`}</button>
             </div>
           </div>
         </div>,

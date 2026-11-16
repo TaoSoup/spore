@@ -1,5 +1,6 @@
 // What a page does with an instant trade's answer (lib/instant-outcome.ts, carried out by components/useInstantTrade.ts
-// on the Portfolio page and the map's side panel): the toast and the step after it, for each kind of answer. Then the
+// on the Portfolio page, the map's side panel and the coin page): the toast and the step after it, for each kind of
+// answer; the presets as buttons and the press guard of the coin page's always-visible row. Then the
 // two small rules the map's preset popover rests on: a popover holds the page's keys while it is open (lib/dialog.ts),
 // and it closes once its button scrolled out of the panel that clips it (lib/clip.ts). Nothing here reads the chain.
 import { test } from "node:test";
@@ -96,4 +97,36 @@ test("signer: the map honours Trade-with and never changes it; the Portfolio pag
   assert.deepEqual(instantSigner({ ...base, mode: "portfolio", tradeWith: "wallet", unlocked: false }), { use: "unlock", setTrading: false });
   assert.deepEqual(instantSigner({ mode: "portfolio", trading: false, unlocked: false, tradeWith: "trading", walletConnected: true }), { use: "wallet", setTrading: false });
   assert.deepEqual(instantSigner({ mode: "portfolio", trading: false, unlocked: false, tradeWith: "trading", walletConnected: false }), { use: "none", setTrading: false });
+});
+
+test("preset choices: the popover's texts, the coin page row's short texts, and the trade each one is", async () => {
+  const { presetChoices } = await import("../src/lib/instant-outcome.ts");
+  assert.deepEqual(presetChoices("buy", [0.1, 0.5, 1]), [
+    { text: "0.1 SOL", short: "0.1", spec: { side: "buy", sol: 0.1 } },
+    { text: "0.5 SOL", short: "0.5", spec: { side: "buy", sol: 0.5 } },
+    { text: "1 SOL", short: "1", spec: { side: "buy", sol: 1 } },
+  ]);
+  assert.deepEqual(presetChoices("sell", [25, 50, 100]), [
+    { text: "25%", short: "25%", spec: { side: "sell", pct: 25 } },
+    { text: "50%", short: "50%", spec: { side: "sell", pct: 50 } },
+    { text: "100%", short: "100%", spec: { side: "sell", pct: 100 } },
+  ]);
+  // the index a press picks is the preset at that index, so a pick past the end trades nothing
+  assert.equal(presetChoices("buy", [0.25])[3], undefined);
+  assert.deepEqual(presetChoices("sell", []), []);
+});
+
+test("an always-visible preset counts only once armed for the guard, and never from a held key", async () => {
+  const { pressCounts } = await import("../src/lib/instant-outcome.ts");
+  const guardMs = 300;
+  // off (a trade runs, or the row is not pressable): nothing counts
+  assert.equal(pressCounts({ armedAt: null, now: 10_000, guardMs }), false);
+  // inside the guard after the buttons appeared or came back on: ignored; at and after it: counts
+  assert.equal(pressCounts({ armedAt: 1_000, now: 1_000, guardMs }), false);
+  assert.equal(pressCounts({ armedAt: 1_000, now: 1_299, guardMs }), false);
+  assert.equal(pressCounts({ armedAt: 1_000, now: 1_300, guardMs }), true);
+  assert.equal(pressCounts({ armedAt: 1_000, now: 60_000, guardMs }), true);
+  // a repeating key never counts, armed or not
+  assert.equal(pressCounts({ armedAt: 1_000, now: 60_000, guardMs, repeat: true }), false);
+  assert.equal(pressCounts({ armedAt: 1_000, now: 60_000, guardMs, repeat: false }), true);
 });
