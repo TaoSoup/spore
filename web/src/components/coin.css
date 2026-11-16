@@ -416,6 +416,18 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
   .trade-bar-price .bar-price { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 6px; justify-self: start; }
   .bar-sub { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
   .bar-sub .delta { margin-left: 0; padding: 0 6px; font-size: 11px; }
+  /* the parent's line (a coin priced in a token): logo, ticker, price, change; the ticker gives way first */
+  .bar-parent { display: block; min-width: 0; font-size: 11px; color: var(--muted); }
+  .bar-parent-v { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; }
+  .bar-parent-logo { flex: none; border-radius: 50%; }
+  .bar-parent-k { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); font-weight: 500; }
+  .bar-parent b { flex: none; font-weight: 500; color: var(--ink); }
+  .bar-parent .delta { flex: none; margin-left: 0; padding: 0 5px; font-size: 10.5px; }
+  .coin-page.has-bar:has(.bar-parent) { padding-bottom: 92px; }
+  /* a narrow price column (a blocked coin's wide pump.fun button, small phones): the change gives way whole, never
+     cut in half (the sentence for screen readers keeps it) */
+  .trade-bar-price { container-type: inline-size; }
+  @container (max-width: 160px) { .bar-parent .delta { display: none; } }
   .trade-bar .btn { height: 44px; min-height: 44px; padding: 0 18px; }
   /* --z-overlay keeps toasts (--z-toast) readable above the sheet and the confirm dialog. */
   .trade-sheet-backdrop { display: grid; align-items: end; position: fixed; inset: 0; z-index: var(--z-overlay); background: rgba(4,10,6,.7); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade .18s var(--ease); }

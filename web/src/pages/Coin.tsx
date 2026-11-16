@@ -46,7 +46,7 @@ import ShareMenu from "../components/coin/ShareMenu";
 import { tradeUsd, useLive, useLiveCoinStore, type LiveCoin } from "../components/coin/useLiveCoin";
 import { Sparkline, Tween, sparkTone } from "../components/coin/viz";
 import { change24h, changeWords, daySpark } from "../components/coin/change";
-import ParentPrice from "../components/coin/ParentPrice";
+import ParentPrice, { ParentBarLine } from "../components/coin/ParentPrice";
 import { parentOf } from "../lib/priced-in";
 import Reveal from "../components/ui/Reveal";
 import "../components/coin.css";
@@ -643,6 +643,8 @@ function PhoneBar({ store, daily, onOpen, blocked = null, instant }: { store: Li
       <div className="trade-bar-price">
         <b key={tick?.id ?? 0} className={`bar-price mono ${tick ? `tick-${tick.dir}` : ""}`}>{priceText(coin)}</b>
         <span className="bar-sub">{delta && <Delta ratio={delta.ratio} label={delta.short} title={delta.title} />}<span className="mono">{coin.mcapUsd != null ? `MC ${usd(coin.mcapUsd)}` : mcText(coin)}</span></span>
+        {/* the token the pool is paired with: its price moves this coin's (nothing for SOL) */}
+        <ParentBarLine store={store} />
       </div>
       {blocked
         ? <span className="trade-bar-blocked"><Ext href={pumpUrl(coin.mint)} className="btn ghost trade-bar-ext" title={`Not tradable here: ${blocked}`}>Trade on pump.fun ↗</Ext><small>not tradable here · {blocked}</small></span>
