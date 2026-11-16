@@ -23,8 +23,9 @@
 // Buy / Sell trade with the wallet shown: a locked trading wallet is asked to unlock first (the panel closes once it
 // is unlocked and the user presses again), and an unlocked one is made the wallet that trades (lib/trader.ts).
 // With instant trades on (Trade settings, the default) the button shows the user's presets (TradePresets.tsx) and a
-// preset trades at once through lib/instant-trade.ts: no ticket. A trade that fails one of its checks opens the ticket
-// with the amount filled in and a toast that says why; "Custom…" and instant trades off open the ticket as before.
+// preset trades at once through lib/instant-trade.ts (components/useInstantTrade.ts, shared with the map): no ticket.
+// A trade that fails one of its checks opens the ticket with the amount filled in and a toast that says why; "Custom…"
+// and instant trades off open the ticket as before.
 // One trade runs at a time: while one does, every trade button of the page is off.
 // Claims are built in the browser and signed by the account wallet (useClaimFlow, lib/trader.ts useAccount): the
 // trading wallet when there is one (unlocked first; it signs on the confirm dialog's button, with no popup), else the
@@ -40,20 +41,19 @@ import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { api, ApiError, errorMessage, pumpUrl, solscanTx, type Candle, type Candles, type ClaimCoin, type Coin, type Pnl, type PnlSeries, type WalletTrade } from "../lib/api";
 import { useAsync, useStats } from "../lib/hooks";
 import { ago, amount, count, lamportsToSol, plural, short, signedPct, sol, tokens, usd, usdCard, when } from "../lib/format";
-import { instantTrade, type InstantSpec } from "../lib/instant-trade";
-import { friendlyError } from "../lib/steps";
-import { lockIfIdle, tradingSender } from "../lib/trading-wallet";
+import type { InstantSpec } from "../lib/instant-trade";
 import { appendPage, buildPnl, historyLine, historyRunning, mergeFirstPage, pnlAvailable, pnlPct, pnlTone, quotePrices, type PnlAmount, type PnlRow, type TradeList } from "../lib/pnl";
 import { makeMoney, MONEY_UNITS, type Money, type MoneyUnit } from "../lib/money";
 import { seriesPoints } from "../lib/pnl-chart";
 import { buildPortfolio, claimableRows, type PfClaim, type PfGroup, type PfRow } from "../lib/portfolio";
 import { blockText, hardBlock, loadTradeRoute, type TradeBlock } from "../lib/trade-route";
-import { openTradeSettings, openTradingWallet, useInstantSol, useTradeSettings, useTrader } from "../lib/trader";
-import type { Side, TxSender } from "../lib/pump";
+import { openTradeSettings, openTradingWallet, useTrader } from "../lib/trader";
+import type { Side } from "../lib/pump";
 import { Addr, ErrorBox, Logo, SkeletonRows, sym } from "../components/Bits";
 import { Sprout } from "../components/LaunchButton";
 import QuickTrade from "../components/QuickTrade";
 import TradePresets from "../components/TradePresets";
+import { useInstantTrade } from "../components/useInstantTrade";
 import PnlChart from "../components/portfolio/PnlChart";
 import { candleChange, spanLabel } from "../components/map/panel/Sparkline";
 import SlidingPill from "../components/ui/SlidingPill";
@@ -133,7 +133,7 @@ export default function Portfolio() {
   const { connection } = useConnection();
   const wallet = useWallet();
   const { setVisible } = useWalletModal();
-  const { trader, tw, tradeWith, setTradeWith } = useTrader();
+  const { trader, tw } = useTrader();
   const { stats } = useStats();
   const toast = useToast();
 
@@ -208,25 +208,8 @@ export default function Portfolio() {
     return () => clearInterval(t);
   }, [shown, reading, reloadPnl, reloadSeries]);
 
-  const settings = useTradeSettings();
-  const [instantSol] = useInstantSol();
   const [trade, setTrade] = useState<{ coin: Coin; side: Side; amount?: string } | null>(null);
-  const [opening, setOpening] = useState<Opening>(null);
   const [blocked, setBlocked] = useState<Blocked>({});
-  const alive = useRef(true);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  const busyRef = useRef(false);
-  // The wallet step before any trade. The trading wallet trades here: a locked one is asked to unlock (the panel closes
-  // by itself once it is; the user then presses Buy / Sell again, nothing is traded by the unlock), an unlocked one is
-  // made the wallet that trades.
-  const ready = useCallback(() => {
-    if (tw.address) {
-      // an hour without use counts as locked a moment before the timer says so
-      if (tw.status !== "unlocked" || !tradingSender()) { lockIfIdle(); openTradingWallet("unlock"); toast.info("Unlock your trading wallet to trade."); return false; }
-      if (tradeWith !== "trading") setTradeWith("trading");
-    }
-    return true;
-  }, [toast, tw.address, tw.status, tradeWith, setTradeWith]);
   // A coin that cannot be traded here says why in its row.
   const showBlock = useCallback((block: TradeBlock, coin: Coin) => {
     const t = blockText(block, coin);
@@ -234,12 +217,17 @@ export default function Portfolio() {
     if (block.kind === "gap") toast.info(`${t.title}. ${t.body}`);
     else setBlocked((b) => ({ ...b, [coin.mint]: { short: t.short, body: t.body, at: Date.now() } }));
   }, [toast]);
+  // The instant trade (components/useInstantTrade.ts): the wallet step before any trade (`ready`), one trade at a time
+  // on the page (`busy` / `begin` / `end`, shared with the ticket opener below), the toasts, and what follows each answer.
+  // A preset trades at once through lib/instant-trade.ts (every check runs before it signs); what does not pass a check
+  // opens the ticket with the amount filled in; nothing is sent again by itself after a failure.
+  const onLanded = useCallback(() => { refresh(); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
+  const { ready, opening, busy, begin, end, alive, settings, run: onInstant } = useInstantTrade({ onTicket: setTrade, onBlocked: showBlock, onLanded });
   // Buy / Sell through the ticket: it needs the coin's full record.
   const onTrade = useCallback(async (mint: string, side: Side) => {
-    if (busyRef.current) return;
+    if (busy()) return;
     if (!ready()) return;
-    busyRef.current = true;
-    setOpening({ mint, side });
+    begin(mint, side);
     try {
       const { coin } = await api.coin(mint, { children: false, trades: false });
       // a route check that fails (the RPC) opens the ticket anyway: it checks the route itself and offers a retry
@@ -251,47 +239,10 @@ export default function Portfolio() {
     } catch (e) {
       toast.error(`Could not open the trade: ${errorMessage(e)}`);
     } finally {
-      busyRef.current = false;
-      if (alive.current) setOpening(null);
+      end();
     }
-  }, [connection, toast, ready, showBlock]);
+  }, [connection, toast, ready, showBlock, busy, begin, end, alive]);
   const closeTrade = useCallback(() => { setTrade(null); refresh(); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
-  // A preset pressed: the trade itself, at once (lib/instant-trade.ts runs every check before it signs). One at a time:
-  // `busyRef` is taken before anything is awaited, so a second press cannot start a second send. What does not pass a
-  // check opens the ticket with the amount filled in; nothing is sent again by itself after a failure.
-  const slippageBps = settings.slippageBps;
-  const onInstant = useCallback(async (mint: string, spec: InstantSpec, label: string) => {
-    if (busyRef.current) return;
-    if (!ready()) return;
-    const viaTrading = !!tw.address;
-    const sender: TxSender | null = viaTrading ? tradingSender() : wallet.connected && wallet.publicKey ? wallet : null;
-    if (!sender) { toast.error("No wallet is ready to trade. Nothing was sent."); return; }
-    busyRef.current = true;
-    setOpening({ mint, side: spec.side });
-    toast.info(spec.side === "sell" ? `Selling ${spec.pct}% of ${label}…` : `Buying ${label} with ${spec.sol} SOL…`);
-    try {
-      const r = await instantTrade(connection, { mint, spec, sender, trader: viaTrading ? "trading" : "wallet", slippageBps, capSol: instantSol });
-      if (r.kind === "done") {
-        const what = sym(r.coin);
-        toast.success(r.side === "sell"
-          ? `Sold ${amount(tokens(r.amountIn, r.coin.decimals))} ${what} for ≈ ${sol(lamportsToSol(r.amountOut))}`
-          : `Bought ≈ ${amount(tokens(r.amountOut, r.coin.decimals))} ${what} for ${sol(lamportsToSol(r.amountIn))}`, { href: solscanTx(r.sig), label: "view transaction" });
-        refresh(); setTimeout(refresh, TRADE_SETTLE_MS);
-      } else if (r.kind === "ticket") {
-        // not enough SOL in the trading wallet: the way to add some (the ticket's own hint covers only a buy)
-        toast.info(r.text, r.deposit && viaTrading ? { label: "Move SOL into the trading wallet", onClick: () => openTradingWallet("deposit") } : undefined);
-        if (alive.current) setTrade({ coin: r.coin, side: r.side, amount: r.amount });
-      } else if (r.kind === "blocked") {
-        if (alive.current) showBlock(r.block, r.coin);
-      } else toast.error(r.text, r.link);
-    } catch (e) {
-      toast.error(`The trade was not sent: ${friendlyError(e)}`);
-    } finally {
-      busyRef.current = false;
-      if (alive.current) setOpening(null);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, toast, ready, showBlock, refresh, tw.address, wallet.connected, wallet.publicKey, wallet.sendTransaction, slippageBps, instantSol]);
 
   // Refresh while the tab is visible, and at once when it comes back; never under an open ticket, an open preset popover
   // (the rows must not move under it) or a running claim.

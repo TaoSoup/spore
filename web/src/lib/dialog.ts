@@ -7,8 +7,17 @@
 import { useEffect, useRef, type RefObject } from "react";
 
 const stack: HTMLElement[] = [];
-/// Whether any dialog is open: a page's own keyboard shortcuts stand down while one is (keys belong to the dialog).
-export const isDialogOpen = () => stack.length > 0;
+/// Popovers that hold the keyboard while open without being a modal dialog (the trade presets, TradePresets.tsx).
+let held = 0;
+/// Whether any dialog, or a popover that holds the keys, is open: a page's own keyboard shortcuts stand down while one
+/// is (keys belong to the dialog or the popover).
+export const isDialogOpen = () => stack.length > 0 || held > 0;
+/// A popover takes the page's keys while it is open: call on open, call what it returns on close (twice is harmless).
+export function holdPageKeys(): () => void {
+  held++;
+  let done = false;
+  return () => { if (done) return; done = true; held = Math.max(0, held - 1); };
+}
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function useDialog<T extends HTMLElement = HTMLDivElement>(open: boolean, onClose: () => void, opts: { initialFocus?: RefObject<HTMLElement | null>; returnFocus?: RefObject<HTMLElement | null> } = {}): RefObject<T | null> {

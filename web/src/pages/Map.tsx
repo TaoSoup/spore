@@ -23,12 +23,14 @@ import { ErrorBox, NoSpawnsYet, Skeleton, nameOf, sym } from "../components/Bits
 import { LiveDot } from "../components/SpawnFeed";
 import LiveNumber from "../components/LiveNumber";
 import SlidingPill from "../components/ui/SlidingPill";
-import SidePanel, { kidCmp, usePanelCoin } from "../components/map/panel/SidePanel";
+import SidePanel, { kidCmp, usePanelCoin, type PanelInstant } from "../components/map/panel/SidePanel";
 import QuickTrade from "../components/QuickTrade";
+import { useInstantTrade } from "../components/useInstantTrade";
+import { useToast } from "../components/Toast";
 import { isDialogOpen } from "../lib/dialog";
 import type { Coin } from "../lib/api";
 import type { Side } from "../lib/pump";
-import { hardBlock, useTradeRoute } from "../lib/trade-route";
+import { blockText, hardBlock, useTradeRoute, type TradeBlock } from "../lib/trade-route";
 import { firstborns } from "../lib/map/firstborn";
 import MapSearch from "../components/map/panel/MapSearch";
 import Highlights, { useHighlight } from "../components/map/panel/Highlights";
@@ -190,9 +192,26 @@ export default function MapPage() {
   const families = useFamilyStore({ byMint: data.byMint, tier: familyTier });
   const heat = useMapHeat(true);
   const { stats } = useStats();
-  // The quick trade over the map (side panel Buy / Sell, the B key): the coin as it was when it opened.
-  const [trade, setTrade] = useState<{ coin: Coin; side: Side } | null>(null);
+  // The quick trade over the map (side panel Buy / Sell, the B key): the coin as it was when it opened, and the amount
+  // it opens with when an instant trade handed it back (a check did not pass).
+  const [trade, setTrade] = useState<{ coin: Coin; side: Side; amount?: string } | null>(null);
   const openTrade = useCallback((side: Side, coin: Coin) => setTrade({ coin, side }), []);
+  // Instant trades from the side panel's presets (components/useInstantTrade.ts, as on the Portfolio page): one at a
+  // time, the wallet step first, the toasts; a check that does not pass opens the ticket above with the amount filled
+  // in. A coin found not tradable here says why where its buttons are (a gap in the index is said once in a toast and
+  // the buttons stay, so the next press checks again); the reason goes with the selection. The panel shows no holdings,
+  // so a landed trade has nothing of the panel to refresh (the toast carries the transaction).
+  const toast = useToast();
+  const [instantBlock, setInstantBlock] = useState<PanelInstant["blocked"]>(null);
+  const onInstantBlock = useCallback((block: TradeBlock, coin: Coin) => {
+    const t = blockText(block, coin);
+    if (block.kind === "gap") toast.info(`${t.title}. ${t.body}`);
+    else setInstantBlock({ mint: coin.mint, short: t.short, body: t.body });
+  }, [toast]);
+  // The map shows no wallet, so the user's Trade-with choice signs ("chosen"), as the ticket does; opening the presets
+  // never changes that choice (the Portfolio page, which shows the trading wallet, makes it the one that trades).
+  const instant = useInstantTrade({ onTicket: setTrade, onBlocked: onInstantBlock }, { signer: "chosen" });
+  useEffect(() => setInstantBlock(null), [focus]);
   const status = useStreamStatus();
   const [wide, setWide] = useState(() => typeof window !== "undefined" && window.innerWidth > WIDE_W);
   useEffect(() => { const f = () => setWide(window.innerWidth > WIDE_W); window.addEventListener("resize", f); return () => window.removeEventListener("resize", f); }, []);
@@ -458,11 +477,13 @@ export default function MapPage() {
   // ---- keyboard: walk the tree, open, launch, frame; zoom and pan without a selection
   // The last-trade filter's part: ↓ ← → step only onto coins the map draws (shown, anchors, the pins); ↑ may climb to a
   // hidden parent, which the selection then pins. K toggles the filter between the default and everything.
-  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat: heat as HeatIndex | null, hiddenCopies: (stacked?.leaderOf ?? null) as ReadonlyMap<string, string> | null });
-  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat, hiddenCopies: stacked?.leaderOf ?? null };
+  const keyState = useRef({ selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat: heat as HeatIndex | null, hiddenCopies: (stacked?.leaderOf ?? null) as ReadonlyMap<string, string> | null, tradeBusy: instant.busy });
+  keyState.current = { selected, byMint, kidsOf, nodes, maxDepth: stats?.maxDepth, mayhem: panel.coin?.mayhem, coin: panel.coin, tradeOk, pop, focus, levels, pinned, lastWant, heatOn: !!heat, heat, hiddenCopies: stacked?.leaderOf ?? null, tradeBusy: instant.busy };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // A dialog (the quick trade, a confirm sheet) owns the keyboard: arrows, L or B must not act on the map behind it.
+      // So does the side panel's preset popover while it is open (TradePresets holds the page's keys, lib/dialog.ts):
+      // its Escape is taken in the capture phase before this listener, so one press closes the popover and not the panel.
       if (isDialogOpen()) return;
       const s = keyState.current;
       if (e.key === "Escape") { if (s.pop) setPop(null); else if (s.focus) select(null); return; }
@@ -492,7 +513,9 @@ export default function MapPage() {
         }
         else if (e.key === "Enter" && !onControl) nav(`/c/${n.mint}`);
         else if (e.key === "l" || e.key === "L") { if (!launchBlock({ depth: n.depth, mayhem: s.mayhem }, s.maxDepth)) nav(`/launch?parent=${n.mint}`); }
-        else if (e.key === "b" || e.key === "B") { if (s.coin && s.coin.mint === n.mint && s.tradeOk) openTrade("buy", s.coin); }
+        // B opens the ticket, never an instant trade (even with instant trades on, a key press does not pick an amount);
+        // not while an instant trade runs (one trade at a time, as the panel's buttons)
+        else if (e.key === "b" || e.key === "B") { if (s.coin && s.coin.mint === n.mint && s.tradeOk && !s.tradeBusy()) openTrade("buy", s.coin); }
         else if (e.key === "f" || e.key === "F") { let r = n; for (let h = 0; r.parentMint && s.byMint.has(r.parentMint) && h < 12; h++) r = s.byMint.get(r.parentMint)!; m?.fitCluster(r.mint, { select: false }); }
         else handled = false;
       }
@@ -565,7 +588,13 @@ export default function MapPage() {
   // the side panel's "most active" list: the ten most traded coins of the selection's family (per heat poll)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const leaders = useMemo(() => (famTop && heat ? familyLeaders(famTop.mint, mapByMint, heat) : []), [famTop?.mint, heatAt, mapByMint]);
-  const panelProps = selected ? { leaders, copyList, copyTraded, node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, heatIndex: heat, volRank: volRanks?.get(selected.mint) ?? null, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast, solUsd: stats?.solUsd ?? null, onTrade: openTrade, trade: { data: tradeRoute.data, error: tradeRoute.error, reload: tradeRoute.reload } } : null;
+  // Instant trades in the panel: on with the setting and a wallet that can sign (without one the ticket opens, which
+  // offers to connect).
+  const { settings: tradeSettings, ready: tradeReady, run: tradeRun, opening: tradeOpening } = instant;
+  const instantOn = tradeSettings.instant && instant.hasWallet;
+  const panelInstant = useMemo<PanelInstant>(() => ({ on: instantOn, presets: { buy: tradeSettings.buyPresets, sell: tradeSettings.sellPresets }, ready: tradeReady, run: tradeRun, opening: tradeOpening, blocked: instantBlock }),
+    [instantOn, tradeSettings.buyPresets, tradeSettings.sellPresets, tradeReady, tradeRun, tradeOpening, instantBlock]);
+  const panelProps = selected ? { leaders, copyList, copyTraded, node: selected, byMint: allByMint, kids, coin: panel.coin, coinError: panel.error, heat: heatRow, heatOn: !!heat, heatIndex: heat, volRank: volRanks?.get(selected.mint) ?? null, maxDepth: stats?.maxDepth, map, onPick: select, onClose: () => select(null), family, mode, firstborn, families, lastHidden: selHidden, onShowAll: showAllLast, solUsd: stats?.solUsd ?? null, onTrade: openTrade, trade: { data: tradeRoute.data, error: tradeRoute.error, reload: tradeRoute.reload }, instant: panelInstant } : null;
   // the lead's one line on the filter (only while it hides something): the default reads as "no trade in 24 h"
   const lastOn = !!heat && lastWant !== LAST_ALL;
   const lastLead = lastOn ? (lastWant === lastMask(LAST_DEFAULT) ? " Coins with no trade in 24 h are hidden by default; the Key brings them back." : " Some last-trade buckets are hidden; the Key brings them back.") : "";
@@ -640,7 +669,7 @@ export default function MapPage() {
       {focus && ready && !selected && !data.loading && !data.syncing && !allByMint.has(focus) && !!(panel.coin || panel.error) && !families.familyOf(focus) && <div className="map-toast">That coin is not on the map yet. <Link to={`/c/${focus}`}>Open its page</Link> · <button type="button" className="linkish" onClick={() => select(null)}>dismiss</button></div>}
       <MapHint cam={cam} gone={touched} renderer={renderer} />
       <div className="map-sr" aria-live="polite" aria-atomic="true">{announce}</div>
-      {trade && <QuickTrade coin={trade.coin} side={trade.side} solUsd={stats?.solUsd ?? null} onClose={() => setTrade(null)} />}
+      {trade && <QuickTrade coin={trade.coin} side={trade.side} amount={trade.amount} solUsd={stats?.solUsd ?? null} onClose={() => setTrade(null)} />}
     </div>
   );
 }

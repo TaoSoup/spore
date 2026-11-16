@@ -5,11 +5,18 @@
 // - nothing in it activates for PRESET_GUARD_MS after it opens, and a repeating (held) key never activates a preset;
 // - it names the coin it trades, and it stays hung from its own button: the page under it may move without a scroll
 //   (a refresh re-sorts the rows, a card above finishes loading), so it is placed again on every frame, closes when its
-//   button leaves the page, and ignores a press for PRESET_GUARD_MS after it moved (the user aimed at what was there).
-// Escape and a press outside close it and the focus goes back to the button; Tab stays inside while it is open.
+//   button leaves the page or scrolls out of the panel that holds it (the map's side panel, the phone's bottom sheet:
+//   lib/clip.ts), and ignores a press for PRESET_GUARD_MS after it moved (the user aimed at what was there).
+// It is portalled to the body and fixed to the viewport, so a panel's own scrolling, transform or backdrop filter (each
+// would make a fixed box inside it relative to the panel) never misplaces it.
+// Escape and a press outside close it and the focus goes back to the button; Tab stays inside while it is open. While
+// it is open the page's own keyboard shortcuts stand down (lib/dialog.ts holdPageKeys: the map's arrows, B, Escape),
+// and its Escape is taken before the page sees it, so one press closes the popover and nothing else.
 // It knows nothing of the page it sits on: the page gives it the labels and takes the index that was picked.
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { clipAncestorsOf, clippedOut } from "../lib/clip";
+import { holdPageKeys } from "../lib/dialog";
 import "./trade-presets.css";
 
 /// A press within this long of the popover opening is ignored: the click or key that opened it is still under way.
@@ -39,15 +46,18 @@ export default function TradePresets({ side, label, anchor, presets, onPick, onC
   close.current = onClose;
 
   // Under the button, right edges aligned; above it when there is no room below; always inside the viewport. Placed on
-  // every frame while open (one rect read, a state change only when it moved), so it follows its button wherever the
-  // page puts it; a button that left the page (its row is gone) closes it.
+  // every frame while open (the button's rect and those of the few boxes that clip it, a state change only when it
+  // moved), so it follows its button wherever the page puts it; a button that left the page (its row is gone) or that
+  // scrolled out of the box that clips it closes it.
   useLayoutEffect(() => {
     let last = "", frame = 0;
+    const clips = anchor ? clipAncestorsOf(anchor) : [];
     const place = (first: boolean) => {
       const el = ref.current;
       if (!el || !anchor) return;
       if (!anchor.isConnected) { close.current(); return; }
       const a = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+      if (clips.length && clippedOut(a, clips.map((c) => ({ box: c.el.getBoundingClientRect(), x: c.x, y: c.y })))) { close.current(); return; }
       const vw = document.documentElement.clientWidth, vh = window.innerHeight;
       const left = Math.round(Math.max(EDGE, Math.min(a.right - w, vw - w - EDGE)));
       const below = a.bottom + GAP, above = a.top - GAP - h;
@@ -64,6 +74,8 @@ export default function TradePresets({ side, label, anchor, presets, onPick, onC
     return () => cancelAnimationFrame(frame);
   }, [anchor, presets.length]);
 
+  // the page's keyboard shortcuts stand down while it is open
+  useEffect(() => holdPageKeys(), []);
   useEffect(() => {
     openedAt.current = performance.now();
     ref.current?.focus({ preventScroll: true });

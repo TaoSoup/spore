@@ -16,6 +16,7 @@ import { Link } from "react-router-dom";
 import { api, pumpUrl, xShareUrl, type Candles, type Coin } from "../../../lib/api";
 import { blockText, hardBlock, type TradeRoute } from "../../../lib/trade-route";
 import type { Side } from "../../../lib/pump";
+import type { InstantSpec } from "../../../lib/instant-trade";
 import { copyText, useAsync, useDebounced } from "../../../lib/hooks";
 import { age, ago, count, pct, short, signedPct, usd } from "../../../lib/format";
 import type { HeatIndex, HeatRow } from "../../../lib/map/heat";
@@ -30,6 +31,7 @@ import type { FamilyChunk, FamilyStore } from "../../../lib/map/family-types";
 import LaunchButton, { launchBlock } from "../../LaunchButton";
 import { useToast } from "../../Toast";
 import SlidingPill from "../../ui/SlidingPill";
+import TradePresets from "../../TradePresets";
 import Sparkline, { candleChange, spanLabel } from "./Sparkline";
 import Brood from "./Brood";
 import type { Leader } from "../../../lib/map/volume";
@@ -140,9 +142,22 @@ type Props = {
   /// props one object the page builds once.
   onTrade?: (side: Side, coin: Coin) => void; solUsd?: number | null;
   trade?: { data: TradeRoute | null; error: string | null; reload: () => void } | null;
+  /// Instant trades (Trade settings; the page runs them through components/useInstantTrade.ts). Absent or `on` false:
+  /// Buy / Sell open the ticket (`onTrade`) as before.
+  instant?: PanelInstant | null;
+};
+/// What the Buy / Sell row needs for instant trades: with `on`, a button opens the presets (TradePresets) after the
+/// wallet step (`ready`: false when a locked trading wallet was asked to unlock, and nothing else happens), a preset
+/// runs the trade (`run`), "Custom…" opens the ticket. `opening`: the trade under way on the page (one at a time; both
+/// buttons are off while it runs). `blocked`: why the last instant trade of a coin found it not tradable here.
+export type PanelInstant = {
+  on: boolean; presets: { buy: readonly number[]; sell: readonly number[] }; ready: () => boolean;
+  run: (mint: string, spec: InstantSpec, label: string) => void;
+  opening: { mint: string; side: Side } | null;
+  blocked: { mint: string; short: string; body: string } | null;
 };
 
-export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, heatIndex = null, volRank = null, families = null, lastHidden = false, onShowAll, onTrade, trade = null }: Props) {
+export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, heatIndex = null, volRank = null, families = null, lastHidden = false, onShowAll, onTrade, trade = null, instant = null }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
   const [sparkRef, sparkW] = useWidth();
@@ -271,9 +286,10 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   // Buy / Sell open the quick trade; a coin whose route cannot start from SOL gets pump.fun instead, with the reason,
   // so the button never leads to a dead end. Only for a coin with a record (a listed asset top such as PUMP has none),
   // and only once this coin's route is known (the page checks it: lib/trade-route, the same answer the B key reads).
+  // An instant trade that found the coin not tradable here (its route read again) says why in the same place.
   const routeFor = trade?.data && trade.data.coins[0]?.mint === node.mint ? trade.data : null;
   const blocked = hardBlock(routeFor);
-  const why = blocked && c ? blockText(blocked, c) : null;
+  const why = (blocked && c ? blockText(blocked, c) : null) ?? (instant?.blocked && instant.blocked.mint === node.mint ? instant.blocked : null);
   const tradeActs = !onTrade || !trade || !c || c.mint !== node.mint ? null
     : why ? (
       <div className="map-side-trade blocked">
@@ -281,10 +297,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
         <span className="map-side-why" title={why.body}>{why.short}</span>
       </div>
     ) : routeFor ? (
-      <div className="map-side-trade">
-        <button type="button" className="btn buy" onClick={() => onTrade("buy", c)} title={`Buy ${sym(node)} with SOL${routeFor.via === "jupiter" ? " through Jupiter" : ""} (B)`}>Buy</button>
-        <button type="button" className="btn sell" onClick={() => onTrade("sell", c)} title={`Sell ${sym(node)} for SOL${routeFor.via === "jupiter" ? " through Jupiter" : ""}`}>Sell</button>
-      </div>
+      // keyed by the coin: a new selection never inherits an open popover (peek and full are two mounts as well)
+      <TradeRow key={node.mint} coin={c} label={sym(node)} jupiter={routeFor.via === "jupiter"} onTrade={onTrade} instant={instant} />
     ) : trade.error ? (
       <div className="map-side-trade blocked">
         <a className="btn ghost" href={pumpUrl(node.mint)} target="_blank" rel="noopener noreferrer">Trade on pump.fun ↗</a>
@@ -458,6 +472,44 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
         </section>
       )}
       {coinError && !c && <p className="hint">{coinError}</p>}
+    </div>
+  );
+}
+
+/// Buy / Sell for the selected coin. With instant trades on, a button opens the user's presets under it (TradePresets,
+/// portalled to the body, so the side panel's scrolling and the bottom sheet's transform do not move it) and a preset
+/// is the trade; "Custom…" and instant trades off open the ticket. Sell shows without a position check: the instant sell
+/// reads the balance from the chain, and a wallet that holds none is told so. The B key opens the ticket (Map.tsx).
+function TradeRow({ coin, label, jupiter, onTrade, instant }: { coin: Coin; label: string; jupiter: boolean; onTrade: (side: Side, coin: Coin) => void; instant: PanelInstant | null }) {
+  const [menu, setMenu] = useState<Side | null>(null);
+  const buyRef = useRef<HTMLButtonElement>(null), sellRef = useRef<HTMLButtonElement>(null);
+  const on = !!instant?.on;
+  // a trade under way (on any coin: one at a time), or instant trades turned off, closes the presets
+  const running = !!instant?.opening;
+  useEffect(() => { if (running || !on) setMenu(null); }, [running, on]);
+  const shown = running || !on ? null : menu;
+  const busy = (side: Side) => instant?.opening?.mint === coin.mint && instant.opening.side === side;
+  const press = (side: Side) => {
+    if (!instant || !on) { onTrade(side, coin); return; }
+    if (menu === side) { setMenu(null); return; }
+    // a locked trading wallet is asked to unlock, and nothing else happens
+    if (instant.ready()) setMenu(side);
+  };
+  const pop = (side: Side) => (on ? { "aria-haspopup": "dialog" as const, "aria-expanded": shown === side } : {});
+  const via = jupiter ? " through Jupiter" : "";
+  const title = (side: Side) => (on
+    ? `${side === "buy" ? "Buy" : "Sell"} ${label}${via}: pick a preset amount, or Custom… for the ticket${side === "buy" ? " (B opens the ticket)" : ""}`
+    : side === "buy" ? `Buy ${label} with SOL${via} (B)` : `Sell ${label} for SOL${via}`);
+  return (
+    <div className="map-side-trade" aria-busy={running || undefined}>
+      <button ref={buyRef} type="button" className={`btn buy ${busy("buy") ? "is-busy" : ""}`} disabled={running} aria-busy={busy("buy")} {...pop("buy")} onClick={() => press("buy")} title={title("buy")}>Buy</button>
+      <button ref={sellRef} type="button" className={`btn sell ${busy("sell") ? "is-busy" : ""}`} disabled={running} aria-busy={busy("sell")} {...pop("sell")} onClick={() => press("sell")} title={title("sell")}>Sell</button>
+      {shown && instant && (
+        <TradePresets side={shown} label={`${shown === "buy" ? "Buy" : "Sell"} ${label}`} anchor={(shown === "buy" ? buyRef : sellRef).current}
+          presets={shown === "buy" ? instant.presets.buy.map((v) => `${v} SOL`) : instant.presets.sell.map((v) => `${v}%`)}
+          onPick={(i) => instant.run(coin.mint, shown === "buy" ? { side: "buy", sol: instant.presets.buy[i] } : { side: "sell", pct: instant.presets.sell[i] }, label)}
+          onCustom={() => onTrade(shown, coin)} onClose={() => setMenu(null)} />
+      )}
     </div>
   );
 }
