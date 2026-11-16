@@ -13,7 +13,6 @@
 .pf-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .pf-head h1 { font-size: var(--fs-xl); line-height: 1.2; }
 .pf-sub { font-size: var(--fs-base); color: var(--muted); }
-.pf-wallet { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 4px; min-width: 0; }
 .pf-trades { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 
 /* no wallet: one prompt, two ways in */
@@ -154,3 +153,10 @@
 
 /* between 760 and 1100 px the price column keeps the price and the change; the line needs the room */
 @media (min-width: 760px) and (max-width: 1099px) { .pf-hold { grid-template-columns: 28px minmax(0, 1fr) minmax(0, 220px) 80px 80px 80px 120px; } .pf-holds-plain .pf-hold { grid-template-columns: 28px minmax(0, 1fr) minmax(0, 220px) 80px 80px 80px; } .pf-px-line { display: none; } }
+
+/* The same price block in a spore row: price, line and change on one line, the trade note under them (a card is narrow). */
+.pf-row > .pf-hold-px { grid-column: 2 / -1; grid-row: auto; margin-top: 0; gap: 2px 10px; }
+.pf-row .pf-px-main { display: contents; }
+.pf-row .pf-px-main > b { font-size: var(--fs-sm); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-row .pf-px-meta { grid-column: 1 / -1; grid-row: 2; }
+@media (min-width: 360px) { .pf-row .pf-px-line { display: block; } }

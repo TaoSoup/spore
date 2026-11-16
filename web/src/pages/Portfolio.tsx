@@ -2,11 +2,13 @@
 // HOLDINGS: the coins the wallet bought (it holds them and did not launch them), one flat list, largest value first.
 // YOUR SPORES: the pairs the wallet launched (a child coin under a parent, priced in the parent's token) and the coins
 // whose creator fees it shares, one card per parent coin; each row has its fees to claim. A coin is in one list only.
-// The wallet shown is the browser trading wallet (its address is known while locked) or the connected extension
-// wallet; /portfolio?wallet=<address> shows any address read-only. Numbers come from /api/portfolio/:wallet and
-// /api/claims/:wallet (lib/portfolio.ts sorts them into the two lists). Buy / Sell open the quick-trade ticket, which
-// trades with the user's active wallet (lib/trader.ts): Sell is offered only while that is the wallet shown, and a
-// line under the title says which wallet trades when it is another one (or offers to unlock the trading wallet).
+// The wallet shown is the user's trading wallet (the browser wallet they trade with; its address is known while it is
+// locked). There is no switch between wallets: a connected extension wallet is how the account was made, and it still
+// signs launches and claims, so the pairs it launched and the fees it can claim are listed with the trading wallet's
+// own. Without a trading wallet the connected wallet is shown. /portfolio?wallet=<address> shows any address
+// read-only. Numbers come from /api/portfolio/:wallet and /api/claims/:wallet (lib/portfolio.ts sorts them into the
+// two lists). Buy / Sell open the quick-trade ticket and trade with the wallet shown: a locked trading wallet is
+// asked to unlock first, and an unlocked one is made the wallet that trades (lib/trader.ts).
 // Claims are built in the browser and signed by the connected extension wallet (useClaimFlow). Long lists are cut:
 // 10 holdings, 12 parent cards and 5 rows a card, the rest behind a button.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -24,7 +26,6 @@ import type { Side } from "../lib/pump";
 import { Addr, ErrorBox, Logo, SkeletonRows, sym } from "../components/Bits";
 import { Sprout } from "../components/LaunchButton";
 import QuickTrade from "../components/QuickTrade";
-import SlidingPill from "../components/ui/SlidingPill";
 import { candleChange, spanLabel } from "../components/map/panel/Sparkline";
 import { useToast } from "../components/Toast";
 import { useClaimFlow, type ClaimTarget } from "../components/claim/useClaimFlow";
@@ -46,7 +47,6 @@ function address(s: string | null): string | null {
   try { return new PublicKey(s.trim()).toBase58(); } catch { return null; }
 }
 
-type Which = "trading" | "wallet";
 type Opening = { mint: string; side: Side } | null;
 type Blocked = Record<string, { short: string; body: string; at: number }>;
 type Flow = ReturnType<typeof useClaimFlow>;
@@ -57,33 +57,29 @@ type Actions = { opening: Opening; blocked: Blocked; onTrade: (mint: string, sid
 
 export default function Portfolio() {
   useEffect(() => { document.title = "Portfolio · Spore"; return () => { document.title = "Spore"; }; }, []);
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const { connection } = useConnection();
   const wallet = useWallet();
   const { setVisible } = useWalletModal();
-  const { trader, tw, tradeWith } = useTrader();
+  const { trader, tw, tradeWith, setTradeWith } = useTrader();
   const { stats } = useStats();
   const toast = useToast();
 
-  // Which wallet: the one that trades now, unless the user picked the other; ?wallet= shows any address read-only.
+  // The wallet shown: the trading wallet, else the connected wallet; ?wallet= shows any address read-only.
   const ext = wallet.publicKey?.toBase58() ?? null;
-  const own: Record<Which, string | null> = { trading: tw.address, wallet: ext };
-  const [pick, setPick] = useState<Which | null>(null);
-  const which: Which | null = pick && own[pick] ? pick : trader.kind && own[trader.kind] ? trader.kind : own.trading ? "trading" : own.wallet ? "wallet" : null;
+  const mine = tw.address ?? ext;
   const asked = params.get("wallet");
   const preview = address(asked);
-  const shown = preview ?? (which ? own[which] : null);
-  const readOnly = !!preview && preview !== own.trading && preview !== own.wallet;
-  // The wallet a ticket trades with: the active trader, or with none ready the locked trading wallet (the ticket asks
-  // to unlock it). Sell and the ticket's balance belong to that wallet, so Sell needs it to be the wallet shown.
-  const tradeKind: Which | null = trader.kind ?? (own.trading ? "trading" : null);
-  const tradeAddr = trader.publicKey?.toBase58() ?? own.trading;
-  const tradesShown = !!shown && shown === tradeAddr;
-  // The trading wallet is on the page but locked, so the connected wallet trades. Unlocking it makes it the trader
-  // only while it is the preferred one (lib/trader.ts: an unlocked trading wallet trades unless the user chose the
-  // extension); with the extension preferred the line below names the wallet that trades instead.
-  const lockedShown = !!shown && !tradesShown && shown === own.trading && tw.status === "locked" && tradeWith === "trading";
-  const showOwn = useCallback((w: Which | null) => { setPick(w); if (asked !== null) setParams({}, { replace: true }); }, [asked, setParams]);
+  const shown = preview ?? mine;
+  const readOnly = !!preview && preview !== tw.address && preview !== ext;
+  const isTrading = !!shown && shown === tw.address;
+  // The connected wallet beside a trading wallet: it signed the launches, so its pairs and fees belong on the page.
+  const also = !preview && tw.address && ext && ext !== tw.address ? ext : null;
+  // Tickets trade with the wallet shown: the trading wallet (unlocked on the click), or the connected wallet when
+  // there is no trading wallet. A read-only view can still buy with the user's own wallet.
+  const tradeAddr = tw.address ?? trader.publicKey?.toBase58() ?? null;
+  const tradesShown = !!shown && !readOnly && shown === tradeAddr;
+  const locked = isTrading && !readOnly && tw.status !== "unlocked";
 
   // Latest reloaders, read when a claim or a trade lands (the flow hook is created before the fetches).
   const reloadRef = useRef<() => void>(() => {});
@@ -91,9 +87,11 @@ export default function Portfolio() {
   const onClaimed = useCallback(() => { refresh(); setTimeout(refresh, CLAIM_CACHE_MS); }, [refresh]);
   const flow = useClaimFlow(onClaimed);
   const pf = useAsync(() => (shown ? api.portfolio(shown) : Promise.resolve(null)), [shown]);
+  const pf2 = useAsync(() => (also ? api.portfolio(also).catch(() => null) : Promise.resolve(null)), [also]);
   // Fees are a second read: when it fails the holdings still show, without amounts to claim.
   const claims = useAsync(() => (shown ? api.claimsFor(shown) : Promise.resolve(null)), [shown]);
-  reloadRef.current = () => { pf.reload(); claims.reload(); };
+  const claims2 = useAsync(() => (also ? api.claimsFor(also).catch(() => null) : Promise.resolve(null)), [also]);
+  reloadRef.current = () => { pf.reload(); claims.reload(); if (also) { pf2.reload(); claims2.reload(); } };
 
   const [trade, setTrade] = useState<{ coin: Coin; side: Side } | null>(null);
   const [opening, setOpening] = useState<Opening>(null);
@@ -104,6 +102,11 @@ export default function Portfolio() {
   // Buy / Sell: the ticket needs the coin's full record, and a coin that cannot be traded here says why in its row.
   const onTrade = useCallback(async (mint: string, side: Side) => {
     if (busyRef.current) return;
+    // the trading wallet trades here: a locked one is unlocked first, an unlocked one is made the wallet that trades
+    if (tw.address) {
+      if (tw.status !== "unlocked") { openTradingWallet(); toast.info("Unlock your trading wallet to trade."); return; }
+      if (tradeWith !== "trading") setTradeWith("trading");
+    }
     busyRef.current = true;
     setOpening({ mint, side });
     try {
@@ -125,7 +128,7 @@ export default function Portfolio() {
       busyRef.current = false;
       if (alive.current) setOpening(null);
     }
-  }, [connection, toast]);
+  }, [connection, toast, tw.address, tw.status, tradeWith, setTradeWith]);
   const closeTrade = useCallback(() => { setTrade(null); refresh(); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
 
   // Refresh while the tab is visible, and at once when it comes back; never under an open ticket or a running claim.
@@ -138,7 +141,14 @@ export default function Portfolio() {
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", tick); };
   }, [shown, idle, refresh]);
 
-  const data = pf.data;
+  // The page's portfolio: the wallet shown, with the pairs the connected wallet launched added to its own.
+  const data = useMemo(() => {
+    const a = pf.data, b = also ? pf2.data : null;
+    if (!a || !b) return a;
+    const seen = new Set(a.launched.map((c) => c.mint));
+    return { ...a, launched: [...a.launched, ...b.launched.filter((c) => !seen.has(c.mint))], launchedTotal: a.launchedTotal + b.launchedTotal };
+  }, [pf.data, pf2.data, also]);
+  const claimCoins = useMemo(() => [...(claims.data?.coins ?? []), ...((also ? claims2.data?.coins : null) ?? [])], [claims.data, claims2.data, also]);
   // A stored reason is dropped when the portfolio is read again (and with the wallet shown): the buttons come back and
   // the next click checks the route again.
   useEffect(() => {
@@ -149,7 +159,7 @@ export default function Portfolio() {
   }, [data]);
   const [cards, setCards] = useState(CARDS_STEP);
   useEffect(() => { setCards(CARDS_STEP); }, [shown]);
-  const view = useMemo(() => buildPortfolio(data, claims.data?.coins ?? []), [data, claims.data]);
+  const view = useMemo(() => buildPortfolio(data, claimCoins), [data, claimCoins]);
   const toClaim = useMemo(() => claimableRows(view), [view]);
   const { totals, groups, holdings } = view;
   const [allHeld, setAllHeld] = useState(false);
@@ -169,28 +179,11 @@ export default function Portfolio() {
           <p className="pf-sub">{readOnly ? "The coins this wallet holds, and the pairs it launched." : "The coins you hold, and the pairs you launched."}</p>
           {asked && !preview && <p className="pf-note" role="status">"{short(asked, 6)}" is not a wallet address.{shown ? " Showing your own wallet." : ""}</p>}
           {shown && (
-            <div className="pf-wallet">
+            <p className="pf-note pf-trades" role="status">
               {readOnly
-                ? <span className="pf-note" role="status">Viewing <Addr a={shown} />, read only{which && <> · <Link to="/portfolio" className="pf-link" onClick={() => setPick(null)}>Back to my wallet</Link></>}</span>
-                : <span className="pf-note">{shown === own.trading ? "Trading wallet" : "Connected wallet"} <Addr a={shown} /></span>}
-              {!preview && own.trading && own.wallet && (
-                <span className="seg" role="group" aria-label="Wallet shown">
-                  <SlidingPill />
-                  <button type="button" aria-pressed={which === "trading"} title={own.trading} onClick={() => setPick("trading")}>Trading wallet</button>
-                  <button type="button" aria-pressed={which === "wallet"} title={own.wallet} onClick={() => setPick("wallet")}>Connected wallet</button>
-                </span>
-              )}
-            </div>
-          )}
-          {lockedShown ? (
-            <p className="pf-note pf-trades" role="status">
-              Unlock your trading wallet to trade from it.
-              <button type="button" className="btn sm ghost" onClick={() => openTradingWallet()}>Unlock</button>
-            </p>
-          ) : shown && tradeAddr && !tradesShown && (
-            <p className="pf-note pf-trades" role="status">
-              <span>Trades use your {tradeKind === "wallet" ? "connected wallet" : "trading wallet"} <Addr a={tradeAddr} />.</span>
-              {!readOnly && <button type="button" className="linkish pf-link" onClick={() => showOwn(tradeKind)}>Show that wallet</button>}
+                ? <span>Viewing <Addr a={shown} />, read only{mine && <> · <Link to="/portfolio" className="pf-link">Back to my wallet</Link></>}</span>
+                : <span>{isTrading ? "Trading wallet" : "Connected wallet"} <Addr a={shown} />{locked && " · locked"}</span>}
+              {locked && <button type="button" className="btn sm ghost" onClick={() => openTradingWallet()}>Unlock</button>}
             </p>
           )}
         </header>
@@ -365,16 +358,17 @@ function HoldingRow({ r, a }: { r: PfRow; a: Actions }) {
 /// 5-minute candles of a coin, shared by every row that asks and read again after a minute. null: none to show.
 const CANDLES_MS = 60_000;
 const candleCache = new Map<string, { at: number; p: Promise<Candles | null> }>();
-function useCandles(mint: string): Candles | null | undefined {
+function useCandles(mint: string, on = true): Candles | null | undefined {
   const [got, setGot] = useState<{ mint: string; c: Candles | null } | null>(null);
   const epoch = Math.floor(Date.now() / CANDLES_MS);
   useEffect(() => {
+    if (!on) return;
     let live = true;
     let e = candleCache.get(mint);
     if (!e || Date.now() - e.at >= CANDLES_MS) { e = { at: Date.now(), p: api.candles(mint, 300, "all").catch(() => null) }; candleCache.set(mint, e); }
     e.p.then((c) => { if (live) setGot({ mint, c }); });
     return () => { live = false; };
-  }, [mint, epoch]);
+  }, [mint, epoch, on]);
   return got && got.mint === mint ? got.c : undefined;
 }
 
@@ -391,16 +385,25 @@ function MiniLine({ candles }: { candles: Candle[] }) {
   return <svg className={`pf-line ${up ? "up" : "down"}`} width={LINE_W} height={LINE_H} viewBox={`0 0 ${LINE_W} ${LINE_H}`} aria-hidden="true"><path d={d} fill="none" strokeWidth="1.25" strokeLinejoin="round" strokeLinecap="round" /></svg>;
 }
 
-/// A holding's market at a glance: price, the line of the candles the index has, the change over them, and how
-/// lately and how often it trades.
+/// A coin's market at a glance: price, the line of the candles the index has, the change over them, and how lately
+/// and how often it trades. The candles are read once the row is near the screen, so a long page asks for few.
 function PriceCell({ r }: { r: PfRow }) {
   const c = r.coin;
-  const candles = useCandles(c.mint);
+  const box = useRef<HTMLDivElement>(null);
+  const [seen, setSeen] = useState(typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    const el = box.current;
+    if (seen || !el) return;
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) setSeen(true); }, { rootMargin: "300px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [seen]);
+  const candles = useCandles(c.mint, seen);
   const list = candles?.candles ?? [];
   const change = candleChange(list);
   const n24 = c.trades24h ?? 0;
   return (
-    <div className="pf-hold-px">
+    <div className="pf-hold-px" ref={box}>
       <span className="pf-px-main">
         <span className="sr-only">Price </span><b className="pf-num">{usd(c.priceUsd)}</b>
         <span className="pf-px-meta" title={c.lastTradeAt ? `Last trade ${ago(c.lastTradeAt)}${n24 > 0 ? `, ${count(n24)} trades in 24 h` : ""}` : undefined}>{c.lastTradeAt ? <>{ago(c.lastTradeAt)}{n24 > 0 && <> · {n24 >= 10_000 ? amount(n24) : count(n24)} tx 24h</>}</> : "no trade in 24 h"}</span>
@@ -452,6 +455,7 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
                   {r.feeShare && <SporeTag r={r} />}
                 </span>
                 <TradeButtons mint={c.mint} label={name} held={!!r.held} a={a} />
+                <PriceCell r={r} />
                 <div className="pf-row-foot">
                   <span className="pf-meta"><span className="pf-k">Mcap</span> <span className="pf-num">{usd(c.mcapUsd)}</span></span>
                   <span className="pf-meta"><span className="pf-k">24 h vol</span> <span className="pf-num">{usd(c.vol24Usd)}</span></span>
