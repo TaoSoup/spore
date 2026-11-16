@@ -100,10 +100,11 @@ export function blockText(b: TradeBlock, self: { symbol: string | null; mint: st
 // ---- loaders (module caches shared by every widget and button on the page)
 
 /// Ancestor records for routes, one light request per ancestor a minute, not one per opening. Migration state can
-/// change, so the cache is short; `forgetCoin` drops one (a pending coin being re-checked).
+/// change, so the cache is short; `forgetCoin` drops one (a pending coin being re-checked). The coin page's parent pill
+/// (components/coin/ParentPrice) reads its parent through it too, so the page asks for that record once a minute.
 const coinCache = new Map<string, { at: number; p: Promise<Coin> }>();
 const COIN_TTL_MS = 60_000;
-function coinCached(mint: string): Promise<Coin> {
+export function coinCached(mint: string): Promise<Coin> {
   const hit = coinCache.get(mint);
   if (hit && Date.now() - hit.at < COIN_TTL_MS) return hit.p;
   const p = api.coin(mint, { children: false, trades: false }).then((r) => r.coin);
@@ -112,6 +113,8 @@ function coinCached(mint: string): Promise<Coin> {
   return p;
 }
 export const forgetCoin = (mint: string) => { coinCache.delete(mint); };
+/// When the cached record of `mint` was asked for (ms), or null without one.
+export const coinCachedAt = (mint: string): number | null => coinCache.get(mint)?.at ?? null;
 
 /// A listed asset's SOL pool, or null: its canonical pump pool against WSOL exists, is pump-amm's, holds the asset as
 /// base and WSOL as quote, and is not mayhem-mode (multi_hop_swap refuses mayhem venues anywhere: pump-amm 6080). A

@@ -11,7 +11,9 @@ main:focus { outline: none; }
    incoming one rises 12 px and fades in over 320 ms. The rise animates top on a relative box, not a
    transform, so fixed children (the spore canvas, sticky bars, sheets) keep the viewport as their
    containing block. Reduced or paused motion: no animation (the global rules). */
-.route { position: relative; animation: route-in var(--dur-3) var(--ease-out) both; min-width: 0; }
+/* No fill mode: a filled opacity animation would keep .route a stacking context for good and trap the fixed bars
+   inside it (the phone Buy / Sell bar under the footer). The keyframes start at the from state with no delay. */
+.route { position: relative; animation: route-in var(--dur-3) var(--ease-out); min-width: 0; }
 .route.leaving { animation: route-out var(--dur-1) var(--ease) forwards; pointer-events: none; }
 @keyframes route-in { from { opacity: 0; top: 12px; } to { opacity: 1; top: 0; } }
 @keyframes route-out { from { opacity: 1; } to { opacity: 0; } }

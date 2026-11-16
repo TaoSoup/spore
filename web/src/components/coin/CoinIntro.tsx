@@ -1,7 +1,8 @@
 // Two ways the coin page explains itself in plain words. CoinIntro: one sentence built only from
 // API fields (what this coin is, where it sits in its tree, what its agent did). NewToSpore: a
-// dismissible strip for a visitor whose first page this session was a shared coin link.
-import { useState } from "react";
+// dismissible one-line note for a visitor whose first page this session was a shared coin link, shown
+// once: the next coin page (or a reload) opens straight on the chart.
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { AgentCoin, Coin, CoinRef } from "../../lib/api";
 import { age, count, usdCard } from "../../lib/format";
@@ -45,8 +46,10 @@ function shouldShow(): boolean {
 
 export function NewToSpore() {
   const [show, setShow] = useState(shouldShow);
+  // Seen once is enough: it stays for this view (until dismissed) and is remembered at once.
+  useEffect(() => { if (show) try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* storage blocked: shown again next time */ } }, [show]);
   if (!show) return null;
-  const dismiss = () => { setShow(false); try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* storage blocked: hidden for this view */ } };
+  const dismiss = () => setShow(false);
   return (
     <aside className="new-strip" aria-label="About Spore">
       <span className="new-strip-dot" aria-hidden="true" />

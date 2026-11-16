@@ -1,34 +1,119 @@
 /* Coin page, elevation layer (DESIGN-ELEVATE §8–9, lane coin). Loads after coin.css and overrides it:
-   the terminal header (identity left, price instrument right), the stats as one hairline instrument
-   row, the chart's legend, readout pill and glowing last price, the fee arc, the activity card's
+   the coin bar (identity and links, then the numbers in one hairline row), the chart sized to the
+   window, the chart's legend, readout pill and glowing last price, the fee arc, the activity card's
    sliding tabs, heat strip, tape and radial family tree, the glass trade panel with its route drawn as
    filaments, and the details as a definition grid. Tokens from styles.css only. coin.css is also
    loaded on other pages (Stat imports it), so every rule here is scoped to this page's own classes. */
 
-/* ---------- page rhythm */
+/* ---------- page rhythm. The page keeps the nav's column (--content) where the nav's edges are close to the page's;
+   on large screens (≥ 1680 px) it takes --content-wide, so the chart gets the room instead of the margins. */
+@media (min-width: 1680px) { .container.coin-page { max-width: var(--content-wide); } }
+/* the main column is a size container: the coin bar picks two lines or three from its width */
+@media (min-width: 981px) { .coin-page .coin-main { container: coin-main / inline-size; } }
+@media (min-width: 981px) { .container.coin-page { margin-top: -16px; } }
 .coin-page .coin-main { gap: 22px; }
 .coin-page .coin-grid { gap: 28px; }
 
-/* ---------- header: identity left, price instrument right */
-.coin-page .coin-head {
+/* ---------- coin bar, beside the logo: identity, the numbers, then CA and links with Share and Launch (three tight
+   rows); a main column of 1010 px or more fits it in two lines (identity | CA and links, then the numbers | Share and
+   Launch), each wrapping only what does not fit. Phones stack it (identity, the numbers as one sideways-scrolling
+   row, CA and links, the two actions). */
+.coin-bar {
   position: relative; isolation: isolate;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: "logo id price" "logo addr price" "logo act price";
-  column-gap: 22px; row-gap: 12px; padding: 6px 0 22px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "logo id id" "logo nums nums" "logo tools act";
+  column-gap: 16px; row-gap: 8px; align-items: center; padding: 0 0 14px;
   border-bottom: 1px solid var(--rule);
 }
-.coin-page .coin-head::after { content: ""; position: absolute; left: 0; bottom: -1px; width: 64px; height: 1px; background: linear-gradient(90deg, rgba(var(--tint), .9), transparent); }
-.coin-aura { position: absolute; z-index: -1; left: -140px; top: -150px; width: 560px; height: 380px; pointer-events: none; background: radial-gradient(closest-side, rgba(var(--tint), .13), rgba(var(--tint), .04) 55%, transparent); }
-.coin-logo-wrap { grid-area: logo; position: relative; width: 76px; height: 76px; align-self: start; }
-.coin-logo-wrap::before { content: ""; position: absolute; inset: -7px; border-radius: 27px; border: 1px dashed rgba(var(--tint), .32); pointer-events: none; }
-.coin-page .coin-head .coin-logo-wrap .coin-logo { width: 76px !important; height: 76px !important; border-radius: 22px; font-size: 28px !important; box-shadow: 0 0 0 1px rgba(var(--tint), .55), inset 0 1px 0 rgba(255,255,255,.12), 0 0 46px -6px rgba(var(--tint), .55), 0 18px 40px -18px rgba(0,0,0,.9); }
-.coin-page .coin-id { gap: 10px; }
-.coin-page .coin-title { gap: 12px; align-items: baseline; }
-.coin-page .coin-title h1 { font-size: clamp(30px, 3vw, 42px); letter-spacing: -0.035em; line-height: 1.05; }
-.coin-page .coin-title .ticker { font-size: 15px; color: var(--ink-2); letter-spacing: -0.01em; }
-.coin-page .coin-title .depth { align-self: center; }
-.coin-page .coin-addr { gap: 8px 16px; }
-.coin-page .coin-actions { justify-content: flex-start; }
+.cb-line { display: contents; }
+@container coin-main (min-width: 1010px) {
+  .coin-bar { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo l1" "logo l2"; }
+  .cb-line { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; min-width: 0; }
+  .cb-l1 { grid-area: l1; }
+  .cb-l2 { grid-area: l2; }
+  .coin-bar .coin-logo-wrap { align-self: center; }
+}
+.coin-bar::after { content: ""; position: absolute; left: 0; bottom: -1px; width: 64px; height: 1px; background: linear-gradient(90deg, rgba(var(--tint), .9), transparent); }
+.coin-aura { position: absolute; z-index: -1; left: -110px; top: -120px; width: 440px; height: 280px; pointer-events: none; background: radial-gradient(closest-side, rgba(var(--tint), .12), rgba(var(--tint), .035) 55%, transparent); }
+.coin-logo-wrap { grid-area: logo; position: relative; width: 44px; height: 44px; align-self: start; }
+.coin-logo-wrap::before { content: ""; position: absolute; inset: -4px; border-radius: 17px; border: 1px dashed rgba(var(--tint), .32); pointer-events: none; }
+.coin-page .coin-bar .coin-logo-wrap .coin-logo { width: 44px !important; height: 44px !important; border-radius: 13px; font-size: 17px !important; object-fit: cover; box-shadow: 0 0 0 1px rgba(var(--tint), .55), inset 0 1px 0 rgba(255,255,255,.12), 0 0 30px -6px rgba(var(--tint), .5), 0 12px 28px -14px rgba(0,0,0,.9); }
+.cb-id { grid-area: id; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; min-width: 0; max-width: 100%; }
+.cb-id h1 { min-width: 0; max-width: 100%; font-size: 24px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cb-id .ticker { flex: none; font-size: 13px; color: var(--ink-2); letter-spacing: -0.01em; }
+.cb-id .depth, .cb-id .chip { flex: none; }
+.cb-tools { grid-area: tools; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; min-width: 0; }
+.cb-nums { grid-area: nums; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; min-width: 0; }
+.cb-price { display: flex; align-items: center; gap: 8px; flex: none; }
+.cb-price .price-now { font-size: 26px; font-weight: 500; letter-spacing: -0.04em; line-height: 1.1; }
+.cb-price .delta { margin-left: 0; }
+.cb-stats { display: flex; flex-wrap: wrap; align-items: stretch; row-gap: 6px; margin: 0; min-width: 0; }
+.cb-stat { display: grid; gap: 1px; align-content: center; padding: 0 14px; border-left: 1px solid var(--rule); }
+.cb-stat dt { font-size: 11.5px; line-height: 1.3; color: var(--muted); white-space: nowrap; }
+.cb-stat dd { margin: 0; font-size: 15px; font-weight: 500; line-height: 1.3; color: var(--ink); white-space: nowrap; letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
+.cb-stat.hero dd { color: var(--accent); }
+.cb-stat .mc-sol { font-size: 12px; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+.cb-curve dd { display: flex; align-items: center; gap: 8px; }
+.cb-curve .progress { width: 64px; margin: 0; }
+.coin-bar .coin-actions { justify-content: flex-end; }
+.coin-bar .coin-actions .btn { height: 32px; }
+.coin-page .coin-bar .ca-pill { height: 30px; }
+.coin-bar .coin-links { gap: 4px 12px; }
+.sk-bar .cb-id, .sk-bar .cb-nums { min-height: 34px; }
+/* the coin's own 24 h line, beside its change (phones leave it out: the numbers row scrolls sideways as it is; a bar
+   it would make wrap drops it, BarNums) */
+.cb-spark { display: inline-flex; align-items: center; flex: none; margin-left: 2px; }
+.cb-spark .cspark { display: block; }
+
+/* "Priced in $PARENT": what the pool is paired with, a tight row of its own under the numbers (a child's liquidity is
+   its parent token, so the parent's price is the second number to read). A pill in the CA pill's language: logo,
+   ticker, USD price, 24 h change, a small 24 h line and its market cap; the whole pill opens the parent. */
+.coin-bar.has-parent { grid-template-areas: "logo id id" "logo nums nums" "logo parent parent" "logo tools act"; }
+/* two-line bars: the numbers get the second line to themselves and Share / Launch sit at the end of the pill's row */
+@container coin-main (min-width: 1010px) {
+  .coin-bar.has-parent { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "logo l1 l1" "logo nums nums" "logo parent act"; }
+  .coin-bar.has-parent .cb-l2 { display: contents; }
+}
+.cb-parent { grid-area: parent; display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; justify-self: start; }
+.pc-label { flex: none; font-size: 11.5px; line-height: 1.3; color: var(--muted); white-space: nowrap; }
+.pc { position: relative; display: inline-flex; align-items: center; gap: 10px; min-width: 0; height: 34px; padding: 0 12px 0 5px; border-radius: 999px; border: 1px solid var(--line); background: rgba(0,0,0,.32); box-shadow: inset 0 1px 0 rgba(255,255,255,.05); color: var(--ink); text-decoration: none; white-space: nowrap; transition: border-color var(--dur-2), background var(--dur-2), box-shadow var(--dur-2); }
+.pc:hover { border-color: var(--accent); background: rgba(var(--accent-rgb), .05); box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .25), 0 0 28px -10px rgba(var(--accent-rgb), .6); }
+.pc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pc:active { transform: scale(.985); }
+.coin-page .pc .pc-logo { flex: none; width: 22px !important; height: 22px !important; border-radius: 7px; font-size: 11px !important; object-fit: cover; }
+.pc-id { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.pc-k { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pc-k b { font-size: 13px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.pc-in { display: none; }
+.pc-v { display: inline-flex; align-items: center; gap: 7px; }
+.pc-price { font-size: 14px; font-weight: 500; letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums slashed-zero; }
+.pc .delta { margin-left: 0; padding: 0 6px; font-size: 11px; }
+.pc .delta small { font-size: 10.5px; }
+.pc-spark { display: inline-flex; align-items: center; flex: none; }
+.pc-spark .cspark { display: block; }
+.pc-mc { display: inline-flex; align-items: baseline; gap: 5px; padding-left: 10px; border-left: 1px solid var(--rule); }
+.pc-mck { font-size: 11px; color: var(--muted); }
+.pc-mc b { font-size: 13px; font-weight: 500; letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
+.pc-go { flex: none; font-size: 12px; color: var(--muted); transition: transform var(--dur-2), color var(--dur-2); }
+.pc:hover .pc-go { color: var(--accent); transform: translateX(2px); }
+@media (prefers-reduced-motion: reduce) { .pc, .pc-go { transition: none; } .pc:active { transform: none; } .pc:hover .pc-go { transform: none; } }
+.sk-bar .cb-parent { min-height: 34px; }
+/* tablets and phones: a full-width row, the market cap at its end */
+@media (max-width: 980px) {
+  .cb-parent { justify-self: stretch; }
+  .pc { flex: 1 1 auto; }
+  .pc-mc { margin-left: auto; }
+  .sk-bar .cb-parent .sk-pc { width: 100% !important; }
+}
+/* a narrow main column (windows of about 981-1180 px): Share keeps its icon (its name stays for screen readers) and
+   the market cap drops its SOL half, as the old phone header did, so the numbers and the tools keep a row each; below
+   900 px a coin on the curve (a fourth number) drops that half too */
+@container coin-main (max-width: 760px) {
+  .coin-bar .share-btn { padding: 0 11px; }
+  .coin-bar .share-label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .cb-stat .mc-sol { display: none; }
+}
+@container coin-main (max-width: 899px) { .cb-nums:has(.cb-curve) .mc-sol { display: none; } }
 
 /* CA pill: the icon morphs into a check and "copied" flashes inside it */
 .coin-page .ca-pill { position: relative; height: 34px; padding-right: 10px; gap: 9px; border-color: var(--line); background: rgba(0,0,0,.32); box-shadow: inset 0 1px 0 rgba(255,255,255,.05); overflow: hidden; transition: border-color var(--dur-2), background var(--dur-2), box-shadow var(--dur-2); }
@@ -47,14 +132,6 @@
 @media (prefers-reduced-motion: reduce) { .ca-pill.done .ca-copied { opacity: 1; } }
 html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
 
-/* the price instrument */
-.coin-page .coin-price { grid-area: price; align-self: start; gap: 6px; min-width: 240px; padding-left: 24px; border-left: 1px solid var(--rule); }
-.price-k { font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
-.coin-page .price-now { font-size: clamp(36px, 4vw, 56px); font-weight: 500; letter-spacing: -0.045em; line-height: .98; text-shadow: 0 0 40px rgba(var(--accent-rgb), .12); }
-.coin-page .price-sub { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
-.price-spark { width: 240px; height: 40px; margin: 2px 0 0; }
-.price-spark .cspark { display: block; width: 100%; height: 100%; overflow: visible; }
-
 /* sparklines (header, children rows) */
 .cspark { color: var(--ink-2); overflow: visible; }
 .cspark.up { color: var(--accent); }
@@ -63,24 +140,22 @@ html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
 .cspark .cspark-halo { animation: cspark-breathe 2.8s ease-in-out infinite alternate; transform-box: fill-box; transform-origin: center; }
 @keyframes cspark-breathe { from { opacity: .08; transform: scale(.7); } to { opacity: .28; transform: scale(1.15); } }
 
-/* ---------- intro sentence */
-.coin-page .coin-about { max-width: 72ch; gap: 8px; }
-.coin-page .coin-intro { font-size: 16px; line-height: 1.6; }
-
-/* ---------- stats: one instrument row separated by hairlines, no boxes */
-.coin-page .coin-stats { background: none; border: 0; border-radius: 0; box-shadow: none; clip-path: none; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
-.coin-page .coin-stats::before { display: none; }
-.coin-page .coin-stats .stat { padding: 18px 22px 16px; border-left-color: var(--rule); }
-.coin-page .coin-stats .stat:first-child { padding-left: 0; }
-.coin-page .coin-stats .stat b { font-size: clamp(22px, 2vw, 30px); letter-spacing: -0.035em; }
-.coin-page .coin-stats .stat.hero { background: none; }
-.coin-page .coin-stats .stat.hero b { font-size: clamp(22px, 2vw, 30px); }
-.coin-page .coin-stats .stat small { font-family: var(--mono); font-size: 11px; line-height: 1.45; }
+/* ---------- the info card: what the coin is, its family, status, marks, dominance (calm, no tiles) */
+.coin-info { display: grid; gap: 12px; align-content: start; padding: 16px 18px; min-width: 0; }
+.coin-page .coin-info .coin-about { max-width: 72ch; gap: 6px; }
+.coin-page .coin-info .coin-intro { font-size: var(--fs-sm); line-height: 1.55; }
+.coin-info .coin-desc p { font-size: var(--fs-xs); }
+.coin-info .coin-lineage { gap: 6px 10px; }
+.coin-facts { list-style: none; margin: 0; padding: 10px 0 0; display: grid; gap: 6px; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); line-height: 1.45; color: var(--ink-2); }
+.coin-facts a { color: var(--ink-2); }
+.coin-facts a:hover { color: var(--accent); }
+.fact-trades { display: grid; gap: 6px; }
+.coin-info .coin-status { gap: 6px 10px; }
 .coin-page .bs-bar { height: 3px; gap: 3px; background: none; }
 .coin-page .bs-bar i { border-radius: 2px; }
 .coin-page .bs-bar .b { background: linear-gradient(90deg, rgba(var(--buy-rgb), .5), var(--buy)); box-shadow: 0 0 8px rgba(var(--buy-rgb), .4); }
 .coin-page .bs-bar .s { background: linear-gradient(90deg, var(--sell), rgba(var(--sell-rgb), .5)); }
-.coin-page .coin-dom { margin-top: -12px; padding: 0; }
+.coin-page .coin-dom { margin: 0; padding: 10px 0 0; border-top: 1px solid var(--line-soft); }
 .coin-page .coin-dom .dom-bar { background: rgba(255,255,255,.06); }
 .coin-page .coin-dom .dom-bar i { background: linear-gradient(90deg, var(--teal), var(--accent)); }
 
@@ -99,6 +174,22 @@ html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
 .chart-stage { border-radius: 10px; }
 .chart-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .coin-page .chart-box { height: 340px; }
+/* Desktop: the chart card fills the window under the bar and leaves the Activity tabs' head in view (84 px: the gap,
+   the 48 px tab row and a margin), up to 680 px; the plot takes what the head, legend and foot leave. The floor is on
+   the plot (280 px, near the old fixed 340 px box), not the card: on a short or narrow window (a wrapped head) the card
+   grows past the formula and the tabs fall just below the fold, rather than the plot thinning to a strip.
+   --chart-top is the chart's offset in the document (Coin.tsx useCoinLayout); the fallback is the usual one (a three-row bar under the strip). */
+@media (min-width: 981px) {
+  .coin-page { --chart-h: min(calc(100vh - var(--chart-top, 278px) - 84px), 680px); }
+  .coin-page .coin-chart > .chart:not(.is-thin) { min-height: var(--chart-h); display: flex; flex-direction: column; }
+  .coin-page .coin-chart > .chart:not(.is-thin) > * { flex: none; }
+  /* the box fills the stage absolutely: the stage's flexed height is not a definite one for a percentage */
+  .coin-page .coin-chart > .chart:not(.is-thin) > .chart-stage { flex: 1 1 0; min-height: 280px; }
+  .coin-page .coin-chart > .chart:not(.is-thin) .chart-box { position: absolute; inset: 0; height: auto; }
+}
+.coin-page .sk-chart { display: block; height: 372px !important; }
+/* the loaded card's least height: head, legend, the 280 px plot, foot and the padding */
+@media (min-width: 981px) { .coin-page .sk-chart { height: max(var(--chart-h), 428px) !important; } }
 .chart-dot { position: absolute; left: 0; top: 0; z-index: 3; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; pointer-events: none; background: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .18), 0 0 16px 2px rgba(var(--accent-rgb), .55); transition: opacity var(--dur-2); }
 .chart-dot[data-dir="down"] { background: var(--bad); box-shadow: 0 0 0 3px rgba(var(--sell-rgb), .18), 0 0 16px 2px rgba(var(--sell-rgb), .5); }
 .chart-dot::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 1px solid currentColor; color: var(--accent); opacity: 0; }
@@ -284,47 +375,80 @@ html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
 .trade .quote-main b.violet { color: var(--violet-2); }
 .trade .quote b { font-family: var(--mono); }
 .trade .quote-line { padding: 10px 12px; border-radius: 12px; border: 1px dashed var(--line-soft); }
+.trade-foot > span { min-width: 0; }
+
+/* the coin page's side card (TradeWidget compact): the route as one line that opens the drawing, tighter rhythm */
+.coin-side .card.trade.compact { padding: 14px 16px 12px; gap: 10px; }
+.trade.compact .trade-tabs button { height: 34px; }
+.trade.compact .amount .input { height: 52px; font-size: 24px; }
+.trade.compact .quick > button { height: 30px; }
+.route-compact { gap: 0; }
+.route-sum { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 30px; padding: 4px 10px; border-radius: 10px; border: 1px solid var(--line-soft); background: rgba(0,0,0,.18); color: var(--ink-2); font: inherit; text-align: left; transition: border-color var(--dur-1), background var(--dur-1); }
+.route-sum:hover { border-color: var(--line-2); background: var(--glass); }
+.route-sum .card-label { flex: none; }
+.route-path { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--ink); }
+.route-sum .route-hops { flex: none; }
+.route-caret { flex: none; margin-left: auto; font-size: 11px; color: var(--muted); transition: transform var(--dur-2) var(--ease); }
+.route-compact.open .route-caret { transform: rotate(180deg); }
+.route-more { display: grid; gap: 4px; padding-top: 10px; }
+.route-more[hidden] { display: none; }
+.route-more .route-note .route-hops { white-space: nowrap; }
 
 /* phone bar + sheet: glass */
 @media (max-width: 980px) {
-  .coin-page .coin-head { grid-template-areas: "logo id price" "logo addr price" "logo act price"; }
   /* The sheet sits over the page: an opaque surface, so nothing reads through where blur is missing. */
   .trade-sheet .card.trade { padding-top: 22px; background: radial-gradient(120% 38% at 50% 0%, rgba(var(--accent-rgb), .07), transparent 62%), linear-gradient(180deg, var(--bg-2), var(--bg-1) 58%); }
-  .coin-page .coin-stats .stat:first-child { padding-left: 0; }
-}
-
-/* tablet: the price sits under the identity once the row gets tight */
-@media (max-width: 860px) and (min-width: 641px) {
-  .coin-page .coin-head { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo id" "logo addr" "logo act" "price price"; }
-  .coin-page .coin-price { min-width: 0; padding: 16px 0 0; border-left: 0; border-top: 1px solid var(--rule); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 320px); align-items: end; gap: 6px 24px; justify-items: start; text-align: left; }
-  .coin-page .price-k { grid-column: 1 / -1; }
-  .coin-page .price-row { grid-column: 1; }
-  .coin-page .price-sub { grid-column: 1; justify-content: flex-start; }
-  .price-spark { grid-column: 2; grid-row: 2 / span 2; justify-self: stretch; width: auto; height: 64px; margin: 0; }
-  .coin-page .last-trade { grid-column: 1 / -1; }
 }
 
 /* phones */
 @media (max-width: 640px) {
-  .coin-page .coin-head { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo title" "tags tags" "price price" "addr addr" "act act"; column-gap: 14px; row-gap: 10px; padding-bottom: 18px; }
-  .coin-logo-wrap { width: 52px; height: 52px; }
-  .coin-logo-wrap::before { inset: -5px; border-radius: 20px; }
-  .coin-page .coin-head .coin-logo-wrap .coin-logo { width: 52px !important; height: 52px !important; border-radius: 16px; font-size: 20px !important; }
-  .coin-page .coin-title h1 { font-size: 26px; }
-  .coin-page .coin-price { min-width: 0; padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--rule); display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 4px 12px; justify-items: start; }
-  .coin-page .price-k { grid-column: 1 / -1; }
-  .coin-page .price-row { grid-column: 1; }
-  .coin-page .price-sub { grid-column: 1 / -1; display: flex; justify-content: flex-start; }
-  .coin-page .price-now { font-size: 38px; }
-  .price-spark { grid-column: 2; grid-row: 2; width: 112px; height: 34px; margin: 0; }
-  .coin-page .last-trade { grid-column: 1 / -1; }
-  .coin-aura { left: -120px; top: -120px; width: 420px; height: 300px; }
-
-  .coin-page .coin-stats { grid-template-columns: 1fr 1fr; }
-  .coin-page .coin-stats .stat { padding: 14px 14px 12px; }
-  .coin-page .coin-stats .stat:nth-child(odd) { padding-left: 0; border-left: 0; }
-  .coin-page .coin-stats .stat:nth-child(n + 3) { border-top: 1px solid var(--rule); }
-  .coin-page .coin-stats .stat b, .coin-page .coin-stats .stat.hero b { font-size: 22px; }
+  .coin-bar { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo id" "nums nums" "tools tools" "act act"; column-gap: 12px; row-gap: 10px; }
+  .coin-bar.has-parent { grid-template-areas: "logo id" "nums nums" "parent parent" "tools tools" "act act"; }
+  .cb-spark { display: none; }
+  /* the parent pill in two lines, its label inside it (the bar has no room for one beside it) */
+  .pc-label { display: none; }
+  .pc-in { display: inline; }
+  .pc { height: auto; min-height: 46px; padding: 5px 12px 5px 7px; border-radius: 14px; gap: 10px; }
+  .coin-page .pc .pc-logo { width: 28px !important; height: 28px !important; border-radius: 9px; }
+  .pc-id { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .pc-v { gap: 6px; }
+  .pc-id { flex: none; }
+  .pc .delta small { display: none; }
+  .pc-spark { margin-left: auto; }
+  .pc-spark .cspark { width: 72px; height: auto; }
+  .pc-spark + .pc-mc { margin-left: 0; }
+  .pc-mc { display: grid; justify-items: end; gap: 1px; padding-left: 10px; }
+  .pc-go { display: none; }
+  /* the pill's width decides whether its 24 h line fits beside the price, change and market cap; the change keeps
+     its basis in its title (the bar's own change names it) */
+  .cb-parent { container: pc / inline-size; }
+  .sk-bar .cb-parent { min-height: 54px; }
+  .sk-bar .cb-parent .sk-pc { height: 54px !important; border-radius: 14px !important; }
+  /* the loading bar's rows at their usual loaded heights here (a name with its chips on two lines, the CA pill over
+     two lines of links, the two 40 px buttons), so the bar keeps its height when the coin lands */
+  .sk-bar .cb-id { min-height: 50px; }
+  .sk-bar .cb-tools { min-height: 80px; }
+  .sk-bar .coin-actions { min-height: 44px; }
+  .sk-bar .coin-actions .sk { height: 40px !important; }
+  .cb-id { gap: 2px 8px; }
+  .cb-id h1 { font-size: 22px; }
+  .cb-tools { justify-content: flex-start; gap: 6px 12px; }
+  /* the numbers: one row that scrolls sideways inside the page, never wider than it */
+  .cb-nums { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; gap: 14px; padding-bottom: 2px; }
+  .cb-nums::-webkit-scrollbar { display: none; }
+  /* a soft edge on the right says the row goes on */
+  .cb-nums { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); padding-right: 32px; }
+  /* as wide as its stats, so the row's end padding lands after the last one, clear of the fade */
+  .cb-stats { flex-wrap: nowrap; flex: none; }
+  .cb-stat { padding: 0 12px; }
+  .cb-stat:last-child { padding-right: 0; }
+  .cb-price .price-now { font-size: 24px; }
+  .coin-bar .coin-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .coin-bar .coin-actions .share, .coin-bar .coin-actions .share-btn { width: 100%; }
+  .coin-bar .coin-actions .btn { height: 40px; width: 100%; justify-content: center; }
+  .coin-bar .coin-actions .share-pop { left: 0; right: auto; }
+  .coin-aura { left: -100px; top: -100px; width: 360px; height: 240px; }
+  .coin-info { padding: 14px 16px; }
 
   .coin-page .chart { padding: 14px 14px 10px; }
   .coin-page .chart-box { height: 260px; }
@@ -351,10 +475,11 @@ html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
   .dcell.wide { grid-column: auto; }
   .dcell { padding-right: 0; }
 }
+@container pc (max-width: 329px) { .pc-spark { display: none; } }
 @media (max-width: 360px) {
+  .pc { gap: 8px; padding-right: 10px; }
   .coin-page .kid-row { grid-template-columns: 32px minmax(0, 1fr) 64px 40px; }
-  .price-spark { width: 84px; }
-  .coin-page .price-now { font-size: 32px; }
+  .cb-price .price-now { font-size: 22px; }
 }
 .rt-label.self { fill: var(--accent); font-weight: 600; }
 

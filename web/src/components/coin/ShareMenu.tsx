@@ -62,7 +62,7 @@ export default function ShareMenu({ coin: base, current, className = "" }: { coi
   return (
     <div className={`share ${className}`} ref={box}>
       <button ref={btn} type="button" className="btn ghost sm share-btn" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} onClick={toggle}>
-        {shareIcon}Share<span className="caret" aria-hidden="true">▾</span>
+        {shareIcon}<span className="share-label">Share</span><span className="caret" aria-hidden="true">▾</span>
       </button>
       {open && (
         <div className="share-pop" id={id} role="menu" aria-label={`Share ${sym(coin)}`} onKeyDown={onMenuKey}>

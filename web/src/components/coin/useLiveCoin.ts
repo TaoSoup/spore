@@ -27,6 +27,10 @@ export type LiveCoinState = {
   tick: PriceTick | null;
   /// bumps once per new child so the Children count pulses
   kidPulse: number;
+  /// The quote token's USD price as the newest trade that carried both prices values it (its USD price over its price
+  /// in that token), and when that trade was applied (ms): the parent card weighs it against the parent's own record.
+  /// null until such a trade arrives over the stream.
+  quoteUsd: { usd: number; at: number } | null;
 };
 
 const priceOf = (c: Coin) => c.priceUsd ?? c.priceQuote;
@@ -50,7 +54,7 @@ export class LiveCoin {
   constructor(page: CoinPage) {
     this.mint = page.coin.mint;
     this.lastSlot = page.trades.reduce((m, t) => Math.max(m, t.slot), 0);
-    this.state = { coin: page.coin, trades: page.trades.slice(0, MAX_TRADES), children: page.children, fresh: new Set(), newKids: new Map(), tick: null, kidPulse: 0 };
+    this.state = { coin: page.coin, trades: page.trades.slice(0, MAX_TRADES), children: page.children, fresh: new Set(), newKids: new Map(), tick: null, kidPulse: 0, quoteUsd: null };
   }
 
   get = () => this.state;
@@ -98,6 +102,7 @@ export class LiveCoin {
     let coin = s.coin;
     let tape = s.trades;
     let fresh: Set<string> | null = null;
+    let quoteUsd = s.quoteUsd;
     const before = priceOf(coin);
     for (const t of trades) {
       if (tape.some((x) => x.sig === t.sig)) continue;
@@ -112,6 +117,7 @@ export class LiveCoin {
         const priceUsd = t.priceUsd ?? coin.priceUsd;
         const priceSol = priceUsd != null && this.solUsd ? priceUsd / this.solUsd : coin.priceSol;
         coin = { ...coin, priceQuote: t.priceQuote, priceUsd, priceSol, mcapUsd: priceUsd != null ? priceUsd * supply : coin.mcapUsd, mcapSol: priceSol != null ? priceSol * supply : coin.mcapSol };
+        if (t.priceUsd != null && t.priceUsd > 0 && t.priceQuote > 0) quoteUsd = { usd: t.priceUsd / t.priceQuote, at: Date.now() };
       }
     }
     if (tape !== s.trades) tape = [...tape].sort((a, b) => b.slot - a.slot || b.time - a.time).slice(0, MAX_TRADES);
@@ -131,7 +137,7 @@ export class LiveCoin {
     let tick = s.tick;
     const after = priceOf(coin);
     if (before != null && after != null && after !== before && (!tick || Date.now() - tick.at >= TICK_GAP_MS)) tick = { id: ++this.tickId, dir: after > before ? "up" : "down", at: Date.now() };
-    this.state = { coin, trades: tape, children, fresh: fresh ?? s.fresh, newKids: newKids ?? s.newKids, tick, kidPulse };
+    this.state = { coin, trades: tape, children, fresh: fresh ?? s.fresh, newKids: newKids ?? s.newKids, tick, kidPulse, quoteUsd };
     if (fresh) this.later(FRESH_MS, () => { const f = new Set(this.state.fresh); trades.forEach((t) => f.delete(t.sig)); return { fresh: f }; });
     if (newKids) this.later(NEW_CHILD_MS + 50, () => { const m = new Map(this.state.newKids); for (const [k, at] of m) if (Date.now() - at >= NEW_CHILD_MS) m.delete(k); return { newKids: m }; });
     this.emit();

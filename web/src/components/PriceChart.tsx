@@ -103,8 +103,10 @@ function ChartDrawing({ kind }: { kind: "loading" | "empty" }) {
 /// `onBuy`: the empty state's "Buy" (the page focuses the trade widget, or opens the phone sheet).
 /// `live`: the page's live store; the header then reads the same live price and market cap as the
 /// price block above it (the OHLC legend keeps the candle's own close).
-export default function PriceChart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live?: LiveCoin | null }) {
-  return <ChartBoundary resetKey={coin.mint}><Chart coin={coin} onBuy={onBuy} live={live ?? null} /></ChartBoundary>;
+/// `aside`: a live line for the foot, beside the live dot (the coin page's last trade); shown in every state.
+/// The plot takes the height its card is given (the coin page sizes the card to the window) or the CSS default.
+export default function PriceChart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; live?: LiveCoin | null; aside?: ReactNode }) {
+  return <ChartBoundary resetKey={coin.mint}><Chart coin={coin} onBuy={onBuy} live={live ?? null} aside={aside} /></ChartBoundary>;
 }
 
 const UNITS: { k: Unit; label: string }[] = [{ k: "mcap", label: "MC" }, { k: "usd", label: "Price" }];
@@ -113,7 +115,7 @@ const noStore = () => () => {};
 /// A tick label within this many px of the last-value label on the axis is left blank (the label covers it).
 const LABEL_CLEAR = 15;
 
-function Chart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live: LiveCoin | null }) {
+function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; live: LiveCoin | null; aside?: ReactNode }) {
   const [res, setRes] = useLocalPref<number>("chart-res", 300);
   // Older stored values ("usd", "quote") still mean what they meant.
   const [unitPref, setUnitPref] = useLocalPref<string>("chart-unit", "mcap");
@@ -178,6 +180,8 @@ function Chart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live: Li
     lastY.current = y;
     h.chart.applyOptions({ localization: { priceFormatter: fmtRef.current, tickmarksPriceFormatter: tickFmt } });
   }, [tickFmt]);
+  const ticksRef = useRef(refreshTicks);
+  ticksRef.current = refreshTicks;
 
   /// The glowing last price: an HTML dot on the last close, moved whenever the view or the data does.
   const placeDot = useCallback(() => {
@@ -220,8 +224,19 @@ function Chart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live: Li
     const later = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; placeDot(); }); };
     chart.timeScale().subscribeVisibleLogicalRangeChange(later);
     chart.timeScale().subscribeSizeChange(later);
+    // The time scale reports width changes only. The box's height follows the window on the coin page, and the price
+    // coordinates move with it: after autoSize's own resize and the price scale's relayout (the next frames, then a
+    // settle), place the dot again and re-check the tick labels near it.
+    let raf2 = 0, settle = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf2);
+      raf2 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(() => { raf2 = 0; placeDot(); ticksRef.current(false); }); });
+      clearTimeout(settle);
+      settle = window.setTimeout(() => { placeDot(); ticksRef.current(false); }, 160);
+    });
+    ro.observe(el);
     handles.current = { chart, candles, vol, area };
-    return () => { cancelAnimationFrame(raf); chart.remove(); handles.current = null; };
+    return () => { cancelAnimationFrame(raf); cancelAnimationFrame(raf2); clearTimeout(settle); ro.disconnect(); chart.remove(); handles.current = null; };
   }, [placeDot]);
 
   // Full (re)load: resolution or unit changed, or the server series was re-read.
@@ -319,7 +334,8 @@ function Chart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live: Li
           {/* The last candle can be hours old while the header shows today's price: say when it closed.
               Without a live price the header is the last candle's close, and says so. */}
           {!hover && last && liveValue == null && <span className="chart-when">last candle{Date.now() / 1000 - (last.t + res) > 3_600 ? ` · ${age(last.t + res)} ago` : ""}</span>}
-          {!hover && last && liveValue != null && Date.now() / 1000 - (last.t + res) > 3_600 && <span className="chart-when">last trade {age(last.t + res)} ago</span>}
+          {/* The coin page's foot aside says when the last trade was (from the trade itself): said once per card. */}
+          {!hover && !aside && last && liveValue != null && Date.now() / 1000 - (last.t + res) > 3_600 && <span className="chart-when">last trade {age(last.t + res)} ago</span>}
         </div>
         <div className="chart-ctl">
           <span className="seg" role="group" aria-label="Chart unit">
@@ -360,10 +376,10 @@ function Chart({ coin, onBuy, live }: { coin: Coin; onBuy?: () => void; live: Li
           </div>
         )}
       </div>
-      {!overlay && !thin && (
+      {(aside || (!overlay && !thin)) && (
         <div className="chart-foot">
-          <span>{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>
-          <LiveDot />
+          {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
+          <span className="chart-foot-live">{aside}<LiveDot /></span>
         </div>
       )}
     </section>

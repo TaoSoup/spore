@@ -1,5 +1,5 @@
-/* Coin page (coin lane, redesign 2026-10-20): header, stats, chart, creator fees, activity, details,
-   trade widget, phone bar and sheet. It loads after styles.css and overrides that file's "coin page",
+/* Coin page (coin lane, redesign 2026-10-20; re-laid out 2026-11-16): coin bar, chart, activity, creator
+   fees, details, trade widget, info card, phone bar and sheet. It loads after styles.css and overrides that file's "coin page",
    "chart" and "trade widget" blocks, using the redesign tokens only. Kept for other owners:
    .delta (Stat renders it) and the .confirm* class names (launch's useClaimFlow uses them). */
 
@@ -30,14 +30,21 @@
 .coin-page { gap: var(--s4); }
 .coin-grid { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 360px); gap: var(--s5); align-items: start; }
 .coin-main { display: grid; gap: 20px; min-width: 0; }
-.coin-side { display: grid; gap: var(--s3); position: sticky; top: calc(var(--nav-h) + 16px); align-self: start; }
-@media (max-height: 720px) { .coin-side { position: static; } }
+/* Sticky 16 px below the nav, always. When the trade and info cards are taller than the window the column scrolls
+   inside itself, so the trade card's top (Buy / Sell, the route, the instant row) never slides under the nav and
+   never moves while the ticket grows (a quote, the route opened). The padding (and the matching negative margin)
+   gives the cards' shadows and focus rings room inside the scroller; the thin bar's gutter is reserved so the cards
+   do not narrow when the column starts to scroll. */
+.coin-side { display: grid; align-content: start; gap: var(--s3); position: sticky; top: calc(var(--nav-h) + 12px); align-self: start; min-width: 0;
+  max-height: calc(100vh - var(--nav-h) - 12px); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-soft) transparent; scrollbar-gutter: stable;
+  padding: 4px 2px 16px 12px; margin: -4px -12px -16px; }
+.coin-ticket { display: grid; gap: var(--s3); min-width: 0; }
 .zero { color: var(--faint); }
 .coin-lock:empty, .coin-about:empty { display: none; }
 .card-label { margin: 0; font-family: var(--mono); font-size: var(--fs-2xs); font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 
-/* ---------- "New to Spore?" strip (first visit from a shared link) */
-.new-strip { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 4px 4px 4px 14px; border-radius: 999px; border: 1px solid rgba(var(--violet-rgb), .35); background: linear-gradient(90deg, var(--violet-soft), rgba(var(--accent-rgb), .05) 70%, transparent); font-size: var(--fs-sm); color: var(--ink-2); line-height: 1.4; }
+/* ---------- "New to Spore?" note (first visit from a shared link; shown once): one quiet line */
+.new-strip { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 1px 2px 1px 14px; border-radius: 999px; border: 1px solid rgba(var(--violet-rgb), .35); background: linear-gradient(90deg, var(--violet-soft), rgba(var(--accent-rgb), .05) 70%, transparent); font-size: var(--fs-xs); color: var(--ink-2); line-height: 1.4; }
 .new-strip p { flex: 1; min-width: 0; }
 .new-strip b { color: var(--ink); font-weight: 600; }
 .new-strip a { color: var(--accent); font-weight: 500; white-space: nowrap; }
@@ -46,16 +53,7 @@
 .new-strip-x:hover { color: var(--ink); background: var(--glass-2); }
 @media (pointer: coarse) { .new-strip-x { width: 44px; height: 44px; margin: -2px 0; } }
 
-/* ---------- header: identity left, price right */
-.coin-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "logo id price" "logo addr act"; column-gap: 20px; row-gap: 8px; align-items: start; }
-.coin-head .coin-logo { grid-area: logo; width: 64px; height: 64px; border-radius: 18px; object-fit: cover; box-shadow: 0 0 0 1px var(--line-2), 0 14px 34px -14px rgba(var(--accent-rgb), .45); }
-.coin-id { grid-area: id; display: grid; gap: 7px; min-width: 0; }
-.coin-title { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; min-width: 0; }
-.coin-title h1 { font-size: 28px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-wrap: nowrap; }
-.coin-title .ticker { font-size: 15px; color: var(--muted); flex: none; }
-.coin-title .depth { flex: none; }
-.coin-tags { display: contents; }
-.sk-head .sk-id { grid-area: id; }
+/* ---------- coin bar (the layout is in coin/terminal.css) and the info card's rows */
 .coin-lineage { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; min-width: 0; }
 .coin-status { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; }
 .chip.neutral { color: var(--ink-2); border-color: var(--line-soft); background: var(--glass); }
@@ -63,7 +61,6 @@
 .spore-mark.pending { color: var(--warn); }
 .agent-anchor, .agent-anchor:hover { text-decoration: none; }
 .agent-anchor .chip { cursor: pointer; }
-.coin-addr { grid-area: addr; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; min-width: 0; }
 .ca-pill { display: inline-flex; align-items: center; gap: 8px; height: var(--h-sm); padding: 0 12px 0 4px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--surface-sunken); color: var(--ink); font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: -.01em; transition: border-color var(--dur-1), background var(--dur-1); }
 .ca-pill .ca-k { display: grid; place-items: center; height: 24px; padding: 0 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; letter-spacing: .08em; }
 .ca-pill svg { color: var(--muted); flex: none; }
@@ -74,14 +71,12 @@
 .coin-links a { color: var(--ink-2); white-space: nowrap; }
 .coin-links a:hover { color: var(--accent); }
 
-.coin-price { grid-area: price; display: grid; justify-items: end; gap: 3px; text-align: right; min-width: 0; }
-.price-row { display: flex; align-items: center; gap: 6px; }
-.price-now { padding: 0 4px; margin: 0 -4px; border-radius: 8px; font-size: var(--num-xl); font-weight: 600; letter-spacing: -0.03em; line-height: 1.05; color: var(--ink); font-variant-numeric: tabular-nums slashed-zero; white-space: nowrap; }
-.price-sub { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
-.price-sub .delta { margin-left: 0; }
+.price-now { padding: 0 4px; margin: 0 -4px; border-radius: 8px; font-weight: 600; letter-spacing: -0.03em; line-height: 1.05; color: var(--ink); font-variant-numeric: tabular-nums slashed-zero; white-space: nowrap; }
 .d-short { display: none; }
-.price-mc { font-size: var(--fs-sm); color: var(--muted); white-space: nowrap; }
-.last-trade { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-2); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.last-trade { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-2); white-space: nowrap; max-width: 100%; min-width: 0; }
+/* what and who give way (an ellipsis); when it was always shows */
+.last-trade .lt-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.last-trade .lt-ago { flex: none; }
 a.last-trade:hover { color: var(--ink); text-decoration: none; }
 .last-trade i { width: 7px; height: 7px; border-radius: 50%; background: var(--buy); flex: none; }
 .last-trade.sell i { background: var(--sell); }
@@ -94,6 +89,9 @@ a.last-trade:hover { color: var(--ink); text-decoration: none; }
 .tick-arrow { font-size: 9px; line-height: 1; }
 .tick-arrow.up { color: var(--good); } .tick-arrow.down { color: var(--bad); }
 .coin-actions { grid-area: act; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.chart-foot-live { display: inline-flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; max-width: 100%; margin-left: auto; }
+.chart-foot-live .live, .chart-foot-live > :last-child { flex: none; }
+.chart-foot-live .last-trade { font-size: 11px; }
 
 /* share menu */
 .share { position: relative; }
@@ -126,16 +124,7 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 .family-strip.lineage { height: auto; padding: 0; border: 0; background: none; gap: 12px; }
 .family-strip.lineage a { color: var(--accent); }
 
-/* ---------- stats: four tiles */
-.coin-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.coin-stats .stat { padding: 16px 18px 14px; gap: 5px; }
-.coin-stats .stat > span:not(.stat-icon) { padding-right: 0; }
-.coin-stats .stat b { font-family: var(--mono); font-weight: 500; font-size: clamp(20px, 1.9vw, var(--num-lg)); letter-spacing: -0.02em; font-variant-numeric: tabular-nums slashed-zero; }
-.coin-stats .stat.hero b { font-size: clamp(22px, 2.1vw, var(--num-lg)); }
-.coin-stats .stat small { display: grid; gap: 6px; white-space: normal; color: var(--muted); }
-.coin-stats .stat .progress { margin-top: 2px; }
-/* a root's dominance on the map (DominanceLine, inline): one line tucked under the stats */
-.coin-dom { margin-top: -8px; padding: 0 4px; }
+/* a root's dominance on the map (DominanceLine, inline): the info card's last line */
 .coin-dom-map { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; }
 .coin-dom-map:hover { text-decoration: underline; }
 .bs-bar { display: flex; gap: 2px; height: 4px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.06); }
@@ -143,7 +132,8 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 .bs-bar .b { background: var(--buy); } .bs-bar .s { background: var(--sell); }
 
 /* ---------- price chart */
-.chart { padding: 14px 16px 10px; display: grid; gap: 8px; }
+.chart { padding: 14px 16px 10px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.chart > * { min-width: 0; }
 .chart .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .chart-legend { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .chart-legend .delta { margin-left: 0; align-self: center; }
@@ -162,7 +152,9 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 .chart-sk { height: 100% !important; }
 .chart-empty { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; min-height: 96px; padding: 14px 16px; border-radius: var(--radius); border: 1px dashed var(--line-2); background: var(--surface-sunken); }
 .chart-empty b { font-size: var(--fs-base); font-weight: 500; color: var(--ink-2); }
-.chart-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.chart-foot { display: flex; justify-content: space-between; align-items: center; gap: 4px 12px; flex-wrap: wrap; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+/* The caption gives way first (it wraps the live line to its own row); the live line keeps its time. */
+.chart-foot-k { flex: 1 1 auto; min-width: 0; }
 .chart-foot::before { content: none; }
 
 /* ---------- money row: creator fees + the agent */
@@ -406,10 +398,10 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
   .coin-main, .coin-side, .coin-money { display: contents; }
   /* Flex items default to min-width: auto; a wide table or tab row must scroll inside its card, not widen it. */
   .coin-grid > *, .coin-main > *, .coin-money > * { min-width: 0; }
-  .coin-head, .coin-about { order: 1; }
-  .coin-stats, .coin-dom { order: 2; }
-  .coin-chart { order: 3; }
-  .coin-activity { order: 4; }
+  .coin-bar { order: 1; }
+  .coin-chart { order: 2; }
+  .coin-activity { order: 3; }
+  .coin-info { order: 4; }
   .coin-fees, .coin-lock { order: 5; }
   .coin-money > #agent { order: 6; }
   .coin-details { order: 7; }
@@ -433,42 +425,21 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
   .trade-sheet .trade::before { display: none; }
   .trade-sheet .trade::after { content: ""; position: absolute; top: 8px; left: 50%; width: 40px; height: 4px; border-radius: 2px; background: var(--line-2); transform: translateX(-50%); }
 }
-@media (max-width: 1180px) and (min-width: 981px) { .coin-head { column-gap: 16px; } .coin-title h1 { font-size: 24px; } }
 
-/* phones (≤ 640 px): the header stacks — identity, price, CA, two actions */
+/* phones (≤ 640 px): the bar stacks — identity, the numbers, CA and links, two actions */
 @media (max-width: 640px) {
   .new-strip { border-radius: 14px; align-items: flex-start; padding: 8px 4px 8px 12px; }
   .new-strip-dot { margin-top: 6px; }
-  /* ≤ 260 px: the name sits beside the logo, every other row spans the width. */
-  .coin-head { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "logo title" "tags tags" "price price" "addr addr" "act act"; column-gap: 12px; row-gap: 6px; }
   .coin-lineage { gap: 6px 8px; }
   .family-strip .fam-tree, .family-strip .faces { display: none; }
   .family-strip { padding-left: 10px; }
-  /* The Logo sizes itself inline (64); phones want 48. */
-  .coin-head .coin-logo { width: 48px !important; height: 48px !important; border-radius: 14px; font-size: 18px !important; }
-  .coin-id { display: contents; }
-  .sk-head .sk-id { grid-area: title; }
-  .coin-title { grid-area: title; align-self: center; gap: 2px 8px; flex-wrap: wrap; }
-  .coin-tags { grid-area: tags; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
-  .coin-tags > .coin-lineage, .coin-tags > .coin-status { display: contents; }
-  .coin-title h1 { font-size: 22px; max-width: 100%; }
-  .coin-title .ticker { font-size: 13px; }
-  .coin-price { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; text-align: left; }
-  .price-sub { display: contents; }
-  .price-now { font-size: 30px; }
-  .mc-sol, .lt-who, .d-long { display: none; }
+  .lt-who, .d-long { display: none; }
   .d-short { display: inline-flex; }
-  .coin-addr { gap: 6px 12px; }
-  .coin-links .solscan-link { display: none; }
   .coin-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .coin-actions .share, .coin-actions .share-btn { width: 100%; }
   .coin-actions .btn { height: 40px; width: 100%; justify-content: center; }
   .coin-actions .share-pop { left: 0; right: auto; }
   .coin-intro { font-size: 14px; }
-
-  .coin-stats { grid-template-columns: 1fr 1fr; }
-  .coin-stats .stat { padding: 14px; }
-  .coin-stats .stat b, .coin-stats .stat.hero b { font-size: 22px; }
 
   .chart { padding: 12px 12px 8px; }
   .chart .chart-head { align-items: flex-start; }

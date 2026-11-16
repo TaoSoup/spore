@@ -1,12 +1,15 @@
 // /c/:mint — a coin, price first. Someone arriving from a shared link should read the price, the CA
-// and how to buy within three seconds: the header carries price, change (with its basis), market
-// cap, the copyable CA and the last trade; the trade widget sits beside it on desktop and behind a
-// sticky Buy / Sell bar on phones. With instant trades on (Trade settings) and a wallet that can sign,
-// the user's presets trade at once: a row of them above the widget on desktop, a popover from the
-// bar's Buy / Sell on phones (components/useInstantTrade.ts, as on the Portfolio page and the map).
-// Everything below (chart, creator fees, the agent, one Activity card, the folded details) answers
-// the second question: what this coin is in its tree.
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type SyntheticEvent } from "react";
+// and how to buy within three seconds, and see the chart without scrolling: one compact coin bar
+// (identity, price and change with its basis, market cap, 24h volume, locked by children, the
+// copyable CA and the links), the chart sized to the window under it, and the trade widget beside it
+// on desktop (behind a sticky Buy / Sell bar on phones). With instant trades on (Trade settings) and
+// a wallet that can sign, the user's presets trade at once: a row of them above the widget on
+// desktop, a popover from the bar's Buy / Sell on phones (components/useInstantTrade.ts, as on the
+// Portfolio page and the map). Under the chart the Activity card (trades, children, family tree),
+// then creator fees, the agent and the folded details; under the trade widget a calm info card
+// (what the coin is, its family, status, dominance) answers the second question: what this coin is
+// in its tree.
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type RefObject, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link, useParams } from "react-router-dom";
 import { api, pumpUrl, solscanAccount, solscanTx, type Candles, type Coin as CoinT } from "../lib/api";
@@ -33,7 +36,7 @@ import DominanceLine from "../components/DominanceLine";
 import LaunchButton from "../components/LaunchButton";
 import Search from "../components/Search";
 import Term from "../components/Term";
-import { Delta, Stat, StatStrip } from "../components/Stat";
+import { Delta } from "../components/Stat";
 import { Addr, AgentChip, DepthBadge, ErrorBox, Ext, Logo, ProgressBar, Skeleton, listedQuoteOf, nameOf, sym, useTint } from "../components/Bits";
 import { useToast } from "../components/Toast";
 import CoinActivity, { defaultTab, hashTab, useActivityTab } from "../components/coin/CoinActivity";
@@ -42,26 +45,12 @@ import FamilyStrip from "../components/coin/FamilyStrip";
 import ShareMenu from "../components/coin/ShareMenu";
 import { tradeUsd, useLive, useLiveCoinStore, type LiveCoin } from "../components/coin/useLiveCoin";
 import { Sparkline, Tween, sparkTone } from "../components/coin/viz";
+import { change24h, changeWords, daySpark } from "../components/coin/change";
+import ParentPrice from "../components/coin/ParentPrice";
+import { parentOf } from "../lib/priced-in";
 import Reveal from "../components/ui/Reveal";
 import "../components/coin.css";
 import "../components/coin/terminal.css";
-
-/// `label` names the basis in full ("· 24h", "since first trade (21h)"); `short` is the phone bar's ("24h", "21h").
-type Change = { ratio: number; label: string; short: string; title: string };
-
-/// The one change figure of the page. From hourly candles: the close of the last candle that ended
-/// at least 24 h ago ("· 24h"); when the series is younger, the first open ("since first trade (21h)").
-function change24h(rows: Candles["candles"], coin: CoinT, priceKey: Candles["priceKey"]): Change | null {
-  if (!rows.length) return null;
-  const cutoff = Math.floor(Date.now() / 1000) - 86_400;
-  const sorted = [...rows].sort((a, b) => a.t - b.t);
-  const ref = [...sorted].reverse().find((r) => r.t + 3600 <= cutoff);
-  const current = (priceKey === "usd" ? coin.priceUsd : coin.priceQuote) ?? sorted[sorted.length - 1].c;
-  if (ref && ref.c > 0) return { ratio: current / ref.c - 1, label: "· 24h", short: "24h", title: "Change over the last 24 hours (hourly candles)" };
-  const first = sorted[0];
-  if (first.o > 0 && sorted.length > 1) return { ratio: current / first.o - 1, label: `since first trade (${age(first.t)})`, short: age(first.t), title: `Change since the first trade the indexer saw, ${age(first.t)} ago` };
-  return null;
-}
 
 const CopyGlyph = () => <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.5" /><path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15" /></svg>;
 const CheckGlyph = () => <svg className="ic-check" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.2 4.2L19 7" /></svg>;
@@ -75,8 +64,6 @@ function useCopied(): [boolean, () => void] {
 const quoteDecimalsOf = (c: CoinT) => (c as CoinT & { quoteDecimals?: number }).quoteDecimals ?? (c.quoteMint === null ? 9 : 6);
 const priceText = (c: CoinT) => (c.priceUsd != null ? usd(c.priceUsd) : price(c.priceQuote, c.quoteSymbol));
 const mcText = (c: CoinT) => (c.mcapUsd != null ? `MC ${usd(c.mcapUsd)}${c.mcapSol != null ? ` · ${sol(c.mcapSol)}` : ""}` : c.mcapSol != null ? `MC ${sol(c.mcapSol)}` : "MC —");
-/// The header's MC line; the SOL half is dropped on phones (the class hides it).
-const McLine = ({ c }: { c: CoinT }) => (c.mcapUsd != null && c.mcapSol != null ? <span className="price-mc mono">MC {usd(c.mcapUsd)}<span className="mc-sol"> · {sol(c.mcapSol)}</span></span> : <span className="price-mc mono">{mcText(c)}</span>);
 const smooth = (): ScrollBehavior => (motionPaused() ? "auto" : "smooth");
 /// A trade's new balance reaches the RPC a few seconds after it lands: the widget reads it again then too.
 const TRADE_SETTLE_MS = 4_000;
@@ -107,8 +94,10 @@ export default function CoinPage() {
   // a sheet opened by hand starts with nothing changed in it
   const openSheet = useCallback((side: Side) => { editedInHold.current = false; setSheet({ side, n: ++sheetN.current }); }, []);
   const amountRef = useRef<HTMLInputElement>(null);
-  const sideRef = useRef<HTMLElement>(null);
+  const sideRef = useRef<HTMLDivElement>(null);
   const activityRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (!narrow) setSheet(null); }, [narrow]);
 
   // Instant trades (components/useInstantTrade.ts, as on the Portfolio page and the map): one at a time, the wallet
@@ -203,13 +192,14 @@ export default function CoinPage() {
   }, [page.data, presetTab]);
 
   const openChildren = useCallback(() => { setTab("children"); activityRef.current?.scrollIntoView({ behavior: smooth(), block: "start" }); }, [setTab]);
+  useCoinLayout(pageRef, chartRef, !narrow && !!page.data);
   const onBuy = useCallback(() => {
     if (narrow) { openSheet("buy"); return; }
     amountRef.current?.focus({ preventScroll: true });
     amountRef.current?.scrollIntoView({ behavior: smooth(), block: "nearest" });
   }, [narrow, openSheet]);
 
-  if (page.loading) return <div className="container coin-page"><CoinSkeleton /></div>;
+  if (page.loading) return <div className="container coin-page"><CoinSkeleton priced /></div>;
   if (page.error && !page.data) {
     const invalid = /invalid/i.test(page.error);
     const unknown = invalid || page.error.includes("404") || /not found|unknown/i.test(page.error);
@@ -233,19 +223,18 @@ export default function CoinPage() {
   const pf = prefill && prefill.mint === coin.mint ? prefill : null;
 
   return (
-    <div className={`container coin-page ${narrow ? "has-bar" : ""}`}>
+    <div ref={pageRef} className={`container coin-page ${narrow ? "has-bar" : ""}`}>
       <NewToSpore />
       <TitleSync store={store} />
       <div className="coin-grid">
         <div className="coin-main">
-          <CoinHeader coin={coin} store={store} daily={daily.data} maxDepth={maxDepth} agentCoin={agentCoin} onChildren={openChildren} />
-          <div className="coin-about">
-            <LiveIntro store={store} agentCoin={agentCoin} />
-            {coin.description && <Description text={coin.description} />}
+          <CoinBar coin={coin} store={store} daily={daily.data} maxDepth={maxDepth} />
+          <div className="coin-chart" ref={chartRef}><PriceChart coin={coin} onBuy={tradeBlocked || instantWhy ? undefined : onBuy} live={store} aside={<LastTrade store={store} />} /></div>
+          <div className="coin-activity" ref={activityRef}>
+            <Reveal><CoinActivity store={store} tab={tab} onTab={setTab} maxDepth={maxDepth} narrow={narrow} otherChildren={page.data.otherChildren ?? 0} /></Reveal>
           </div>
-          <CoinStats store={store} />
-          {coin.depth === 0 && <CoinDominance mint={coin.mint} />}
-          <div className="coin-chart"><PriceChart coin={coin} onBuy={tradeBlocked || instantWhy ? undefined : onBuy} live={store} /></div>
+          {/* phones: the info card follows the tabs (on desktop it sits under the trade card) */}
+          {narrow && <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />}
           <div className={`coin-money ${solo ? "solo" : ""}`}>
             <div className="coin-fees"><ClaimFees coin={coin} /></div>
             <AgentSlot coin={coin} />
@@ -253,20 +242,21 @@ export default function CoinPage() {
           {/* A child without a fee-sharing config: its creator can still lock the split (Spore's
               own split section is gone; the fee card above shows who gets what). */}
           {!coin.shares?.length && coin.depth > 0 && <div className="coin-lock"><FeeSplitAction coin={coin} onDone={page.reload} /></div>}
-          <div className="coin-activity" ref={activityRef}>
-            <Reveal><CoinActivity store={store} tab={tab} onTab={setTab} maxDepth={maxDepth} narrow={narrow} otherChildren={page.data.otherChildren ?? 0} /></Reveal>
-          </div>
           <Reveal className="coin-details-wrap"><Details coin={coin} narrow={narrow} /></Reveal>
         </div>
         {!narrow && (
-          <aside ref={sideRef} className="coin-side" aria-label={`Buy or sell ${sym(coin)}`} onClickCapture={markTicketEdit} onChangeCapture={markTicketEdit}>
-            {instantOn && !tradeBlocked && (tradeRoute.data || tradeRoute.error) && (
-              <InstantRow label={sym(coin)} mint={coin.mint} presets={presets} running={running} busySide={busySide} blocked={instantWhy} onRun={runInstant} />
-            )}
-            {/* remounted with the amount when an instant trade handed the trade back to it */}
-            <PageTicket key={pf ? `ticket-${pf.n}` : "ticket"} coin={coin} solUsd={solUsd} amountRef={amountRef} current={store.coin}
-              initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} refresh={balTick} />
-          </aside>
+          // Two landmarks side by side: the trade ("Buy or sell $X") and the info card ("About $X", its own section).
+          <div ref={sideRef} className="coin-side">
+            <aside className="coin-ticket" aria-label={`Buy or sell ${sym(coin)}`} onClickCapture={markTicketEdit} onChangeCapture={markTicketEdit}>
+              {instantOn && !tradeBlocked && (tradeRoute.data || tradeRoute.error) && (
+                <InstantRow label={sym(coin)} mint={coin.mint} presets={presets} running={running} busySide={busySide} blocked={instantWhy} onRun={runInstant} />
+              )}
+              {/* remounted with the amount when an instant trade handed the trade back to it */}
+              <PageTicket key={pf ? `ticket-${pf.n}` : "ticket"} coin={coin} solUsd={solUsd} amountRef={amountRef} current={store.coin} compact
+                initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} refresh={balTick} />
+            </aside>
+            <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />
+          </div>
         )}
       </div>
       {narrow && <PhoneBar store={store} daily={daily.data} onOpen={openSheet} blocked={blockedShort}
@@ -277,49 +267,60 @@ export default function CoinPage() {
   );
 }
 
-/* ---------- header */
+/// Desktop: the chart fills the window under the coin bar and leaves the Activity tabs' head in view. That needs an
+/// offset CSS cannot know (the bar wraps, the note above it comes and goes): measured here into --chart-top (the
+/// chart's offset in the document); the CSS has a fallback. (The side column needs nothing: it sticks below the nav
+/// and scrolls inside itself when it is taller than the window, so the trade card's top never moves.)
+function useCoinLayout(pageRef: RefObject<HTMLDivElement | null>, chartRef: RefObject<HTMLDivElement | null>, on: boolean) {
+  useLayoutEffect(() => {
+    const root = pageRef.current;
+    if (!on || !root) return;
+    const put = (k: string, v: number) => { const t = `${Math.round(v)}px`; if (root.style.getPropertyValue(k) !== t) root.style.setProperty(k, t); };
+    let raf = 0;
+    const apply = () => {
+      raf = 0;
+      const c = chartRef.current;
+      if (c) put("--chart-top", c.getBoundingClientRect().top + window.scrollY);
+    };
+    const later = () => { if (!raf) raf = requestAnimationFrame(apply); };
+    apply();
+    const ro = new ResizeObserver(later);
+    ro.observe(root);
+    window.addEventListener("resize", later);
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); window.removeEventListener("resize", later); root.style.removeProperty("--chart-top"); };
+  }, [pageRef, chartRef, on]);
+}
 
-function CoinHeader({ coin, store, daily, maxDepth, agentCoin, onChildren }: { coin: CoinT; store: LiveCoin; daily: Candles | null; maxDepth: number | undefined; agentCoin: ReturnType<typeof useAgentCoin>; onChildren: () => void }) {
+/* ---------- the coin bar */
+
+/// The coin in two tight lines: who it is (name, ticker, depth, status) with the CA and its links, then the numbers
+/// that move (price and change with its basis, market cap, 24h volume, locked by children, the curve) with Share and
+/// Launch. A narrow desktop column wraps it to a third line; phones stack it, the numbers as one sideways row. A coin
+/// priced in another token (a child's parent, a root's listed quote) gets one more tight row under the numbers: that
+/// token's price, change, 24 h line and market cap (ParentPrice), since the child's liquidity is that token.
+function CoinBar({ coin, store, daily, maxDepth }: { coin: CoinT; store: LiveCoin; daily: Candles | null; maxDepth: number | undefined }) {
   const toast = useToast();
-  const prov = provenanceFromAgentCoin(agentCoin);
-  // The header takes the coin's own colour: its logo's halo and the light behind the identity.
+  // The bar takes the coin's own colour: its logo's halo and the light behind the identity.
   const [tint, onLogo] = useTint(coin.image, coin.mint);
   const [copied, flashCopied] = useCopied();
   const copyCa = async () => { if (await copyText(coin.mint)) { flashCopied(); toast.success("Contract address copied"); } else toast.error("Could not copy the contract address"); };
-  const toAgent = (e: ReactMouseEvent) => { const el = document.getElementById("agent"); if (!el || !el.firstElementChild) return; e.preventDefault(); el.scrollIntoView({ behavior: smooth(), block: "center" }); };
   const status = coin.complete && !coin.migrated ? <span className="chip warn" title="The curve filled; pump.fun is moving the coin to a PumpSwap pool">migrating</span>
-    : coin.migrated ? <span className="chip good"><Term k="graduated">graduated</Term>&nbsp;· PumpSwap</span>
-    : <span className="chip neutral">on <Term k="curve">curve</Term>&nbsp;· {pctCurve(coin.progress)}</span>;
+    : coin.migrated ? <span className="chip good" title="Trades in its PumpSwap pool"><Term k="graduated">graduated</Term></span>
+    : <span className="chip neutral">on <Term k="curve">curve</Term></span>;
   return (
-    <header className="coin-head" style={{ "--tint": tint } as CSSProperties}>
+    <header className={`coin-bar ${parentOf(coin) ? "has-parent" : ""}`} style={{ "--tint": tint } as CSSProperties}>
       <span className="coin-aura" aria-hidden="true" />
-      <span className="coin-logo-wrap"><Logo src={coin.image} label={coin.symbol} size={64} className="coin-logo" onLoad={onLogo} /></span>
-      <div className="coin-id">
-        <div className="coin-title">
-          <h1 title={nameOf(coin)}>{nameOf(coin)}</h1>
-          <span className="ticker mono">{sym(coin)}</span>
-          <DepthBadge depth={coin.depth} long term maxDepth={maxDepth} quote={listedQuoteOf(coin)} />
-        </div>
-        {/* Two rows on desktop; one wrapping run of tags on phones. */}
-        <div className="coin-tags">
-        <div className="coin-lineage">
-          <ChainBreadcrumb coin={coin} variant="header" rootQuote={null} />
-          <FamilyStrip store={store} onChildren={onChildren} showLineage={false} />
-        </div>
-        <div className="coin-status">
-          {status}
-          {coin.mint === OFFICIAL_CA ? <span className="spore-mark"><span aria-hidden="true">✓</span> official $SPORE</span>
-            : coin.ours ? <span className="spore-mark" title="Its on-chain fee split names the Spore wallet"><span aria-hidden="true">✓</span> launched on Spore</span>
-            : coin.oursPending ? <span className="spore-mark pending" title="Reported as a Spore launch; the indexer is verifying the fee split on-chain">verifying launch</span> : null}
-          {coin.holderReward && <span className="chip violet" title="Creator fees go to holders; the fee split does not apply">holder rewards</span>}
-          {prov?.role === "child" && <AgentChip prov={prov} />}
-          {prov?.role === "root" && <a href="#agent" className="agent-anchor" onClick={toAgent} title="Jump to this coin's agent"><AgentChip prov={prov} link={false} /></a>}
-        </div>
-        </div>
+      <span className="coin-logo-wrap"><Logo src={coin.image} label={coin.symbol} size={44} className="coin-logo" onLoad={onLogo} /></span>
+      <div className="cb-line cb-l1">
+      <div className="cb-id">
+        <h1 title={nameOf(coin)}>{nameOf(coin)}</h1>
+        <span className="ticker mono">{sym(coin)}</span>
+        <DepthBadge depth={coin.depth} long term maxDepth={maxDepth} quote={listedQuoteOf(coin)} />
+        {status}
       </div>
-      <div className="coin-addr">
+      <div className="cb-tools">
         <button type="button" className={`ca-pill ${copied ? "done" : ""}`} onClick={copyCa} aria-label={`Copy contract address ${coin.mint}`} title={coin.mint}>
-          <span className="ca-k">CA</span><span className="mono ca-v">{coin.mint.slice(0, 4)}…{coin.mint.slice(-5)}</span>
+          <span className="ca-k">CA</span><span className="mono ca-v">{coin.mint.slice(0, 4)}…{coin.mint.slice(-4)}</span>
           <span className="ca-ic"><CopyGlyph /><CheckGlyph /></span>
           <span className="ca-copied" aria-hidden="true">copied</span>
         </button>
@@ -331,21 +332,31 @@ function CoinHeader({ coin, store, daily, maxDepth, agentCoin, onChildren }: { c
           {coin.website && <Ext href={coin.website}>Website ↗</Ext>}
         </span>
       </div>
-      <PriceBlock store={store} daily={daily} />
-      <div className="coin-actions">
-        <ShareMenu coin={coin} current={store.coin} />
-        <LaunchButton coin={coin} maxDepth={maxDepth} variant="ghost" size="sm" label={`Launch under ${sym(coin)}`} />
       </div>
+      <div className="cb-line cb-l2">
+        <BarNums store={store} daily={daily} />
+        <div className="coin-actions">
+          <ShareMenu coin={coin} current={store.coin} />
+          <LaunchButton coin={coin} maxDepth={maxDepth} variant="ghost" size="sm" label={`Launch under ${sym(coin)}`} />
+        </div>
+      </div>
+      {/* what the pool is paired with (a child's parent, a root's listed quote): its own tight row under the numbers */}
+      <ParentPrice store={store} />
     </header>
   );
 }
 
-/// Price, change, market cap and the last trade: the block that moves. A price move flashes once
-/// (at most every 600 ms) and leaves a small static arrow for two seconds that survives reduced motion.
-function PriceBlock({ store, daily }: { store: LiveCoin; daily: Candles | null }) {
+/// The numbers that move: price (a move flashes once, at most every 600 ms, and leaves a small static arrow for two
+/// seconds that survives reduced motion) with its change, then market cap, 24h volume, locked by children and, on the
+/// curve, how far it is to graduation. The detail behind each (trades, buys and sells, the locked amount, the pool)
+/// is in the info card.
+function BarNums({ store, daily }: { store: LiveCoin; daily: Candles | null }) {
   const coin = useLive(store, (s) => s.coin);
+  const numsRef = useRef<HTMLDivElement>(null);
   const tick = useLive(store, (s) => s.tick);
   const delta = useMemo(() => (daily ? change24h(daily.candles, coin, daily.priceKey) : null), [daily, coin]);
+  const spark = useMemo(() => daySpark(daily, coin), [daily, coin]);
+  const sparkOn = useSparkRoom(numsRef, !!spark);
   const [arrow, setArrow] = useState<"up" | "down" | null>(null);
   useEffect(() => {
     if (!tick) return;
@@ -354,50 +365,151 @@ function PriceBlock({ store, daily }: { store: LiveCoin; daily: Candles | null }
     return () => clearTimeout(t);
   }, [tick]);
   const main = priceText(coin);
-  // The last day of hourly closes, ending on the live price, so the dot is the number above it.
-  const spark = useMemo(() => {
-    if (!daily?.candles.length) return null;
-    const now = Date.now() / 1000;
-    const rows = [...daily.candles].sort((a, b) => a.t - b.t);
-    const day = rows.filter((r) => r.t >= now - 86_400);
-    const use = day.length >= 2 ? day : rows.slice(-48);
-    const live = daily.priceKey === "usd" ? coin.priceUsd : coin.priceQuote;
-    const pts = use.map((r) => r.c).filter((v) => Number.isFinite(v) && v > 0);
-    if (live != null && live > 0) pts.push(live);
-    return pts.length >= 2 ? pts : null;
-  }, [daily, coin.priceUsd, coin.priceQuote]);
+  // A real amount gets the accent; dust reads "< $0.01" like the cards (the exact figure is in the title).
+  const locked = coin.lockedUsd != null && coin.lockedUsd >= 0.01;
+  const dust = coin.lockedUsd != null && coin.lockedUsd > 0 && !locked;
   return (
-    <div className="coin-price">
-      <span className="price-k" aria-hidden="true">price</span>
-      <div className="price-row">
+    <div ref={numsRef} className="cb-nums">
+      <div className="cb-price">
+        <span className="sr-only">Price</span>
         {arrow && <span className={`tick-arrow ${arrow}`} aria-hidden="true">{arrow === "up" ? "▲" : "▼"}</span>}
         <b key={tick?.id ?? 0} className={`price-now mono ${tick ? `tick-${tick.dir}` : ""}`}>{main}</b>
         {/[₀-₉]/.test(main) && <Term k="subscript" icon>What does the small digit mean?</Term>}
-      </div>
-      <div className="price-sub">
-        {/* Phones show the short basis ("· 4h") so the change fits on the price line. */}
+        {/* Phones show the short basis ("· 4h") so the change fits beside the price. */}
         {delta ? <><span className="d-long"><Delta ratio={delta.ratio} label={delta.label} title={delta.title} /></span><span className="d-short"><Delta ratio={delta.ratio} label={`· ${delta.short}`} title={delta.title} /></span></> : <span className="delta flat" title="Not enough price history for a change figure yet">— <small>no history yet</small></span>}
-        <McLine c={coin} />
+        {spark && sparkOn && <span className="cb-spark"><Sparkline points={spark} tone={sparkTone(delta?.ratio ?? spark[spark.length - 1] / spark[0] - 1)} w={84} h={24} label={`Price over ${!delta || delta.short === "24h" ? "the last 24 hours" : `the last ${delta.short}`}${delta ? `, ${changeWords(delta)}` : ""}`} /></span>}
       </div>
-      {spark && <div className="price-spark"><Sparkline points={spark} tone={sparkTone(delta?.ratio ?? (spark[spark.length - 1] / spark[0] - 1))} w={240} h={40} label={`Price over ${delta?.short === "24h" || !delta ? "the last 24 hours" : delta.short}${delta ? `, ${delta.ratio >= 0 ? "up" : "down"} ${Math.abs(delta.ratio * 100).toFixed(1)} %` : ""}`} /></div>}
-      <LastTrade store={store} />
+      <dl className="cb-stats">
+        <div className="cb-stat"><dt><Term k="mcap">Market cap</Term></dt>
+          <dd className="mono" title={coin.mcapUsd != null && coin.mcapSol != null ? `${usd(coin.mcapUsd)} · ${sol(coin.mcapSol)}` : undefined}>{coin.mcapUsd != null ? <Tween value={coin.mcapUsd} format={usd} /> : sol(coin.mcapSol)}{coin.mcapUsd != null && coin.mcapSol != null && <span className="mc-sol"> · {sol(coin.mcapSol)}</span>}</dd></div>
+        <div className="cb-stat"><dt><Term k="volume">24h volume</Term></dt>
+          <dd className="mono">{coin.volume24hUsd > 0 ? <Tween value={coin.volume24hUsd} format={usd} /> : <span className="zero">{usd(coin.volume24hUsd)}</span>}</dd></div>
+        <div className={`cb-stat ${locked ? "hero" : ""}`}><dt><Term k="locked">Locked by children</Term></dt>
+          <dd className="mono">{locked ? <Tween value={coin.lockedUsd ?? 0} format={usd} /> : dust ? <span title={usd(coin.lockedUsd)}>{usdCard(coin.lockedUsd)}</span> : <span className="zero">—</span>}</dd></div>
+        {!coin.migrated && !coin.complete && (
+          <div className="cb-stat cb-curve"><dt><Term k="curve">To graduation</Term></dt>
+            <dd className="mono">{pctCurve(coin.progress)}<ProgressBar value={coin.progress} /></dd></div>
+        )}
+      </dl>
     </div>
   );
 }
 
+/// The coin's 24 h line beside its price is the first thing the bar gives up: shown unless it makes the bar wrap (the
+/// stats under the price, a stat onto a second line, or Share / Launch under the numbers). Dropped at a bar width, it
+/// is tried again only once the bar is wider than that, so it never flickers in and out.
+function useSparkRoom(numsRef: RefObject<HTMLDivElement | null>, has: boolean): boolean {
+  const [offAt, setOffAt] = useState<number | null>(null);
+  const offRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const nums = numsRef.current;
+    const bar = nums?.closest<HTMLElement>(".coin-bar");
+    if (!has || !nums || !bar) return;
+    const wrapped = () => {
+      const top = (e: Element | null) => (e ? e.getBoundingClientRect().top : 0);
+      const price = nums.querySelector(".cb-price"), stats = nums.querySelectorAll(".cb-stat");
+      if (price && stats.length && top(stats[0]) >= price.getBoundingClientRect().bottom - 2) return true;
+      if (stats.length > 1 && top(stats[stats.length - 1]) > top(stats[0]) + 2) return true;
+      const line = bar.querySelector<HTMLElement>(".cb-l2"), act = line?.querySelector(".coin-actions");
+      return !!(line && act && getComputedStyle(line).display === "flex" && top(act) > top(nums) + 4);
+    };
+    const check = () => {
+      const w = bar.clientWidth;
+      if (offRef.current != null) {
+        if (w > offRef.current) { offRef.current = null; setOffAt(null); }
+        return;
+      }
+      const s = nums.querySelector(".cb-spark");
+      if (!s || getComputedStyle(s).display === "none") return;
+      if (wrapped()) { offRef.current = w; setOffAt(w); }
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(bar);
+    return () => ro.disconnect();
+  }, [numsRef, has, offAt]);
+  return has && offAt == null;
+}
+
+/// The last trade, in the chart's foot: a link to it on solscan while it is under an hour old. It is the chart card's
+/// only "last trade … ago" (PriceChart leaves its head line out when it has this aside). On a narrow foot the side
+/// and size give way (an ellipsis) and the time stays.
 function LastTrade({ store }: { store: LiveCoin }) {
   const t = useLive(store, (s) => s.trades[0] ?? null);
   const fresh = t ? Date.now() / 1000 - t.time < 3_600 : false;
   const now = useNow(fresh ? 1_000 : 60_000);
-  if (!t) return <p className="last-trade none">No trades seen yet</p>;
+  if (!t) return <span className="last-trade none"><span className="lt-what">No trades seen yet</span></span>;
   const ago = Math.max(0, now - t.time);
-  if (ago >= 3_600) return <p className="last-trade none">Last trade {age(t.time)} ago</p>;
+  if (ago >= 3_600) return <span className="last-trade none"><span className="lt-what">Last trade</span><span className="lt-ago">{age(t.time)} ago</span></span>;
   const coin = store.get().coin;
   const size = coin.quoteMint === null ? sol(tokens(t.quoteAmount, 9)) : (tradeUsd(t, coin.decimals) != null ? usdCard(tradeUsd(t, coin.decimals)) : amount(tokens(t.quoteAmount, quoteDecimalsOf(coin)), coin.quoteSymbol));
   return (
     <a className={`last-trade ${t.isBuy ? "buy" : "sell"}`} href={solscanTx(t.sig)} target="_blank" rel="noreferrer" title="Open the transaction on solscan">
-      <i aria-hidden="true" />{t.isBuy ? "Buy" : "Sell"} {size}<span className="lt-who"> · {short(t.user, 4)}</span> · {ago < 5 ? "just now" : ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`}
+      <i aria-hidden="true" /><span className="lt-what">{t.isBuy ? "Buy" : "Sell"} {size}<span className="lt-who"> · {short(t.user, 4)}</span></span>
+      <span className="lt-ago">· {ago < 5 ? "just now" : ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ago`}</span>
     </a>
+  );
+}
+
+/* ---------- the info card (under the trade card; after the tabs on phones) */
+
+/// What the coin is, in plain words: the intro sentence and the description, where it hangs (breadcrumb, children),
+/// its status and pool, the day's trades, what its children lock, its marks (Spore launch, holder rewards, agent)
+/// and, for a root, its dominance on the map.
+function CoinInfo({ coin, store, agentCoin, onChildren }: { coin: CoinT; store: LiveCoin; agentCoin: ReturnType<typeof useAgentCoin>; onChildren: () => void }) {
+  const prov = provenanceFromAgentCoin(agentCoin);
+  const toAgent = (e: ReactMouseEvent) => { const el = document.getElementById("agent"); if (!el || !el.firstElementChild) return; e.preventDefault(); el.scrollIntoView({ behavior: smooth(), block: "center" }); };
+  const mark = coin.mint === OFFICIAL_CA ? <span className="spore-mark"><span aria-hidden="true">✓</span> official $SPORE</span>
+    : coin.ours ? <span className="spore-mark" title="Its on-chain fee split names the Spore wallet"><span aria-hidden="true">✓</span> launched on Spore</span>
+    : coin.oursPending ? <span className="spore-mark pending" title="Reported as a Spore launch; the indexer is verifying the fee split on-chain">verifying launch</span> : null;
+  const marks = mark || coin.holderReward || prov;
+  return (
+    <section className="card coin-info" aria-label={`About ${sym(coin)}`}>
+      <div className="coin-about">
+        <LiveIntro store={store} agentCoin={agentCoin} />
+        {coin.description && <Description text={coin.description} />}
+      </div>
+      <div className="coin-lineage">
+        <ChainBreadcrumb coin={coin} variant="header" rootQuote={null} />
+        <FamilyStrip store={store} onChildren={onChildren} showLineage={false} />
+      </div>
+      <InfoFacts store={store} />
+      {marks && (
+        <div className="coin-status">
+          {mark}
+          {coin.holderReward && <span className="chip violet" title="Creator fees go to holders; the fee split does not apply">holder rewards</span>}
+          {prov?.role === "child" && <AgentChip prov={prov} />}
+          {prov?.role === "root" && <a href="#agent" className="agent-anchor" onClick={toAgent} title="Jump to this coin's agent"><AgentChip prov={prov} link={false} /></a>}
+        </div>
+      )}
+      {coin.depth === 0 && <CoinDominance mint={coin.mint} />}
+    </section>
+  );
+}
+
+/// The detail behind the bar's numbers, one quiet line each: status and pool, the day's trades with the buy / sell
+/// split of the latest ones, and what the children lock.
+function InfoFacts({ store }: { store: LiveCoin }) {
+  const coin = useLive(store, (s) => s.coin);
+  const trades = useLive(store, (s) => s.trades);
+  const now = Math.floor(Date.now() / 1000);
+  const day = trades.filter((t) => now - t.time < 86_400);
+  const buys = day.filter((t) => t.isBuy).length, sells = day.length - buys;
+  // The tape holds the last 50 trades: when the day had more, the split is of the latest ones.
+  const covers = day.length >= coin.trades24h;
+  const lockedQuote = tokens(coin.lockedQuote, coin.decimals);
+  const some = coin.lockedUsd != null && coin.lockedUsd > 0;
+  return (
+    <ul className="coin-facts">
+      <li>{coin.migrated ? <>Graduated · trades on PumpSwap{coin.pool && <> · <a href={solscanAccount(coin.pool)} target="_blank" rel="noreferrer" className="mono">pool {short(coin.pool, 4)}</a></>}</>
+        : coin.complete ? <>Migrating · moving to a PumpSwap pool</>
+        : <>On the <Term k="curve">curve</Term> · {pctCurve(coin.progress)} to graduation</>}</li>
+      <li className="fact-trades">
+        <span>{plural(coin.trades24h, "trade")} in 24h{day.length > 0 && <> · {covers ? "" : `last ${day.length}: `}{buys} buys / {sells} sells</>}</span>
+        {day.length > 0 && <span className="bs-bar" role="img" aria-label={`${buys} buys and ${sells} sells among the latest trades`}><i className="b" style={{ flexGrow: buys }} /><i className="s" style={{ flexGrow: sells }} /></span>}
+      </li>
+      <li>{some ? <>{amount(lockedQuote, sym(coin))} locked in {plural(coin.children, "child", "children")}</> : coin.children === 0 ? "No children yet" : "Its children hold none yet"}</li>
+    </ul>
   );
 }
 
@@ -418,40 +530,6 @@ function Description({ text }: { text: string }) {
       <p ref={ref}>{text}</p>
       {(long || open) && <button type="button" className="linkish" aria-expanded={open} onClick={() => setOpen((o) => !o)}>{open ? "less" : "more"}</button>}
     </div>
-  );
-}
-
-/* ---------- stats */
-
-function CoinStats({ store }: { store: LiveCoin }) {
-  const coin = useLive(store, (s) => s.coin);
-  const trades = useLive(store, (s) => s.trades);
-  const now = Math.floor(Date.now() / 1000);
-  const day = trades.filter((t) => now - t.time < 86_400);
-  const buys = day.filter((t) => t.isBuy).length, sells = day.length - buys;
-  // The tape holds the last 50 trades: when the day had more, the split is of the latest ones.
-  const covers = day.length >= coin.trades24h;
-  const lockedQuote = tokens(coin.lockedQuote, coin.decimals);
-  // Hero only for a real amount; dust reads "< $0.01" like the cards (the exact figure is in the title).
-  const locked = coin.lockedUsd != null && coin.lockedUsd >= 0.01;
-  const dust = coin.lockedUsd != null && coin.lockedUsd > 0 && !locked;
-  return (
-    <StatStrip className="coin-stats">
-      <Stat label={<Term k="mcap">Market cap</Term>} value={coin.mcapUsd != null ? <Tween value={coin.mcapUsd} format={usd} /> : sol(coin.mcapSol)} sub={coin.mcapUsd != null && coin.mcapSol != null ? sol(coin.mcapSol) : undefined} />
-      <Stat label={<Term k="volume">24h volume</Term>} value={coin.volume24hUsd > 0 ? <Tween value={coin.volume24hUsd} format={usd} /> : <span className="zero">{usd(coin.volume24hUsd)}</span>}
-        sub={<>
-          <span className="vol-sub">{plural(coin.trades24h, "trade")}{day.length > 0 && <> · {covers ? "" : `last ${day.length}: `}{buys} buys / {sells} sells</>}</span>
-          {day.length > 0 && <span className="bs-bar" role="img" aria-label={`${buys} buys and ${sells} sells among the latest trades`}><i className="b" style={{ flexGrow: buys }} /><i className="s" style={{ flexGrow: sells }} /></span>}
-        </>} />
-      <Stat label={<Term k="locked">Locked by children</Term>} hero={locked}
-        value={locked ? <Tween value={coin.lockedUsd ?? 0} format={usd} /> : dust ? <span title={usd(coin.lockedUsd)}>{usdCard(coin.lockedUsd)}</span> : <span className="zero">—</span>}
-        sub={locked || dust ? `${amount(lockedQuote, sym(coin))} in ${plural(coin.children, "child", "children")}` : coin.children === 0 ? "no children yet" : "children hold none yet"} />
-      {coin.migrated
-        ? <Stat label="status" value="graduated" sub={<>trades on PumpSwap{coin.pool && <> · <a href={solscanAccount(coin.pool)} target="_blank" rel="noreferrer" className="mono">pool {short(coin.pool, 4)}</a></>}</>} />
-        : coin.complete
-          ? <Stat label="status" value="migrating" sub="moving to a PumpSwap pool" />
-          : <Stat label={<Term k="curve">to graduation</Term>} value={pctCurve(coin.progress)} sub={<ProgressBar value={coin.progress} />} />}
-    </StatStrip>
   );
 }
 
@@ -635,24 +713,23 @@ function UnknownCoin({ mint, invalid }: { mint: string; invalid: boolean }) {
   );
 }
 
-function CoinSkeleton() {
+/// The loading page in the loaded page's shape (bar, a chart of the same height, the tabs; the trade and info cards).
+/// `priced`: the bar keeps the "Priced in" row's room (a coin seen before is known; an unknown one is taken for a
+/// child, as most coins here are, and a root's bar then loses the row when it loads).
+function CoinSkeleton({ priced }: { priced: boolean }) {
   return (
     <div className="coin-grid" aria-busy="true" aria-label="Loading the coin">
       <div className="coin-main">
-        <header className="coin-head sk-head">
-          <Skeleton w={64} h={64} r={18} className="coin-logo" />
-          <div className="sk-id stack-2"><Skeleton w="55%" h={30} /><Skeleton w="40%" h={20} /><Skeleton w="45%" h={22} /></div>
-          <div className="coin-addr"><Skeleton w={150} h={32} r={999} /></div>
-          <div className="coin-price stack-2"><Skeleton w={150} h={34} /><Skeleton w={120} h={16} /><Skeleton w={160} h={14} /></div>
+        <header className={`coin-bar sk-bar ${priced ? "has-parent" : ""}`}>
+          <span className="coin-logo-wrap"><Skeleton w={44} h={44} r={13} /></span>
+          <div className="cb-line cb-l1"><div className="cb-id"><Skeleton w={260} h={28} /></div><div className="cb-tools"><Skeleton w={300} h={30} r={999} /></div></div>
+          <div className="cb-line cb-l2"><div className="cb-nums"><Skeleton w={420} h={34} /></div><div className="coin-actions"><Skeleton w={220} h={30} r={999} /></div></div>
+          {priced && <div className="cb-parent"><Skeleton className="sk-pc" w={380} h={34} r={999} /></div>}
         </header>
-        <div className="coin-about"><Skeleton h={20} w="70%" /></div>
-        <div className="stats coin-stats">{[0, 1, 2, 3].map((i) => <div className="stat" key={i}><Skeleton w="50%" h={11} /><Skeleton w="70%" h={26} /><Skeleton w="60%" h={11} /></div>)}</div>
-        <div className="coin-chart"><Skeleton h={372} r={16} /></div>
-        <div className="coin-money solo"><div className="coin-fees"><Skeleton h={180} r={16} /></div></div>
+        <div className="coin-chart"><Skeleton className="sk-chart" r={16} /></div>
         <div className="coin-activity"><Skeleton h={420} r={16} /></div>
       </div>
-      <aside className="coin-side sk-side"><Skeleton h={460} r={16} /></aside>
+      <aside className="coin-side sk-side"><Skeleton h={430} r={16} /><Skeleton h={250} r={16} /></aside>
     </div>
   );
 }
-

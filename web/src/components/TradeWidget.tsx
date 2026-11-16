@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
@@ -66,13 +66,16 @@ export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?
   /// trade at a time.
   hold?: boolean;
   /// A change of this number reads the wallet's balances again now (the coin page, after an instant trade landed).
-  refresh?: number };
+  refresh?: number;
+  /// The coin page's side card: the route as one line (the drawn route and its note open on a press), the
+  /// "simulated on-chain" note in the foot, tighter spacing. Every notice, error and figure stays as it is.
+  compact?: boolean };
 
 /// Buy from SOL / sell to SOL through every hop of the chain in one multi_hop_swap, or, for a coin priced in a listed
 /// asset with no pump SOL pool, through Jupiter (lib/jup.ts). Quotes come from a simulation (no local curve math), so
 /// the preview is what the programs do; the widget adds what a terminal needs around it: balances, impact against spot,
 /// slippage, fees, the reason a trade is blocked, and a confirm step before the wallet opens.
-export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", initialAmount = "", sheet = false, onClose, amountRef, titleId, current, onBusy, hold = false, refresh = 0 }: TradeWidgetProps) {
+export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", initialAmount = "", sheet = false, onClose, amountRef, titleId, current, onBusy, hold = false, refresh = 0, compact = false }: TradeWidgetProps) {
   // Identity fields (mint, decimals, ancestors) are the same in both; prices come from the live one.
   const live = current?.();
   const coin = live && live.mint === base.mint ? live : base;
@@ -113,6 +116,9 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
   const confirmWhenFresh = confirmAfter != null;
   // The last check before the wallet found the price had moved: the sheet says so above the new numbers.
   const [moved, setMoved] = useState(false);
+  // compact: the drawn route is open (a press on the route line)
+  const [routeOpen, setRouteOpen] = useState(false);
+  const routeId = useId();
   const [bal, setBal] = useState<{ sol: bigint | null; token: bigint | null; hasAta: boolean }>({ sol: null, token: null, hasAta: false });
   const [nonce, setNonce] = useState(0);
   // Buy in dollars: the field takes USD and writes the SOL amount the rest of the widget reads, so the
@@ -393,7 +399,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
   const impactText = impact == null ? null : impact <= 0 ? signedPct(-impact) : `−${pct(impact)}`;
 
   return (
-    <section className={`card trade ${sheet ? "in-sheet" : ""} ${side}`} aria-label={`Trade ${sym(coin)}`}>
+    <section className={`card trade ${sheet ? "in-sheet" : ""} ${compact ? "compact" : ""} ${side}`} aria-label={`Trade ${sym(coin)}`}>
       {sheet && (
         <div className="trade-sheet-head">
           <Logo src={coin.image} label={coin.symbol} size={32} />
@@ -409,7 +415,20 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
 
       {route.loading && <div className="stack-2"><Skeleton h={40} r={10} /><Skeleton h={52} r={12} /><Skeleton h={28} r={999} /><Skeleton h={48} r={999} /></div>}
       {route.error && !route.data && <ErrorBox error={route.error} retry={route.reload} compact />}
-      {route.data && tradable && (
+      {route.data && tradable && (compact ? (
+        <div className={`route-chips route-compact ${routeOpen ? "open" : ""}`}>
+          {/* One line: the path and how it is filled; the drawn route and its note on a press. */}
+          <button type="button" className="route-sum" aria-expanded={routeOpen} aria-controls={routeId} aria-label={`Route: ${path.map((p) => p.label).join(" to ")}, ${routeHops}`} onClick={() => setRouteOpen((o) => !o)} title={`${path.map((p) => p.label).join(" → ")} · ${routeHops}`}>
+            <span className="route-path mono">{path.map((p) => p.label).join(" → ")}</span>
+            <span className="route-hops mono">· {isJup ? "Jupiter" : hops <= 1 ? "1 hop" : `${hops} hops`}</span>
+            <span className="route-caret" aria-hidden="true">▾</span>
+          </button>
+          <div id={routeId} className="route-more" hidden={!routeOpen}>
+            {routeOpen && <RouteFilament side={side} hops={path.map((p): Hop => ({ key: p.key, label: p.label, image: p.image, symbol: p.symbol, self: p.key === coin.mint, quote: p.key === "quote" }))} />}
+            <p className="route-note">{routeNote ? `${routeNote} ` : ""}<span className="route-hops mono">{routeHops}</span></p>
+          </div>
+        </div>
+      ) : (
         <div className="route-chips">
           <div className="route-k"><span className="card-label">Route</span><span className="route-hops mono">{routeHops}</span></div>
           <ol className="sr-only" aria-label={`Route: ${path.map((p) => p.label).join(" to ")}`}>
@@ -418,7 +437,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
           <RouteFilament side={side} hops={path.map((p): Hop => ({ key: p.key, label: p.label, image: p.image, symbol: p.symbol, self: p.key === coin.mint, quote: p.key === "quote" }))} />
           {routeNote && <p className="route-note">{routeNote}</p>}
         </div>
-      )}
+      ))}
       {lastSent && (
         <div className={`notice ${lastSent.state === "failed" || lastSent.state === "unknown" ? "warn" : ""} compact trade-last`}>
           <span>
@@ -497,7 +516,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
           </div>
           {slippage >= 1000 && <div className="notice warn compact">High slippage: a fill up to {slippage / 100}% below the quote is accepted.</div>}
 
-          {!amountIn ? <p className="quote-line">Preview is simulated on-chain — exactly what the program will do.</p> : (
+          {!amountIn ? (compact ? null : <p className="quote-line">Preview is simulated on-chain — exactly what the program will do.</p>) : (
             <div className={`quote ${stale ? "stale" : ""}`} aria-live="polite">
               {/* the numbers of a quote of what the field holds only: while another amount is asked, the panel says so */}
               {!sameQuote && !quoteErr && (quoting || !settled || !!quote) ? <div className="quote-empty muted"><i className="spin" aria-hidden="true" /> {isJup ? "Asking Jupiter for a route…" : `Simulating ${hops} hop${hops === 1 ? "" : "s"}…`}</div>
@@ -547,7 +566,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
               </span>
             </div>
           )}
-          <p className="trade-foot"><LockGlyph />{trader.kind === "trading" ? "Built and signed in your browser by your trading wallet." : "Built in your browser, signed by your wallet."}{isJup && <> Route by <Ext href="https://jup.ag">Jupiter</Ext> (Metis).</>}{coin.priceSol == null && " Spot price unavailable, so no impact figure."}</p>
+          <p className="trade-foot"><LockGlyph /><span>{compact && "Previews are simulated on-chain. "}{trader.kind === "trading" ? "Built and signed in your browser by your trading wallet." : "Built in your browser, signed by your wallet."}{isJup && <> Route by <Ext href="https://jup.ag">Jupiter</Ext> (Metis).</>}{coin.priceSol == null && " Spot price unavailable, so no impact figure."}</span></p>
         </>
       )}
 
