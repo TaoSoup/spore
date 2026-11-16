@@ -118,7 +118,7 @@ function ClaimFees({ coin }: { coin: Coin }) {
 
   const start = async () => {
     if (!me || !f) return;
-    if (locked) { openTradingWallet(); toast.info("Unlock your trading wallet to claim: it signs the payout."); return; }
+    if (locked) { openTradingWallet("unlock"); toast.info("Unlock your trading wallet to claim: it signs the payout."); return; }
     setPhase({ kind: "building" });
     try {
       const payer = new PublicKey(me);

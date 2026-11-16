@@ -2,16 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { createPortal } from "react-dom";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { PublicKey } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { ApiError, pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/api";
 import { routeLabels } from "../lib/chain";
-import { PriceMovedError, QUOTE_PROBE, runJupSwap, runSwap, withSlippage } from "../lib/flow";
-import { JupPriceMovedError, KNOWN_MINTS, SOL_MINT, jupPath, quoteJup, type JupQuote } from "../lib/jup";
-import { openTradingWallet, signsAtOnce, useInstantSol, useTrader } from "../lib/trader";
+import { PriceMovedError, QUOTE_PROBE, withSlippage } from "../lib/flow";
+import { JupPriceMovedError, KNOWN_MINTS, SOL_MINT, jupPath } from "../lib/jup";
+import { quoteTrade, readTradeBalances, sendTrade, tradeErrorText, tradePriority, tradeVenues, type TradeQuote } from "../lib/trade-exec";
+import { BUY_HEADROOM_LAMPORTS, sellAmountOf, tradeImpact } from "../lib/trade-settings";
+import { openTradingWallet, signsAtOnce, useInstantSol, useSlippageBps, useTrader } from "../lib/trader";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { BoltGlyph } from "./TradingWallet";
-import { ataRentLamports, priorityMicroLamports, quoteSwap, routeVenues, signatureState, swapFeeLamports, swapUnits, CU_PRICE_MICRO, type Side } from "../lib/pump";
+import { ataRentLamports, signatureState, swapFeeLamports, swapUnits, CU_PRICE_MICRO, type Side } from "../lib/pump";
 import { assetLabel, blockText, forgetCoin, useTradeRoute } from "../lib/trade-route";
 import { clearPendingTrade, pendingTradeOf, type PendingTrade } from "../lib/trade-store";
 import { useDebounced, useLocalPref, useNow } from "../lib/hooks";
@@ -35,8 +35,8 @@ const QUICK_PCT = [25, 50, 75, 100];
 const REQUOTE_S = 20;
 const STALE_S = 10;
 /// Lamports kept back on a buy: the WSOL scratch account's rent is refunded in the same
-/// transaction but has to be there at the start.
-const HEADROOM = 2_100_000n;
+/// transaction but has to be there at the start (lib/trade-settings.ts, shared with the instant trade).
+const HEADROOM = BUY_HEADROOM_LAMPORTS;
 /// A quote younger than this opens the confirm sheet at once; an older one is simulated again first.
 const FRESH_MS = 5_000;
 /// A quote refused for a passing reason (Jupiter busy or rate-limiting, the server restarting) is asked again after this.
@@ -46,10 +46,9 @@ const PENDING_POLL_MS = 20_000;
 
 const LockGlyph = () => <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>;
 
-/// `unwrapped`: lamports of a wrapped-SOL account the user already had that the route closes into the wallet.
-/// `jup`: the Jupiter route's quote (its build is what the transaction is compiled from).
+/// A quote (lib/trade-exec.ts TradeQuote) with what it was made for.
 /// `payer`: the wallet the quote was simulated for (the trader's, or the public probe before one is ready).
-type QuoteState = { amountOut: bigint; units: number; unwrapped: bigint; at: number; amountIn: bigint; side: Side; payer: string; jup?: JupQuote };
+type QuoteState = TradeQuote & { at: number; amountIn: bigint; side: Side; payer: string };
 
 /// "12.50" → "12.5", "3.000000000" → "3": the shortest decimal string for an amount field.
 const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s);
@@ -58,7 +57,9 @@ const trimNum = (s: string) => (s.includes(".") ? s.replace(/0+$/, "").replace(/
 /// the id of the sheet head, for the phone dialog's aria-labelledby.
 /// `current`: the live record (the coin page's store), read on each render so spot price and the
 /// dollar figures follow the market without the widget subscribing to every trade.
-export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?: Side; sheet?: boolean; onClose?: () => void; amountRef?: RefObject<HTMLInputElement | null>; titleId?: string; current?: () => Coin;
+/// `initialAmount`: what the amount field holds when the widget opens (SOL on a buy, tokens on a sell): the ticket an
+/// instant trade falls back to opens with the amount that was asked for.
+export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?: Side; initialAmount?: string; sheet?: boolean; onClose?: () => void; amountRef?: RefObject<HTMLInputElement | null>; titleId?: string; current?: () => Coin;
   /// Told whether a trade is in flight, so the dialog around the widget (the map's quick trade) never closes under it.
   onBusy?: (busy: boolean) => void };
 
@@ -66,7 +67,7 @@ export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?
 /// asset with no pump SOL pool, through Jupiter (lib/jup.ts). Quotes come from a simulation (no local curve math), so
 /// the preview is what the programs do; the widget adds what a terminal needs around it: balances, impact against spot,
 /// slippage, fees, the reason a trade is blocked, and a confirm step before the wallet opens.
-export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", sheet = false, onClose, amountRef, titleId, current, onBusy }: TradeWidgetProps) {
+export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", initialAmount = "", sheet = false, onClose, amountRef, titleId, current, onBusy }: TradeWidgetProps) {
   // Identity fields (mint, decimals, ancestors) are the same in both; prices come from the live one.
   const live = current?.();
   const coin = live && live.mint === base.mint ? live : base;
@@ -94,8 +95,9 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     return () => clearInterval(t);
   }, [pending, reloadRoute]);
   const [side, setSide] = useState<Side>(initialSide);
-  const [input, setInput] = useState("");
-  const [slippage, setSlippage] = useLocalPref<number>("slippage", 100);
+  const [input, setInput] = useState(initialAmount);
+  // the stored slippage, shared with the trade settings and followed while it changes there (lib/trader.ts)
+  const [slippage, setSlippage] = useSlippageBps();
   const [customOpen, setCustomOpen] = useState(() => !SLIPPAGES.includes(slippage));
   const [steps, setSteps] = useState<Step[]>([]);
   const [busy, setBusy] = useState(false);
@@ -163,13 +165,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
 
   const refreshBalances = useCallback(async () => {
     if (!user) { setBal({ sol: null, token: null, hasAta: false }); return; }
-    const ata = getAssociatedTokenAddressSync(new PublicKey(coin.mint), user, false, new PublicKey(coin.tokenProgram));
-    const [s, t] = await Promise.all([
-      connection.getBalance(user, "confirmed").then((n) => BigInt(n)).catch(() => null),
-      // A missing account is the normal "never held it" case, not an error.
-      connection.getTokenAccountBalance(ata, "confirmed").then((r) => ({ amount: BigInt(r.value.amount), has: true })).catch(() => ({ amount: 0n, has: false })),
-    ]);
-    setBal({ sol: s, token: t.amount, hasAta: t.has });
+    setBal(await readTradeBalances(connection, user, { mint: coin.mint, tokenProgram: coin.tokenProgram }));
   }, [connection, user, coin.mint, coin.tokenProgram]);
   useEffect(() => { refreshBalances(); const t = setInterval(refreshBalances, 20_000); return () => clearInterval(t); }, [refreshBalances]);
 
@@ -194,10 +190,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     setQuoting(true);
     // Before a wallet connects, buys are simulated from a public probe key so the preview works.
     const payer = user ?? QUOTE_PROBE;
-    const run: Promise<Omit<QuoteState, "at" | "amountIn" | "side" | "payer">> = isJup
-      ? quoteJup(connection, payer, { mint: coinMint, tokenProgram: coinTokenProgram }, side, amountIn, jupSlip, ac.signal).then((q) => ({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped, jup: q }))
-      : quoteSwap(connection, payer, chain, side, amountIn).then((q) => ({ amountOut: q.amountOut, units: q.unitsConsumed, unwrapped: q.unwrapped }));
-    run
+    quoteTrade(connection, payer, { mint: coinMint, tokenProgram: coinTokenProgram }, chain, isJup, side, amountIn, jupSlip, ac.signal)
       .then((q) => { if (alive) { setQuote({ ...q, at: Date.now(), amountIn, side, payer: payer.toBase58() }); setQuoteErr(null); setRetryAt(null); } })
       .catch((e) => {
         if (!alive) return;
@@ -249,10 +242,10 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   useEffect(() => {
     if (!chain || !tradable) return;
     let alive = true;
-    let venues: PublicKey[];
-    try { venues = isJup ? jupVenues.split(",").filter(Boolean).map((k) => new PublicKey(k)) : routeVenues(chain, side); } catch { return; }
+    let venues: ReturnType<typeof tradeVenues>;
+    try { venues = tradeVenues(chain, side, isJup, jupVenues.split(",")); } catch { return; }
     if (!venues.length) return;
-    priorityMicroLamports(connection, venues).then((m) => { if (alive) setMicro(m); });
+    tradePriority(connection, venues).then((m) => { if (alive) setMicro(m); });
     return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeKey, tradable, connection, nonce]);
@@ -281,9 +274,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
     if (!chain || !q || quoting || busy || !sender) { closeConfirm(); return; }
     setConfirm(false); setBusy(true); setSteps([]);
     try {
-      const { sig } = q.jup
-        ? await runJupSwap(connection, sender, q.jup, setSteps, { units: swapUnits(1, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol })
-        : await runSwap(connection, sender, chain, q.side, q.amountIn, q.amountOut, slippage, setSteps, { units: swapUnits(chain.length, q.units), microLamports: micro, mint: coin.mint, symbol: coin.symbol });
+      const { sig } = await sendTrade(connection, sender, coin, chain, q, slippage, micro, setSteps);
       toast.success(side === "buy" ? `Bought ${sym(coin)}` : `Sold ${sym(coin)}`, { href: solscanTx(sig), label: "view transaction" });
       setInput(""); setQuote(null); setSteps([]); setMoved(false);
       refreshBalances();
@@ -295,10 +286,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
         // Nothing was signed: drop the quote that failed, and reopen the sheet on a new one only.
         setSteps([]); setQuote(null); setMoved(true); setConfirmAfter(Date.now()); requote();
       } else {
-        const sent = (e as { sentSig?: string }).sentSig;
-        const unsettled = sent && (e as { name?: string }).name !== "OnChainError" && (e as { name?: string }).name !== "ExpiredError";
-        if (unsettled) toast.error(`Sent, but Spore could not confirm it yet. Check the transaction before trading ${sym(coin)} again.`, { href: solscanTx(sent), label: "view transaction" });
-        else toast.error(friendlyError(e));
+        const why = tradeErrorText(e, sym(coin));
+        toast.error(why.text, why.link);
         setMoved(false);
       }
     }
@@ -306,7 +295,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   }
 
   const switchSide = (s: Side) => { if (s === side || busy) return; resetConfirm(); setSide(s); setInput(""); setQuote(null); setQuoteErr(null); setSteps([]); };
-  const pctOf = (p: number) => (bal.token == null ? "" : p === 100 ? exactAmount(bal.token, coin.decimals) : exactAmount((bal.token * BigInt(p)) / 100n, coin.decimals));
+  const pctOf = (p: number) => (bal.token == null ? "" : exactAmount(sellAmountOf(bal.token, p), coin.decimals));
   const setPct = (p: number) => { if (bal.token != null) setInput(pctOf(p)); };
   /// "Sell 50%" / "Sell all" under the position: switch to Sell with the amount filled in.
   const sellPct = (p: number) => { if (bal.token == null || busy || confirmWhenFresh) return; resetConfirm(); if (side !== "sell") { setSide("sell"); setQuote(null); setQuoteErr(null); setSteps([]); } setInput(pctOf(p)); inputRef.current?.focus({ preventScroll: true }); };
@@ -342,9 +331,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
   const spot = coin.priceSol;
   // only a quote of what the field holds: the old one, kept while a new amount is quoted, would mix two amounts
   const sameQuote = !!quote && quote.amountIn === amountIn && quote.side === side;
-  const impact = sameQuote && spot && spot > 0 && (inSol != null || inTok != null)
-    ? (side === "buy" ? 1 - outTokens! / (inSol! / spot) : 1 - outSol! / (inTok! * spot))
-    : null;
+  const impact = sameQuote && quote && amountIn ? tradeImpact({ side, amountIn, amountOut: quote.amountOut, decimals: coin.decimals, spot }) : null;
   const impactTone = impact == null ? "" : impact > 0.15 ? "bad" : impact > 0.05 ? "warn" : "";
   const effPrice = sameQuote && inSol != null && outTokens ? inSol / outTokens : sameQuote && inTok && outSol != null ? outSol / inTok : null;
   const stale = quote && quoteAge >= STALE_S;
@@ -458,7 +445,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
                 </span>
               ) : trader.kind ? <span>Pay from <b>{trader.kind === "trading" ? "trading wallet" : walletName ?? "your wallet"}</b></span>
                 : <span>{tw.status === "locked" ? "Trading wallet locked" : ""}</span>}
-              {tw.status === "locked" ? <button type="button" className="linkish" onClick={() => openTradingWallet()}><BoltGlyph size={11} /> Unlock trading wallet</button>
+              {tw.status === "locked" ? <button type="button" className="linkish" onClick={() => openTradingWallet("unlock")}><BoltGlyph size={11} /> Unlock trading wallet</button>
                 : tw.status === "none" ? <button type="button" className="linkish" title="A wallet kept in this browser that signs trades with no popup" onClick={() => openTradingWallet()}><BoltGlyph size={11} /> Trade without popups</button>
                 : trader.kind === "trading" ? <button type="button" className="linkish" onClick={() => openTradingWallet()}>Manage</button> : null}
             </div>
@@ -534,7 +521,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", s
           {!trader.kind
             ? (tw.status === "locked"
               ? <>
-                <button type="button" className="btn lg block accent" onClick={() => openTradingWallet()}><BoltGlyph /> Unlock trading wallet</button>
+                <button type="button" className="btn lg block accent" onClick={() => openTradingWallet("unlock")}><BoltGlyph /> Unlock trading wallet</button>
                 <button type="button" className="linkish trade-tw-offer" onClick={() => openWalletModal(true)}>or connect a wallet instead</button>
               </>
               : <>

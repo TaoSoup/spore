@@ -7,6 +7,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { subscribeTradingWallet, tradingSender, tradingWalletState, type TradingWalletState } from "./trading-wallet";
 import type { TxSender } from "./pump/send";
+import { formatPresets, parseSlippageBps, parseTradeSettings, type TradeSettings } from "./trade-settings";
 
 export function useTradingWallet(): TradingWalletState {
   return useSyncExternalStore(subscribeTradingWallet, tradingWalletState, tradingWalletState);
@@ -44,6 +45,32 @@ export function useInstantSol(): [number, (v: number) => void] {
   return [Number.isFinite(n) && n >= 0 ? n : DEFAULT_INSTANT_SOL, useCallback((x: number) => set(String(x)), [set])];
 }
 
+/// The trade settings of this browser (lib/trade-settings.ts says what each stored value means): whether Buy / Sell
+/// trade at once from presets, the presets, and the slippage, which is the ticket's own setting (TradeWidget reads the
+/// same key when it opens). The cap of a trade signed at once stays `useInstantSol`.
+export function useTradeSettings(): TradeSettings & { setInstant: (on: boolean) => void; setBuyPresets: (l: readonly number[]) => void; setSellPresets: (l: readonly number[]) => void; setSlippageBps: (bps: number) => void } {
+  const [instant, setI] = usePref("instant-trades");
+  const [buy, setB] = usePref("buy-presets");
+  const [sell, setS] = usePref("sell-presets");
+  const [slippage, setSl] = usePref("slippage");
+  const v = useMemo(() => parseTradeSettings({ instant, buy, sell, slippage }), [instant, buy, sell, slippage]);
+  const setInstant = useCallback((on: boolean) => setI(on ? "on" : "off"), [setI]);
+  const setBuyPresets = useCallback((l: readonly number[]) => setB(formatPresets(l)), [setB]);
+  const setSellPresets = useCallback((l: readonly number[]) => setS(formatPresets(l)), [setS]);
+  const setSlippageBps = useCallback((bps: number) => setSl(String(bps)), [setSl]);
+  return { ...v, setInstant, setBuyPresets, setSellPresets, setSlippageBps };
+}
+/// The slippage in basis points, for the ticket (TradeWidget): the same stored value the trade settings edit, read
+/// through the same rule (lib/trade-settings.ts parseSlippageBps) and followed while it changes, so a ticket that is
+/// already on screen trades with the setting just made and the two never apply different values.
+export function useSlippageBps(): [number, (bps: number) => void] {
+  const [raw, set] = usePref("slippage");
+  return [useMemo(() => parseSlippageBps(raw), [raw]), useCallback((bps: number) => set(String(bps)), [set])];
+}
+/// Opens the trade settings dialog (components/TradeSettings.tsx listens).
+export const SETTINGS_EVENT = "spore:trade-settings-open";
+export const openTradeSettings = () => window.dispatchEvent(new Event(SETTINGS_EVENT));
+
 /// How old the quote on screen may be for a trade to sign from it at once (the widget refreshes it every 20 s).
 export const INSTANT_MAX_AGE_MS = 30_000;
 /// Whether pressing the trade button signs at once, with no confirm sheet: only with the trading wallet, only the quote
@@ -77,7 +104,11 @@ export function useTrader() {
 }
 
 /// Opens the trading-wallet panel (components/TradingWallet.tsx listens), on a given view.
-export type TradingWalletView = "default" | "deposit";
+/// "default" and "deposit": the user asked for the panel itself (the wallet menu, the ticket's "Manage", a deposit
+/// link); it stays open after an unlock. "unlock": something needs the wallet unlocked (a trade, a launch, a claim, an
+/// Unlock button): the panel asks the password and closes by itself once the wallet is unlocked, and the user presses
+/// their button again; nothing is signed by the unlock. Asked while the wallet is already unlocked, "unlock" opens nothing.
+export type TradingWalletView = "default" | "deposit" | "unlock";
 export const OPEN_EVENT = "spore:trading-wallet-open";
 export const openTradingWallet = (view: TradingWalletView = "default") => window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: view }));
 

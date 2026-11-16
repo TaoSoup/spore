@@ -4,6 +4,7 @@ import { SPORE_COIN } from "./lib/policy";
 import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
 import { ToastProvider } from "./components/Toast";
 import { TradingWalletHost } from "./components/TradingWallet";
+import { TradeSettingsHost } from "./components/TradeSettings";
 import WalletMenu from "./components/WalletMenu";
 import OfficialCoin from "./components/OfficialCoin";
 import LiveNumber from "./components/LiveNumber";
@@ -350,6 +351,7 @@ function Shell() {
         </div>
       </main>
       <TradingWalletHost />
+      <TradeSettingsHost />
       {!isMap && <footer className="footer">
         <div className="footer-grid">
           <div className="footer-col footer-about">

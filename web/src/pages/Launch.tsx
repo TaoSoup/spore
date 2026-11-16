@@ -96,7 +96,7 @@ export default function Launch() {
   const me = dryW ? dryW.publicKey : account.publicKey;
   const connected = !!me;
   const needUnlock = !dryW && account.locked;
-  const unlock = () => { openTradingWallet(); toast.info("Unlock your trading wallet to launch: it is the coin's creator and pays for the launch."); };
+  const unlock = () => { openTradingWallet("unlock"); toast.info("Unlock your trading wallet to launch: it is the coin's creator and pays for the launch."); };
   // A launch writes the trading wallet into the coin for good (creator, fee shareholder; the split never changes). A
   // key that was never saved outside this browser would take those fees with it when the browser's data goes, so the
   // launch waits for the panel's "Save your private key" step.
@@ -322,7 +322,7 @@ export default function Launch() {
       const launcher = rec.shares.find((s) => s.address !== plat && s.address !== rec.agent?.address)?.address ?? plat;
       const own = account.walletOf(launcher);
       if (!own) { toast.error(`Only the wallet that launched this coin (${short(launcher, 4)}) can lock its fee split. ${account.kind === "trading" ? "Connect that wallet to finish." : "Connect it first."}`); return; }
-      if (own === "trading" && account.locked) { openTradingWallet(); toast.info("Unlock your trading wallet to finish the fee split."); return; }
+      if (own === "trading" && account.locked) { openTradingWallet("unlock"); toast.info("Unlock your trading wallet to finish the fee split."); return; }
       const sender = own === "trading" ? account.sender : account.ext.sender;
       by = sender ? walletSigner(connection, sender, own === "trading") : null;
     }

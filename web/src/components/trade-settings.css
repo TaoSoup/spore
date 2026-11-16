@@ -1,0 +1,17 @@
+/* Trade settings (components/TradeSettings.tsx): the confirm dialog's shell (.confirm in coin.css) with one quiet
+   section per setting. Nothing in it is wider than the dialog at 320 px. */
+.ts-panel { width: min(440px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.ts-sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); min-width: 0; }
+.ts-sec small { font-size: 12px; line-height: 1.45; }
+.ts-sec .notice { margin: 0; }
+.ts-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
+.ts-k { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.ts-three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: start; }
+.ts-num { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.ts-in { position: relative; display: block; min-width: 0; }
+.ts-in .input { height: 40px; padding: 0 40px 0 10px; text-align: right; }
+.ts-in em { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-style: normal; font-size: 12px; color: var(--muted); pointer-events: none; }
+.ts-row .ts-num { width: 128px; max-width: 100%; }
+.ts-err { color: var(--bad); overflow-wrap: anywhere; }
+.ts-foot { margin: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+@media (max-width: 360px) { .ts-in .input { padding-right: 34px; font-size: 13px; } }

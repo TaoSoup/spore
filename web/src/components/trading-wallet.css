@@ -27,9 +27,9 @@
 .tw-section small.bad { color: var(--bad); }
 .tw-confirm { display: grid; gap: 8px; padding: 10px 12px; border-radius: 12px; background: rgba(182,255,92,.06); border: 1px solid rgba(182,255,92,.25); font-size: 13px; }
 .tw-setting { justify-content: space-between; font-size: 13px; color: var(--ink-2); }
-.tw-instant { display: inline-flex; align-items: center; gap: 6px; }
-.tw-instant .input { width: 84px; text-align: right; }
-.tw-instant em { font-style: normal; color: var(--muted); font-size: 12px; }
+.tw-setting b { color: var(--ink); font-weight: 600; }
+.tw-settings-link { color: var(--accent); }
+.tw-settings-link:hover { color: var(--ink); text-decoration: underline; }
 .tw-work { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 0; }
 .tw-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--line); }
 

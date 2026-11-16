@@ -96,6 +96,45 @@ The trading wallet pays the network fee of every payout it signs, also for coins
 
 Buy from SOL / sell to SOL through every hop with `multi_hop_swap`. Quotes come from `quoteSwap` (a simulation that reads the final trade event), so the preview is what the program does. Slippage 1–5% sets `minAmountOut`. Buys can be quoted before a wallet is connected (simulated from a public probe key); sells need the wallet's token balance. Chains not rooted in SOL show a notice and a pump.fun link.
 
+## Instant trades (`lib/instant-trade.ts`, `lib/trade-settings.ts`, `test/trade-settings.test.mts`)
+
+On the Portfolio page, with instant trades on (the default), Buy and Sell open a small popover of presets under the button (`components/TradePresets.tsx`): three SOL amounts to buy with, three percentages of the holding to sell, and "Custom…" for the ticket. Pressing a preset is the trade: no ticket, no confirm sheet. With instant trades off the buttons open the ticket as before. The map's quick trade and the coin page still use the ticket.
+
+**Trade settings** (`components/TradeSettings.tsx`; wallet menu, Portfolio, the trading wallet's panel) are kept in this browser (`lib/trader.ts useTradeSettings`):
+
+| Setting | Key | Default | Valid |
+|---|---|---|---|
+| Instant trades | `spore:instant-trades` | on | `on` / `off` |
+| Buy presets | `spore:buy-presets` | 0.1, 0.5, 1 SOL | three amounts, each more than 0, at most 100, at most 4 decimals |
+| Sell presets | `spore:sell-presets` | 25, 50, 100 % | three whole percentages, 1 to 100 |
+| Slippage | `spore:slippage` (the ticket's own setting) | 5 % for instant trades while nothing is stored (the ticket keeps its own 1 % until then) | the field takes 0.1 to 50 %; a stored value is read as whole basis points from 1 to 5,000 by the ticket and instant trades alike |
+| Sign at once up to | `spore:instant-sol` | 1 SOL | 0 to 1,000; saved on Enter or when the field is left; 0 sends every trade to the ticket |
+
+`instantTrade()` is headless and takes its data sources as an argument, so the whole sequence is tested on fakes. It shares `lib/trade-exec.ts` (balances, quote, priority fee, build + simulate + send) with the ticket. From the press to the signature:
+
+1. One trade at a time on the page (a ref taken before anything is awaited); a locked trading wallet opens its unlock view and nothing else happens.
+2. An earlier trade of the coin that this browser sent and never saw settle (`lib/trade-store.ts`) is asked of the chain: while it may still land (unconfirmed and under 150 s old) or its state cannot be read, nothing is signed and the ticket opens, showing that trade.
+3. The coin's record is read fresh, then its route and the wallet's SOL and token balance from the chain. A sell's amount is that balance times the percentage in base units: all of it at 100 %, rounded down otherwise.
+4. A fresh simulated quote for this wallet over the same route the ticket uses (curve, pool, an asset's SOL pool, Jupiter's legs), with the slippage setting as the minimum received.
+5. The exact transaction is built and simulated with that minimum, then signed and sent once.
+
+A check that does not pass never fails silently: the ticket opens with the amount filled in and a toast says why. The popover names the coin it trades, follows its button when the rows move, ignores a press in the 300 ms after it opened or moved, and the page does not refresh in the background while it is open.
+
+| Check | What happens |
+|---|---|
+| The route is hard-blocked (`hardBlock`) | the row's "Not tradable here" text, as for the ticket |
+| The route could not be checked, or a coin on it waits for its migration | ticket |
+| The trade's SOL value (SOL paid, or the SOL a sell's quote gives) is over "Sign at once up to" | ticket (trading wallet only: a connected wallet's own approval popup is its confirmation) |
+| The wallet lacks SOL for the buy with its fee, rent and headroom (a sell: the fee) | ticket; the toast links to the trading wallet's deposit view |
+| The quote could not be simulated | ticket |
+| Price impact against spot is worse than 15 % (`MAX_INSTANT_IMPACT`), more than 5 % better than spot (`MAX_INSTANT_GAIN`: the index's spot price is out of date, so the figure hides the real impact), or there is no spot price to measure it | ticket |
+| An earlier trade of the coin may still be in flight, or its state could not be read | ticket, which shows that trade and its link |
+| The exact transaction's cost could not be measured, or is more than the amount, fee and rent plus 0.01 SOL (trading wallet) | ticket |
+| The price moved past the minimum at the last simulation | ticket; nothing was signed |
+| Nothing to sell, the wallet refused, the send failed or expired | an error toast (with the transaction's link when it went out). A send is never repeated automatically |
+
+**Unlocking** (`lib/trader.ts openTradingWallet("unlock")`): an Unlock button, or a trade, launch or claim that finds the trading wallet locked, opens the panel only to ask the password. It closes as soon as the wallet is unlocked, with a "Trading wallet unlocked" toast and the focus back where it was; nothing is traded, launched or claimed by the unlock, the user presses their button again. The full panel (balance, deposit, withdraw, key, lock) opens from the wallet menu, the ticket's "Manage" and the deposit links, and stays open after an unlock there.
+
 ## Components
 
 | File | Role |

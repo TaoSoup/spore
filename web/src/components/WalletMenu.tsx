@@ -12,7 +12,7 @@ import { solscanAccount } from "../lib/api";
 import { lamportsToSol, short, sol } from "../lib/format";
 import { copyText, useSolBalance } from "../lib/hooks";
 import { lockTradingWallet } from "../lib/trading-wallet";
-import { openTradingWallet, useTrader } from "../lib/trader";
+import { openTradeSettings, openTradingWallet, useTrader } from "../lib/trader";
 import { Ext } from "./Bits";
 import { BoltGlyph, LockGlyph } from "./TradingWallet";
 import { useToast } from "./Toast";
@@ -93,7 +93,7 @@ export default function WalletMenu({ inline = false, onAction, onOpen }: { inlin
               <span className="wm-addr"><code className="mono">{short(tw.address, 4)}</code> <button type="button" className="linkish" aria-label="Copy the trading wallet's address" onClick={copy(tw.address!)}>copy</button></span>
             </div>
             {tw.status === "locked"
-              ? <button type="button" className="btn sm accent block" onClick={act(() => openTradingWallet())}><LockGlyph /> Unlock</button>
+              ? <button type="button" className="btn sm accent block" onClick={act(() => openTradingWallet("unlock"))}><LockGlyph /> Unlock</button>
               : (
                 <div className="wm-actions">
                   <button type="button" className="btn sm" onClick={act(() => openTradingWallet("deposit"))}>Deposit</button>
@@ -149,6 +149,10 @@ export default function WalletMenu({ inline = false, onAction, onOpen }: { inlin
           </span>
         </section>
       )}
+
+      <section className="wm-sec wm-settings" aria-label="Trade settings">
+        <button type="button" className="linkish" title="Instant trades, the Buy and Sell presets, slippage and the sign-at-once limit" onClick={act(() => openTradeSettings())}>Trade settings</button>
+      </section>
     </>
   );
 

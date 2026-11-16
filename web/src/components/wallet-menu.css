@@ -30,6 +30,9 @@
 .wm-with { grid-template-columns: auto 1fr; align-items: center; }
 .wm-with .seg { justify-self: end; }
 .wm-with .seg button { font-size: 12px; }
+.wm-settings .linkish { justify-self: start; font-size: 12.5px; color: var(--ink-2); }
+.wm-settings .linkish:hover { color: var(--ink); text-decoration: underline; }
+@media (pointer: coarse) { .wm-settings .linkish { display: inline-flex; align-items: center; min-height: 40px; } }
 
 /* inside the phone menu: the same sections, full width, no card of their own */
 .wm-inline { display: grid; padding-bottom: 6px; border-bottom: 1px solid var(--line-soft); margin-bottom: 4px; }

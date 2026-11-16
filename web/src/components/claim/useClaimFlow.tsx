@@ -64,7 +64,7 @@ export function useClaimFlow(onClaimed: () => void) {
   const also = !dry && account.kind === "trading" && account.ext.address && account.ext.address !== account.address ? account.ext.address : null;
   /// Which of the user's wallets a fee share pays (a dry run has one: the wallet it runs as).
   const ownerOf = (a: string): "trading" | "wallet" | null => (dry ? (a === me ? "wallet" : null) : account.walletOf(a));
-  const askUnlock = useCallback(() => { openTradingWallet(); toast.info("Unlock your trading wallet to claim: it signs the payout."); }, [toast]);
+  const askUnlock = useCallback(() => { openTradingWallet("unlock"); toast.info("Unlock your trading wallet to claim: it signs the payout."); }, [toast]);
   const [phase, setPhase] = useState<Phase | null>(null);
   const [bulk, setBulk] = useState<{ i: number; n: number; done: number; stopping: boolean } | null>(null);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});

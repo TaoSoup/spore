@@ -1,5 +1,7 @@
 // The trading wallet in the UI (lib/trading-wallet.ts): a panel (opened from the header's wallet menu and the trade widget) to set it up, back up its key,
-// unlock it, move SOL in and out, and choose how trades sign. Trades themselves happen in the trade widget, which signs
+// unlock it, move SOL in and out, and choose which wallet trades. Opened only to unlock (an Unlock button, a trade, a
+// launch or a claim that found it locked), it closes by itself once the wallet is unlocked; the full panel is for the
+// entries that ask for it (the wallet menu, the ticket's "Manage", a deposit link). How trades sign is in Trade settings. Trades themselves happen in the trade widget, which signs
 // with this wallet once it is unlocked (lib/trader.ts).
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -14,9 +16,9 @@ import { friendlyError } from "../lib/steps";
 import { lamportsToSol, parseAmount, short, sol } from "../lib/format";
 import {
   AUTO_LOCK_MS, MIN_PASSWORD, buildTransfer, lockIfIdle, createTradingWallet, importTradingWallet, lockTradingWallet, markTradingWalletBackedUp,
-  removeTradingWallet, revealTradingSecret, tradingSender, unlockTradingWallet, withdrawAllLamports, withdrawError, WrongPasswordError,
+  removeTradingWallet, revealTradingSecret, tradingSender, tradingWalletState, unlockTradingWallet, withdrawAllLamports, withdrawError, WrongPasswordError,
 } from "../lib/trading-wallet";
-import { OPEN_EVENT, useInstantSol, useTradeWith, useTradingWallet, type TradingWalletView } from "../lib/trader";
+import { OPEN_EVENT, openTradeSettings, useInstantSol, useTradeWith, useTradingWallet, type TradingWalletView } from "../lib/trader";
 import { Ext } from "./Bits";
 import { useToast } from "./Toast";
 import "./coin.css";
@@ -25,8 +27,6 @@ import "./trading-wallet.css";
 export const BoltGlyph = ({ size = 13 }: { size?: number }) => <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true"><path d="M13.2 2.5 4.8 13.4c-.3.4 0 .9.5.9H11l-1.1 7.2c-.1.6.6.9 1 .4l8.3-10.9c.3-.4 0-.9-.5-.9H13l1.2-7.1c.1-.6-.6-.9-1-.5Z" /></svg>;
 export const LockGlyph = ({ size = 12 }: { size?: number }) => <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>;
 
-/// The "sign at once" limit as typed (no exponent, which the field's filter would mangle): 0.000001, not 1e-6.
-const limitText = (n: number) => (n > 0 ? n.toFixed(9).replace(/0+$/, "").replace(/\.$/, "") : "0");
 /// A deposit smaller than this would not even keep the new account open (rent), and is not worth a trade.
 const MIN_DEPOSIT_LAMPORTS = 10_000_000n;
 const QUICK_DEPOSIT = ["0.1", "0.5", "1"];
@@ -41,8 +41,14 @@ export function TradingWalletHost() {
   useEffect(() => {
     const on = (e: Event) => {
       const a = document.activeElement;
+      const want = ((e as CustomEvent).detail as TradingWalletView) ?? "default";
+      // An hour without use counts as locked a moment before the idle timer says so, and the callers that ask to unlock
+      // already see it that way (lib/trader.ts useAccount): lock it now, so the panel opens for them.
+      if (want === "unlock") lockIfIdle();
+      // asked only to unlock, and it is unlocked already: there is nothing to show
+      if (want === "unlock" && tradingWalletState().status === "unlocked") return;
       opener.current = a instanceof HTMLElement && a !== document.body ? a : null;
-      setView(((e as CustomEvent).detail as TradingWalletView) ?? "default");
+      setView(want);
     };
     window.addEventListener(OPEN_EVENT, on);
     return () => window.removeEventListener(OPEN_EVENT, on);
@@ -58,6 +64,22 @@ function TradingWalletPanel({ view, onClose, returnFocus }: { view: TradingWalle
   const ref = useDialog<HTMLDivElement>(true, close, { returnFocus });
   const titleId = useId();
   useScrollLock(true);
+  // Opened only to unlock (lib/trader.ts TradingWalletView): once the wallet is unlocked the panel has done its job. It
+  // closes at once, the focus goes back to where the user was (useDialog), and nothing else happens: the user presses
+  // their Buy, Sell, Launch or Claim again.
+  // A wallet removed and set up again inside this panel ("Forgot the password?") is a new wallet: the panel then stays
+  // for its "Save your private key" step, as it does when it is opened for setup.
+  const toast = useToast();
+  const replaced = useRef(false);
+  if (tw.status === "none") replaced.current = true;
+  const unlocked = view === "unlock" && tw.status === "unlocked" && !replaced.current;
+  useEffect(() => {
+    if (!unlocked) return;
+    toast.success("Trading wallet unlocked");
+    onClose();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked]);
+  if (unlocked) return null;
   const title = tw.status === "none" ? "Set up a trading wallet" : tw.status === "locked" ? "Unlock your trading wallet" : !tw.backedUp ? "Save your private key" : "Trading wallet";
   return createPortal(
     <div className="confirm-backdrop" onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
@@ -203,8 +225,7 @@ function Manage({ address, focusDeposit, busy }: { address: string; focusDeposit
   const owner = new PublicKey(address);
   const bal = useSolBalance(connection, owner, 15_000);
   const [tradeWith, setTradeWith] = useTradeWith();
-  const [instantSol, setInstantSol] = useInstantSol();
-  const [instantText, setInstantText] = useState(limitText(instantSol));
+  const [instantSol] = useInstantSol();
   const [section, setSection] = useState<"main" | "key" | "remove">("main");
   const [dep, setDep] = useState(""), [wd, setWd] = useState(""), [wdTo, setWdTo] = useState(""), [wdAsk, setWdAsk] = useState<{ to: string; lamports: bigint } | null>(null);
   const [work, setWork] = useState<string | null>(null), [err, setErr] = useState<string | null>(null);
@@ -264,8 +285,6 @@ function Manage({ address, focusDeposit, busy }: { address: string; focusDeposit
     setWdAsk(null);
     if (await run("Sending…", async () => sendAndConfirm(connection, sender, await buildTransfer(connection, owner, new PublicKey(ask.to), ask.lamports)), `Sent ${sol(lamportsToSol(ask.lamports))} to ${short(ask.to)}`)) { setWd(""); setWdTo(""); }
   };
-  // what the field holds is the limit in force: empty (or not a number yet) asks every time
-  const saveInstant = (v: string) => { setInstantText(v); const n = Number(v); setInstantSol(v.trim() !== "" && Number.isFinite(n) && n >= 1e-9 ? n : 0); };
 
   if (section === "key") return (
     <div className="tw-body">
@@ -343,11 +362,11 @@ function Manage({ address, focusDeposit, busy }: { address: string; focusDeposit
             </span>
           </div>
         )}
-        <label className="tw-row tw-setting">
-          <span>Sign at once up to</span>
-          <span className="tw-instant"><input className="input mono" inputMode="decimal" aria-label="Sign at once up to (SOL)" value={instantText} onChange={(e) => saveInstant(e.target.value.replace(/[^\d.]/g, ""))} onBlur={() => setInstantText(limitText(instantSol))} /><em>SOL</em></span>
-        </label>
-        <small className="muted">Bigger trades show the confirm sheet first; 0 asks every time. Every trade is still simulated before it is signed.</small>
+        <div className="tw-row tw-setting">
+          <span>Sign at once up to <b className="mono">{instantSol > 0 ? sol(instantSol) : "0 SOL (asks every time)"}</b></span>
+          <button type="button" className="linkish tw-settings-link" onClick={() => openTradeSettings()}>Trade settings</button>
+        </div>
+        <small className="muted">Instant trades, the Buy and Sell presets, slippage and this limit are set in Trade settings.</small>
       </section>
 
       <div className="tw-actions">

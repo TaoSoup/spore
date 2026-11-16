@@ -17,9 +17,10 @@ import "./coin/terminal.css";
 /// How often the open dialog reads the coin's record again (the coin page follows the SSE stream instead).
 const LIVE_MS = 10_000;
 
-export type QuickTradeProps = { coin: Coin; side: Side; solUsd: number | null; onClose: () => void };
+/// `amount`: the amount the ticket opens with (the fallback of an instant trade); the user still reviews and presses.
+export type QuickTradeProps = { coin: Coin; side: Side; solUsd: number | null; onClose: () => void; amount?: string };
 
-export default function QuickTrade({ coin, side, solUsd, onClose }: QuickTradeProps) {
+export default function QuickTrade({ coin, side, solUsd, onClose, amount }: QuickTradeProps) {
   const amountRef = useRef<HTMLInputElement>(null);
   // A trade in flight keeps the dialog open: closing it would hide the progress and let another trade start beside it.
   const busy = useRef(false);
@@ -44,7 +45,7 @@ export default function QuickTrade({ coin, side, solUsd, onClose }: QuickTradePr
   return createPortal(
     <div className="quick-trade-backdrop" onPointerDown={(e) => { downOnBackdrop.current = e.target === e.currentTarget; }} onClick={(e) => { if (downOnBackdrop.current && e.target === e.currentTarget) close(); }}>
       <div ref={ref} className="quick-trade" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <TradeWidget key={coin.mint} coin={coin} solUsd={solUsd} initialSide={side} sheet onClose={close} amountRef={amountRef} titleId={titleId} current={current} onBusy={onBusy} />
+        <TradeWidget key={coin.mint} coin={coin} solUsd={solUsd} initialSide={side} initialAmount={amount} sheet onClose={close} amountRef={amountRef} titleId={titleId} current={current} onBusy={onBusy} />
       </div>
     </div>,
     document.body,

@@ -58,7 +58,7 @@ export default function FeeSplitAction({ coin, onDone }: { coin: Coin; onDone: (
     onDone();
   };
   const lock = async () => {
-    if (locked) { openTradingWallet(); return; }
+    if (locked) { openTradingWallet("unlock"); return; }
     if (!elig?.shares.length || !me) return;
     setState({ busy: true, sig: null, error: null });
     try {

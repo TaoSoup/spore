@@ -2,7 +2,8 @@ import { createPortal } from "react-dom";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 type Kind = "info" | "success" | "error";
-type Link = { href: string; label: string };
+/// A link to another page (`href`, opened in a new tab), or an action on this one (`onClick`: a button).
+type Link = { href: string; label: string } | { onClick: () => void; label: string };
 type Toast = { id: number; kind: Kind; text: string; link?: Link; cycle: number; leaving: boolean };
 type ToastApi = {
   info: (text: string, link?: Link) => void;
@@ -72,7 +73,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.kind} ${t.leaving ? "leaving" : ""}`} role={t.kind === "error" ? "alert" : undefined} onMouseEnter={() => hold(t.id)} onMouseLeave={() => release(t.id, t.kind)}>
             <span className="toast-icon" aria-hidden="true">{ICON[t.kind]}</span>
-            <span className="toast-text">{t.text}{t.link && <> · <a href={t.link.href} target="_blank" rel="noreferrer">{t.link.label} ↗</a></>}</span>
+            <span className="toast-text">{t.text}{t.link && ("href" in t.link
+              ? <> · <a href={t.link.href} target="_blank" rel="noreferrer">{t.link.label} ↗</a></>
+              : <> · <button type="button" className="linkish toast-act" onClick={t.link.onClick}>{t.link.label}</button></>)}</span>
             <button type="button" aria-label="Dismiss notification" onClick={() => remove(t.id)}>×</button>
             {t.kind !== "error" && <i key={t.cycle} className="toast-timer" aria-hidden="true" style={{ "--ttl": `${TTL}ms` } as CSSProperties} />}
           </div>

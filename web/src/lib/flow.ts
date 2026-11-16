@@ -475,7 +475,11 @@ export class PriceMovedError extends Error { constructor() { super("The price mo
 
 /// `units` / `microLamports`: the compute limit and priority fee the widget showed. `mint` / `symbol`: the coin, for the
 /// record of the sent trade (lib/trade-store), which stays until the trade settles.
-export type SwapOpts = { units?: number; microLamports?: number; mint?: string; symbol?: string | null };
+/// `mustMeasure` / `beforeSign`: for a trade signed with no confirmation on the page (lib/instant-trade.ts). The exact
+/// transaction's simulated cost must come back (UnmeasuredCostError otherwise), and `beforeSign` sees that simulation
+/// after it passed and before anything is signed: an error it throws stops the trade there, unsigned. The ticket passes
+/// neither, so its checks are the ones it always had.
+export type SwapOpts = { units?: number; microLamports?: number; mint?: string; symbol?: string | null; mustMeasure?: boolean; beforeSign?: (pf: Awaited<ReturnType<typeof preflight>>) => void };
 
 /// The buy or sell: build, simulate the exact transaction (the minimum the user confirmed included: a fill that would
 /// miss it stops here as PriceMovedError, before the wallet opens), sign, confirm.
@@ -511,7 +515,11 @@ export async function runJupSwap(conn: Connection, wallet: TxSender, q: JupQuote
 /// sent trade until it settles (lib/trade-store).
 async function checkSignConfirm(conn: Connection, wallet: TxSender, tx: VersionedTransaction, side: Side, st: ReturnType<typeof stepper>, opts: SwapOpts, explain: (code: number) => string | null): Promise<string> {
   st.set("check", "active", "simulating…");
-  try { await preflight(conn, tx, wallet.publicKey!); st.set("check", "done", "passes with your minimum"); }
+  try {
+    const pf = await preflightMeasured(conn, tx, wallet.publicKey!, !!opts.mustMeasure);
+    opts.beforeSign?.(pf);
+    st.set("check", "done", "passes with your minimum");
+  }
   catch (e) {
     if (e instanceof SimulationError && isSlippageFailure(e.logs, null)) { const moved = new PriceMovedError(); st.fail("check", moved); throw moved; }
     st.fail("check", e); throw e;

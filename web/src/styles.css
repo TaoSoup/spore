@@ -766,6 +766,8 @@ a:hover .logo.ring, .lift:hover .logo.ring, .coin-card:hover .logo.ring, button:
 .toast-icon svg { width: 100%; height: 100%; display: block; }
 .toast-text { min-width: 0; overflow-wrap: anywhere; }
 .toast-text a { color: var(--accent); }
+.toast .toast-text .toast-act { display: inline; width: auto; height: auto; margin: 0; padding: 0; border-radius: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.toast .toast-text .toast-act:hover { background: none; color: var(--ink); }
 .toast button { display: grid; place-items: center; width: 24px; height: 24px; margin-top: -2px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: var(--fs-lg); line-height: 1; transition: background var(--dur-1), color var(--dur-1); }
 .toast button:hover { color: var(--ink); background: var(--glass-2); }
 @media (pointer: coarse) { .toast button { width: var(--tap); height: var(--tap); margin: -10px -8px -10px 0; } }

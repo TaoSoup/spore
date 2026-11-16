@@ -248,6 +248,8 @@
 /* USD | SOL beside the period: one switch for every money figure of the page; off (and said why) without a SOL price */
 .pf-bar-picks { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; }
 .pf-unit button:disabled { opacity: .45; cursor: not-allowed; }
+/* the way to Trade settings (instant trades, presets, slippage): a quiet link beside the switches */
+.pf-settings { font-size: var(--fs-xs); white-space: nowrap; }
 
 /* Realized P&L over the period: a title with the figure read, one line, the dates and the low / high under it */
 .pf-chart { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px 14px; min-width: 0; }
