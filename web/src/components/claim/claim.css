@@ -89,6 +89,12 @@
 .claim-summary-coins { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .claim-summary-coins li { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 4px; border-radius: 999px; border: 1px solid var(--line-soft); font-size: var(--fs-xs, 12px); color: var(--ink-2); }
 .claim-summary-coins li.muted { padding-left: 10px; }
+.claim-sum-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; max-height: 42vh; overflow-y: auto; }
+.claim-sum-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; font-size: var(--fs-sm, 13px); color: var(--ink-2); }
+.claim-sum-row small { display: block; font-size: var(--fs-2xs, 11px); color: var(--muted); overflow-wrap: anywhere; }
+.claim-sum-row > b { font-weight: 500; white-space: nowrap; color: var(--ink); }
+.claim-sum-row.is-off > b, .claim-sum-row.is-off > span > span { color: var(--muted); }
+.claim-sum-total { display: flex; justify-content: space-between; gap: 12px; padding-top: 10px; border-top: 1px dotted rgba(255,255,255,.14); font-size: var(--fs-sm, 13px); color: var(--ink-2); }
 .claim-v2 .sheet-close, .claim-confirm .sheet-close, .claim-summary .sheet-close { min-width: 32px; min-height: 32px; }
 
 /* =====================================================================================

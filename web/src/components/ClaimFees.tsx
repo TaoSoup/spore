@@ -1,14 +1,17 @@
 // The "Creator fees" card of a coin page (DESIGN §11.6): what the coin's fee-sharing config holds
 // right now, who each shareholder is (lib/fee-roles: you, creator, Spore, the root's agent), each
 // one's cut, and a Claim button that pays everyone out. The payout is permissionless on-chain, so
-// any connected wallet may trigger it; the signature costs the network fee (plus rent for a
-// shareholder's missing token account on a token-quoted coin). Built in the browser, simulated
-// before the wallet opens, signed by the wallet; the server only reports numbers.
+// any wallet may trigger it; the signature costs the network fee (plus rent for a shareholder's
+// missing token account on a token-quoted coin). Built in the browser, simulated before the
+// confirm dialog, signed by the account wallet (lib/trader.ts useAccount: the trading wallet when
+// the user has one, which signs on the dialog's button with no popup; else the connected
+// extension); the server only reports numbers. "You" is a share of either of the user's wallets,
+// and the dialog says which wallet the part goes to when it is not the one that signs.
 import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { PublicKey, type VersionedTransaction } from "@solana/web3.js";
-import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { api, solscanTx, type Coin, type Fees } from "../lib/api";
 import { buildClaimTx, parseClaimLogs, preflight, sendAndConfirm, type ClaimPayout } from "../lib/pump";
@@ -19,9 +22,10 @@ import { useDialog } from "../lib/dialog";
 import { useAgentCoin } from "../lib/agent-index";
 import { useTradePulse } from "../lib/live-trades";
 import { feeRole, feeRoleNote, type FeeRoleTone } from "../lib/fee-roles";
+import { claimWords, openTradingWallet, paidToOf, payerProblem, useAccount } from "../lib/trader";
 import { CHILD_SPLIT_LINE, OFFICIAL_CA, ROOT_SPLIT_LINE } from "../lib/copy";
 import { PLATFORM_WALLET, ROOT_SPLIT } from "../lib/policy";
-import { ago, amount, bps, feeSol, tokens, usd } from "../lib/format";
+import { ago, amount, bps, feeSol, short, tokens, usd } from "../lib/format";
 import { Addr, Chip, ErrorBox, Logo, Skeleton, sym } from "./Bits";
 import Term from "./Term";
 import { useToast } from "./Toast";
@@ -48,12 +52,21 @@ const ARC_TONE: Record<FeeRoleTone, Tone> = { you: "lime", creator: "lime", spor
 
 function ClaimFees({ coin }: { coin: Coin }) {
   const { connection } = useConnection();
-  const wallet = useWallet();
+  const account = useAccount();
   const toast = useToast();
   // Dev dry mode (`?dry=1`, development builds only): the claim is simulated instead of signed,
   // from the funded probe wallet or `?as=<pubkey>` so a shareholder's "you" row can be reviewed.
   const dry = isDry();
-  const me = dry ? (new URLSearchParams(window.location.search).get("as") || DRY_FUNDED) : (wallet.publicKey?.toBase58() ?? null);
+  const me = dry ? (new URLSearchParams(window.location.search).get("as") || DRY_FUNDED) : account.address;
+  // The trading wallet signs with no popup (the confirm dialog is the confirmation); locked, it signs nothing.
+  const silent = !dry && account.kind === "trading";
+  const locked = !dry && account.locked;
+  const ownerOf = (a: string): "trading" | "wallet" | null => (dry ? (a === me ? "wallet" : null) : account.walletOf(a));
+  // With a connected wallet beside the trading wallet, a "you" row says which of the two it pays.
+  const both = !dry && account.kind === "trading" && !!account.ext.address && account.ext.address !== account.address;
+  const whichOf = (a: string) => { const o = both ? ownerOf(a) : null; return o === "trading" ? "trading wallet" : o === "wallet" ? "connected wallet" : null; };
+  // A failure in the payer's words: a trading wallet without SOL for the fee is named, with its deposit view.
+  const fail = (e: unknown) => { const pr = payerProblem(friendlyError(e), silent); toast.error(pr.text); if (pr.fund) openTradingWallet("deposit"); };
   const fees = useAsync(() => api.fees(coin.mint), [coin.mint]);
   const agentCoin = useAgentCoin(coin);
   const pulse = useTradePulse(coin.mint);
@@ -87,13 +100,16 @@ function ClaimFees({ coin }: { coin: Coin }) {
   const unit = f?.quoteSymbol ?? coin.quoteSymbol;
   const fmt = (raw: string | bigint) => amount(tokens(raw, dec), unit);
   const agentRoot = agentCoin?.root ?? (coin.depth === 0 ? coin : coin.root);
-  const role = (addr: string) => feeRole(addr, { me, agent: agentCoin?.agent?.address ?? null, agentOf: agentRoot ? sym(agentRoot) : null, agentRole: agentCoin?.role ?? null, inferCreator: !!coin.ours });
+  const role = (addr: string) => feeRole(addr, { me: ownerOf(addr) ? addr : me, agent: agentCoin?.agent?.address ?? null, agentOf: agentRoot ? sym(agentRoot) : null, agentRole: agentCoin?.role ?? null, inferCreator: !!coin.ours });
 
   // Why there is nothing to press, in plain words. The API's own reason wins when it has one.
   const noSplit = !!f && (coin.holderReward || !f.shares?.length);
   const total = f ? tokens(f.total, dec) : 0;
   const rows = f ? (f.perShare.length ? f.perShare : (f.shares ?? []).map((s) => ({ ...s, amount: "0" }))) : [];
-  const mine = !!me && rows.some((r) => r.address === me);
+  // where the user's part goes: the account wallet when the split names it, else the connected wallet it names
+  const paidTo = paidToOf(rows.map((r) => ownerOf(r.address)));
+  const mine = !!paidTo;
+  const words = claimWords({ dry, silent, paidTo, extLabel: account.ext.address ? short(account.ext.address, 4) : null });
   // The policy sentence only where the on-chain config has the policy's shape (a root: the agent's
   // slice; a child: Spore in a two-way split). Older or hand-made configs show their rows only.
   const platform = PLATFORM_WALLET.toBase58();
@@ -102,15 +118,18 @@ function ClaimFees({ coin }: { coin: Coin }) {
 
   const start = async () => {
     if (!me || !f) return;
+    if (locked) { openTradingWallet(); toast.info("Unlock your trading wallet to claim: it signs the payout."); return; }
     setPhase({ kind: "building" });
     try {
       const payer = new PublicKey(me);
       const tx = await buildClaimTx(connection, payer, new PublicKey(coin.mint));
       const pf = await preflight(connection, tx, payer);
       if (!alive.current) return;
+      // the trading wallet signs only a cost the dialog could show (no wallet popup follows to show it)
+      if (silent && pf.spent === null) throw new Error("The payout simulates fine, but its exact cost could not be measured just now, so nothing was signed. Try again in a moment.");
       setPhase({ kind: "confirm", tx, spent: pf.spent, units: pf.unitsConsumed, payout: parseClaimLogs(pf.logs) });
     } catch (e) {
-      toast.error(friendlyError(e));
+      fail(e);
       if (alive.current) setPhase({ kind: "idle" });
     }
   };
@@ -119,7 +138,10 @@ function ClaimFees({ coin }: { coin: Coin }) {
     const { tx, payout } = phase;
     setPhase({ kind: "sending", sig: null });
     try {
-      const sig = dry ? await drySend(connection, tx, "claim") : await sendAndConfirm(connection, wallet, tx, [], (s) => { if (alive.current) setPhase({ kind: "sending", sig: s }); });
+      if (!dry && !account.sender) throw new Error(account.locked ? "The trading wallet is locked: unlock it to claim" : "Connect a wallet first");
+      // built for the wallet that was the account when the dialog opened: never handed to another one
+      if (!dry && !account.sender!.publicKey?.equals(tx.message.staticAccountKeys[0])) throw new Error("Your wallet changed while the claim was open. Nothing was signed; start the claim again.");
+      const sig = dry ? await drySend(connection, tx, "claim") : await sendAndConfirm(connection, account.sender!, tx, [], (s) => { if (alive.current) setPhase({ kind: "sending", sig: s }); });
       const paid = payout ? `${fmt(payout.distributed)} to ${payout.shares.length} wallet${payout.shares.length === 1 ? "" : "s"}` : "the pending fees";
       toast.success(dry ? `Dry run: the claim passes (${paid})` : `Claimed ${paid}`, dry ? undefined : { href: solscanTx(sig), label: "view transaction" });
       if (!alive.current) return;
@@ -127,13 +149,13 @@ function ClaimFees({ coin }: { coin: Coin }) {
       fees.reload();
       setTimeout(() => { if (alive.current) fees.reload(); }, CACHE_MS);
     } catch (e) {
-      toast.error(friendlyError(e));
+      fail(e);
     } finally {
       if (alive.current) setPhase({ kind: "idle" });
     }
   };
 
-  const working = phase.kind === "building" ? "Simulating…" : phase.kind === "sending" ? (phase.sig ? "Confirming…" : "Waiting for your wallet…") : null;
+  const working = phase.kind === "building" ? "Simulating…" : phase.kind === "sending" ? (phase.sig ? "Confirming…" : silent ? "Signing…" : "Waiting for your wallet…") : null;
   const zero = !!f && !noSplit && total <= 0;
 
   return (
@@ -185,7 +207,7 @@ function ClaimFees({ coin }: { coin: Coin }) {
                   <i className="dot" style={{ background: TONE_VAR[r.tone] }} aria-hidden="true" />
                   <span className="fees-who">
                     <span className="split-role">{label}</span>
-                    <span className="fees-sub"><Addr a={s.address} n={4} />{note && <> · {note}</>}</span>
+                    <span className="fees-sub"><Addr a={s.address} n={4} />{whichOf(s.address) && <> · {whichOf(s.address)}</>}{note && <> · {note}</>}</span>
                   </span>
                   <b className="mono fees-amt">{fmt(s.amount)}<small>{bps(s.bps)}</small></b>
                 </li>
@@ -207,7 +229,7 @@ function ClaimFees({ coin }: { coin: Coin }) {
 
           {f.claimable && (
             !me ? <div className="fees-connect"><WalletMultiButton>Connect wallet to claim</WalletMultiButton></div>
-            : <button ref={claimBtn} type="button" className={`btn block ${mine ? "accent" : "soft"}`} disabled={busy} onClick={start}>{working ?? (mine ? `Claim ${fmt(f.total)}` : `Pay out ${fmt(f.total)}`)}</button>
+            : <button ref={claimBtn} type="button" className={`btn block ${mine ? "accent" : "soft"}`} disabled={busy} onClick={start}>{working ?? (locked ? `Unlock trading wallet to ${mine ? "claim" : "pay out"} ${fmt(f.total)}` : mine ? `Claim ${fmt(f.total)}` : `Pay out ${fmt(f.total)}`)}</button>
           )}
           {f.claimable && <p className="hint">Anyone may <Term k="claim">claim</Term>: the signature pays the network fee{f.quoteMint ? " (and rent for a shareholder's missing token account)" : ""}, and the program pays the wallets above in these proportions.</p>}
           {!f.claimable && total > 0 && f.reason && <p className="hint">{f.reason}</p>}
@@ -219,20 +241,20 @@ function ClaimFees({ coin }: { coin: Coin }) {
       {confirmOpen && f && createPortal(
         <div className="confirm-backdrop" onClick={() => setPhase({ kind: "idle" })}>
           <div ref={dialogRef} className="confirm" role="dialog" aria-modal="true" aria-labelledby="claim-confirm-title" onClick={(e) => e.stopPropagation()}>
-            <div className="confirm-head"><Logo src={coin.image} label={coin.symbol} size={32} /><b id="claim-confirm-title">Claim fees · {sym(coin)}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={() => setPhase({ kind: "idle" })}>×</button></div>
+            <div className="confirm-head"><Logo src={coin.image} label={coin.symbol} size={32} /><b id="claim-confirm-title">{silent && !mine ? "Pay out fees" : "Claim fees"} · {sym(coin)}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={() => setPhase({ kind: "idle" })}>×</button></div>
             <div className="confirm-rows">
               <div><span>Pays out</span><b className="accent">{phase.payout ? fmt(phase.payout.distributed) : fmt(f.total)}</b></div>
               {(phase.payout?.shares ?? f.perShare.map((s) => ({ address: s.address, bps: s.bps, amount: s.amount }))).map((s) => {
                 const a = typeof s.address === "string" ? s.address : s.address.toBase58();
                 const r = role(a);
-                return <div key={a}><span className={r.tone === "you" ? "accent" : ""}>{r.label} · {a.slice(0, 4)}…{a.slice(-4)}</span><b className={r.tone === "you" ? "accent" : ""}>{fmt(s.amount)}</b></div>;
+                return <div key={a}><span className={r.tone === "you" ? "accent" : ""}>{r.label} · {a.slice(0, 4)}…{a.slice(-4)}{whichOf(a) ? ` · ${whichOf(a)}` : ""}</span><b className={r.tone === "you" ? "accent" : ""}>{fmt(s.amount)}</b></div>;
               })}
-              <div><span>Network fee</span><b title={`${phase.units.toLocaleString("en-US")} compute units`}>{phase.spent === null ? "—" : phase.spent < 0n ? `+${feeSol(-phase.spent)} net` : feeSol(phase.spent)}</b></div>
+              <div><span>{silent ? "Network fee (your trading wallet pays)" : "Network fee"}</span><b title={`${phase.units.toLocaleString("en-US")} compute units`}>{phase.spent === null ? "—" : phase.spent < 0n ? `+${feeSol(-phase.spent)} net` : feeSol(phase.spent)}</b></div>
             </div>
-            <p className="hint">{dry ? "Dry run: the transaction is simulated again instead of signed." : "Simulated on-chain just now. Your wallet shows the final simulation before you sign; nothing is custodial."}</p>
+            <p className="hint">{dry || silent ? words.hint : "Simulated on-chain just now. Your wallet shows the final simulation before you sign; nothing is custodial."}</p>
             <div className="confirm-actions">
               <button type="button" className="btn ghost" onClick={() => setPhase({ kind: "idle" })}>Cancel</button>
-              <button type="button" className="btn accent" onClick={confirm}>{dry ? "Simulate claim" : "Claim in wallet"}</button>
+              <button type="button" className="btn accent" onClick={confirm}>{dry ? "Simulate claim" : silent ? words.button : "Claim in wallet"}</button>
             </div>
           </div>
         </div>,

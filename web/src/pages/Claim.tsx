@@ -3,11 +3,14 @@
 // with the most fees waiting: a payout is permissionless, so anyone may trigger one (the signer pays
 // the network fee, the program pays the shareholders, never the person who pressed the button).
 // Numbers come from /api/claims; transactions are built and simulated in the browser and signed by
-// the wallet.
+// the account wallet (useClaimFlow: the trading wallet when the user has one, else the connected
+// extension). With both, the coins whose split names the connected wallet are listed under the
+// trading wallet's own: the trading wallet runs their payouts and the part goes to the connected wallet.
+// Both lists are refreshed together and counted together in "your part" and "Claim all".
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { api, type ClaimCoin } from "../lib/api";
+import { api, type ClaimCoin, type ClaimTotals } from "../lib/api";
 import { useAsync } from "../lib/hooks";
 import { amount, bps, tokens, usd, usdCard } from "../lib/format";
 import { CHILD_SPLIT_LINE, ROOT_SPLIT_LINE, SPORE_BUYBACK } from "../lib/copy";
@@ -28,6 +31,17 @@ const CACHE_MS = 16_000; // the API caches each coin for 15 s; refetch after a c
 const target = (c: ClaimCoin): ClaimTarget => ({ mint: c.mint, symbol: c.symbol, image: c.image, quoteSymbol: c.quoteSymbol, quoteDecimals: c.quoteDecimals, total: c.total, perShare: c.perShare, depth: c.depth });
 const fmt = (c: { quoteDecimals: number; quoteSymbol: string }, raw: string) => amount(tokens(raw, c.quoteDecimals), c.quoteSymbol);
 const AUTO_CLAIMED = "Its agent claims this coin on its own, so it can read 0 right after a payout. That money already went to the shareholders.";
+
+/// "Your part" over both of the user's wallets: the sums per quote coin, and in dollars.
+function addTotals(a: ClaimTotals | undefined, b: ClaimTotals | undefined): ClaimTotals | undefined {
+  if (!a || !b) return a ?? b;
+  const byQuote = a.byQuote.map((q) => ({ ...q }));
+  for (const q of b.byQuote) {
+    const hit = byQuote.find((x) => x.quoteMint === q.quoteMint);
+    if (hit) { hit.amount = (BigInt(hit.amount) + BigInt(q.amount)).toString(); hit.usd += q.usd; } else byQuote.push({ ...q });
+  }
+  return { usd: a.usd + b.usd, byQuote };
+}
 
 /// A plain error card: no raw server text outside the details toggle.
 function LoadError({ error, retry, what }: { error: string; retry: () => void; what: string }) {
@@ -50,11 +64,13 @@ export default function Claim() {
   const flow = useClaimFlow(onClaimed);
   const index = useAgentIndex();
   const mine = useAsync(() => (flow.me ? api.claimsFor(flow.me) : Promise.resolve(null)), [flow.me]);
-  reloadRef.current.mine = mine.reload;
+  // The connected wallet beside a trading wallet: the coins it launched still pay it.
+  const mine2 = useAsync(() => (flow.also ? api.claimsFor(flow.also) : Promise.resolve(null)), [flow.also]);
+  reloadRef.current.mine = () => { mine.reload(); if (flow.also) mine2.reload(); };
   useEffect(() => {
-    const t = setInterval(() => { if (!document.hidden && !flow.busy) { mine.reload(); pub.reload(); } }, POLL_MS);
+    const t = setInterval(() => { if (!document.hidden && !flow.busy) { mine.reload(); if (flow.also) mine2.reload(); pub.reload(); } }, POLL_MS);
     return () => clearInterval(t);
-  }, [mine.reload, pub.reload, flow.busy]);
+  }, [mine.reload, mine2.reload, pub.reload, flow.busy, flow.also]);
 
   // Phones get one sticky connect bar, shown once the "Your coins" connect button scrolled away.
   const connectBox = useRef<HTMLDivElement>(null);
@@ -68,8 +84,13 @@ export default function Claim() {
   }, [flow.me]);
 
   const rows = mine.data?.coins ?? [];
-  const claimable = useMemo(() => rows.filter((c) => c.claimable), [rows]);
-  const totals = mine.data?.totals;
+  // The connected wallet's coins, without those already listed for the trading wallet (a split that names both).
+  const rows2 = useMemo(() => { const seen = new Set(rows.map((c) => c.mint)); return (flow.also ? mine2.data?.coins ?? [] : []).filter((c) => !seen.has(c.mint)); }, [rows, mine2.data, flow.also]);
+  const claimable = useMemo(() => [...rows, ...rows2].filter((c) => c.claimable), [rows, rows2]);
+  const totals = addTotals(mine.data?.totals, flow.also ? mine2.data?.totals : undefined);
+  // the second list is still being read for the first time, or could not be read: the page must not say "nothing"
+  const waiting2 = !!flow.also && !mine2.data && mine2.loading;
+  const failed2 = !!flow.also && !mine2.data && !!mine2.error;
 
   return (
     <>
@@ -91,14 +112,15 @@ export default function Claim() {
             <i className="numeral claim-n" aria-hidden="true">01</i>
             <div>
               <h2 id="claim-mine-h" className="claim-h">Your coins</h2>
-              <p className="muted claim-sub">{flow.me ? <>{flow.dry ? "dry run as " : "wallet "}<span className="mono">{flow.me.slice(0, 4)}…{flow.me.slice(-4)}</span> · every coin whose fee split names it</> : "Every coin whose fee split names your wallet, across Spore."}</p>
+              <p className="muted claim-sub">{flow.me ? <>{flow.dry ? "dry run as " : flow.silent ? (flow.locked ? "trading wallet, locked " : "trading wallet ") : "wallet "}<span className="mono">{flow.me.slice(0, 4)}…{flow.me.slice(-4)}</span> · every coin whose fee split names it</> : "Every coin whose fee split names your wallet, across Spore."}</p>
             </div>
-            {totals && rows.length > 0 && (
+            {totals && rows.length + rows2.length > 0 && (
               <div className="claim-totals">
                 <div><em>your part</em><CountUp value={totals.usd} format={usdCard} className={totals.usd > 0 ? "accent" : "zero"} /></div>
                 <div className="claim-quotes">{totals.byQuote.filter((q) => BigInt(q.amount) > 0n).map((q) => <span key={q.quoteMint ?? "SOL"} className="mono">{amount(tokens(q.amount, q.quoteDecimals), q.quoteSymbol)}</span>)}</div>
-                <button type="button" className="btn accent" disabled={flow.busy || claimable.length === 0} onClick={() => flow.claimAll(claimable.map(target), totals.usd)}>
-                  {flow.bulk ? `Claiming ${flow.bulk.i + 1} of ${flow.bulk.n}…` : `Claim all (${claimable.length})`}
+                <button type="button" className="btn accent" disabled={flow.bulk ? flow.bulk.stopping : flow.busy || claimable.length === 0} title={flow.bulk ? "Stops after the coin in flight; coins already paid out stay paid" : undefined}
+                  onClick={() => (flow.bulk ? flow.stop() : flow.claimAll(claimable.map(target), totals.usd))}>
+                  {flow.bulk ? (flow.bulk.stopping ? "Stopping…" : `Stop · claiming ${flow.bulk.i + 1} of ${flow.bulk.n}`) : flow.locked ? `Unlock to claim (${claimable.length})` : `Claim all (${claimable.length})`}
                 </button>
               </div>
             )}
@@ -112,7 +134,9 @@ export default function Claim() {
             </div>
           ) : mine.loading && !mine.data ? <SkeletonRows n={3} h={64} />
             : mine.error && !mine.data ? <LoadError error={mine.error} retry={mine.reload} what="your coins" />
-            : rows.length === 0 ? (
+            : rows.length === 0 && waiting2 ? <SkeletonRows n={3} h={64} />
+            : rows.length === 0 && failed2 ? <LoadError error={mine2.error!} retry={mine2.reload} what="the coins of your connected wallet" />
+            : rows.length === 0 && rows2.length === 0 ? (
               <div className="claim-empty">
                 <EmptySpore className="claim-empty-art" />
                 <b>No fees waiting for this wallet yet.</b>
@@ -120,7 +144,16 @@ export default function Claim() {
                 <Link to="/launch" className="btn accent">Launch a coin</Link>
               </div>
             ) : (
-              <ClaimTable rows={rows} mine flow={flow} index={index} />
+              <>
+                {rows.length > 0 && <ClaimTable rows={rows} mine flow={flow} index={index} />}
+                {flow.also && rows2.length > 0 && (
+                  <>
+                    <p className="muted claim-sub">Launched with your connected wallet <span className="mono">{flow.also.slice(0, 4)}…{flow.also.slice(-4)}</span>: your trading wallet runs the payout, and your part goes to that wallet.</p>
+                    <ClaimTable rows={rows2} mine me={flow.also} flow={flow} index={index} />
+                  </>
+                )}
+                {failed2 && <LoadError error={mine2.error!} retry={mine2.reload} what="the coins of your connected wallet" />}
+              </>
             )}
         </section>
 
@@ -150,7 +183,7 @@ export default function Claim() {
   );
 }
 
-function ClaimTable({ rows, mine = false, flow, index }: { rows: ClaimCoin[]; mine?: boolean; flow: ReturnType<typeof useClaimFlow>; index: AgentIndex }) {
+function ClaimTable({ rows, mine = false, flow, index, me = flow.me }: { rows: ClaimCoin[]; mine?: boolean; flow: ReturnType<typeof useClaimFlow>; index: AgentIndex; me?: string | null }) {
   return (
     <div className={`claim-table ${mine ? "mine" : "public"}`} role="table" aria-label={mine ? "Your coins with creator fees" : "Coins with fees waiting"}>
       <div className="claim-row claim-th" role="row">
@@ -164,7 +197,7 @@ function ClaimTable({ rows, mine = false, flow, index }: { rows: ClaimCoin[]; mi
         const busyLabel = flow.labelFor(c.mint);
         const zero = BigInt(c.total) === 0n;
         const prov = agentProvenance({ mint: c.mint, depth: c.depth, shares: c.shares }, index);
-        const ctx = { me: flow.me, agent: prov?.agent.wallet ?? null, agentRole: prov?.role ?? null, agentOf: prov ? sym(prov.agent.root) : null, inferCreator: true };
+        const ctx = { me, agent: prov?.agent.wallet ?? null, agentRole: prov?.role ?? null, agentOf: prov ? sym(prov.agent.root) : null, inferCreator: true };
         const shares = c.perShare.length ? c.perShare : (c.shares ?? []).map((s) => ({ ...s, amount: "0" }));
         const roles = shares.map((s) => ({ s, r: feeRole(s.address, ctx) }));
         const autoClaimed = c.depth === 0 && !!index.byRoot.get(c.mint);
@@ -190,8 +223,8 @@ function ClaimTable({ rows, mine = false, flow, index }: { rows: ClaimCoin[]; mi
             <span role="cell" className="claim-act">
               {!flow.me ? <span className="muted claim-why need-wallet">connect a wallet</span>
                 : !c.claimable ? <span className="muted claim-why" title={c.reason ?? undefined}>{zero ? "nothing yet" : "below minimum"}</span>
-                : mine ? <button type="button" className="btn accent sm" disabled={flow.busy} onClick={() => flow.start(target(c))}>{busyLabel ?? "Claim"}</button>
-                : <button type="button" className="btn ghost sm" disabled={flow.busy} title={termText("payout")} onClick={() => flow.start(target(c))}>{busyLabel ?? "Pay out"}</button>}
+                : mine ? <button type="button" className="btn accent sm" disabled={flow.busy} title={flow.locked ? "Your trading wallet signs the payout: unlock it first" : undefined} onClick={() => flow.start(target(c))}>{busyLabel ?? (flow.locked ? "Unlock to claim" : "Claim")}</button>
+                : <button type="button" className="btn ghost sm" disabled={flow.busy} title={flow.locked ? "Your trading wallet signs the payout: unlock it first" : termText("payout")} onClick={() => flow.start(target(c))}>{busyLabel ?? (flow.locked ? "Unlock to pay out" : "Pay out")}</button>}
             </span>
           </div>
         );

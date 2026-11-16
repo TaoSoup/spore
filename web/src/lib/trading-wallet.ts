@@ -8,7 +8,8 @@
 // into Phantom, Solflare or Backpack.
 //
 // It signs only through `tradingSender()`, and only transactions it pays for itself: the quick trade's swaps
-// (lib/flow.ts) and the SOL it withdraws. Nothing is exposed on `window`. Still, it is a hot wallet: whoever gets its
+// (lib/flow.ts), the SOL it withdraws, and, as the user's account wallet (lib/trader.ts useAccount), a launch, a fee
+// split and a fee payout, each after a confirmation on the page. Nothing is exposed on `window`. Still, it is a hot wallet: whoever gets its
 // key, or this browser while it is unlocked, can spend it. Keep only trading money in it.
 import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction, type Connection } from "@solana/web3.js";
 import { decodeBase58, encodeBase58 } from "./base58";
@@ -206,9 +207,20 @@ export function removeTradingWallet() {
   emit();
 }
 
+/// Whether the trading wallet may sign `tx`: it is the fee payer, and it is the only signer or the last one to sign.
+/// The one transaction of this app with a second signer is a launch, whose fresh mint keypair signs first
+/// (lib/pump/send.ts sendAndConfirm signs the extra keypairs before it hands the transaction over); a transaction that
+/// still waits for someone else's signature is refused, so the wallet never signs first for another to complete.
+export function paysForItself(tx: VersionedTransaction, me: PublicKey): boolean {
+  if (!tx.message.staticAccountKeys[0]?.equals(me)) return false;
+  const n = tx.message.header.numRequiredSignatures;
+  if (n === 1) return true;
+  return n === 2 && tx.signatures.length === 2 && tx.signatures[1].some((b) => b !== 0);
+}
+
 /// The unlocked wallet as a sender for lib/pump/send.ts sendAndConfirm (the flows' `wallet`), or null while locked.
-/// It signs only transactions it pays for itself, refuses once the wallet locked, and sends them through the page's
-/// connection (the server's RPC proxy).
+/// It signs only transactions it pays for itself (`paysForItself`), refuses once the wallet locked, and sends them
+/// through the page's connection (the server's RPC proxy).
 export function tradingSender(): TxSender | null {
   // read during a render (lib/trader.ts): an idle session counts as locked here, and is locked by the timer, by the page
   // coming back, or by the send below
@@ -219,7 +231,7 @@ export function tradingSender(): TxSender | null {
     sendTransaction: async (tx, conn, opts = {}) => {
       if (lockIfIdle() || !session || session.kp !== kp) throw new Error("The trading wallet is locked: unlock it to trade");
       if (!(tx instanceof VersionedTransaction)) throw new Error("The trading wallet signs only this app's own transactions");
-      if (!tx.message.staticAccountKeys[0]?.equals(kp.publicKey) || tx.message.header.numRequiredSignatures !== 1) throw new Error("The trading wallet signs only transactions it pays for alone");
+      if (!paysForItself(tx, kp.publicKey)) throw new Error("The trading wallet signs only transactions it pays for alone");
       tx.sign([kp]);
       session.lastUsed = Date.now();
       return conn.sendRawTransaction(tx.serialize(), { preflightCommitment: opts.preflightCommitment ?? "confirmed", maxRetries: opts.maxRetries ?? 3 });

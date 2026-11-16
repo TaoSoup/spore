@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { PublicKey } from "@solana/web3.js";
-import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import { createPortal } from "react-dom";
+import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { api, type Coin } from "../lib/api";
 import { useAsync, useDebounced, useMediaQuery, useSolBalance, useStats } from "../lib/hooks";
-import { QUOTE_PROBE, drySigner, finishFeeSplit, launchFeeOf, policyShares, runSpawn, spawnPlan, walletSigner, type Signer, type SpawnResult } from "../lib/flow";
-import { AGENT_MODELS, AGENT_SEED_LAMPORTS, DEFAULT_AGENT_MODEL, ROOT_SPLIT, SPLIT_BPS, type AgentModelId } from "../lib/policy";
+import { QUOTE_PROBE, drySigner, finishFeeSplit, launchFeeOf, policyShares, runSpawn, spawnPlan, walletSigner, type SignConfirm, type Signer, type SpawnResult } from "../lib/flow";
+import { AGENT_MODELS, AGENT_SEED_LAMPORTS, DEFAULT_AGENT_MODEL, PLATFORM_WALLET, ROOT_SPLIT, SPLIT_BPS, type AgentModelId } from "../lib/policy";
+import { openTradingWallet, useAccount } from "../lib/trader";
+import { useDialog } from "../lib/dialog";
 import { failedBeforeSigning, friendlyError, type Step } from "../lib/steps";
 import { chainFor } from "../lib/chain";
 import { estimateFirstBuy } from "../lib/pump";
@@ -15,7 +18,7 @@ import { clearPending, loadPending, type PendingLaunch } from "../lib/launch-sto
 import { dryWallet, isDry } from "../lib/dry";
 import { CHILD_SPLIT_YOU, NON_CUSTODIAL, NO_LAUNCH_FEE, ROOT_SPLIT_YOU, SPORE_BUYBACK, TRUST_POINTS } from "../lib/copy";
 import { feeRole, type FeeRoleTone } from "../lib/fee-roles";
-import { compact, lamportsToSol, parseAmount, sol, usd } from "../lib/format";
+import { compact, feeSol, lamportsToSol, parseAmount, short, sol, usd } from "../lib/format";
 import Steps from "../components/Steps";
 import SplitPreview from "../components/SplitPreview";
 import CostBox, { EST_RENT_LAMPORTS, FEE_MARGIN_LAMPORTS, launchTotal, simulatedRent, type BuyEstimate } from "../components/CostBox";
@@ -29,13 +32,15 @@ import AgentSetup from "../components/launch/AgentSetup";
 import LaunchBar from "../components/launch/LaunchBar";
 import Certificate from "../components/launch/Certificate";
 import { ProgressArc, RailGlyph, type GlyphState } from "../components/launch/art";
-import { Chip, DepthBadge, Skeleton, sym, useTint } from "../components/Bits";
+import { Chip, DepthBadge, Logo, Skeleton, sym, useTint } from "../components/Bits";
 import { useToast } from "../components/Toast";
 import "../components/launch.css";
 
 const SLIPPAGES = [100, 200, 300, 500];
 const QUICK_BUYS = ["0.1", "0.25", "0.5", "1"];
 const TICKER_RE = /^[A-Z0-9]{1,13}$/;
+/// How long the trading wallet's confirmation ignores its sign button after it appears (see `answerYes`).
+const ASK_ARM_MS = 600;
 type Field = "name" | "symbol" | "description" | "image" | "twitter" | "telegram" | "website" | "firstBuy" | "feeBps";
 /// Form order: the first invalid field in this order is where a blocked launch takes the visitor.
 const FIELD_ORDER: Field[] = ["name", "symbol", "description", "twitter", "telegram", "website", "image", "firstBuy", "feeBps"];
@@ -49,6 +54,7 @@ const PLAN_DETAIL: Record<string, string> = {
   build: "One transaction creates the coin and locks the fee split.",
   preflight: "It runs on a copy of the chain first; a problem stops here, before your wallet opens.",
   sign: "You approve in your wallet; the page follows it until it confirms.",
+  signSilent: "The page shows the exact cost and asks once; then your trading wallet signs, with no wallet popup.",
   split: "Usually inside the same transaction; a deep tree needs a second signature.",
   quote: "Your first buy is quoted on the new curve.",
   buy: "A second signature buys your first tokens.",
@@ -75,17 +81,29 @@ export default function Launch() {
   const [params, setParams] = useSearchParams();
   const parentMint = params.get("parent") || "";
   const { connection } = useConnection();
-  const wallet = useWallet();
+  // The account wallet (lib/trader.ts): the trading wallet when the user has one, else the connected extension. It is
+  // the coin's creator, it pays, and it signs. A locked trading wallet is still "me" (its address is public), so the
+  // form, the split and the balance show; only the launch button waits for the unlock.
+  const account = useAccount();
   const toast = useToast();
   const { stats } = useStats();
   // Dev-only dry run (`?dry=1`): a wallet shim replaces wallet-adapter and every send is a
   // simulation. `isDry()` is false in production builds whatever the URL says.
   const dry = isDry();
   const dryW = useMemo(() => (dry ? dryWallet() : null), [dry]);
-  const signer: Signer | null = useMemo(() => (dryW ? drySigner(connection, dryW) : walletSigner(connection, wallet)), [connection, dryW, wallet]);
-  const connected = !!signer;
-  const creator = signer?.publicKey.toBase58() ?? null;
-  const balance = useSolBalance(connection, signer?.publicKey ?? null);
+  const silent = !dryW && account.kind === "trading";
+  const signer: Signer | null = useMemo(() => (dryW ? drySigner(connection, dryW) : account.sender ? walletSigner(connection, account.sender, account.kind === "trading") : null), [connection, dryW, account.sender, account.kind]);
+  const me = dryW ? dryW.publicKey : account.publicKey;
+  const connected = !!me;
+  const needUnlock = !dryW && account.locked;
+  const unlock = () => { openTradingWallet(); toast.info("Unlock your trading wallet to launch: it is the coin's creator and pays for the launch."); };
+  // A launch writes the trading wallet into the coin for good (creator, fee shareholder; the split never changes). A
+  // key that was never saved outside this browser would take those fees with it when the browser's data goes, so the
+  // launch waits for the panel's "Save your private key" step.
+  const needBackup = !dryW && !needUnlock && account.kind === "trading" && account.unsaved;
+  const saveKey = () => { openTradingWallet(); toast.info("Save your trading wallet's private key first: the coin's creator fees are paid to this wallet for good."); };
+  const creator = me?.toBase58() ?? null;
+  const balance = useSolBalance(connection, me);
   const narrow = useMediaQuery("(max-width: 560px)");
   // "Grow an existing tree" chosen, parent not picked yet; `picking` = the search is open over a chosen parent.
   const [growing, setGrowing] = useState(false);
@@ -161,7 +179,7 @@ export default function Launch() {
   const agentPaused = isRoot && e?.agent?.ready === false;
   // Launch fee from the server, checked against the pinned policy (lib/policy.ts); a violation blocks the launch.
   let launchFee: ReturnType<typeof launchFeeOf> = null, policyProblem: string | null = null;
-  try { launchFee = e ? launchFeeOf(e) : null; if (e && signer) policyShares(signer.publicKey, e, null, "preview"); } catch (err) { policyProblem = err instanceof Error ? err.message : String(err); }
+  try { launchFee = e ? launchFeeOf(e) : null; if (e && me) policyShares(me, e, null, "preview"); } catch (err) { policyProblem = err instanceof Error ? err.message : String(err); }
   const eligibleNow = !!(poolReady && e && e.ok && e.shares.length > 0 && creator) && !policyProblem && !agentPaused;
   // A first buy from SOL needs a SOL-rooted chain: always true for a root, true for a child of one.
   const canBuy = !!(e?.ok && poolReady && (isRoot || (p!.depth === 0 ? p!.quoteMint === null : true)));
@@ -195,7 +213,7 @@ export default function Launch() {
   const estimateKey = `${dBuy}|${parentMint}|${feeValue ?? ""}|${parentChain.data ? "c" : "n"}`;
   const estimate = useAsync(async () => {
     if (dBuy <= 0n || (p && !parentChain.data)) return null;
-    return estimateFirstBuy(connection, signer?.publicKey ?? QUOTE_PROBE, p ? new PublicKey(p.mint) : null, parentChain.data, dBuy, feeValue && !errors.feeBps ? feeValue : undefined);
+    return estimateFirstBuy(connection, me ?? QUOTE_PROBE, p ? new PublicKey(p.mint) : null, parentChain.data, dBuy, feeValue && !errors.feeBps ? feeValue : undefined);
   }, [estimateKey]);
   const buyEstimate: BuyEstimate | null = dBuy > 0n ? { tokens: estimate.data?.tokens ?? null, symbol, loading: estimate.loading || dBuy !== buyLamports, error: estimate.error ? "could not quote yet" : null, hops: estimate.data?.hops ?? 0 } : null;
   const buyUsd = stats?.solUsd && buyLamports > 0n ? (Number(buyLamports) / 1e9) * stats.solUsd : null;
@@ -217,8 +235,31 @@ export default function Launch() {
   }, [e, creator, isRoot]);
   const splitBar = <div className="split-bar" aria-hidden="true">{segments.map((s) => <i key={s.key} className={s.cls} style={{ width: `${s.bps / 100}%` }} title={`${s.label} ${s.bps / 100}%`} />)}</div>;
 
-  const planSteps: Step[] = spawnPlan({ prepareAgent: isRoot, agentModelLabel: isRoot ? modelLabel : null, launchFeeLamports: feeLamports, seedLamports, wantsBuy: canBuy && buyLamports > 0n })
-    .map(([key, label]) => ({ key, label, state: "todo", detail: PLAN_DETAIL[key] }));
+  const planSteps: Step[] = spawnPlan({ prepareAgent: isRoot, agentModelLabel: isRoot ? modelLabel : null, launchFeeLamports: feeLamports, seedLamports, wantsBuy: canBuy && buyLamports > 0n, silent })
+    .map(([key, label]) => ({ key, label, state: "todo", detail: PLAN_DETAIL[silent && key === "sign" ? "signSilent" : key] }));
+
+  // The trading wallet signs without a popup, so the page asks itself: after the simulation, with the exact cost, and
+  // before anything is signed (lib/flow.ts SignConfirm). The flow waits on this promise; closing the dialog answers no.
+  // What the dialog shows is captured when the flow starts (`AskView`), never read from the form or the URL afterwards:
+  // the transaction on the table was built from those values, and no wallet popup would contradict a changed page.
+  type AskView = { tag: string; image: string | null; payer: string; root: boolean; parentTag: string; feeLamports: bigint; seedLamports: bigint; split: string; slippage: number };
+  const [ask, setAsk] = useState<{ c: SignConfirm; v: AskView; done: (ok: boolean) => void } | null>(null);
+  const askRef = useRef(ask);
+  askRef.current = ask;
+  const answer = (ok: boolean) => { const a = askRef.current; if (!a) return; setAsk(null); a.done(ok); };
+  useEffect(() => () => { askRef.current?.done(false); }, []);
+  // The dialog opens seconds after the launch button was pressed, and its sign button is the whole consent (no wallet
+  // popup follows). So the focus lands on Cancel, never on the button that signs: a stray or repeated Enter or Space
+  // answers "no". And the sign button does nothing for a moment after the dialog appears (`ASK_ARM_MS`), so a click
+  // already on its way to the page under it cannot sign either.
+  const askCancel = useRef<HTMLButtonElement>(null);
+  const askAt = useRef(0);
+  const askDialog = useDialog<HTMLDivElement>(!!ask, () => answer(false), { initialFocus: askCancel });
+  const answerYes = () => { if (performance.now() - askAt.current < ASK_ARM_MS) return; answer(true); };
+  // One question at a time: a flow that asks while another question is open answers that one "no" first, so no flow
+  // is left waiting on a dialog that was replaced.
+  const confirmWith = (v: AskView) => (c: SignConfirm) => new Promise<boolean>((done) => { askRef.current?.done(false); askAt.current = performance.now(); setAsk({ c, v, done }); });
+  const viewOf = (tag: string, img: string | null, payer: string): AskView => ({ tag, image: img, payer, root: isRoot, parentTag, feeLamports, seedLamports, split: segments.map((x) => `${x.label} ${x.bps / 100}%`).join(" · "), slippage });
 
   const report = (s: Step[]) => { lastSteps.current = s; setSteps(s); };
   const focusFirstInvalid = () => {
@@ -235,7 +276,11 @@ export default function Launch() {
   async function go() {
     setTried(true);
     if (problems.length) { focusFirstInvalid(); return; }
-    if (!e || !eligibleNow || !signer || !image) return;
+    if (!e || !eligibleNow || !image) return;
+    if (!signer) { if (needUnlock) unlock(); return; }
+    if (needBackup) { saveKey(); return; }
+    // one signing flow at a time: a fee split being finished owns the confirmation
+    if (splitBusy) return;
     setBusy(true); setError(null); setResult(null); lastSteps.current = []; setSteps([]);
     const form = { name: name.trim(), symbol, description: description.trim(), image: image.dataUrl, twitter: normaliseSocial("twitter", twitter), telegram: normaliseSocial("telegram", telegram), website: normaliseSocial("website", website) };
     const me = signer.publicKey.toBase58();
@@ -247,6 +292,7 @@ export default function Launch() {
         prepareAgent: isRoot ? async () => { const a = await api.agentPrepare(me, model); return { id: a.id, address: a.address, model: a.model }; } : undefined,
         agentModelLabel: isRoot ? modelLabel : undefined,
         onPreflight: (spent) => setSimRent(simulatedRent(spent, feeLamports, seedLamports)),
+        confirm: signer.silent && !signer.dry ? confirmWith(viewOf(`$${symbol}`, image.dataUrl, me)) : undefined,
       }, report);
       setResult(r);
       setPending(null);
@@ -255,21 +301,39 @@ export default function Launch() {
       else toast.error(`$${symbol} was created but the fee split did not land. Finish it below.`);
       if (r.buyError) toast.error(`Launched, but the first buy failed: ${friendlyError(new Error(r.buyError))}`);
       setTimeout(() => scrollTo(successCard.current), 60);
-    } catch (err) { setError({ text: friendlyError(err), beforeSigning: failedBeforeSigning(lastSteps.current) }); }
+    } catch (err) {
+      // "No" at the confirmation is not an error: nothing was signed, the form is as it was.
+      if ((err as { name?: string } | null)?.name === "NotConfirmedError") { lastSteps.current = []; setSteps([]); }
+      else setError({ text: friendlyError(err), beforeSigning: failedBeforeSigning(lastSteps.current) });
+    }
     finally { setBusy(false); setPending(loadPending()); }
   }
 
   /// Retries only the fee split of a launch whose create landed (from the success screen or the
   /// resume card): no upload, no new mint, one signature.
   async function finishSplit(rec: PendingLaunch) {
-    if (!signer) { toast.error("Connect the wallet that launched the coin first"); return; }
+    // one signing flow at a time (a launch in progress, or this one already running)
+    if (busy || splitBusy) return;
+    // The program takes a fee split only from the coin's creator, so the wallet that launched it signs: the trading
+    // wallet, or the connected extension for a launch made with it before the trading wallet became the account.
+    let by: Signer | null = signer;
+    if (!dryW) {
+      const plat = PLATFORM_WALLET.toBase58();
+      const launcher = rec.shares.find((s) => s.address !== plat && s.address !== rec.agent?.address)?.address ?? plat;
+      const own = account.walletOf(launcher);
+      if (!own) { toast.error(`Only the wallet that launched this coin (${short(launcher, 4)}) can lock its fee split. ${account.kind === "trading" ? "Connect that wallet to finish." : "Connect it first."}`); return; }
+      if (own === "trading" && account.locked) { openTradingWallet(); toast.info("Unlock your trading wallet to finish the fee split."); return; }
+      const sender = own === "trading" ? account.sender : account.ext.sender;
+      by = sender ? walletSigner(connection, sender, own === "trading") : null;
+    }
+    if (!by) { toast.error("Connect the wallet that launched the coin first"); return; }
     setSplitBusy(true); setSplitError(null); setSplitSteps([]);
     try {
-      const sig = await finishFeeSplit(connection, signer, rec, setSplitSteps);
+      const sig = await finishFeeSplit(connection, by, rec, setSplitSteps, by.silent && !by.dry ? confirmWith(viewOf(`$${rec.symbol}`, rec.image, by.publicKey.toBase58())) : undefined);
       setResult((r) => ({ ...(r ?? resultFromPending(rec)), split: { done: true, sig, error: null } }));
       setPending(null);
       toast.success("Fee split locked. Spore lists the coin once the indexer sees it.");
-    } catch (err) { setSplitError(friendlyError(err)); }
+    } catch (err) { if ((err as { name?: string } | null)?.name === "NotConfirmedError") setSplitSteps([]); else setSplitError(friendlyError(err)); }
     finally { setSplitBusy(false); }
   }
 
@@ -285,8 +349,9 @@ export default function Launch() {
     setTimeout(() => { const i = document.querySelector<HTMLInputElement>(".tree-search input"); if (i) { scrollTo(i, "center"); i.focus({ preventScroll: true }); } }, 60);
   };
 
-  const launchLabel = busy ? "Launching…" : agentPaused ? "New trees paused" : !poolReady ? "Pick a parent first" : insufficient ? "Not enough SOL" : isRoot ? `Launch ${symbol ? `$${symbol}` : "coin"} with SOL` : `Launch ${symbol ? `$${symbol}` : "coin"} under ${sym(p)}`;
-  const launchDisabled = busy || !eligibleNow || insufficient || (tried && problems.length > 0);
+  const launchLabel = busy ? "Launching…" : needUnlock ? "Unlock trading wallet to launch" : needBackup ? "Save your trading wallet's key to launch" : agentPaused ? "New trees paused" : !poolReady ? "Pick a parent first" : insufficient ? "Not enough SOL" : isRoot ? `Launch ${symbol ? `$${symbol}` : "coin"} with SOL` : `Launch ${symbol ? `$${symbol}` : "coin"} under ${sym(p)}`;
+  const launchDisabled = needUnlock || needBackup ? busy : busy || splitBusy || !eligibleNow || insufficient || (tried && problems.length > 0);
+  const press = () => { if (needUnlock) unlock(); else if (needBackup) saveKey(); else void go(); };
   const err = (f: Field) => (show(f) && errors[f] ? <span className="field-error" role="alert">{errors[f]}</span> : null);
   const invalid = (f: Field) => (show(f) && errors[f] ? "invalid" : "");
   const locked = busy || !!result;
@@ -325,7 +390,7 @@ export default function Launch() {
             </ol>
           </nav>
           <div className="spawn-main">
-            {pending && !result && <ResumeCard conn={connection} pending={pending} onResume={(rec) => { setResult(resultFromPending(rec)); void finishSplit(rec); setTimeout(() => scrollTo(successCard.current), 60); }} onDismiss={() => { clearPending(); setPending(null); }} />}
+            {pending && !result && <ResumeCard conn={connection} pending={pending} onResume={(rec) => { if (busy || splitBusy) return; setResult(resultFromPending(rec)); void finishSplit(rec); setTimeout(() => scrollTo(successCard.current), 60); }} onDismiss={() => { clearPending(); setPending(null); }} />}
 
 
             {result && (
@@ -431,18 +496,21 @@ export default function Launch() {
                 </div>
 
                 {policyProblem && <p className="error" role="alert">{policyProblem}</p>}
-                {poolReady && <CostBox feeLamports={feeLamports} buyLamports={buyCost} seedLamports={seedLamports} simulatedRentLamports={simRent} connected={connected} balance={balance.lamports} balanceError={balance.error} solUsd={stats?.solUsd ?? null} estimate={buyEstimate} />}
+                {poolReady && <CostBox feeLamports={feeLamports} buyLamports={buyCost} seedLamports={seedLamports} simulatedRentLamports={simRent} connected={connected} balance={balance.lamports} balanceError={balance.error} solUsd={stats?.solUsd ?? null} estimate={buyEstimate} who={silent ? "trading wallet" : "wallet"} />}
                 {tried && problems.length > 0 && <ul className="problems" role="alert">{problems.map((f) => <li key={f}>{errors[f]}</li>)}</ul>}
 
-                {error && <div className="notice bad launch-error" role="alert"><span><b>The launch stopped.</b> {error.text}{error.beforeSigning ? " Nothing was signed or sent. Your form is kept." : /nothing was (sent|charged)/i.test(error.text) ? "" : " If a transaction was sent, it is linked in the step list."}</span>{!busy && <button type="button" className="btn sm" onClick={go}>Try again</button>}</div>}
+                {error && <div className="notice bad launch-error" role="alert"><span><b>The launch stopped.</b> {error.text}{error.beforeSigning ? " Nothing was signed or sent. Your form is kept." : /nothing was (sent|charged)/i.test(error.text) ? "" : " If a transaction was sent, it is linked in the step list."}</span>{!busy && <button type="button" className="btn sm" onClick={press}>Try again</button>}</div>}
                 {steps.length > 0 && <Steps steps={steps} title={busy ? "Launching" : error ? "Stopped" : "Done"} />}
 
                 {!error && (!connected ? <div className="connect-row"><WalletMultiButton>Connect wallet to launch</WalletMultiButton><span className="hint">Phantom, Solflare or any wallet-standard wallet. The transaction is built here and signed there; Spore never holds a key.</span></div>
                   : <div className="launch-row">
-                      <button type="button" className={`btn lg accent launch-btn ${busy ? "is-launching" : launchDisabled ? "" : "is-ready"}`} disabled={launchDisabled} onClick={go}>{busy ? <ProgressArc done={stepsDone} total={steps.length} /> : <svg className="launch-ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M8 14V7.5M8 7.5C8 4.8 6 3 3 3c0 2.8 2 4.5 5 4.5Zm0 0c0-2.7 2-4.5 5-4.5 0 2.8-2 4.5-5 4.5Z" /></svg>}<span>{launchLabel}</span>{busy && steps.length > 0 && <span className="launch-count mono">{stepsDone}/{steps.length}</span>}</button>
+                      <button type="button" className={`btn lg accent launch-btn ${busy ? "is-launching" : launchDisabled ? "" : "is-ready"}`} disabled={launchDisabled} onClick={press}>{busy ? <ProgressArc done={stepsDone} total={steps.length} /> : <svg className="launch-ico" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M8 14V7.5M8 7.5C8 4.8 6 3 3 3c0 2.8 2 4.5 5 4.5Zm0 0c0-2.7 2-4.5 5-4.5 0 2.8-2 4.5-5 4.5Z" /></svg>}<span>{launchLabel}</span>{busy && steps.length > 0 && <span className="launch-count mono">{stepsDone}/{steps.length}</span>}</button>
                       {dry && <span className="hint">Dry run as <span className="mono">{creator?.slice(0, 6)}…</span>: simulated on mainnet state, nothing sent.</span>}
                       {!busy && !dry && agentPaused && <span className="hint">Pick a parent in step 1, or try again in a moment.</span>}
-                      {!busy && !dry && !agentPaused && eligibleNow && !insufficient && <span className="hint">{problems.length && tried ? `${problems.length} thing${problems.length === 1 ? "" : "s"} to fix above` : "Simulated before you sign; your wallet shows the exact cost."}</span>}
+                      {!busy && !dry && needUnlock && <span className="hint">Your trading wallet <span className="mono">{short(creator, 4)}</span> is the coin's creator and pays for the launch. It is locked; nothing is signed until you unlock it and press launch.</span>}
+                      {!busy && !dry && needBackup && <span className="hint">Your trading wallet <span className="mono">{short(creator, 4)}</span> would be this coin's creator and receive its creator fees for good, but its private key exists only in this browser. Save the key first; nothing is signed until you press launch again.</span>}
+                      {!busy && !dry && !needUnlock && !needBackup && !agentPaused && eligibleNow && !insufficient && <span className="hint">{problems.length && tried ? `${problems.length} thing${problems.length === 1 ? "" : "s"} to fix above` : silent ? <>Launches as your trading wallet <span className="mono">{short(creator, 4)}</span>. Simulated first; you confirm the exact cost before it signs.</> : "Simulated before you sign; your wallet shows the exact cost."}</span>}
+                      {!busy && !dry && !needUnlock && silent && insufficient && <span className="hint">Your trading wallet pays for the launch. <button type="button" className="linkish" onClick={() => openTradingWallet("deposit")}>Add SOL to it</button></span>}
                     </div>)}
                 {connected && poolReady && e && e.ok && !creator && <div className="hint">Waiting for the wallet address…</div>}
 
@@ -490,7 +558,32 @@ export default function Launch() {
         </div>
       </div>
       {!result && <LaunchBar target={launchCard} image={image?.dataUrl ?? null} symbol={symbol} total={total} label={connected ? launchLabel : "Connect wallet"} disabled={connected ? launchDisabled : false} hidden={busy || !!result || !!error}
-        onPress={() => { if (connected) void go(); else scrollTo(launchCard.current); }} />}
+        onPress={() => { if (connected) press(); else scrollTo(launchCard.current); }} />}
+      {ask && createPortal(
+        <div className="confirm-backdrop" onClick={() => answer(false)}>
+          <div ref={askDialog} className="confirm" role="dialog" aria-modal="true" aria-labelledby="launch-confirm-title" onClick={(ev) => ev.stopPropagation()}>
+            <div className="confirm-head"><Logo src={ask.v.image} label={ask.v.tag.slice(1)} size={32} /><b id="launch-confirm-title">{ask.c.kind === "launch" ? "Launch" : "Lock the fee split of"} {ask.v.tag}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={() => answer(false)}>×</button></div>
+            <div className="confirm-rows">
+              <div><span>{ask.c.kind === "launch" ? "Creator, pays and signs" : "Pays and signs"}</span><b>Trading wallet · {short(ask.v.payer, 4)}</b></div>
+              {ask.c.kind === "launch" && <div><span>Tree</span><b>{ask.v.root ? "New tree · priced in SOL" : `Under ${ask.v.parentTag}`}</b></div>}
+              <div><span>{ask.c.kind === "launch" ? "The launch spends" : "This spends"}</span><b className="accent" title="Measured by simulating this exact transaction just now">{feeSol(ask.c.spent)}</b></div>
+              {ask.c.kind === "launch" && ask.v.feeLamports > 0n && <div><span>of which launch fee, to Spore</span><b>{sol(lamportsToSol(ask.v.feeLamports))}</b></div>}
+              {ask.c.kind === "launch" && ask.v.seedLamports > 0n && <div><span>of which gas for your coin's agent</span><b>{sol(lamportsToSol(ask.v.seedLamports))}</b></div>}
+              {ask.c.kind === "launch" && <div><span>Creator fees go to</span><b>{ask.v.split}</b></div>}
+              {ask.c.secondSplit && <div><span>Then, without asking again</span><b>the fee split, in a second transaction</b></div>}
+              {ask.c.firstBuyLamports > 0n && <div><span>Then, without asking again</span><b>first buy of {sol(lamportsToSol(ask.c.firstBuyLamports))}{ask.c.firstBuyMinOut !== null ? ` · for at least ≈ ${compact(Number(ask.c.firstBuyMinOut) / 1e6)} ${ask.v.tag} (the estimate less ${ask.v.slippage / 100}% slippage), or it is not bought` : ` · up to ${ask.v.slippage / 100}% slippage`}</b></div>}
+            </div>
+            <p className="hint">{ask.c.kind === "launch"
+              ? "Simulated on-chain just now. Your trading wallet signs as soon as you press the button; no wallet popup follows. The fee split is written with the coin and can never be changed."
+              : "Simulated on-chain just now. Your trading wallet signs as soon as you press the button; no wallet popup follows. The split is set once and can never be changed."}</p>
+            <div className="confirm-actions">
+              <button ref={askCancel} type="button" className="btn ghost" onClick={() => answer(false)}>Cancel</button>
+              <button type="button" className="btn accent" onClick={answerYes}>{ask.c.kind === "launch" ? `Launch ${ask.v.tag} now` : "Lock the fee split now"}</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </>
   );
 }

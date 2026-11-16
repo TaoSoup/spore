@@ -9,7 +9,8 @@ await import("./cjs-sdk-hook.mjs");
 const { encodeBase58, decodeBase58 } = await import("../src/lib/base58.ts");
 const tw = await import("../src/lib/trading-wallet.ts");
 const { seal, unseal, parseSecretKey, WrongPasswordError, TRANSFER_FEE_LAMPORTS } = tw;
-const { signsAtOnce, INSTANT_MAX_AGE_MS } = await import("../src/lib/trader.ts");
+const { signsAtOnce, INSTANT_MAX_AGE_MS, chooseAccount, walletOf, claimWords, paidToOf, payerProblem, withinQuotedCost, CLAIM_COST_SLACK } = await import("../src/lib/trader.ts");
+const { friendlyError } = await import("../src/lib/steps.ts");
 
 const FAST = { iterations: 1_000 };
 const OPEN = { minIterations: 1_000 };
@@ -117,6 +118,17 @@ test("the signer: signs only what the trading wallet pays for alone, sends it, a
   assert.ok(back.signatures[0].some((b) => b !== 0), "signed");
   await assert.rejects(sender.sendTransaction(txFrom(Keypair.generate().publicKey), conn), /pays for alone/, "another payer");
   await assert.rejects(sender.sendTransaction(txFrom(me, Keypair.generate().publicKey), conn), /pays for alone/, "a second signer");
+  // a launch: the fresh mint keypair signed first (sendAndConfirm does that), the wallet pays and signs last
+  const mint = Keypair.generate();
+  const launch = txFrom(me, mint.publicKey);
+  assert.equal(tw.paysForItself(launch, me), false, "the other signature is still missing");
+  launch.sign([mint]);
+  assert.equal(tw.paysForItself(launch, me), true);
+  assert.equal(tw.paysForItself(launch, mint.publicKey), false, "not as a co-signer of another payer");
+  assert.equal(await sender.sendTransaction(launch, conn), "SIG");
+  const both = VersionedTransaction.deserialize(sent[1]);
+  assert.ok(both.signatures.every((sg) => sg.some((b) => b !== 0)), "both signatures present");
+  sent.pop();
   tw.lockTradingWallet();
   await assert.rejects(sender.sendTransaction(txFrom(me), conn), /locked/, "a sender kept from before the lock");
   assert.equal(sent.length, 1);
@@ -216,4 +228,133 @@ test("withdrawals: everything (the account closes) or leave at least an account'
   const t = await tw.buildTransfer(conn, a, Keypair.generate().publicKey, 5n);
   assert.equal(t.message.header.numRequiredSignatures, 1);
   assert.equal(t.message.compiledInstructions.length, 1);
+});
+
+test("the account wallet: a trading wallet is the account, locked or not; without one the connected wallet is", () => {
+  const T = "Trad1ng", E = "Ext3nsion";
+  assert.deepEqual(chooseAccount({ trading: { address: null, ready: false }, ext: null }), { kind: null, address: null, locked: false, unsaved: false }, "no wallet");
+  assert.deepEqual(chooseAccount({ trading: { address: null, ready: false }, ext: E }), { kind: "wallet", address: E, locked: false, unsaved: false }, "extension only: as before");
+  assert.deepEqual(chooseAccount({ trading: { address: T, ready: false }, ext: null }), { kind: "trading", address: T, locked: true, unsaved: false }, "trading, locked");
+  assert.deepEqual(chooseAccount({ trading: { address: T, ready: true }, ext: null }), { kind: "trading", address: T, locked: false, unsaved: false }, "trading, unlocked");
+  // both: the extension never takes over, not even while the trading wallet is locked
+  assert.deepEqual(chooseAccount({ trading: { address: T, ready: false }, ext: E }), { kind: "trading", address: T, locked: true, unsaved: false });
+  assert.deepEqual(chooseAccount({ trading: { address: T, ready: true }, ext: E }), { kind: "trading", address: T, locked: false, unsaved: false });
+  // a key never saved outside the browser: still the account, flagged so a launch (creator and fee share for good) waits
+  assert.equal(chooseAccount({ trading: { address: T, ready: true, backedUp: false }, ext: E }).unsaved, true);
+  assert.equal(chooseAccount({ trading: { address: T, ready: true, backedUp: true }, ext: E }).unsaved, false);
+  assert.equal(chooseAccount({ trading: { address: null, ready: false, backedUp: false }, ext: E }).unsaved, false, "no trading wallet: nothing to save");
+});
+
+test("paidToOf: which of the user's wallets a payout pays", () => {
+  assert.equal(paidToOf([null, "trading", null]), "trading");
+  assert.equal(paidToOf(["wallet"]), "wallet");
+  assert.equal(paidToOf(["wallet", null, "trading"]), "both");
+  assert.equal(paidToOf([null, null]), null);
+  assert.equal(paidToOf([]), null);
+});
+
+test("payerProblem: a payout that fails for lack of SOL names the trading wallet when it is the payer", () => {
+  const none = payerProblem("The wallet has no SOL yet. Fund it, then try again.", true);
+  assert.equal(none.fund, true);
+  assert.match(none.text, /Your trading wallet pays the network fee/);
+  assert.match(none.text, /holds no SOL yet/);
+  const short = payerProblem("Not enough SOL: the wallet is short by 0.0021 SOL. Top up and try again.", true);
+  assert.equal(short.fund, true);
+  assert.match(short.text, /short by 0\.0021 SOL/);
+  assert.equal(payerProblem("Not enough SOL in the wallet for this.", true).fund, true);
+  // the extension pays: its own words, as before
+  assert.deepEqual(payerProblem("The wallet has no SOL yet. Fund it, then try again.", false), { text: "The wallet has no SOL yet. Fund it, then try again.", fund: false });
+  // any other failure is passed through
+  assert.deepEqual(payerProblem("You cancelled in the wallet. Nothing was sent.", true), { text: "You cancelled in the wallet. Nothing was sent.", fund: false });
+});
+
+test("withinQuotedCost: Claim all signs a payout only at the cost its list showed", () => {
+  assert.equal(withinQuotedCost(5_000n, 5_000n), true);
+  assert.equal(withinQuotedCost(2_044_280n, 5_000n), true, "cheaper than shown (a token account appeared meanwhile)");
+  assert.equal(withinQuotedCost(5_000n, 5_000n + CLAIM_COST_SLACK), true);
+  assert.equal(withinQuotedCost(5_000n, 5_001n + CLAIM_COST_SLACK), false);
+  assert.equal(withinQuotedCost(5_000n, 2_044_280n), false, "a shareholder's token account went missing: rent nobody saw");
+  assert.equal(withinQuotedCost(null, 5_000n), false, "never shown");
+  assert.equal(withinQuotedCost(5_000n, null), false, "cannot be measured now");
+});
+
+test("friendlyError: the trading wallet's lock refusal does not talk about trading", () => {
+  const t = friendlyError(new Error("The trading wallet is locked: unlock it to trade"));
+  assert.doesNotMatch(t, /to trade/);
+  assert.match(t, /locked, so this step was not signed/);
+  assert.equal(friendlyError(new Error("The trading wallet is locked: unlock it to claim")), t);
+});
+
+test("walletOf: which of the user's wallets an address is (a fee share's owner, a fee split's required signer)", () => {
+  const T = "Trad1ng", E = "Ext3nsion";
+  assert.equal(walletOf(T, { trading: T, ext: E }), "trading");
+  assert.equal(walletOf(E, { trading: T, ext: E }), "wallet");
+  assert.equal(walletOf("someone", { trading: T, ext: E }), null);
+  assert.equal(walletOf(E, { trading: T, ext: null }), null, "an extension that is not connected signs nothing");
+  assert.equal(walletOf(null, { trading: T, ext: E }), null);
+  assert.equal(walletOf(undefined, { trading: null, ext: null }), null);
+  assert.equal(walletOf(T, { trading: T, ext: T }), "trading", "the same key in both: the trading wallet signs");
+});
+
+test("claimWords: the payout dialog says who signs and where the user's part goes", () => {
+  const ext = claimWords({ dry: false, silent: false, paidTo: "wallet" });
+  assert.equal(ext.button, "Claim in wallet");
+  assert.match(ext.hint, /arrives in this wallet/);
+  assert.equal(claimWords({ dry: false, silent: false, paidTo: null }).button, "Pay out in wallet");
+  const own = claimWords({ dry: false, silent: true, paidTo: "trading" });
+  assert.equal(own.button, "Claim now");
+  assert.match(own.hint, /arrives in your trading wallet/);
+  assert.match(own.hint, /no wallet popup/);
+  const other = claimWords({ dry: false, silent: true, paidTo: "wallet", extLabel: "Ext3…sion" });
+  assert.match(other.hint, /goes to your connected wallet Ext3…sion/);
+  assert.match(other.hint, /not to the trading wallet/);
+  const both = claimWords({ dry: false, silent: true, paidTo: "both", extLabel: "Ext3…sion" });
+  assert.equal(both.button, "Claim now");
+  assert.match(both.hint, /names both of your wallets/);
+  assert.match(both.hint, /connected wallet Ext3…sion/);
+  assert.doesNotMatch(both.hint, /Your part arrives in your trading wallet/);
+  const none = claimWords({ dry: false, silent: true, paidTo: null });
+  assert.equal(none.button, "Pay out now");
+  assert.match(none.hint, /none of it to you/);
+  assert.equal(claimWords({ dry: true, silent: true, paidTo: "trading" }).button, "Simulate");
+});
+
+// ---- what a signer without a popup may sign in a launch (lib/flow.ts): only a measured cost, only a bounded first buy
+
+test("firstBuyMin: the trading wallet's first buy is held to the minimum its confirmation named", async () => {
+  const { firstBuyMin, withSlippage } = await import("../src/lib/flow.ts");
+  const floor = withSlippage(60_000_000n, 300); // the estimate the dialog showed, less 3%
+  assert.equal(floor, 58_200_000n);
+  assert.equal(firstBuyMin(floor, 60_000_000n, 300), floor, "the same quote: the minimum is the one confirmed");
+  assert.equal(firstBuyMin(floor, 59_000_000n, 300), floor, "a little worse, inside the tolerance: still at least the floor");
+  assert.equal(firstBuyMin(floor, 70_000_000n, 300), withSlippage(70_000_000n, 300), "a better quote tightens the minimum");
+  assert.equal(firstBuyMin(floor, 25_000_000n, 300), null, "someone bought the fresh curve first: not signed");
+  assert.equal(firstBuyMin(floor, floor - 1n, 300), null);
+  assert.equal(firstBuyMin(null, 25_000_000n, 300), withSlippage(25_000_000n, 300), "the extension (its popup shows the buy): as before");
+});
+
+test("preflightMeasured: a cost that cannot be measured is asked for once more, then refused for a silent signer", async () => {
+  const { preflightMeasured, UnmeasuredCostError } = await import("../src/lib/flow.ts");
+  const payer = Keypair.generate().publicKey;
+  const tx = new VersionedTransaction(new TransactionMessage({ payerKey: payer, recentBlockhash: PublicKey.default.toBase58(), instructions: [SystemProgram.transfer({ fromPubkey: payer, toPubkey: PublicKey.default, lamports: 1 })] }).compileToV0Message());
+  const fake = (balances: (number | null)[]) => {
+    let sims = 0, i = 0;
+    const conn = {
+      getBalance: async () => { const b = balances[Math.min(i++, balances.length - 1)]; if (b === null) throw new Error("429"); return b; },
+      simulateTransaction: async () => { sims++; return { value: { err: null, logs: [], unitsConsumed: 150, accounts: [{ lamports: 900, data: ["", "base64"] }] } }; },
+    } as unknown as Connection;
+    return { conn, sims: () => sims };
+  };
+  const ok = fake([1_000]);
+  assert.equal((await preflightMeasured(ok.conn, tx, payer, true)).spent, 100n);
+  assert.equal(ok.sims(), 1);
+  const second = fake([null, 1_000]);
+  assert.equal((await preflightMeasured(second.conn, tx, payer, true)).spent, 100n, "measured on the second try");
+  assert.equal(second.sims(), 2);
+  const never = fake([null]);
+  await assert.rejects(() => preflightMeasured(never.conn, tx, payer, true), UnmeasuredCostError);
+  assert.match(friendlyError(new UnmeasuredCostError()), /nothing was signed/);
+  const ext = fake([null]);
+  assert.equal((await preflightMeasured(ext.conn, tx, payer, false)).spent, null, "the extension shows the cost itself: unchanged");
+  assert.equal(ext.sims(), 1);
 });

@@ -8,7 +8,6 @@
 // fee split that fails after the create landed is retried on its own (`finishFeeSplit`), and a
 // failed first buy is reported beside a successful launch, never as one.
 import { Keypair, PublicKey, type Connection, type VersionedTransaction } from "@solana/web3.js";
-import type { WalletContextState } from "@solana/wallet-adapter-react";
 import { bondingCurvePda } from "@pump-fun/pump-sdk";
 import { api, type Coin, type Eligibility, type UploadBody } from "./api";
 import { chainFor, chainForChild, chainForRoot } from "./chain";
@@ -22,13 +21,47 @@ import { friendlyError, stepper, type Report } from "./steps";
 import { clearPending, loadPending, savePendingSafe, type PendingLaunch } from "./launch-store";
 import { DRY_METADATA_URI, drySend, drySkip, drySleep, isDry, type TestWallet } from "./dry";
 
-/// Who signs. The real one wraps wallet-adapter; the dry one (dev builds, `?dry=1`) simulates.
-export type Signer = { publicKey: PublicKey; dry: boolean; send: (tx: VersionedTransaction, label: string, extraSigners?: Keypair[], onSent?: (sig: string) => void) => Promise<string> };
+/// Who signs. The real one wraps a sender: the connected wallet (wallet-adapter, which opens the extension for each
+/// signature) or Spore's trading wallet (lib/trading-wallet.ts; `silent`: it signs at once, with no popup, so the page
+/// asks for a confirmation itself, see `SignConfirm`). The dry one (dev builds, `?dry=1`) simulates.
+export type Signer = { publicKey: PublicKey; dry: boolean; silent?: boolean; send: (tx: VersionedTransaction, label: string, extraSigners?: Keypair[], onSent?: (sig: string) => void) => Promise<string> };
 
-export function walletSigner(conn: Connection, wallet: WalletContextState): Signer | null {
+export function walletSigner(conn: Connection, wallet: TxSender, silent = false): Signer | null {
   if (!wallet.publicKey || !wallet.sendTransaction) return null;
-  return { publicKey: wallet.publicKey, dry: false, send: (tx, _label, extra = [], onSent) => sendAndConfirm(conn, wallet, tx, extra, onSent) };
+  return { publicKey: wallet.publicKey, dry: false, silent, send: (tx, _label, extra = [], onSent) => sendAndConfirm(conn, wallet, tx, extra, onSent) };
 }
+
+/// What the page shows before a wallet that signs without a popup signs: the simulated spend of the transaction about
+/// to be signed, and what is signed right after it without another question (a fee split that did not fit the create,
+/// the first buy). `spent` is always measured: a cost the simulation could not measure is never offered for signing
+/// (UnmeasuredCostError). `firstBuyMinOut`: the fewest tokens (raw units) the first buy may return, from the estimate
+/// taken before this confirmation less the slippage; a buy that would return fewer is not signed.
+export type SignConfirm = { kind: "launch" | "split"; spent: bigint; secondSplit: boolean; firstBuyLamports: bigint; firstBuyMinOut: bigint | null };
+/// A wallet that signs without a popup signs only a cost the page could show. The simulation passed, but the payer's
+/// balance before or after it did not come back (a rate-limited RPC), twice: nothing is signed.
+export class UnmeasuredCostError extends Error { constructor() { super("The simulation passed, but its exact cost could not be measured just now, so nothing was signed. Try again in a moment."); this.name = "UnmeasuredCostError"; } }
+/// The same transaction simulated for a signer that shows no popup: once more when the cost did not come back, and
+/// refused when it still did not. Other signers (the extension shows the cost itself) get the first answer as it is.
+export async function preflightMeasured(conn: Connection, tx: VersionedTransaction, payer: PublicKey, mustMeasure: boolean): Promise<Awaited<ReturnType<typeof preflight>>> {
+  let pf = await preflight(conn, tx, payer);
+  if (mustMeasure && pf.spent === null) pf = await preflight(conn, tx, payer);
+  if (mustMeasure && pf.spent === null) throw new UnmeasuredCostError();
+  return pf;
+}
+/// The first buy's minimum. A signer that shows no popup is held to what its confirmation named: `floor` = the
+/// estimate taken before the confirmation, less the slippage. A fresh quote under the floor is refused (null);
+/// otherwise the minimum is the higher of the floor and the fresh quote less the slippage. Without a floor (the
+/// extension: its popup shows the buy) the minimum is the fresh quote less the slippage, as before.
+export function firstBuyMin(floor: bigint | null, quotedOut: bigint, slippageBps: number): bigint | null {
+  const m = withSlippage(quotedOut, slippageBps);
+  if (floor === null) return m;
+  if (quotedOut < floor) return null;
+  return m > floor ? m : floor;
+}
+/// The user closed that confirmation: nothing was signed, nothing was sent.
+export class NotConfirmedError extends Error { constructor() { super("Stopped at the confirmation: nothing was signed and nothing was sent."); this.name = "NotConfirmedError"; } }
+/// What the sign step says while it waits: the extension asks, the trading wallet just signs.
+const asking = (signer: Signer, what: string) => (signer.silent ? "signing with your trading wallet…" : `approve ${what} in your wallet…`);
 
 export function drySigner(conn: Connection, w: TestWallet): Signer {
   return { publicKey: w.publicKey, dry: true, send: (tx, label) => drySend(conn, tx, label) };
@@ -46,6 +79,9 @@ export type PreparedAgent = { id: string; address: string; model: string };
 export type SpawnInput = {
   parent: Coin | null; eligibility: Eligibility; form: UploadBody; creatorFeeBps?: number; firstBuyLamports: bigint; slippageBps: number; agent?: PreparedAgent | null;
   prepareAgent?: () => Promise<PreparedAgent>; agentModelLabel?: string; onPreflight?: (spentLamports: bigint | null) => void;
+  /// Asked after the simulation and before anything is signed or persisted; false stops the launch (NotConfirmedError).
+  /// The page passes it when the signer is `silent`: the extension's popup is that confirmation otherwise.
+  confirm?: (c: SignConfirm) => Promise<boolean>;
 };
 export type SpawnResult = {
   sig: string; mint: string; depth: number; name: string; symbol: string; image: string | null;
@@ -64,7 +100,7 @@ export type SpawnResult = {
 
 /// The launch's steps, in signing order, for the live step list and for the plan the page shows
 /// before anything runs ("What happens when you press launch"), so the two can never disagree.
-export function spawnPlan(o: { prepareAgent?: boolean; agentModelLabel?: string | null; launchFeeLamports?: bigint | null; seedLamports?: bigint | null; wantsBuy?: boolean }): [string, string][] {
+export function spawnPlan(o: { prepareAgent?: boolean; agentModelLabel?: string | null; launchFeeLamports?: bigint | null; seedLamports?: bigint | null; wantsBuy?: boolean; silent?: boolean }): [string, string][] {
   const fee = o.launchFeeLamports && o.launchFeeLamports > 0n ? ` + ${fmtSol(o.launchFeeLamports)} launch fee` : "";
   const seed = o.seedLamports && o.seedLamports > 0n ? ` + ${fmtSol(o.seedLamports)} agent gas` : "";
   return [
@@ -72,7 +108,7 @@ export function spawnPlan(o: { prepareAgent?: boolean; agentModelLabel?: string 
     ["upload", "Upload image and metadata"],
     ["build", `Build the launch transaction · create + fee split${fee}${seed}`],
     ["preflight", "Simulate it before you sign"],
-    ["sign", "Approve in your wallet"],
+    ["sign", o.silent ? "Confirm; your trading wallet signs" : "Approve in your wallet"],
     ["split", "Lock the fee split on-chain"],
     ...(o.wantsBuy ? ([["quote", "Quote your first buy"], ["buy", "Buy from the new curve"]] as [string, string][]) : []),
   ];
@@ -177,7 +213,8 @@ function reportSpawned(mint: string, sig: string | null, agent: PreparedAgent | 
 function isWalletRefusal(e: unknown): boolean {
   const name = (e as { name?: string } | null)?.name ?? "";
   const msg = e instanceof Error ? e.message : String(e);
-  return name === "WalletSignTransactionError" || name === "WalletNotConnectedError" || /user rejected|rejected the request|user declined|user cancel|cancell?ed by (the )?user/i.test(msg);
+  // The trading wallet's own refusals (locked, or not a transaction it signs) are thrown before it signs anything.
+  return name === "WalletSignTransactionError" || name === "WalletNotConnectedError" || /user rejected|rejected the request|user declined|user cancel|cancell?ed by (the )?user/i.test(msg) || /^The trading wallet (is locked|signs only)/.test(msg);
 }
 
 const fmtSol = (lamports: bigint | number) => `${(Number(lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 4 })} SOL`;
@@ -194,7 +231,7 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   const wantsBuy = input.firstBuyLamports > 0n;
   const launchFee = launchFeeOf(eligibility);
   const rootAgent = !!(input.prepareAgent || input.agent);
-  const st = stepper(spawnPlan({ prepareAgent: !!input.prepareAgent, agentModelLabel: input.agentModelLabel, launchFeeLamports: launchFee?.lamports ?? null, seedLamports: rootAgent ? AGENT_SEED_LAMPORTS : null, wantsBuy }), report);
+  const st = stepper(spawnPlan({ prepareAgent: !!input.prepareAgent, agentModelLabel: input.agentModelLabel, launchFeeLamports: launchFee?.lamports ?? null, seedLamports: rootAgent ? AGENT_SEED_LAMPORTS : null, wantsBuy, silent: !!signer.silent && !dry }), report);
 
   // 0. A root's agent wallet: the server makes the keypair, keeps the key, and the address goes into
   // the fee split the wallet signs. Nothing is uploaded or signed until this answered.
@@ -235,12 +272,31 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   // wallet; a pass tells the exact cost (rent + fees + launch fee) before anything is signed.
   st.set("preflight", "active", "running the transaction on a fork of the chain…");
   let spent: bigint | null = null;
+  // A signer without a popup (the page's confirmation is the only one): the cost must be measured, and a first buy is
+  // estimated now, so the confirmation can name the fewest tokens it may return.
+  const mustShow = !!input.confirm && !dry;
+  let buyFloor: bigint | null = null;
   try {
-    const pf = await preflight(conn, built.tx, creator);
+    const pf = await preflightMeasured(conn, built.tx, creator, mustShow);
     spent = pf.spent;
     input.onPreflight?.(pf.spent);
+    if (mustShow && wantsBuy) {
+      let est: bigint;
+      try { est = (await estimateFirstBuy(conn, creator, parent ? new PublicKey(parent.mint) : null, parent ? await chainFor(parent) : null, input.firstBuyLamports, input.creatorFeeBps)).tokens; } catch { est = 0n; }
+      if (est <= 0n) throw new Error("Your first buy could not be estimated just now, so nothing was signed. Try again, or launch without a first buy.");
+      buyFloor = withSlippage(est, input.slippageBps);
+    }
     st.set("preflight", "done", `passes · ${fmtUnits(pf.unitsConsumed)}${pf.spent !== null ? ` · this signature spends ${fmtSol(pf.spent)}` : ""}`);
   } catch (e) { st.fail("preflight", e); throw e; }
+
+  // A wallet that signs without a popup: the page asks first, with the simulated cost. Nothing is persisted or signed
+  // before the answer, and a "no" ends the launch here.
+  if (input.confirm && !dry) {
+    st.set("sign", "active", "waiting for your confirmation…");
+    let ok = false;
+    try { ok = spent !== null && await input.confirm({ kind: "launch", spent, secondSplit: !!built.feeTx, firstBuyLamports: input.firstBuyLamports, firstBuyMinOut: buyFloor }); } catch { ok = false; }
+    if (!ok) { const e = new NotConfirmedError(); st.fail("sign", e); throw e; }
+  }
 
   // 4. Sign + confirm. The record is persisted BEFORE the wallet opens: wallets do sign, broadcast
   // and then reject their promise (RPC timeout, "already processed", a popup closed after approval,
@@ -255,7 +311,7 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
     splitIncluded: !built.feeTx, splitSig: null, step: "signing", createdAt: Date.now(), agent,
   };
   if (!dry) savePendingSafe(pending);
-  st.set("sign", "active", dry ? "dry run · simulating instead of signing" : "approve the transaction in your wallet…");
+  st.set("sign", "active", dry ? "dry run · simulating instead of signing" : asking(signer, "the transaction"));
   let sig: string;
   try {
     sig = await signer.send(built.tx, "launch", [built.mint], (s) => {
@@ -288,7 +344,7 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
   if (built.feeTx) {
     pending.step = "split-pending";
     if (!dry) savePendingSafe(pending);
-    st.set("split", "active", dry ? "dry run · second transaction" : "approve the second transaction in your wallet…");
+    st.set("split", "active", dry ? "dry run · second transaction" : asking(signer, "the second transaction"));
     try {
       // Dry runs cannot simulate this one: it needs the mint the (unsent) create would have made.
       const s2 = dry ? drySkip(built.feeTx, "fee split") : await signer.send(built.feeTx, "fee split", [], (s) => st.note("split", "sent · waiting for confirmation…", txHref(s, dry)));
@@ -321,9 +377,12 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
     const chain: Chain = parent ? chainForChild(mint, parent, await chainFor(parent)) : chainForRoot(mint);
     const q = await quoteSwap(conn, creator, chain, "buy", input.firstBuyLamports);
     st.set("quote", "done", `${fmtTokens(q.amountOut, form.symbol)} for ${fmtSol(input.firstBuyLamports)} · ${chain.length} hop${chain.length === 1 ? "" : "s"}`);
+    // The trading wallet asks nothing here, so the buy is held to the minimum its confirmation named.
+    const minOut = firstBuyMin(buyFloor, q.amountOut, input.slippageBps);
+    if (minOut === null) throw new Error(`The price moved since you confirmed: ${fmtSol(input.firstBuyLamports)} now buys fewer than the ${fmtTokens(buyFloor!, form.symbol)} you confirmed. The first buy was not signed.`);
     phase = "buy";
-    st.set("buy", "active", "approve the buy in your wallet…");
-    const tx = await buildSwapTx(conn, creator, chain, "buy", input.firstBuyLamports, withSlippage(q.amountOut, input.slippageBps));
+    st.set("buy", "active", asking(signer, "the buy"));
+    const tx = await buildSwapTx(conn, creator, chain, "buy", input.firstBuyLamports, minOut);
     const buySig = await signer.send(tx, "first buy", [], (s) => st.note("buy", "sent · waiting for confirmation…", txHref(s, false)));
     st.set("buy", "done", "confirmed", txHref(buySig, false));
     result.buy = { sig: buySig, amountOut: q.amountOut };
@@ -336,9 +395,9 @@ export async function runSpawn(conn: Connection, signer: Signer, input: SpawnInp
 
 /// The fee split alone, for a launch whose create landed but whose second transaction did not
 /// (or a tab that died in between). Rebuilt from the persisted record: no re-upload, no new mint.
-export async function finishFeeSplit(conn: Connection, signer: Signer, p: PendingLaunch, report: Report): Promise<string> {
+export async function finishFeeSplit(conn: Connection, signer: Signer, p: PendingLaunch, report: Report, confirm?: (c: SignConfirm) => Promise<boolean>): Promise<string> {
   const dry = signer.dry && isDry();
-  const st = stepper([["build", "Rebuild the fee split"], ["preflight", "Simulate it before you sign"], ["sign", "Approve in your wallet"]], report);
+  const st = stepper([["build", "Rebuild the fee split"], ["preflight", "Simulate it before you sign"], ["sign", signer.silent && !dry ? "Confirm; your trading wallet signs" : "Approve in your wallet"]], report);
   st.set("build", "active", "compiling…");
   let tx: VersionedTransaction;
   try {
@@ -353,11 +412,19 @@ export async function finishFeeSplit(conn: Connection, signer: Signer, p: Pendin
     st.set("build", "done", `${tx.serialize().length} bytes · ${shares.length} shareholders`);
   } catch (e) { st.fail("build", e); throw e; }
   st.set("preflight", "active", "running it on a fork of the chain…");
+  let spent: bigint | null = null;
   try {
-    const pf = await preflight(conn, tx, signer.publicKey);
+    const pf = await preflightMeasured(conn, tx, signer.publicKey, !!confirm && !dry);
+    spent = pf.spent;
     st.set("preflight", "done", `passes · ${fmtUnits(pf.unitsConsumed)}${pf.spent !== null ? ` · spends ${fmtSol(pf.spent)}` : ""}`);
   } catch (e) { st.fail("preflight", e); throw e; }
-  st.set("sign", "active", dry ? "dry run · simulating instead of signing" : "approve the transaction in your wallet…");
+  if (confirm && !dry) {
+    st.set("sign", "active", "waiting for your confirmation…");
+    let ok = false;
+    try { ok = spent !== null && await confirm({ kind: "split", spent, secondSplit: false, firstBuyLamports: 0n, firstBuyMinOut: null }); } catch { ok = false; }
+    if (!ok) { const e = new NotConfirmedError(); st.fail("sign", e); throw e; }
+  }
+  st.set("sign", "active", dry ? "dry run · simulating instead of signing" : asking(signer, "the transaction"));
   try {
     const sig = await signer.send(tx, "fee split", [], (s) => st.note("sign", "sent · waiting for confirmation…", txHref(s, dry)));
     st.set("sign", "done", dry ? "simulated · passes" : "confirmed", txHref(sig, dry));

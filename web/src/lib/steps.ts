@@ -53,6 +53,9 @@ export function friendlyError(e: unknown): string {
   // POST /api/agents/prepare answers 503 when the server has no agent wallet vault (flow.ts tags it).
   if (/agent wallets are not configured/i.test(raw) || name === "AgentWalletError") return "Spore could not create your coin's agent wallet right now.";
   if (/user rejected|rejected the request|cancel|declined/i.test(raw) || name === "WalletSignTransactionError" || name === "WalletSendTransactionError" && /reject/i.test(raw)) return "You cancelled in the wallet. Nothing was sent.";
+  // The trading wallet refused before signing (lib/trading-wallet.ts tradingSender): the user may have been launching
+  // or claiming, not trading, and an earlier step of the same flow may already have landed.
+  if (/^The trading wallet is locked/.test(raw)) return "Your trading wallet is locked, so this step was not signed. Unlock it and try again.";
   // The swap's last simulation caught it before the wallet opened (flow.ts runSwap): nothing was signed.
   if (name === "PriceMovedError") return raw;
   // The Jupiter route's own refusals (lib/jup.ts) already say what happened, in the user's words.

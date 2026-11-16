@@ -3,13 +3,17 @@
 // YOUR SPORES: the pairs the wallet launched (a child coin under a parent, priced in the parent's token) and the coins
 // whose creator fees it shares, one card per parent coin; each row has its fees to claim. A coin is in one list only.
 // The wallet shown is the user's trading wallet (the browser wallet they trade with; its address is known while it is
-// locked). There is no switch between wallets: a connected extension wallet is how the account was made, and it still
-// signs launches and claims, so the pairs it launched and the fees it can claim are listed with the trading wallet's
-// own. Without a trading wallet the connected wallet is shown. /portfolio?wallet=<address> shows any address
+// locked). There is no switch between wallets: a connected extension wallet is how the account was made, so the pairs
+// it launched before and the fees their splits pay it are listed with the trading wallet's own. Without a trading
+// wallet the connected wallet is shown. /portfolio?wallet=<address> shows any address
 // read-only. Numbers come from /api/portfolio/:wallet and /api/claims/:wallet (lib/portfolio.ts sorts them into the
 // two lists). Buy / Sell open the quick-trade ticket and trade with the wallet shown: a locked trading wallet is
 // asked to unlock first, and an unlocked one is made the wallet that trades (lib/trader.ts).
-// Claims are built in the browser and signed by the connected extension wallet (useClaimFlow). Long lists are cut:
+// Claims are built in the browser and signed by the account wallet (useClaimFlow, lib/trader.ts useAccount): the
+// trading wallet when there is one (unlocked first; it signs on the confirm dialog's button, with no popup), else the
+// connected wallet. A payout is permissionless and pays the wallets of the coin's fee split, so the trading wallet
+// also runs the payouts of coins the connected wallet launched: their part goes to the connected wallet, and the
+// dialog says so. Long lists are cut:
 // 10 holdings, 12 parent cards and 5 rows a card, the rest behind a button.
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
@@ -228,9 +232,9 @@ export default function Portfolio() {
                     : readOnly ? plural(toClaim.length, "coin")
                     : !flow.me ? <button type="button" className="linkish" onClick={() => setVisible(true)}>Connect a wallet to claim</button>
                     : (
-                      <button type="button" className="btn sm accent" disabled={flow.busy} onClick={() => flow.claimAll(toClaim.map(target), totals.claimUsd)}
-                        title="One payout per coin, each approved in the connected wallet">
-                        {flow.bulk ? `Claiming ${flow.bulk.i + 1} of ${flow.bulk.n}…` : `Claim all (${toClaim.length})`}
+                      <button type="button" className="btn sm accent" disabled={flow.bulk ? flow.bulk.stopping : flow.busy} onClick={() => (flow.bulk ? flow.stop() : flow.claimAll(toClaim.map(target), totals.claimUsd))}
+                        title={flow.bulk ? "Stops after the coin in flight; coins already paid out stay paid" : flow.locked ? "Your trading wallet signs the payouts: unlock it first" : flow.silent ? "One payout per coin, signed by your trading wallet after you confirm the list with each coin's cost" : "One payout per coin, each approved in the connected wallet"}>
+                        {flow.bulk ? (flow.bulk.stopping ? "Stopping…" : `Stop · claiming ${flow.bulk.i + 1} of ${flow.bulk.n}`) : flow.locked ? `Unlock to claim (${toClaim.length})` : `Claim all (${toClaim.length})`}
                       </button>
                     )}
                 </dd>
@@ -318,7 +322,7 @@ function Fee({ k, label, a }: { k: PfClaim; label: string; a: Actions }) {
       <span className="pf-k">Fees</span>
       <span className="pf-num" title={k.usd != null ? usd(k.usd) : undefined}>{feeText(k)}</span>
       {!k.claimable ? <span className="pf-k" title={k.row.reason ?? undefined}>not claimable</span>
-        : flow && <button type="button" className="btn sm soft" disabled={flow.busy} aria-label={`Claim the fees of ${label}`} onClick={() => flow.start(target(k.row))}>{flow.labelFor(k.row.mint) ?? "Claim"}</button>}
+        : flow && <button type="button" className="btn sm soft" disabled={flow.busy} aria-label={flow.locked ? `Unlock your trading wallet to claim the fees of ${label}` : `Claim the fees of ${label}`} title={flow.locked ? "Your trading wallet signs the payout: unlock it first" : undefined} onClick={() => flow.start(target(k.row))}>{flow.labelFor(k.row.mint) ?? (flow.locked ? "Unlock to claim" : "Claim")}</button>}
     </span>
   );
 }

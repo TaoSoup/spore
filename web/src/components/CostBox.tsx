@@ -26,6 +26,8 @@ export type BuyEstimate = { tokens: bigint | null; symbol: string; loading: bool
 
 type Props = {
   feeLamports: bigint; buyLamports: bigint; connected: boolean; balance: bigint | null; balanceError: string | null; solUsd: number | null; estimate?: BuyEstimate | null;
+  /// What the paying wallet is called in the balance line ("wallet", or "trading wallet" when that is the account).
+  who?: string;
   /// A root's agent gas (0 for a child).
   seedLamports?: bigint;
   /// Rent + network fees as the pre-flight simulation measured them (replaces the estimate).
@@ -35,7 +37,7 @@ type Props = {
 /// What the signature spends, line by line, against the wallet balance: launch fee (only when the
 /// server charges one), network rent, a root's agent gas, the optional first buy, and the total.
 /// With a first buy the row also says what that buy would return (pump's curve math on the new curve).
-export default function CostBox({ feeLamports, buyLamports, connected, balance, balanceError, solUsd, estimate, seedLamports = 0n, simulatedRentLamports = null }: Props) {
+export default function CostBox({ feeLamports, buyLamports, connected, balance, balanceError, solUsd, estimate, seedLamports = 0n, simulatedRentLamports = null, who = "wallet" }: Props) {
   const rent = simulatedRentLamports ?? EST_RENT_LAMPORTS;
   const total = launchTotal(feeLamports, buyLamports, seedLamports, rent);
   const insufficient = balance !== null && balance < total + FEE_MARGIN_LAMPORTS;
@@ -53,7 +55,7 @@ export default function CostBox({ feeLamports, buyLamports, connected, balance, 
         <span className="cost-wallet">
           {!connected ? <span className="muted">connect a wallet to check your balance</span>
             : balance === null ? <span className="muted">{balanceError ? "balance unavailable" : "reading your balance…"}</span>
-            : <span className={`mono ${insufficient ? "bad" : "muted"}`}>wallet {sol(lamportsToSol(balance))}</span>}
+            : <span className={`mono ${insufficient ? "bad" : "muted"}`}>{who} {sol(lamportsToSol(balance))}</span>}
         </span>
       </div>
       <dl className="cost-rows">
@@ -65,7 +67,7 @@ export default function CostBox({ feeLamports, buyLamports, connected, balance, 
         {buyLamports > 0n && <Row label="First buy" note={<>second signature, optional{estText && <> · <span className={est?.error ? "bad" : "accent"}>{estText}</span></>}</>} value={buyLamports} />}
         <Row label="Total" value={total} total />
       </dl>
-      {insufficient && balance !== null && <div className="notice bad compact"><span><b>Not enough SOL.</b> This needs about {sol(lamportsToSol(total + FEE_MARGIN_LAMPORTS))} including network fees; the wallet holds {sol(lamportsToSol(balance))}, short by {sol(lamportsToSol(total + FEE_MARGIN_LAMPORTS - balance))}. Top up or lower the first buy.</span></div>}
+      {insufficient && balance !== null && <div className="notice bad compact"><span><b>Not enough SOL.</b> This needs about {sol(lamportsToSol(total + FEE_MARGIN_LAMPORTS))} including network fees; the {who} holds {sol(lamportsToSol(balance))}, short by {sol(lamportsToSol(total + FEE_MARGIN_LAMPORTS - balance))}. Top up or lower the first buy.</span></div>}
     </div>
   );
 }
