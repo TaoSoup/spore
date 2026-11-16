@@ -16,7 +16,7 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const SOL_MINT = NATIVE_MINT.toBase58(); // encoded once: toBase58() is a base58 encode per call
 const USDC_MINT_STR = String(USDC_MINT);
 /** Programs whose events the live subscription acts on; a CPI into another program cannot inject events. */
-const LIVE_EVENT_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.toBase58()]);
+export const LIVE_EVENT_PROGRAMS = new Set([PUMP_PROGRAM_ID.toBase58(), PUMP_AMM_PROGRAM_ID.toBase58()]);
 /** What the pool stream acts on: a transaction that also touches a curve reaches the curve stream too, which takes the curve's events. */
 export const POOL_EVENT_PROGRAMS = new Set([PUMP_AMM_PROGRAM_ID.toBase58()]);
 /** A frame without this carries no event (a failed transaction, or one that emitted nothing): not parsed. */
@@ -882,6 +882,9 @@ export class Indexer {
    */
   onLogs({ slot, signature, err, logs }, accept = LIVE_EVENT_PROGRAMS) {
     if (err) return;
+    // The node cut this log: a trade behind the cut is not in it. The tracker of wallet trades notes the signature and
+    // reads the transaction itself when a tracked wallet turns out to have signed it (lib/pnl-tracker.mjs onCutLog).
+    if (logs[logs.length - 1] === "Log truncated") this.model.walletTrades?.onCutLog?.(signature);
     const events = eventsInLogs(logs, LIVE_EVENT_PROGRAMS);
     if (!events.length) return;
     events.forEach(({ name, data, program, ix }, idx) => {
@@ -952,7 +955,7 @@ export class Indexer {
     const c = this.model.upsertCoin({ mint: e.mint, virtualQuoteReserves: e.virtualQuoteReserves, virtualTokenReserves: e.virtualTokenReserves, realQuoteReserves: e.realQuoteReserves, realTokenReserves: e.realTokenReserves });
     const baseDecimals = this.model.decimalsOf(c.mint), quoteDecimals = this.model.quoteDecimals(c);
     const priceQuote = curvePriceQuote(c, baseDecimals, quoteDecimals) ?? (units(e.quoteAmount, quoteDecimals) / Math.max(units(e.tokenAmount, baseDecimals), 1e-12));
-    this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.tokenAmount, quoteAmount: e.quoteAmount, priceQuote });
+    this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.tokenAmount, quoteAmount: e.quoteAmount, userQuoteAmount: e.userQuoteAmount, priceQuote });
   }
   #onPoolTrade(mint, e, sig, slot, idx) {
     const c = this.model.upsertCoin({ mint, poolBase: e.poolBaseReserves, poolQuote: e.poolQuoteReserves });
@@ -962,7 +965,7 @@ export class Indexer {
     // Not hot: the event gives the pool's reserves after the trade (decode.mjs), so the next tick has nothing to
     // re-read for it (and the pool stream names hundreds of coins a tick). The pool's virtual quote is not in the event:
     // the rolling pass and the pricing-pool pass re-read it as before.
-    return this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, priceQuote }, { hot: false });
+    return this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, userQuoteAmount: e.userQuoteAmount, priceQuote }, { hot: false });
   }
   /** Stores and announces a trade; false for one already stored (both streams delivered it). */
   #recordTrade(c, t, { hot = true } = {}) {

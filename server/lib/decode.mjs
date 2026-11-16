@@ -51,6 +51,49 @@ export function eventsInLogs(logs, programs = null) {
   return out;
 }
 
+/**
+ * The 8 bytes Anchor puts in front of an event it emits by self-CPI (`emit_cpi!`): the instruction data of that inner
+ * instruction is this tag, then the event's discriminator and body, which are the very bytes of the "Program data:" line.
+ */
+export const EVENT_CPI_TAG = Buffer.from("e445a52e51cb9a1d", "hex");
+/** Inner-instruction data longer than this (base58 characters) is not decoded: the tracked events are a few hundred bytes. */
+const EVENT_CPI_MAX_CHARS = 4096;
+/**
+ * The same events as eventsInLogs, read from a transaction's inner instructions instead of its log (getTransaction with
+ * encoding "json"): the pump curve and pump-amm programs emit every trade event twice, as a log line and as an inner
+ * instruction to themselves (measured 2026-11-16 on mainnet, 28 transactions of both programs, legacy and versioned,
+ * with and without address-table keys, 9 of them with tracked events: those were byte-identical on both paths and in
+ * the same order).
+ * A log can be cut by the node ("Log truncated"); the inner instructions are not. Only a program can sign for its own
+ * event authority, so in a transaction that succeeded such an instruction is the program's own.
+ * `programs` (a Set of base58 ids) names the programs whose events count. Program ids are resolved through the whole key
+ * list: the message's static keys, then the address-table keys the node loaded (writable, then readonly). The events
+ * come in execution order (outer instruction by outer instruction), so numbering them gives the log path's numbers.
+ * `ix` is always null (the log's "Instruction:" line is not read here). Null when the transaction does not carry what
+ * is needed (no inner-instruction list: an old transaction the node kept none for, or no key list).
+ */
+export function eventsInInner(tx, programs) {
+  const inner = tx?.meta?.innerInstructions, msgKeys = tx?.transaction?.message?.accountKeys;
+  if (!Array.isArray(inner) || !Array.isArray(msgKeys)) return null;
+  const loaded = tx.meta.loadedAddresses;
+  const keys = [...msgKeys, ...(Array.isArray(loaded?.writable) ? loaded.writable : []), ...(Array.isArray(loaded?.readonly) ? loaded.readonly : [])].map((k) => (typeof k === "string" ? k : k?.pubkey));
+  const out = [];
+  for (const group of [...inner].sort((a, b) => (a?.index ?? 0) - (b?.index ?? 0))) {
+    for (const ix of Array.isArray(group?.instructions) ? group.instructions : []) {
+      const program = keys[ix?.programIdIndex];
+      if (!program || (programs && !programs.has(program)) || typeof ix.data !== "string") continue;
+      // 16 bytes (the tag and a discriminator) are at least 16 base58 characters; nothing shorter is an event.
+      if (ix.data.length < 16 || ix.data.length > EVENT_CPI_MAX_CHARS) continue;
+      let buf;
+      try { buf = fromBase58(ix.data); } catch { continue; }
+      if (buf.length < 16 || !buf.subarray(0, 8).equals(EVENT_CPI_TAG)) continue;
+      const data = buf.subarray(8), name = eventNameOf(data);
+      if (name) out.push({ name, data, program, ix: null });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- plain conversion
 const ZERO_KEY = PublicKey.default.toBase58();
 /** Anchor output → JSON-safe: BN → string, PublicKey → base58, nested arrays/objects recursively. */
@@ -67,6 +110,16 @@ export function plain(v) {
 /** A reserve after a trade moved `amount` in (sign 1n) or out (-1n) of it; the reported reserve when that cannot be (a field an older event lacks, a negative result). */
 const OLD_BUYS = new Set(["buy", "buy_exact_quote_in"]);
 const sum = (...xs) => xs.reduce((a, x) => a + BigInt(x ?? 0), 0n);
+/**
+ * What the trader paid (a buy) or received (a sell) on a curve, fees included: the event's amount is before the
+ * protocol and creator fees, which a buy pays on top and a sell has taken off. An event from before those fields
+ * existed has them as zero, so the amount itself is the answer. Never negative.
+ */
+function curveUserQuote(amount, isBuy, fee, creatorFee) {
+  try { const f = BigInt(fee ?? 0) + BigInt(creatorFee ?? 0), a = BigInt(amount); const v = isBuy ? a + f : a - f; return v > 0n ? v.toString() : "0"; } catch { return amount; }
+}
+/** pump-amm names the trader's own amount in the event; an event without it (zero) falls back to the swap amount. */
+const ownOr = (own, amount) => (own && own !== "0" ? own : amount);
 function after(reserve, amount, sign) {
   try { const v = BigInt(reserve) + sign * BigInt(amount ?? 0); return v >= 0n ? v.toString() : reserve; } catch { return reserve; }
 }
@@ -74,7 +127,8 @@ function after(reserve, amount, sign) {
  * Decodes one tracked event from its `Program data:` payload. The SDK's event decoders take the
  * borsh body only, so the 8-byte discriminator in front is dropped here. A SOL quote is reported
  * as `quoteMint: null` to match the API. `ix` is the instruction that emitted a pump-amm event (eventsInLogs), which
- * decides where its fees went.
+ * decides where its fees went. A trade carries two quote amounts: `quoteAmount`, the swap itself before the venue's fees
+ * (prices, volume), and `userQuoteAmount`, what the trader paid or received with the fees (a wallet's profit and loss).
  */
 export function decodeEvent(name, payload, ix = null) {
   const data = Buffer.from(payload).subarray(8);
@@ -91,6 +145,7 @@ export function decodeEvent(name, payload, ix = null) {
       return {
         mint: e.mint, isBuy: e.isBuy, user: e.user, timestamp: Number(e.timestamp),
         tokenAmount: e.tokenAmount, quoteAmount: quoted ? e.quoteAmount : e.solAmount,
+        userQuoteAmount: curveUserQuote(quoted ? e.quoteAmount : e.solAmount, e.isBuy, e.fee, e.creatorFee),
         virtualQuoteReserves: quoted ? e.virtualQuoteReserves : e.virtualSolReserves,
         virtualTokenReserves: e.virtualTokenReserves,
         realQuoteReserves: quoted ? e.realQuoteReserves : e.realSolReserves,
@@ -113,13 +168,13 @@ export function decodeEvent(name, payload, ix = null) {
     // (two trades in three); the other path then differs by that trade's fees (about 1 % of it) until the next read.
     case "BuyEvent": {
       const e = plain(PUMP_SDK.decodeBuyEventAmm(data));
-      return { pool: e.pool, isBuy: true, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountOut, quoteAmount: e.quoteAmountIn,
+      return { pool: e.pool, isBuy: true, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountOut, quoteAmount: e.quoteAmountIn, userQuoteAmount: ownOr(e.userQuoteAmountIn, e.quoteAmountIn),
         poolBaseReserves: after(e.poolBaseTokenReserves, e.baseAmountOut, -1n),
         poolQuoteReserves: after(e.poolQuoteTokenReserves, OLD_BUYS.has(e.ixName) ? e.quoteAmountInWithLpFee : sum(e.quoteAmountInWithLpFee, e.protocolFee, e.coinCreatorFee) - sum(e.buybackFee), 1n) };
     }
     case "SellEvent": {
       const e = plain(PUMP_SDK.decodeSellEventAmm(data));
-      return { pool: e.pool, isBuy: false, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountIn, quoteAmount: e.quoteAmountOut,
+      return { pool: e.pool, isBuy: false, user: e.user, timestamp: Number(e.timestamp), baseAmount: e.baseAmountIn, quoteAmount: e.quoteAmountOut, userQuoteAmount: ownOr(e.userQuoteAmountOut, e.quoteAmountOut),
         poolBaseReserves: after(e.poolBaseTokenReserves, e.baseAmountIn, 1n),
         poolQuoteReserves: after(e.poolQuoteTokenReserves, ix === "Sell" ? e.quoteAmountOutWithoutLpFee : sum(e.userQuoteAmountOut, e.buybackFee), -1n) };
     }

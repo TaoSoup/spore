@@ -55,6 +55,9 @@ test("TradeEvents: one multi-hop buy emits a trade per hop, in execution order f
   }
   // The SOL hop reports its amounts in the legacy sol fields; decodeEvent folds them into the quote fields.
   assert.notEqual(trades[0].virtualQuoteReserves, "0");
+  // What the trader paid: the amount plus the fees a curve buy pays on top (here 0.784546805 + 0.007453195 = the 0.792 SOL sent).
+  assert.deepEqual([trades[0].quoteAmount, trades[0].fee, trades[0].userQuoteAmount], ["784546805", "7453195", "792000000"]);
+  assert.equal(trades[1].userQuoteAmount, trades[1].quoteAmount, "no fee on this hop");
   assert.equal(peekMint(b64(fixtures.events.TradeEvent[2])), MINT);
 });
 

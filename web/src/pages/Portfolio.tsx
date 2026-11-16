@@ -1,5 +1,7 @@
-// The Portfolio page: for one wallet, two lists under three summary figures. No profit and loss.
-// HOLDINGS: the coins the wallet bought (it holds them and did not launch them), one flat list, largest value first.
+// The Portfolio page: for one wallet, three lists under four summary figures (value, unrealized and realized profit,
+// fees to claim).
+// HOLDINGS: the coins the wallet bought (it holds them and did not launch them), one flat list, largest value first,
+// each with its unrealized profit; its "Closed" side lists the coins it traded and no longer holds.
 // YOUR SPORES: the pairs the wallet launched (a child coin under a parent, priced in the parent's token) and the coins
 // whose creator fees it shares, one card per parent coin; each row has its fees to claim. A coin is in one list only.
 // The wallet shown is the user's trading wallet (the browser wallet they trade with; its address is known while it is
@@ -7,7 +9,18 @@
 // it launched before and the fees their splits pay it are listed with the trading wallet's own. Without a trading
 // wallet the connected wallet is shown. /portfolio?wallet=<address> shows any address
 // read-only. Numbers come from /api/portfolio/:wallet and /api/claims/:wallet (lib/portfolio.ts sorts them into the
-// two lists). Buy / Sell open the quick-trade ticket and trade with the wallet shown: a locked trading wallet is
+// two lists).
+// ACTIVITY: the wallet's own trades, newest first (/api/activity/:wallet).
+// Profit and loss comes from /api/pnl/:wallet, joined with the holdings in lib/pnl.ts. It is a read of its own: when it
+// fails or is rate limited the rest of the page works and the P&L places show a dash. The server reads a wallet's
+// past transactions once, in the background; while it does the page asks again every 5 s and says how far it is.
+// Every P&L dollar is at today's price of SOL / the parent coin, without network fees and tips.
+// MONEY: the page keeps every money figure in USD and writes it through one formatter, `money()` (lib/money.ts),
+// handed down by MoneyCtx: the "USD | SOL" switch beside the period turns all of them into SOL at the current SOL
+// price (off, and said why, while that price is not known). Percentages, token amounts and a coin's price stay.
+// The card under the tiles draws the realized P&L over the period (/api/pnl/:wallet/series, PnlChart.tsx); it is
+// read with the P&L, one request at a time, and an API without that route (404) leaves the card's empty line.
+// Buy / Sell open the quick-trade ticket and trade with the wallet shown: a locked trading wallet is
 // asked to unlock first, and an unlocked one is made the wallet that trades (lib/trader.ts).
 // Claims are built in the browser and signed by the account wallet (useClaimFlow, lib/trader.ts useAccount): the
 // trading wallet when there is one (unlocked first; it signs on the confirm dialog's button, with no popup), else the
@@ -15,14 +28,17 @@
 // also runs the payouts of coins the connected wallet launched: their part goes to the connected wallet, and the
 // dialog says so. Long lists are cut:
 // 10 holdings, 12 parent cards and 5 rows a card, the rest behind a button.
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { PublicKey } from "@solana/web3.js";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
-import { api, errorMessage, pumpUrl, type Candle, type Candles, type ClaimCoin, type Coin } from "../lib/api";
+import { api, ApiError, errorMessage, pumpUrl, solscanTx, type Candle, type Candles, type ClaimCoin, type Coin, type Pnl, type PnlSeries, type WalletTrade } from "../lib/api";
 import { useAsync, useStats } from "../lib/hooks";
-import { ago, amount, count, lamportsToSol, plural, short, signedPct, sol, tokens, usd, usdCard } from "../lib/format";
+import { ago, amount, count, lamportsToSol, plural, short, signedPct, sol, tokens, usd, usdCard, when } from "../lib/format";
+import { appendPage, buildPnl, historyLine, historyRunning, mergeFirstPage, pnlAvailable, pnlPct, pnlTone, quotePrices, type PnlAmount, type PnlRow, type TradeList } from "../lib/pnl";
+import { makeMoney, MONEY_UNITS, type Money, type MoneyUnit } from "../lib/money";
+import { seriesPoints } from "../lib/pnl-chart";
 import { buildPortfolio, claimableRows, type PfClaim, type PfGroup, type PfRow } from "../lib/portfolio";
 import { blockText, hardBlock, loadTradeRoute } from "../lib/trade-route";
 import { openTradingWallet, useTrader } from "../lib/trader";
@@ -30,7 +46,9 @@ import type { Side } from "../lib/pump";
 import { Addr, ErrorBox, Logo, SkeletonRows, sym } from "../components/Bits";
 import { Sprout } from "../components/LaunchButton";
 import QuickTrade from "../components/QuickTrade";
+import PnlChart from "../components/portfolio/PnlChart";
 import { candleChange, spanLabel } from "../components/map/panel/Sparkline";
+import SlidingPill from "../components/ui/SlidingPill";
 import { useToast } from "../components/Toast";
 import { useClaimFlow, type ClaimTarget } from "../components/claim/useClaimFlow";
 import "../components/portfolio/portfolio.css";
@@ -41,7 +59,42 @@ const TRADE_SETTLE_MS = 4_000; // a trade's new balance and price reach the API 
 const BLOCK_READ_MS = 5_000;   // a "not tradable here" reason stays at least this long, so a refresh right after the click does not hide it unread
 const CARDS_STEP = 12;         // parent cards shown at first, and added by "Show more"
 const ROWS_MAX = 5;            // rows a card shows before "Show all"
+const DUST_USD = 1;             // "Hide small" drops holdings worth less than this (a holding without a price stays)
+const PNL_POLL_MS = 5_000;      // how often the P&L is asked again while the server still reads the wallet's history
+const SINCE_STEP_S = 600;       // a period's start is rounded down to this, so refreshes ask the server for the same window
+const ACTIVITY_PAGE = 25;       // trades a page of the Activity list
+const CLOSED_MAX = 10;          // closed positions shown before "Show all"
+type Tab = "holdings" | "spores" | "activity";
+type HoldSort = "value" | "pnl" | "volume" | "recent";
+const SORTS: [HoldSort, string, string][] = [["value", "Value", "Largest value held first"], ["pnl", "P&L", "Largest unrealized profit first"], ["volume", "Volume", "Most traded in 24 h first"], ["recent", "Recent", "Most recently traded first"]];
+/// The period of the realized P&L and of the closed positions: its key, its button, its days (null: everything), its name.
+type Period = "1d" | "7d" | "30d" | "all";
+const PERIODS: [Period, string, number | null, string][] = [["1d", "1d", 1, "last 24 hours"], ["7d", "7d", 7, "last 7 days"], ["30d", "30d", 30, "last 30 days"], ["all", "All", null, "all time"]];
+const sinceOf = (p: Period): number | null => {
+  const days = PERIODS.find(([k]) => k === p)?.[2] ?? null;
+  return days === null ? null : Math.floor((Date.now() / 1000 - days * 86_400) / SINCE_STEP_S) * SINCE_STEP_S;
+};
+/// True when an answer's window is the one of the period chosen. A refresh can be some steps behind the clock, never
+/// half a day: the periods lie days apart.
+const sameWindow = (since: number | null, p: Period) => { const want = sinceOf(p); return since === null || want === null ? since === want : Math.abs(since - want) < 43_200; };
+const PNL_NOTE = "P&L is valued at today's price of SOL or the parent coin. Network fees and tips are not included.";
+const SOLD_UNKNOWN = "Coins sold without a recorded buy, or without a price to value them with";
+const APPROX_NOTE = "Approximate: some tokens were received without a recorded buy, so they are left out";
+/// Where the P&L read stands: no answer yet, failed (or rate limited), answered without P&L, answered while the
+/// holdings could not be read (realized figures only), or there.
+type PnlState = "loading" | "failed" | "off" | "nohold" | "ok";
+const PNL_WHY: Record<PnlState, string | undefined> = { loading: "Reading the trades", failed: "P&L could not be read just now", off: "P&L is not available right now", nohold: "Holdings could not be read just now", ok: undefined };
+/// A small choice kept in this browser (the tab, the sort, the dust switch); storage may be blocked.
+function usePick<T extends string>(key: string, allowed: readonly T[], initial: T): [T, (v: T) => void] {
+  const [v, setV] = useState<T>(() => { try { const x = localStorage.getItem(key) as T | null; return x && allowed.includes(x) ? x : initial; } catch { return initial; } });
+  const set = useCallback((n: T) => { setV(n); try { localStorage.setItem(key, n); } catch { /* blocked storage */ } }, [key]);
+  return [v, set];
+}
 const HOLDINGS_MAX = 10;       // holdings shown before "Show all"
+/// The page's money formatter (lib/money.ts): the unit chosen and the SOL price, for every part of the page.
+const MoneyCtx = createContext<Money>(makeMoney("usd", null));
+const useMoney = () => useContext(MoneyCtx);
+const NO_SOL_PRICE = "The SOL price is not known right now, so figures stay in dollars";
 const target = (c: ClaimCoin): ClaimTarget => ({ mint: c.mint, symbol: c.symbol, image: c.image, quoteSymbol: c.quoteSymbol, quoteDecimals: c.quoteDecimals, total: c.total, perShare: c.perShare, depth: c.depth });
 const feeText = (k: PfClaim) => amount(tokens(k.amount, k.quoteDecimals), k.quoteSymbol);
 const mapLink = (mint: string) => `/map?focus=${encodeURIComponent(mint)}`;
@@ -58,6 +111,8 @@ type Flow = ReturnType<typeof useClaimFlow>;
 /// `buy`: a wallet of the user's can trade; `sell`: that wallet is the one shown, so its holdings are the ticket's.
 /// `readOnly`: the wallet shown is not the user's.
 type Actions = { opening: Opening; blocked: Blocked; onTrade: (mint: string, side: Side) => void; flow: Flow | null; buy: boolean; sell: boolean; readOnly: boolean };
+/// The small "~" before a figure that leaves out tokens without a recorded buy.
+const Approx = ({ n }: { n: number | null }) => (n !== null && Math.abs(n) >= 0.005 ? <span className="pf-approx" title={APPROX_NOTE}>~<span className="sr-only">approximately </span></span> : null);
 
 export default function Portfolio() {
   useEffect(() => { document.title = "Portfolio · Spore"; return () => { document.title = "Spore"; }; }, []);
@@ -95,7 +150,50 @@ export default function Portfolio() {
   // Fees are a second read: when it fails the holdings still show, without amounts to claim.
   const claims = useAsync(() => (shown ? api.claimsFor(shown) : Promise.resolve(null)), [shown]);
   const claims2 = useAsync(() => (also ? api.claimsFor(also).catch(() => null) : Promise.resolve(null)), [also]);
-  reloadRef.current = () => { pf.reload(); claims.reload(); if (also) { pf2.reload(); claims2.reload(); } };
+  // Profit and loss of the wallet shown, a read of its own: a failure leaves the lists as they are.
+  const [period, setPeriod] = usePick<Period>("spore:pf-period", ["1d", "7d", "30d", "all"], "all");
+  // One request at a time: a refresh asked for while one is in flight is skipped (the hook drops the answer of a call
+  // it has replaced, so a slow answer would otherwise never land under the 5 s poll).
+  const pnlFlight = useRef<object | null>(null);
+  const pnlQ = useAsync<Pnl | null>(() => {
+    if (!shown) return Promise.resolve(null);
+    const mark = {};
+    pnlFlight.current = mark;
+    return api.pnl(shown, sinceOf(period)).finally(() => { if (pnlFlight.current === mark) pnlFlight.current = null; });
+  }, [shown, period]);
+  // The answer of another period stays for the unrealized figures (they do not depend on the period) while the new one loads.
+  // (For one render after the wallet or the period changed the hook still holds the answer before: it is not used,
+  // told by its wallet and by the start of its window.)
+  const pnlNow = pnlQ.data && pnlQ.data.wallet === shown && sameWindow(pnlQ.data.since, period) ? pnlQ.data : null;
+  const lastPnl = useRef<Pnl | null>(null);
+  if (pnlNow) lastPnl.current = pnlNow;
+  const pnlAny = pnlNow ?? (lastPnl.current && lastPnl.current.wallet === shown ? lastPnl.current : null);
+  const reloadPnlNow = pnlQ.reload;
+  const reloadPnl = useCallback(() => { if (!pnlFlight.current) reloadPnlNow(); }, [reloadPnlNow]);
+  // The realized P&L over time, for the chart: read with the P&L (same wallet, same period, one request at a time).
+  // An API that does not have the route yet answers 404: that reads as "no points", the card's empty line.
+  const seriesFlight = useRef<object | null>(null);
+  const seriesQ = useAsync<PnlSeries | null>(() => {
+    if (!shown) return Promise.resolve(null);
+    const mark = {}, wallet = shown, since = sinceOf(period);
+    seriesFlight.current = mark;
+    return api.pnlSeries(wallet, since)
+      .catch((e): PnlSeries => { if (e instanceof ApiError && e.status === 404) return { ok: true, wallet, at: Math.floor(Date.now() / 1000), since, solUsd: null, points: [], unpriced: 0 }; throw e; })
+      .finally(() => { if (seriesFlight.current === mark) seriesFlight.current = null; });
+  }, [shown, period]);
+  const seriesNow = seriesQ.data && seriesQ.data.wallet === shown && sameWindow(seriesQ.data.since, period) ? seriesQ.data : null;
+  const seriesOk = !!seriesNow && seriesNow.ok !== false;
+  const chartPoints = useMemo(() => (seriesNow && seriesNow.ok !== false ? seriesPoints(seriesNow.points) : []), [seriesNow]);
+  const reloadSeriesNow = seriesQ.reload;
+  const reloadSeries = useCallback(() => { if (!seriesFlight.current) reloadSeriesNow(); }, [reloadSeriesNow]);
+  reloadRef.current = () => { pf.reload(); claims.reload(); reloadPnl(); reloadSeries(); if (also) { pf2.reload(); claims2.reload(); } };
+  // While the server reads the wallet's history the P&L is asked again sooner; never while the tab is hidden.
+  const reading = historyRunning(pnlNow);
+  useEffect(() => {
+    if (!shown || !reading) return;
+    const t = setInterval(() => { if (!document.hidden) { reloadPnl(); reloadSeries(); } }, PNL_POLL_MS);
+    return () => clearInterval(t);
+  }, [shown, reading, reloadPnl, reloadSeries]);
 
   const [trade, setTrade] = useState<{ coin: Coin; side: Side } | null>(null);
   const [opening, setOpening] = useState<Opening>(null);
@@ -165,7 +263,48 @@ export default function Portfolio() {
   useEffect(() => { setCards(CARDS_STEP); }, [shown]);
   const view = useMemo(() => buildPortfolio(data, claimCoins), [data, claimCoins]);
   const toClaim = useMemo(() => claimableRows(view), [view]);
-  const { totals, groups, holdings } = view;
+  const { totals, groups } = view;
+  // One list at a time: what the wallet bought, or what it launched. The choices stay in this browser.
+  const [tab, setTab] = usePick<Tab>("spore:pf-tab", ["holdings", "spores", "activity"], "holdings");
+  const [sort, setSort] = usePick<HoldSort>("spore:pf-sort", ["value", "pnl", "volume", "recent"], "value");
+  const [side, setSide] = usePick<"open" | "closed">("spore:pf-side", ["open", "closed"], "open");
+  // P&L: the answer joined with what the wallet holds. Without the holdings (their read failed) only the realized
+  // figures stand: nothing held is known, so there is no unrealized figure and no closed list.
+  const known = useMemo(() => {
+    const m: [string | null, number | null][] = [[null, stats?.solUsd ?? null]];
+    for (const h of data?.holdings ?? []) m.push([h.mint, h.coin.priceUsd]);
+    for (const c of data?.launched ?? []) m.push([c.mint, c.priceUsd]);
+    return m;
+  }, [data, stats?.solUsd]);
+  const holdOk = !!data?.holdingsOk;
+  const pv = useMemo(() => (data && pnlAvailable(pnlAny) ? buildPnl(pnlAny, data.holdingsOk ? data.holdings : [], { quoteUsd: known, dustUsd: DUST_USD }) : null), [data, pnlAny, known]);
+  const prices = useMemo(() => quotePrices(pnlAny, known), [pnlAny, known]);
+  const pnlState: PnlState = !pnlAny ? (pnlQ.error ? "failed" : "loading") : !pnlAvailable(pnlAny) ? "off" : !pv ? "loading" : holdOk ? "ok" : "nohold";
+  // the realized figures and the closed list are of the period chosen: they wait for that period's answer
+  const pvPeriod = pnlNow ? pv : null;
+  const periodName = PERIODS.find(([k]) => k === period)?.[3] ?? "all time";
+  const histLine = pnlQ.error && !pnlNow ? "P&L could not be read just now." : historyLine(pnlAny, !readOnly);
+  const [dust, setDust] = usePick<"hide" | "show">("spore:pf-dust", ["hide", "show"], "hide");
+  // Dollars or SOL, for every money figure of the page; SOL needs the SOL price (without it the page stays in USD).
+  const [unit, setUnit] = usePick<MoneyUnit>("spore:pf-unit", MONEY_UNITS, "usd");
+  const solUsd = stats?.solUsd ?? null;
+  const m = useMemo(() => makeMoney(unit, solUsd), [unit, solUsd]);
+  // the dust limit in the unit in use: "$1" in dollars, its SOL worth ("0.0067 SOL") in SOL mode
+  const dustText = m.unit === "sol" ? m.money(DUST_USD) : `$${DUST_USD}`;
+  const small = useMemo(() => view.holdings.filter((r) => r.held?.valueUsd != null && r.held.valueUsd < DUST_USD).length, [view.holdings]);
+  const holdings = useMemo(() => {
+    const list = dust === "hide" ? view.holdings.filter((r) => !(r.held?.valueUsd != null && r.held.valueUsd < DUST_USD)) : [...view.holdings];
+    // buildPortfolio's order is by value; the other two orders fall back to it (the sort is stable)
+    if (sort === "volume") list.sort((a, b) => (b.coin.vol24Usd ?? 0) - (a.coin.vol24Usd ?? 0));
+    else if (sort === "pnl") {
+      // a coin without a figure goes last
+      const of = (r: PfRow) => pv?.byMint.get(r.coin.mint)?.unrealizedUsd ?? null;
+      list.sort((a, b) => { const x = of(a), y = of(b); return x === null ? (y === null ? 0 : 1) : y === null ? -1 : y - x; });
+    }
+    else if (sort === "recent") list.sort((a, b) => (b.coin.lastTradeAt ?? 0) - (a.coin.lastTradeAt ?? 0));
+    return list;
+  }, [view.holdings, dust, sort, pv]);
+  const sporeRows = groups.reduce((n, g) => n + g.rows.length + (g.self && g.rows.length === 0 ? 1 : 0), 0);
   const [allHeld, setAllHeld] = useState(false);
   useEffect(() => { setAllHeld(false); }, [shown]);
   const solBalance = data?.solLamports != null ? lamportsToSol(data.solLamports) : null;
@@ -176,7 +315,7 @@ export default function Portfolio() {
   const feesPending = !claims.data && !claims.error;
 
   return (
-    <>
+    <MoneyCtx.Provider value={m}>
       <div className="pf-page">
         <header className="pf-head">
           <h1>Portfolio</h1>
@@ -208,23 +347,66 @@ export default function Portfolio() {
         ) : data && (
           <>
             <dl className="pf-sum" aria-label="Summary">
-              <div className="pf-tile">
+              <div className="pf-tile pf-tile-wide">
                 <dt>Total value</dt>
-                <dd className="pf-num">{data.holdingsOk ? usdCard(totals.valueUsd) : "—"}</dd>
+                <dd className="pf-num">{data.holdingsOk ? m.money(totals.valueUsd, { card: true }) : "—"}</dd>
                 <dd className="pf-tile-sub">
                   {data.holdingsOk ? `${plural(totals.holdings, "holding")} · ${plural(totals.sporeTotal, "spore")}` : "could not be read"}
                   {totals.unpriced > 0 && ` · ${totals.unpriced} without a price`}
                   {data.untracked > 0 && ` · ${plural(data.untracked, "other token")} not on Spore`}
                 </dd>
+                <dd className="pf-tile-sub" title="The wallet's SOL balance; it is not part of the total value">
+                  {solBalance === null ? "SOL balance could not be read"
+                    : m.solUsd === null ? <>+ <span className="pf-num">{sol(solBalance)}</span></>
+                    : m.unit === "sol" ? <>+ <span className="pf-num">{sol(solBalance)}</span> · {usdCard(solBalance * m.solUsd)}</>
+                    : <>+ <span className="pf-num">{usdCard(solBalance * m.solUsd)}</span> · {sol(solBalance)}</>}
+                </dd>
               </div>
               <div className="pf-tile">
-                <dt>SOL balance</dt>
-                <dd className="pf-num">{sol(solBalance)}</dd>
-                <dd className="pf-tile-sub">{solBalance === null ? "could not be read" : stats?.solUsd ? usdCard(solBalance * stats.solUsd) : " "}</dd>
+                <dt title={PNL_NOTE}>Unrealized P&amp;L</dt>
+                {pv && holdOk && pv.totals.unrealizedUsd !== null ? (
+                  <>
+                    <dd className={`pf-num pf-pl ${pnlTone(pv.totals.unrealizedUsd)}`}>{pv.totals.partial > 0 && <Approx n={pv.totals.unrealizedUsd} />}{m.money(pv.totals.unrealizedUsd, { signed: true })}</dd>
+                    <dd className="pf-tile-sub">
+                      {pv.totals.unrealizedPct !== null && <><span className="pf-num">{pnlPct(pv.totals.unrealizedPct)}</span> · </>}{plural(pv.totals.counted, "coin")}
+                      {pv.totals.noCost + pv.totals.unpriced > 0 && <span title={leftOutTitle(pv.totals.noCost, pv.totals.unpriced)}>, {pv.totals.noCost + pv.totals.unpriced} left out</span>}
+                    </dd>
+                  </>
+                ) : (
+                  <>
+                    <dd className="pf-num" aria-busy={pnlState === "loading"}>—</dd>
+                    <dd className="pf-tile-sub">
+                      {pnlState === "loading" ? "reading…" : pnlState === "off" ? "not available right now"
+                        : pnlState === "failed" ? <>could not be read · <button type="button" className="linkish" onClick={reloadPnl}>retry</button></>
+                        : pnlState === "nohold" ? <>holdings could not be read · <button type="button" className="linkish" onClick={pf.reload}>retry</button></>
+                        : pv && pv.totals.noCost + pv.totals.unpriced > 0 ? <span title={leftOutTitle(pv.totals.noCost, pv.totals.unpriced)}>{plural(pv.totals.noCost + pv.totals.unpriced, "coin")} without a known cost</span>
+                        : "no bought coins held"}
+                    </dd>
+                  </>
+                )}
               </div>
               <div className="pf-tile">
+                <dt title={PNL_NOTE}>Realized P&amp;L</dt>
+                {pvPeriod ? (
+                  <>
+                    <dd className={`pf-num pf-pl ${pnlTone(pvPeriod.totals.realizedUsd)}`}>{pvPeriod.totals.realizedUsd !== null && pvPeriod.totals.realizedPartial > 0 && <Approx n={pvPeriod.totals.realizedUsd} />}{m.money(pvPeriod.totals.realizedUsd, { signed: true })}</dd>
+                    <dd className="pf-tile-sub">
+                      {periodName} · {pvPeriod.totals.realizedUsd === null
+                        ? <span title={SOLD_UNKNOWN}>{plural(pvPeriod.totals.realizedLeftOut, "coin")} sold without a known cost</span>
+                        : <>{pvPeriod.totals.realizedCoins > 0 ? `${plural(pvPeriod.totals.realizedCoins, "coin")} sold` : "nothing sold"}
+                          {pvPeriod.totals.realizedLeftOut > 0 && <span title={SOLD_UNKNOWN}>, {pvPeriod.totals.realizedLeftOut} left out</span>}</>}
+                    </dd>
+                  </>
+                ) : (
+                  <>
+                    <dd className="pf-num" aria-busy={pnlState === "loading" || (pv !== null && pnlQ.loading)}>—</dd>
+                    <dd className="pf-tile-sub">{pnlState === "off" ? "not available right now" : pnlState === "failed" || (pnlQ.error && !pnlNow) ? "could not be read" : "reading…"}</dd>
+                  </>
+                )}
+              </div>
+              <div className="pf-tile pf-tile-wide">
                 <dt>Fees to claim</dt>
-                <dd className="pf-num" aria-busy={feesPending}>{feesFailed || feesPending ? "—" : usdCard(totals.claimUsd)}</dd>
+                <dd className="pf-num" aria-busy={feesPending}>{feesFailed || feesPending ? "—" : m.money(totals.claimUsd, { card: true })}</dd>
                 <dd className="pf-tile-sub pf-tile-act">
                   {feesFailed ? <>could not be read · <button type="button" className="linkish" onClick={claims.reload}>retry</button></>
                     : feesPending ? "reading…"
@@ -241,22 +423,82 @@ export default function Portfolio() {
               </div>
             </dl>
 
+            <div className="pf-pnl-bar">
+              <p className="pf-hist">{histLine && <><span className="pf-hist-state">{histLine}</span> </>}{PNL_NOTE}</p>
+              <span className="pf-bar-picks">
+                <span className="pf-period">
+                  <span className="pf-k" id="pf-period-l">Realized over</span>
+                  <span className="seg pf-sort" role="group" aria-labelledby="pf-period-l">
+                    <SlidingPill />
+                    {PERIODS.map(([k, label, , name]) => <button key={k} type="button" aria-pressed={period === k} title={`Realized P&L and closed positions: ${name}`} onClick={() => setPeriod(k)}>{label}</button>)}
+                  </span>
+                </span>
+                <span className="seg pf-sort pf-unit" role="group" aria-label="Show money in" title={m.can ? undefined : NO_SOL_PRICE}>
+                  <SlidingPill />
+                  <button type="button" aria-pressed={m.unit === "usd"} title="Money figures in dollars" onClick={() => setUnit("usd")}>USD</button>
+                  <button type="button" aria-pressed={m.unit === "sol"} disabled={!m.can} title={m.can ? `Money figures in SOL, at the current price of SOL (${usd(m.solUsd)})` : NO_SOL_PRICE} onClick={() => setUnit("sol")}>SOL</button>
+                </span>
+              </span>
+            </div>
+
+            {pnlState !== "off" && (
+              <PnlChart points={chartPoints} periodName={periodName} money={m} note={PNL_NOTE} unpriced={seriesOk ? seriesNow.unpriced : 0}
+                state={seriesNow ? (seriesOk ? "ok" : "failed") : seriesQ.error ? "failed" : "loading"} />
+            )}
+
+            <div className="pf-tabs">
+              <span className="seg" role="group" aria-label="List shown">
+                <SlidingPill />
+                <button type="button" aria-pressed={tab === "holdings"} onClick={() => setTab("holdings")}>Holdings <span className="pf-tab-n">{view.holdings.length}</span></button>
+                <button type="button" aria-pressed={tab === "spores"} onClick={() => setTab("spores")}>{readOnly ? "Spores" : "Your spores"} <span className="pf-tab-n">{sporeRows}</span></button>
+                <button type="button" aria-pressed={tab === "activity"} onClick={() => setTab("activity")}>Activity</button>
+              </span>
+              {tab === "holdings" && (
+                <span className="pf-tools">
+                  <span className="pf-switch" role="group" aria-label="Positions shown">
+                    <button type="button" className="linkish" aria-pressed={side === "open"} title="The coins the wallet holds" onClick={() => setSide("open")}>Open</button>
+                    <button type="button" className="linkish" aria-pressed={side === "closed"} title="Coins the wallet traded and no longer holds" onClick={() => setSide("closed")}>Closed</button>
+                  </span>
+                  {side === "closed" && <span className="pf-count">{periodName}</span>}
+                  {side === "open" && view.holdings.length > 1 && small > 0 && (
+                    <button type="button" className="linkish pf-link" aria-pressed={dust === "hide"} onClick={() => setDust(dust === "hide" ? "show" : "hide")}
+                      title={`Holdings worth less than ${dustText}`}>
+                      {dust === "hide" ? `Show ${small} under ${dustText}` : `Hide ${small} under ${dustText}`}
+                    </button>
+                  )}
+                  {side === "open" && view.holdings.length > 1 && (
+                    <span className="seg pf-sort" role="group" aria-label="Sort holdings by">
+                      <SlidingPill />
+                      {SORTS.map(([k, label, title]) => <button key={k} type="button" aria-pressed={sort === k} title={title} onClick={() => setSort(k)}>{label}</button>)}
+                    </span>
+                  )}
+                </span>
+              )}
+              {tab === "activity" && <span className="pf-count">{readOnly ? "This wallet's trades" : "Your trades"}, newest first</span>}
+              {tab === "spores" && groups.length > 0 && <span className="pf-count">{readOnly ? "Pairs this wallet launched" : "Pairs you launched"}, by parent coin</span>}
+            </div>
+
+            {tab === "holdings" && (
             <section className="pf-sec" aria-labelledby="pf-held-h">
-              <div className="pf-sec-head">
-                <h2 id="pf-held-h">Holdings</h2>
-                {holdings.length > 0 && <span className="pf-count">{plural(holdings.length, "coin")} {readOnly ? "bought" : "you bought"}</span>}
-              </div>
-              {!data.holdingsOk ? (
+              <h2 id="pf-held-h" className="sr-only">Holdings</h2>
+              {side === "closed" ? (
+                !data.holdingsOk ? <p className="pf-warn" role="status">Holdings could not be read just now, so closed positions cannot be told apart. <button type="button" className="linkish" onClick={pf.reload}>Retry</button></p>
+                  : pvPeriod ? <ClosedList key={`${shown}:${period}`} rows={pvPeriod.closed} a={actions} periodName={periodName} />
+                  : pnlState === "loading" || (pnlState === "ok" && !pnlQ.error) ? <div aria-busy="true" aria-label="Loading the closed positions"><SkeletonRows n={3} h={52} /></div>
+                  : <p className="pf-empty">{pnlState === "off" ? "Closed positions are not available right now." : <>Closed positions could not be read just now. <button type="button" className="linkish pf-link" onClick={reloadPnl}>Retry</button></>}</p>
+              ) : !data.holdingsOk ? (
                 <p className="pf-warn" role="status">Holdings could not be read just now, so only the coins this wallet launched are listed. <button type="button" className="linkish" onClick={pf.reload}>Retry</button></p>
-              ) : holdings.length === 0 ? (
+              ) : view.holdings.length === 0 ? (
                 <p className="pf-empty">{readOnly ? "This wallet holds no coins it bought." : "Coins you buy show up here."} <Link to="/map" className="pf-link">Find one on the map</Link></p>
+              ) : holdings.length === 0 ? (
+                <p className="pf-empty">Every holding is worth less than {dustText}. <button type="button" className="linkish pf-link" onClick={() => setDust("show")}>Show {small}</button></p>
               ) : (
                 <div className={`card pf-holds ${actions.buy ? "" : "pf-holds-plain"}`}>
                   <div className="pf-hold pf-hold-cols" aria-hidden="true">
-                    <span /><span>Coin</span><span>Price</span><span>Amount</span><span>Value</span><span>24 h volume</span>{actions.buy && <span />}
+                    <span /><span>Coin</span><span>Price</span><span>Amount</span><span>Value</span><span title={PNL_NOTE}>P&amp;L</span>{actions.buy && <span />}
                   </div>
                   <ul className="pf-rows" aria-label="Holdings">
-                    {(allHeld ? holdings : holdings.slice(0, HOLDINGS_MAX)).map((r) => <HoldingRow key={r.coin.mint} r={r} a={actions} />)}
+                    {(allHeld ? holdings : holdings.slice(0, HOLDINGS_MAX)).map((r) => <HoldingRow key={r.coin.mint} r={r} a={actions} p={pv?.byMint.get(r.coin.mint)} state={pnlState} periodName={pvPeriod ? periodName : null} />)}
                   </ul>
                   {holdings.length > HOLDINGS_MAX && (
                     <button type="button" className="linkish pf-link pf-all" aria-expanded={allHeld} onClick={() => setAllHeld((v) => !v)}>
@@ -266,12 +508,11 @@ export default function Portfolio() {
                 </div>
               )}
             </section>
+            )}
 
+            {tab === "spores" && (
             <section className="pf-sec" aria-labelledby="pf-spores-h">
-              <div className="pf-sec-head">
-                <h2 id="pf-spores-h">{readOnly ? "Spores" : "Your spores"}</h2>
-                {groups.length > 0 && <span className="pf-count">{readOnly ? "Pairs this wallet launched" : "Pairs you launched"}, by parent coin</span>}
-              </div>
+              <h2 id="pf-spores-h" className="sr-only">{readOnly ? "Spores" : "Your spores"}</h2>
               {groups.length === 0 ? (
                 <p className="pf-empty">
                   {readOnly ? "This wallet has not launched a pair." : "A pair you launch shows up here, with the fees it earns."}
@@ -289,12 +530,20 @@ export default function Portfolio() {
               )}
               {data.launchedTotal > data.launched.length && <p className="pf-note">Showing the newest {data.launched.length} of {data.launchedTotal} launched coins.</p>}
             </section>
+            )}
+
+            {tab === "activity" && shown && (
+            <section className="pf-sec" aria-labelledby="pf-act-h">
+              <h2 id="pf-act-h" className="sr-only">Activity</h2>
+              <Activity key={shown} wallet={shown} stamp={`${pnlAny?.trades ?? 0}:${pnlAny ? pnlAny.history?.state ?? "none" : "-"}`} total={pnlAny?.trades ?? 0} prices={prices} readOnly={readOnly} reading={reading} />
+            </section>
+            )}
           </>
         )}
       </div>
       {flow.dialog}
       {trade && <QuickTrade coin={trade.coin} side={trade.side} solUsd={stats?.solUsd ?? null} onClose={closeTrade} />}
-    </>
+    </MoneyCtx.Provider>
   );
 }
 
@@ -316,11 +565,11 @@ function TradeButtons({ mint, label, held, a }: { mint: string; label: string; h
 
 /// A coin's fees waiting for the wallet, with Claim when a payout can run and the page may claim.
 function Fee({ k, label, a }: { k: PfClaim; label: string; a: Actions }) {
-  const flow = a.flow;
+  const flow = a.flow, { money } = useMoney();
   return (
     <span className="pf-fee">
       <span className="pf-k">Fees</span>
-      <span className="pf-num" title={k.usd != null ? usd(k.usd) : undefined}>{feeText(k)}</span>
+      <span className="pf-num" title={k.usd != null ? money(k.usd) : undefined}>{feeText(k)}</span>
       {!k.claimable ? <span className="pf-k" title={k.row.reason ?? undefined}>not claimable</span>
         : flow && <button type="button" className="btn sm soft" disabled={flow.busy} aria-label={flow.locked ? `Unlock your trading wallet to claim the fees of ${label}` : `Claim the fees of ${label}`} title={flow.locked ? "Your trading wallet signs the payout: unlock it first" : undefined} onClick={() => flow.start(target(k.row))}>{flow.labelFor(k.row.mint) ?? (flow.locked ? "Unlock to claim" : "Claim")}</button>}
     </span>
@@ -328,16 +577,46 @@ function Fee({ k, label, a }: { k: PfClaim; label: string; a: Actions }) {
 }
 
 /// What the wallet holds of a coin: its value, or the token amount when it has no price; a dash when it holds none.
-const heldText = (r: PfRow | null) => (!r?.held ? "—" : r.held.valueUsd != null ? usdCard(r.held.valueUsd) : amount(r.held.uiAmount));
+const heldText = (r: PfRow | null, m: Money) => (!r?.held ? "—" : r.held.valueUsd != null ? m.money(r.held.valueUsd, { card: true }) : amount(r.held.uiAmount));
 const heldTitle = (r: PfRow | null) => (r?.held ? `${amount(r.held.uiAmount)} ${sym(r.coin)}` : undefined);
 /// Why a coin is among the spores: the wallet launched it, or only shares its fees.
 const SporeTag = ({ r }: { r: PfRow }) => (r.launched ? <span className="pf-tag">launched</span> : r.feeShare ? <span className="pf-tag" title="Listed because this wallet receives a share of the coin's creator fees">fee share</span> : null);
 
-/// One coin the wallet bought: logo, symbol over its pair, amount, value, 24 h volume, Buy / Sell. The cells line up
-/// in columns on a wide screen (portfolio.css); on a phone the value sits over the amount on the first line and the
-/// volume and the buttons take the second. Every figure keeps a label for a screen reader.
-function HoldingRow({ r, a }: { r: PfRow; a: Actions }) {
+/// "0.5 SOL ($100)": an amount of a coin's quote, with its money at today's price when there is one. In SOL an
+/// amount of SOL stands alone (the bracket would repeat it). `quoteMint`: null for SOL.
+const quoteText = (x: PnlAmount, symbol: string, quoteMint: string | null, m: Money) =>
+  `${amount(x.quote, symbol)}${x.usd !== null && !(m.unit === "sol" && quoteMint === null) ? ` (${m.money(x.usd)})` : ""}`;
+const leftOutTitle = (noCost: number, unpriced: number) =>
+  [noCost > 0 ? `${plural(noCost, "coin")} held without a recorded buy` : "", unpriced > 0 ? `${plural(unpriced, "coin")} without a price` : ""].filter(Boolean).join(", ");
+
+/// A holding's unrealized profit: dollars (signed, coloured) over the percent of its cost; a dash with the reason in
+/// its title when there is no figure. The title carries the average cost and what was bought and sold in the period.
+function PnlCell({ p, state, periodName }: { p: PnlRow | undefined; state: PnlState; periodName: string | null }) {
+  const m = useMoney();
+  const why = state !== "ok" ? PNL_WHY[state]
+    : !p || p.gap === "no-cost" ? "No buy of this coin is recorded for this wallet, so its cost is not known"
+    : p.gap === "no-price" || p.unrealizedUsd === null ? "No price to value the cost with" : null;
+  if (why || !p) return <span className="pf-hold-pnl" title={why ?? undefined}><span className="pf-k">P&amp;L</span> <span className="pf-num pf-pl none">—</span></span>;
+  const title = [
+    `Average cost ${usd(p.avgCostUsd)} per token, ${m.money(p.costUsd)} for what is held.`,
+    periodName ? `Bought ${quoteText(p.bought, p.quoteSymbol, p.quoteMint, m)}, sold ${quoteText(p.sold, p.quoteSymbol, p.quoteMint, m)} (${periodName}).` : "",
+    p.partial ? `${APPROX_NOTE}.` : "",
+  ].filter(Boolean).join(" ");
+  return (
+    <span className="pf-hold-pnl" title={title}>
+      <span className="pf-k">P&amp;L</span>{" "}
+      <b className={`pf-num pf-pl ${pnlTone(p.unrealizedUsd)}`}>{p.partial && <Approx n={p.unrealizedUsd} />}{m.money(p.unrealizedUsd, { signed: true })}</b>{" "}
+      {p.unrealizedPct !== null && <span className="pf-num pf-pl-pct">{pnlPct(p.unrealizedPct)}</span>}
+    </span>
+  );
+}
+
+/// One coin the wallet bought: logo, symbol over its pair, amount, value, unrealized P&L, Buy / Sell. The cells line
+/// up in columns on a wide screen (portfolio.css); on a phone the value sits over the amount on the first line and
+/// the P&L and the buttons take the second. Every figure keeps a label for a screen reader.
+function HoldingRow({ r, a, p, state, periodName }: { r: PfRow; a: Actions; p: PnlRow | undefined; state: PnlState; periodName: string | null }) {
   const c = r.coin, name = sym(c), h = r.held;
+  const { money } = useMoney();
   return (
     <li className="pf-hold">
       <Logo src={c.image} label={c.symbol} size={28} />
@@ -347,15 +626,171 @@ function HoldingRow({ r, a }: { r: PfRow; a: Actions }) {
       </span>
       <span className="pf-hold-val">
         <span className="sr-only">Value </span>
-        {h?.valueUsd != null ? <b className="pf-num">{usdCard(h.valueUsd)}</b> : <span className="pf-k">no price</span>}
+        {h?.valueUsd != null ? <b className="pf-num">{money(h.valueUsd, { card: true })}</b> : <span className="pf-k">no price</span>}
       </span>
       <span className="pf-hold-amt"><span className="sr-only">Amount </span><span className="pf-num">{amount(h?.uiAmount)}</span></span>
       <PriceCell r={r} />
       <div className="pf-hold-foot">
-        <span className="pf-hold-vol"><span className="pf-k">24 h vol</span> <span className="pf-num">{usd(c.vol24Usd)}</span></span>
+        <PnlCell p={p} state={state} periodName={periodName} />
         {a.buy && <span className="pf-hold-act"><TradeButtons mint={c.mint} label={name} held={!!h} a={a} /></span>}
       </div>
     </li>
+  );
+}
+
+/// The coins the wallet traded in the period and no longer holds (or holds only as dust): what was bought and sold,
+/// and what the sells made, in the page's money unit at today's price of the quote and as a percent of the sold
+/// tokens' cost.
+function ClosedList({ rows, a, periodName }: { rows: PnlRow[]; a: Actions; periodName: string }) {
+  const [all, setAll] = useState(false);
+  const { money } = useMoney();
+  if (rows.length === 0) return <p className="pf-empty">No closed positions in the {periodName === "all time" ? "trades read so far" : periodName}.</p>;
+  const side = (x: PnlAmount, symbol: string) => (x.usd !== null ? <span className="pf-num" title={amount(x.quote, symbol)}>{money(x.usd, { card: true })}</span> : <span className="pf-num">{amount(x.quote, symbol)}</span>);
+  return (
+    <div className={`card pf-holds ${a.buy ? "" : "pf-holds-plain"}`}>
+      <div className="pf-shut pf-shut-cols" aria-hidden="true">
+        <span /><span>Coin</span><span>Bought</span><span>Sold</span><span title={PNL_NOTE}>Realized P&amp;L</span>{a.buy && <span />}
+      </div>
+      <ul className="pf-rows" aria-label={`Closed positions, ${periodName}`}>
+        {(all ? rows : rows.slice(0, CLOSED_MAX)).map((r) => {
+          const name = sym({ symbol: r.coin.symbol, mint: r.mint });
+          return (
+            <li key={r.mint} className="pf-shut">
+              <Logo src={r.coin.image} label={r.coin.symbol} size={28} />
+              <span className="pf-hold-main">
+                <Link to={mapLink(r.mint)} className="pf-sym" title={`${r.coin.name ?? name} on the map`}>{name}</Link>
+                <span className="pf-name" title={r.lastAt !== null ? `Last trade ${when(r.lastAt)}` : undefined}>last trade {ago(r.lastAt)}</span>
+              </span>
+              <span className="pf-shut-pl" title={r.realizedUsd === null ? (r.sells > 0 ? "Sold without a recorded buy, or without a price to value it with" : "Nothing sold in this period") : r.realizedPartial ? APPROX_NOTE : undefined}>
+                <span className="sr-only">Realized P&amp;L </span>
+                <b className={`pf-num pf-pl ${pnlTone(r.realizedUsd)}`}>{r.realizedPartial && r.realizedUsd !== null && Math.abs(r.realizedUsd) < 0.005 ? <span title={APPROX_NOTE}>—</span> : <>{r.realizedPartial && <Approx n={r.realizedUsd} />}{money(r.realizedUsd, { signed: true })}</>}</b>
+                {r.realizedPct !== null && <span className="pf-num pf-pl-pct">{pnlPct(r.realizedPct)}</span>}
+              </span>
+              <div className="pf-shut-foot">
+                <span className="pf-shut-amt"><span className="pf-k">Bought</span> {side(r.bought, r.quoteSymbol)}</span>
+                <span className="pf-shut-amt"><span className="pf-k">Sold</span> {side(r.sold, r.quoteSymbol)}</span>
+                {a.buy && <span className="pf-hold-act"><TradeButtons mint={r.mint} label={name} held={r.held} a={a} /></span>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {rows.length > CLOSED_MAX && (
+        <button type="button" className="linkish pf-link pf-all" aria-expanded={all} onClick={() => setAll((v) => !v)}>
+          {all ? "Show fewer" : `Show all ${rows.length}`}<span className="sr-only"> closed positions</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+/// The wallet's trades, newest first, a page at a time. `stamp` changes when the server stored more of them or the
+/// state of the history read changed: the first page is then read again. A list the reader has not extended is
+/// replaced whole; one extended with "Load more" keeps what it holds and takes the trades it lacks (lib/pnl.ts
+/// mergeFirstPage). One first-page request at a time: a change that comes while one is in flight asks once more after
+/// it, so a slow answer still lands. `total`: the trades the server stores for the wallet (0: not known).
+/// `prices`: today's USD price of a quote, by quote mint.
+const tradeKey = (t: WalletTrade) => `${t.sig}:${t.mint}:${t.side}:${t.baseAmount}`;
+function Activity({ wallet, stamp, total, prices, readOnly, reading }: { wallet: string; stamp: string; total: number; prices: ReadonlyMap<string, number>; readOnly: boolean; reading: boolean }) {
+  const [list, setList] = useState<TradeList<WalletTrade> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const m = useMoney();
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const totalRef = useRef(total);
+  totalRef.current = total;
+  const extended = useRef(false); // "Load more" was used (or is in flight): a refresh merges, it does not replace
+  const slack = useRef(0);        // stored trades the list did not hold when it last reached its end
+  const flight = useRef(false), again = useRef(false), moreFlight = useRef(false);
+  const loadFirst = useCallback(() => {
+    if (flight.current) { again.current = true; return; }
+    flight.current = true;
+    api.activity(wallet, { limit: ACTIVITY_PAGE }).then((a) => {
+      if (!alive.current) return;
+      setError(null);
+      const page = { trades: a.trades, next: a.next, tracked: a.tracked };
+      setList((cur) => (!cur || !extended.current ? page : mergeFirstPage(cur, page, tradeKey, totalRef.current - slack.current)));
+    }).catch((e) => { if (alive.current) setError(errorMessage(e)); })
+      .finally(() => { flight.current = false; if (alive.current && again.current) { again.current = false; loadFirst(); } });
+  }, [wallet]);
+  useEffect(() => { loadFirst(); }, [loadFirst, stamp]);
+  const loadMore = async () => {
+    const before = list?.next;
+    if (!before || moreFlight.current) return;
+    moreFlight.current = true;
+    extended.current = true;
+    setMore(true);
+    try {
+      const a = await api.activity(wallet, { limit: ACTIVITY_PAGE, before });
+      if (!alive.current) return;
+      setError(null);
+      setList((cur) => {
+        if (!cur) return cur;
+        const out = appendPage(cur, a, tradeKey);
+        if (out.next === null) slack.current = Math.max(0, totalRef.current - out.trades.length);
+        return out;
+      });
+    } catch (e) {
+      if (alive.current) setError(errorMessage(e));
+    } finally {
+      moreFlight.current = false;
+      if (alive.current) setMore(false);
+    }
+  };
+
+  if (!list) {
+    return error
+      ? <p className="pf-empty">The trades could not be loaded just now. <button type="button" className="linkish pf-link" onClick={() => { setError(null); loadFirst(); }}>Retry</button></p>
+      : <div aria-busy="true" aria-label="Loading the trades"><SkeletonRows n={5} h={44} /></div>;
+  }
+  if (list.trades.length === 0) {
+    return (
+      <p className="pf-empty">
+        {reading ? `Reading ${readOnly ? "this wallet's" : "your"} trade history. Trades show up here as they are found.`
+          : !list.tracked ? "The trade history of this wallet is not available right now."
+          : readOnly ? "No trades of this wallet were found." : "Trades you make show up here."}
+      </p>
+    );
+  }
+  return (
+    <div className="card pf-holds">
+      <div className="pf-act pf-act-cols" aria-hidden="true">
+        <span>Time</span><span>Side</span><span>Coin</span><span>Amount</span><span>Paid / received</span><span />
+      </div>
+      <ul className="pf-rows" aria-label="Trades">
+        {list.trades.map((t, i) => {
+          const name = sym({ symbol: t.coin?.symbol ?? null, mint: t.mint });
+          const buy = t.side === "buy";
+          const quote = t.quoteDecimals === null ? null : tokens(t.quoteAmount, t.quoteDecimals);
+          const price = prices.get(t.quoteMint ?? "SOL");
+          const dollars = quote !== null && price !== undefined ? quote * price : null;
+          // what was paid in SOL is the SOL figure already: its second figure stays in dollars in either unit
+          const solQuote = !t.quoteMint;
+          return (
+            <li key={`${tradeKey(t)}:${i}`} className="pf-act">
+              <span className="pf-act-time" title={when(t.time)}>{ago(t.time)}</span>
+              <span className={`pf-act-side ${buy ? "up" : "down"}`}>{buy ? "Buy" : "Sell"}</span>
+              <span className="pf-act-coin">
+                <Logo src={t.coin?.image} label={t.coin?.symbol} size={22} />
+                <Link to={mapLink(t.mint)} className="pf-sym" title={`${t.coin?.name ?? name} on the map`}>{name}</Link>
+              </span>
+              <span className="pf-act-amt"><span className="sr-only">Amount </span><span className="pf-num">{amount(tokens(t.baseAmount, t.baseDecimals))}</span></span>
+              <span className="pf-act-quote" title={dollars !== null ? (solQuote || m.unit === "usd" ? "In dollars at today's price" : "In SOL at today's prices") : undefined}>
+                <span className="sr-only">{buy ? "Paid " : "Received "}</span>
+                <span className="pf-num">{quote === null ? "—" : amount(quote, t.quoteSymbol ?? (t.quoteMint ? "" : "SOL"))}</span>
+                {dollars !== null && <span className="pf-num pf-act-usd">{solQuote ? usdCard(dollars) : m.money(dollars, { card: true })}</span>}
+              </span>
+              <a className="pf-link pf-act-tx" href={solscanTx(t.sig)} target="_blank" rel="noreferrer" aria-label={`Transaction of this ${buy ? "buy" : "sell"} of ${name} on Solscan`} title="Transaction on Solscan">tx ↗</a>
+            </li>
+          );
+        })}
+      </ul>
+      {error && <p className="pf-note" role="status">More trades could not be loaded just now.</p>}
+      {list.next && (
+        <button type="button" className="linkish pf-link pf-all" disabled={more} aria-busy={more} onClick={loadMore}>{more ? "Loading…" : "Load more"}</button>
+      )}
+    </div>
   );
 }
 
@@ -426,6 +861,7 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
   const id = useId();
   const [all, setAll] = useState(false);
   const p = g.parent, self = g.self;
+  const m = useMoney();
   const label = sym(p);
   // a parent the index does not track (a listed asset such as USDC) has no ticket and takes no child here
   const tracked = g.tracked;
@@ -442,7 +878,7 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
       </header>
       {self && (self.held || self.claim || a.buy) && (
         <div className="pf-card-own">
-          {self.held && <span className="pf-meta"><span className="pf-k">{a.readOnly ? "Holds" : "You hold"}</span> <span className="pf-num" title={heldTitle(self)}>{heldText(self)}</span></span>}
+          {self.held && <span className="pf-meta"><span className="pf-k">{a.readOnly ? "Holds" : "You hold"}</span> <span className="pf-num" title={heldTitle(self)}>{heldText(self, m)}</span></span>}
           {self.claim && <Fee k={self.claim} label={label} a={a} />}
           {tracked && <TradeButtons mint={p.mint} label={label} held={!!self.held} a={a} />}
         </div>
@@ -461,9 +897,9 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
                 <TradeButtons mint={c.mint} label={name} held={!!r.held} a={a} />
                 <PriceCell r={r} />
                 <div className="pf-row-foot">
-                  <span className="pf-meta"><span className="pf-k">Mcap</span> <span className="pf-num">{usd(c.mcapUsd)}</span></span>
-                  <span className="pf-meta"><span className="pf-k">24 h vol</span> <span className="pf-num">{usd(c.vol24Usd)}</span></span>
-                  <span className="pf-meta"><span className="pf-k">{a.readOnly ? "Holds" : "You hold"}</span> <span className="pf-num" title={heldTitle(r)}>{heldText(r)}</span></span>
+                  <span className="pf-meta"><span className="pf-k">Mcap</span> <span className="pf-num">{m.money(c.mcapUsd)}</span></span>
+                  <span className="pf-meta"><span className="pf-k">24 h vol</span> <span className="pf-num">{m.money(c.vol24Usd)}</span></span>
+                  <span className="pf-meta"><span className="pf-k">{a.readOnly ? "Holds" : "You hold"}</span> <span className="pf-num" title={heldTitle(r)}>{heldText(r, m)}</span></span>
                   {r.claim && <Fee k={r.claim} label={name} a={a} />}
                 </div>
               </li>

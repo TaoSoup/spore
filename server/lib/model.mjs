@@ -405,7 +405,12 @@ export class Model {
   setGlobal(g) { this.global = g; this.db.kvSet("global", g); this.#bump(); }
   setBackfill(b) { this.backfill = { ...this.backfill, ...b }; }
   /** Stores a trade; only a row sqlite did not have yet is counted (a replayed event never counts twice). */
-  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) this.activity.record(t); this.#bump(); return fresh; }
+  /**
+   * `walletTrades` (lib/pnl-tracker.mjs, when the server runs one) also keeps the trade for its trader when that wallet
+   * is tracked: one Map lookup per trade otherwise. It is asked for a replayed trade too, since the wallet may have
+   * become tracked between the two deliveries; its own primary key keeps the row single.
+   */
+  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) this.activity.record(t); this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
   touch(mint) { this.touched.set(mint, Date.now()); }
 
   // ---------------------------------------------------------------- "ours" (DESIGN §11.1)

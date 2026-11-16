@@ -102,6 +102,51 @@ export type Portfolio = {
   wallet: string; at: number; solLamports: string | null; holdingsOk: boolean; holdings: PortfolioHolding[];
   untracked: number; launched: PortfolioCoin[]; launchedTotal: number;
 };
+/// `GET /api/pnl/:wallet` and `GET /api/activity/:wallet`: the wallet's own trades and what they made.
+/// `history`: the one-off read of the wallet's past transactions. `scanned` of `total` while it runs; `cut`: older
+/// trades were left out (`since` = block time of the oldest transaction read); `unread`: transactions that could not
+/// be read; `gap`: trades since that time may be missing until a catch-up ran. "off": the read is disabled; "full":
+/// the server tracks no more wallets (the coins are then empty).
+export type PnlHistory = {
+  state: "queued" | "running" | "done" | "failed" | "off" | "full";
+  scanned: number; total: number; cut: boolean; unread: number; since: number | null; trackedAt: number | null; gap: number | null;
+};
+/// One coin the wallet traded. Amounts are strings in smallest units: `*Base` of the coin, `*Quote` of its quote
+/// (`quoteMint` null = SOL, else the parent token), fees of the venue included. `boughtX`, `soldX`, `realizedQuote`
+/// (signed), `buys` and `sells` cover the window asked for (`since`); `costQuote` (the cost of `heldBase`), `heldBase`
+/// (what the trades say is still held), `partial` (tokens were sold or held without a recorded buy), `firstAt` and
+/// `lastAt` cover everything stored. `*UsdNow`: the quote amount at TODAY's price of the quote, null without one.
+export type PnlCoin = {
+  mint: string; coin: { name: string | null; symbol: string | null; image: string | null };
+  quoteMint: string | null; quoteSymbol: string; quoteDecimals: number; baseDecimals: number;
+  boughtBase: string; boughtQuote: string; soldBase: string; soldQuote: string;
+  realizedQuote: string; costQuote: string; heldBase: string;
+  partial: boolean; buys: number; sells: number; firstAt: number; lastAt: number;
+  realizedUsdNow: number | null; costUsdNow: number | null;
+};
+/// `ok: false`: the server's store failed (`history` null, no coins). `since`: the window used (rounded down to a
+/// minute), null = everything. `trades`: the wallet's stored trades. `coins`: newest `lastAt` first.
+export type Pnl = {
+  ok: boolean; wallet: string; at: number; since: number | null; history: PnlHistory | null; trades: number; coins: PnlCoin[];
+  totals: { realizedUsdNow: number | null; costUsdNow: number | null; unpriced: number };
+};
+/// `GET /api/pnl/:wallet/series`: the wallet's CUMULATIVE realized profit over time inside the window, in USD at
+/// today's price of each coin's quote, time ascending: { t: window start (the first trade for all time), usd: 0 }, a
+/// point per sell that realizes profit (240 at most, bucketed by time above that), then { t: at, usd: the total }, which
+/// equals /api/pnl's totals.realizedUsdNow for the same `since`. `solUsd`: the SOL price now. `unpriced`: coins left
+/// out because their quote has no price. Asking does not make the server track the wallet: an untracked wallet
+/// answers no points. `ok: false`: the store failed (no points).
+export type PnlSeriesPoint = { t: number; usd: number };
+export type PnlSeries = { ok: boolean; wallet: string; at: number; since: number | null; solUsd: number | null; points: PnlSeriesPoint[]; unpriced: number };
+/// One trade of the wallet. `quoteAmount`: what the wallet paid (buy) or received (sell), venue fees included.
+export type WalletTrade = {
+  sig: string; mint: string; coin: { name: string | null; symbol: string | null; image: string | null } | null;
+  side: "buy" | "sell"; baseAmount: string; quoteAmount: string; baseDecimals: number;
+  quoteMint: string | null; quoteSymbol: string | null; quoteDecimals: number | null; time: number;
+};
+/// `tracked`: the server keeps this wallet's trades (asking for the activity does not start that; /api/pnl does).
+/// `trades`: newest first. `next`: pass back as `before` for the page after, null at the end.
+export type WalletActivity = { ok: boolean; wallet: string; at: number; tracked: boolean; history: PnlHistory | null; trades: WalletTrade[]; next: string | null };
 /// Root agents (DESIGN §13 + §13.1, live): every root launched on Spore gets an agent with its own
 /// Solana wallet. The root's fee split sends the agent 0.20 % of every trade; the agent claims its
 /// fees, thinks with a language model, launches coins under its root and pays its surplus to the
@@ -270,6 +315,13 @@ export const api = {
   claims: (limit = 50) => request<Claims>(`/claims${qs({ limit })}`, {}, 30_000),
   /// One wallet's holdings and launched coins; 400 on a bad address. The server reads the wallet's token accounts.
   portfolio: (wallet: string) => request<Portfolio>(`/portfolio/${encodeURIComponent(wallet)}`, {}, 30_000),
+  /// What the wallet's trades made, per coin; `since` (unix s) windows the bought / sold / realized figures. The first
+  /// request for a wallet starts the server's one-off read of its history. 429 when rate limited.
+  pnl: (wallet: string, since?: number | null) => request<Pnl>(`/pnl/${encodeURIComponent(wallet)}${qs({ since })}`, {}, 20_000),
+  /// The wallet's cumulative realized profit over time, for the chart; `since` as in `pnl`. 429 when rate limited.
+  pnlSeries: (wallet: string, since?: number | null) => request<PnlSeries>(`/pnl/${encodeURIComponent(wallet)}/series${qs({ since })}`, {}, 20_000),
+  /// The wallet's trades, newest first; `before` is the `next` cursor of the page above (or a unix time).
+  activity: (wallet: string, q: { limit?: number; before?: string | number | null } = {}) => request<WalletActivity>(`/activity/${encodeURIComponent(wallet)}${qs({ limit: q.limit, before: q.before })}`, {}, 20_000),
   search: (q: string, signal?: AbortSignal) => request<{ coins: Coin[] }>(`/search${qs({ q })}`, { signal }),
   eligibility: (mint: string, creator?: string | null) => request<Eligibility>(`/eligibility/${encodeURIComponent(mint)}${qs({ creator })}`),
   /// The SOL pool: a root coin needs no parent, but the split and launch fee are still the server's.

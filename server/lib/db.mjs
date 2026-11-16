@@ -81,6 +81,25 @@ CREATE TABLE IF NOT EXISTS img_fail (
   url TEXT PRIMARY KEY, kind TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 1,
   failed_at INTEGER NOT NULL, retry_at INTEGER NOT NULL, gone_attempts INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS pnl_wallets (
+  wallet TEXT PRIMARY KEY, added_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued', before_sig TEXT, oldest_time INTEGER,
+  scanned INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0,
+  cut INTEGER NOT NULL DEFAULT 0, rows INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0, failed_at INTEGER NOT NULL DEFAULT 0, error TEXT, gap_from INTEGER
+);
+CREATE TABLE IF NOT EXISTS wallet_trades (
+  wallet TEXT NOT NULL, sig TEXT NOT NULL, mint TEXT NOT NULL, idx INTEGER NOT NULL DEFAULT 0,
+  slot INTEGER NOT NULL DEFAULT 0, time INTEGER NOT NULL, is_buy INTEGER NOT NULL,
+  base_amount TEXT NOT NULL, quote_amount TEXT NOT NULL, ord INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (wallet, sig, mint, idx)
+);
+CREATE TABLE IF NOT EXISTS pnl_unread (
+  wallet TEXT NOT NULL, sig TEXT NOT NULL, ord INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+  added_at INTEGER NOT NULL, next_at INTEGER, errors INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (wallet, sig)
+);
+CREATE INDEX IF NOT EXISTS pnl_unread_due ON pnl_unread(next_at) WHERE next_at IS NOT NULL;
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -129,6 +148,17 @@ export class Db {
     // DESIGN §13; statements in lib/agents/registry.mjs) are new tables only, so CREATE IF NOT
     // EXISTS above is their migration. So is `img_fail` (the image proxy's failed downloads and
     // undrawable logos with their kind and next retry, lib/meta.mjs ImageCache; times in ms).
+    // `pnl_wallets` / `wallet_trades` (the wallets whose profit and loss was asked for and their own trades, lib/pnl-tracker.mjs)
+    // are new tables only as well. wallet_trades is never touched by the per-mint trim of `trades`. Its `ord` (the order of
+    // a wallet's transactions inside one slot) and pnl_wallets' `gap_from` came a build later: added when absent, and the
+    // index follows the order every read uses (time, slot, ord, idx), so a page of a wallet's trades is never sorted.
+    if (!this.db.prepare("PRAGMA table_info(wallet_trades)").all().some((c) => c.name === "ord")) this.db.exec("ALTER TABLE wallet_trades ADD COLUMN ord INTEGER NOT NULL DEFAULT 0");
+    if (!this.db.prepare("PRAGMA table_info(pnl_wallets)").all().some((c) => c.name === "gap_from")) this.db.exec("ALTER TABLE pnl_wallets ADD COLUMN gap_from INTEGER");
+    this.db.exec("DROP INDEX IF EXISTS wallet_trades_time; CREATE INDEX IF NOT EXISTS wallet_trades_order ON wallet_trades(wallet, time, slot, ord, idx)");
+    // `pnl_unread` (the transactions of a tracked wallet its history scan could not read, kept to be tried again:
+    // lib/pnl-tracker.mjs; times in ms, `next_at` null = given up) is a new table only. Its `errors` (tries in a row the
+    // endpoint did not answer at all, which are not tries of the transaction) is added when a table made before it has none.
+    if (!this.db.prepare("PRAGMA table_info(pnl_unread)").all().some((c) => c.name === "errors")) this.db.exec("ALTER TABLE pnl_unread ADD COLUMN errors INTEGER NOT NULL DEFAULT 0");
     // `img_fail.gone_attempts`: the permanent failures since the last success, carried across temporary ones in between
     // (lib/meta.mjs ImageCache #fail), so a url alternating 404 and 502 still reaches the weekly wait. Guarded by the
     // column's absence alone, like dead_streak (a table made before it has none); old rows start at 0, and a "gone" row
@@ -201,6 +231,36 @@ export class Db {
       imgFailDelete: p("DELETE FROM img_fail WHERE url = ?"),
       imgFailPrune: p("DELETE FROM img_fail WHERE retry_at < ?"),
       imgFailDropKind: p("DELETE FROM img_fail WHERE kind = ?"),
+      pnlWalletsAll: p("SELECT * FROM pnl_wallets"),
+      pnlWalletInsert: p("INSERT OR IGNORE INTO pnl_wallets (wallet, added_at, last_seen_at, state) VALUES (?, ?, ?, ?)"),
+      pnlWalletSeen: p("UPDATE pnl_wallets SET last_seen_at = ? WHERE wallet = ?"),
+      pnlWalletSave: p(`UPDATE pnl_wallets SET state = @state, before_sig = @beforeSig, oldest_time = @oldestTime, scanned = @scanned, total = @total, unread = @unread,
+        cut = @cut, rows = @rows, attempts = @attempts, failed_at = @failedAt, error = @error, gap_from = @gapFrom WHERE wallet = @wallet`),
+      pnlWalletsGap: p("UPDATE pnl_wallets SET gap_from = MIN(COALESCE(gap_from, ?1), ?1) WHERE added_at <= ?1"),
+      pnlWalletRows: p("UPDATE pnl_wallets SET rows = ?, cut = ? WHERE wallet = ?"),
+      pnlWalletDelete: p("DELETE FROM pnl_wallets WHERE wallet = ?"),
+      walletTradeInsert: p(`INSERT OR IGNORE INTO wallet_trades (wallet, sig, mint, idx, slot, time, is_buy, base_amount, quote_amount, ord)
+        VALUES (@wallet, @sig, @mint, @idx, @slot, @time, @isBuy, @baseAmount, @quoteAmount, @ord)`),
+      // Trade order = the index's order: time, slot, ord (the transaction's place in its slot), idx, then the rowid.
+      walletTradesPage: p(`SELECT rowid AS id, sig, mint, idx, slot, ord, time, is_buy, base_amount, quote_amount FROM wallet_trades
+        WHERE wallet = ?1 AND (time, slot, ord, idx, rowid) > (?2, ?3, ?4, ?5, ?6) ORDER BY time ASC, slot ASC, ord ASC, idx ASC, rowid ASC LIMIT ?7`),
+      walletTradesNewest: p(`SELECT rowid AS id, sig, mint, idx, slot, ord, time, is_buy, base_amount, quote_amount FROM wallet_trades
+        WHERE wallet = ?1 AND (time, slot, ord, idx, rowid) < (?2, ?3, ?4, ?5, ?6) ORDER BY time DESC, slot DESC, ord DESC, idx DESC, rowid DESC LIMIT ?7`),
+      walletTradeAt: p("SELECT rowid AS id, time, slot, ord, idx FROM wallet_trades WHERE rowid = ? AND wallet = ?"),
+      walletTradesTrim: p("DELETE FROM wallet_trades WHERE rowid IN (SELECT rowid FROM wallet_trades WHERE wallet = ? ORDER BY time ASC, slot ASC, ord ASC, idx ASC, rowid ASC LIMIT ?)"),
+      walletTradesDrop: p("DELETE FROM wallet_trades WHERE wallet = ?"),
+      walletTradesCount: p("SELECT COUNT(*) AS n FROM wallet_trades WHERE wallet = ?"),
+      pnlUnreadInsert: p("INSERT OR IGNORE INTO pnl_unread (wallet, sig, ord, attempts, added_at, next_at) VALUES (?, ?, ?, 0, ?, ?)"),
+      pnlUnreadHas: p("SELECT 1 AS x FROM pnl_unread WHERE wallet = ? AND sig = ?"),
+      pnlUnreadDelete: p("DELETE FROM pnl_unread WHERE wallet = ? AND sig = ?"),
+      pnlUnreadDrop: p("DELETE FROM pnl_unread WHERE wallet = ?"),
+      pnlUnreadTried: p("UPDATE pnl_unread SET attempts = ?, next_at = ?, errors = ? WHERE wallet = ? AND sig = ?"),
+      pnlUnreadDue: p("SELECT wallet, sig, ord, attempts, next_at, errors FROM pnl_unread WHERE next_at IS NOT NULL AND next_at <= ? ORDER BY next_at ASC LIMIT ?"),
+      pnlUnreadNext: p("SELECT MIN(next_at) AS at FROM pnl_unread WHERE next_at IS NOT NULL"),
+      pnlUnreadCount: p("SELECT COUNT(*) AS n FROM pnl_unread"),
+      pnlUnreadCountOf: p("SELECT COUNT(*) AS n FROM pnl_unread WHERE wallet = ?"),
+      pnlUnreadOf: p("SELECT wallet, sig, ord, attempts, next_at, errors FROM pnl_unread WHERE wallet = ? ORDER BY added_at ASC, sig ASC"),
+      pnlWalletsUnstored: p("SELECT wallet FROM pnl_wallets WHERE unread > 0 AND NOT EXISTS (SELECT 1 FROM pnl_unread u WHERE u.wallet = pnl_wallets.wallet)"),
     };
   }
 
@@ -351,6 +411,61 @@ export class Db {
   /** Forgets rows whose retry time is before `before` (ms); returns how many went. */
   imgFailPrune(before) { return Number(this.q.imgFailPrune.run(before).changes); }
   imgFailDropKind(kind) { return Number(this.q.imgFailDropKind.run(kind).changes); }
+
+  // Wallet profit and loss (lib/pnl-tracker.mjs owns the logic): the tracked wallets with their history-scan state,
+  // and each tracked wallet's own trades. Every read goes by the primary key or the (wallet, time) index.
+  static pnlWallet(r) { return { wallet: r.wallet, addedAt: r.added_at, lastSeenAt: r.last_seen_at, state: r.state, beforeSig: r.before_sig ?? null, oldestTime: r.oldest_time ?? null, scanned: r.scanned, total: r.total, unread: r.unread, cut: !!r.cut, rows: r.rows, attempts: r.attempts, failedAt: r.failed_at, error: r.error ?? null, gapFrom: r.gap_from ?? null }; }
+  pnlWallets() { return this.q.pnlWalletsAll.all().map(Db.pnlWallet); }
+  pnlWalletAdd(wallet, at, state = "queued") { return Number(this.q.pnlWalletInsert.run(wallet, at, at, state).changes) > 0; }
+  pnlWalletSeen(wallet, at) { this.q.pnlWalletSeen.run(at, wallet); }
+  pnlWalletSave(w) { this.q.pnlWalletSave.run({ wallet: w.wallet, state: w.state, beforeSig: w.beforeSig ?? null, oldestTime: w.oldestTime ?? null, scanned: w.scanned, total: w.total, unread: w.unread, cut: w.cut ? 1 : 0, rows: w.rows, attempts: w.attempts ?? 0, failedAt: w.failedAt ?? 0, error: w.error == null ? null : String(w.error).slice(0, 200), gapFrom: w.gapFrom ?? null }); }
+  /** Every wallet tracked at or before `at` may have missed trades since then (the server was down): its `gap_from` moves back to it. */
+  pnlWalletsGap(at) { return Number(this.q.pnlWalletsGap.run(at).changes); }
+  pnlWalletRows(wallet, rows, cut) { this.q.pnlWalletRows.run(rows, cut ? 1 : 0, wallet); }
+  /** Forgets a wallet and its trades (eviction); returns how many trade rows went. */
+  pnlWalletDrop(wallet) { return this.transaction(() => { this.q.pnlWalletDelete.run(wallet); this.q.pnlUnreadDrop.run(wallet); return Number(this.q.walletTradesDrop.run(wallet).changes); }); }
+  // The transactions a wallet's scan could not read (at most a couple of hundred per wallet): the signature, the `ord`
+  // its trades get, how often it was tried again and when it is tried next (ms; null = given up: the row stays, so the
+  // transaction is not counted a second time).
+  static pnlUnread(r) { return { wallet: r.wallet, sig: r.sig, ord: r.ord, attempts: r.attempts, nextAt: r.next_at ?? null, errors: r.errors ?? 0 }; }
+  /** Remembers an unread transaction; false when it is stored already. */
+  pnlUnreadAdd(wallet, sig, ord, addedAt, nextAt) { return Number(this.q.pnlUnreadInsert.run(wallet, sig, ord ?? 0, addedAt, nextAt ?? null).changes) > 0; }
+  pnlUnreadHas(wallet, sig) { return !!this.q.pnlUnreadHas.get(wallet, sig); }
+  /** Forgets one (it was read); true when it was stored. */
+  pnlUnreadDelete(wallet, sig) { return Number(this.q.pnlUnreadDelete.run(wallet, sig).changes) > 0; }
+  /** Forgets a wallet's; returns how many went. */
+  pnlUnreadDrop(wallet) { return Number(this.q.pnlUnreadDrop.run(wallet).changes); }
+  /** After one more try: `attempts` (the endpoint answered, the transaction still does not read) or `errors` (it did not answer, in a row) moved on. */
+  pnlUnreadTried(wallet, sig, attempts, nextAt, errors = 0) { this.q.pnlUnreadTried.run(attempts, nextAt ?? null, errors, wallet, sig); }
+  /** Those whose next try is due at `at` (ms), the longest waiting first. */
+  pnlUnreadDue(at, limit = 20) { return this.q.pnlUnreadDue.all(at, limit).map(Db.pnlUnread); }
+  /** When the next one is due (ms), null when none waits. */
+  pnlUnreadNext() { return this.q.pnlUnreadNext.get()?.at ?? null; }
+  pnlUnreadCount(wallet = null) { return wallet == null ? this.q.pnlUnreadCount.get().n : this.q.pnlUnreadCountOf.get(wallet).n; }
+  pnlUnreadOf(wallet) { return this.q.pnlUnreadOf.all(wallet).map(Db.pnlUnread); }
+  /** Wallets that count unread transactions but have none stored (rows from before they were stored). */
+  pnlWalletsUnstored() { return this.q.pnlWalletsUnstored.all().map((r) => r.wallet); }
+  /** Inserts one trade of a tracked wallet; false when the row (wallet, sig, mint, idx) is already there. */
+  insertWalletTrade(wallet, t) { return Number(this.q.walletTradeInsert.run({ wallet, sig: t.sig, mint: t.mint, idx: t.idx ?? 0, slot: t.slot ?? 0, time: t.time, isBuy: t.isBuy ? 1 : 0, baseAmount: String(t.baseAmount), quoteAmount: String(t.quoteAmount), ord: t.ord ?? 0 }).changes) > 0; }
+  static walletTrade(r) { return { id: r.id, sig: r.sig, mint: r.mint, idx: r.idx, slot: r.slot, ord: r.ord, time: r.time, isBuy: !!r.is_buy, baseAmount: r.base_amount, quoteAmount: r.quote_amount }; }
+  /**
+   * A wallet's trades in trade order, oldest first: `limit` rows after the row `after` (a row this returned, null = from
+   * the start). The caller pages through them between event-loop turns; each page is one range of the index.
+   */
+  walletTradesPage(wallet, after = null, limit = 2000) {
+    const m = Number.MIN_SAFE_INTEGER, a = after ?? { time: m, slot: m, ord: m, idx: m, id: m };
+    return this.q.walletTradesPage.all(wallet, a.time, a.slot, a.ord, a.idx, a.id, limit).map(Db.walletTrade);
+  }
+  /** A wallet's newest trades in trade order, newest first: `limit` rows before the place `before` (`{ time, slot, ord, idx, id }`, null = from the newest). */
+  walletTradesNewest(wallet, before = null, limit = 50) {
+    const M = Number.MAX_SAFE_INTEGER, b = before ?? { time: M, slot: M, ord: M, idx: M, id: M };
+    return this.q.walletTradesNewest.all(wallet, b.time, b.slot, b.ord, b.idx, b.id, limit).map(Db.walletTrade);
+  }
+  /** The place of one stored trade of the wallet (an activity cursor), null when the row is gone. */
+  walletTradeAt(wallet, id) { return this.q.walletTradeAt.get(id, wallet) ?? null; }
+  /** Removes a wallet's `n` oldest trades; returns how many went. */
+  walletTradesTrim(wallet, n) { return Number(this.q.walletTradesTrim.run(wallet, n).changes); }
+  walletTradesCount(wallet) { return this.q.walletTradesCount.get(wallet).n; }
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }

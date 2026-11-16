@@ -30,6 +30,7 @@ import { createBriefStore } from "./agents/brief.mjs";
 import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
 import { createPortfolio } from "./portfolio.mjs";
+import { PnlTracker, ACTIVITY_MAX, sinceOf } from "./pnl-tracker.mjs";
 
 export { RateLimiter };
 
@@ -290,7 +291,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -323,7 +324,9 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     return keys.map((k) => knownTable(k) ?? read.get(k) ?? null);
   };
   const limitOf = (name) => ({ limit: rates?.[name]?.limit ?? DEFAULT_RATES[name][0], windowMs: rates?.[name]?.windowMs ?? DEFAULT_RATES[name][1], name, now });
-  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")), jup: rateLimit(limitOf("jup")), portfolio: rateLimit(limitOf("portfolio")) };
+  const limits = { api: rateLimit(limitOf("api")), img: rateLimit(limitOf("img")), rpc: rateLimit(limitOf("rpc")), upload: rateLimit(limitOf("upload")), spawned: rateLimit(limitOf("spawned")), sse: rateLimit(limitOf("sse")), jup: rateLimit(limitOf("jup")), portfolio: rateLimit(limitOf("portfolio")), pnl: rateLimit(limitOf("pnl")) };
+  // New wallets one IP may make tracked per window (each costs a history scan and a place in the set); only /api/pnl of a wallet not tracked yet counts.
+  const pnlNew = new RateLimiter({ limit: limitOf("pnlnew").limit, windowMs: limitOf("pnlnew").windowMs, now });
   // Share cards (lib/card.mjs: `cardData`, `renderCard`) load on first use: the renderer carries fonts
   // and a wasm rasterizer no other route needs, and a test injects its own `card`. A failed load is
   // retried after CARD_RETRY_MS; meanwhile the card route answers 503 and pages keep the static tags.
@@ -334,6 +337,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     try { cardMod = await import("./card.mjs"); } catch (e) { cardFailAt = now(); log.warn?.(`card: renderer unavailable: ${String(e?.message ?? e).slice(0, 200)}`); return null; }
     return cardMod;
   };
+  // Wallet P&L (lib/pnl-tracker.mjs): the server's tracker, else the model's, else one that only keeps trades from now on.
+  const pnlOf = pnl ?? model.walletTrades ?? new PnlTracker({ model, now, log });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -376,7 +381,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot() };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -657,6 +662,69 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
     sendCachedJson(req, res, await portfolio.get(wallet), { maxAge: 3 });
   }));
+  // Profit and loss, and the activity list, of one wallet (lib/pnl-tracker.mjs): both read the wallet's own table by
+  // its index, never the trades table. Asking for the P&L makes the wallet tracked and queues the one-time read of its
+  // older history; the answer says how far that is (`history`). One per-IP limit for both routes on top of the api
+  // one, and a second one (`pnlnew`) on how many wallets an IP may newly make tracked: past it a wallet nobody asked
+  // for before answers 429, wallets already tracked are served as ever. `since` counts in whole minutes. A store that
+  // cannot be read answers 200 with `ok: false` and empty lists, never a 500.
+  /** `?since=` of the P&L routes: 0 without one, whole minutes, NaN when it is not a unix time (or lies more than a day ahead). */
+  const pnlSince = (req, at) => {
+    if (req.query.since == null || req.query.since === "") return 0;
+    const since = /^\d{1,12}$/.test(String(req.query.since)) ? Number(req.query.since) : NaN;
+    return !Number.isInteger(since) || since > at + 86_400 ? NaN : sinceOf(since);
+  };
+  // The wallet's cumulative realized profit over time for the Portfolio chart (lib/pnl.mjs seriesEnd): at most 240
+  // points in USD at today's quote prices, the last one equal to /api/pnl's totals.realizedUsdNow for the same `since`.
+  // Reads only what is stored: it does NOT make a wallet tracked (one that is not answers no points), so there is no
+  // `pnlnew` count here. Same validation, per-IP limit, short keep and degrade as /api/pnl.
+  app.get("/api/pnl/:wallet/series", limits.pnl, wrap(async (req, res) => {
+    const { wallet } = req.params;
+    if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
+    const at = Math.floor(now() / 1000), since = pnlSince(req, at);
+    if (Number.isNaN(since)) return res.status(400).json({ error: "invalid since (unix seconds)" });
+    try { sendCachedJson(req, res, await pnlOf.series(wallet, since), { maxAge: 2, swr: 4 }); }
+    catch (e) {
+      log.warn?.(`pnl series ${wallet}: ${String(e?.message ?? e).slice(0, 160)}`);
+      res.json({ ok: false, wallet, at, since: since || null, solUsd: null, points: [], unpriced: 0 });
+    }
+  }));
+  app.get("/api/pnl/:wallet", limits.pnl, wrap(async (req, res) => {
+    const { wallet } = req.params;
+    if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
+    const at = Math.floor(now() / 1000), since = pnlSince(req, at);
+    if (Number.isNaN(since)) return res.status(400).json({ error: "invalid since (unix seconds)" });
+    if (pnlOf.tracks && !pnlOf.tracks(wallet)) {
+      const r = pnlNew.check(req.ip ?? "?");
+      if (!r.ok) {
+        const retryAfter = Math.max(1, Math.ceil((r.resetAt - now()) / 1000));
+        res.setHeader("retry-after", String(retryAfter));
+        return res.status(429).json({ error: `rate limited (pnlnew: ${r.limit} new wallets per ${Math.round(pnlNew.windowMs / 1000)} s), try again in ${retryAfter} s`, retryAfter });
+      }
+    }
+    try { sendCachedJson(req, res, await pnlOf.pnl(wallet, since), { maxAge: 2, swr: 4 }); }
+    catch (e) {
+      log.warn?.(`pnl ${wallet}: ${String(e?.message ?? e).slice(0, 160)}`);
+      res.json({ ok: false, wallet, at, since: since || null, history: null, trades: 0, coins: [], totals: { realizedUsdNow: null, costUsdNow: null, unpriced: 0 } });
+    }
+  }));
+  app.get("/api/activity/:wallet", limits.pnl, (req, res) => {
+    const { wallet } = req.params;
+    if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
+    const limit = clampInt(req.query.limit, 50, 1, ACTIVITY_MAX);
+    // `before`: a unix time (trades strictly older than it), or the `next` cursor of the page before ("time:id").
+    let beforeTime = null, beforeId = null;
+    if (req.query.before != null && req.query.before !== "") {
+      const m = /^(\d{1,12})(?::(\d{1,15}))?$/.exec(String(req.query.before));
+      if (!m) return res.status(400).json({ error: "invalid before (unix seconds, or the next cursor)" });
+      beforeTime = Number(m[1]); beforeId = m[2] != null ? Number(m[2]) : null;
+    }
+    try { sendCachedJson(req, res, pnlOf.activity(wallet, { limit, beforeTime, beforeId }), { maxAge: 2, swr: 4 }); }
+    catch (e) {
+      log.warn?.(`activity ${wallet}: ${String(e?.message ?? e).slice(0, 160)}`);
+      res.json({ ok: false, wallet, at: Math.floor(now() / 1000), tracked: false, history: null, trades: [], next: null });
+    }
+  });
   app.get("/api/claims", wrap(async (req, res) => {
     const limit = clampInt(req.query.limit, 50, 1, CLAIMS_MAX);
     if (!treasury) return res.status(503).json({ error: "claims unavailable" });

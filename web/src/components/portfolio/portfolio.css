@@ -21,24 +21,41 @@
 .pf-connect p { font-size: var(--fs-base); color: var(--muted); max-width: 60ch; }
 .pf-connect-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 
-/* summary: three figures in a row; on a phone the value and SOL share a row and the fees take the next one,
-   with less padding and a smaller figure (a figure too long for its tile is cut with an ellipsis) */
+/* summary: four figures in a row from 920 px, two by two from 760 px (a quarter of that width is too narrow for the
+   claim button); on a phone the total value takes a row, the two P&L figures share the next and the fees take the
+   last, with less padding and a smaller figure (a figure too long for its tile is cut with an ellipsis) */
 .pf-sum { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .pf-tile { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; align-content: start; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); min-width: 0; }
 .pf-tile dt { font-size: var(--fs-xs); color: var(--muted); }
 .pf-tile dd { margin: 0; min-width: 0; }
 .pf-tile dd.pf-num { font-size: var(--fs-lg); line-height: 1.15; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-tile-sub { font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
-.pf-tile:last-child { grid-column: 1 / -1; }
+.pf-tile-wide { grid-column: 1 / -1; }
 .pf-tile-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.pf-tile-act .btn { margin-top: 2px; }
+/* the claim button never leaves its tile: a label longer than the tile wraps inside the button */
+.pf-tile-act .btn { margin-top: 2px; max-width: 100%; }
+@media (max-width: 1099px) { .pf-tile-act .btn.sm { height: auto; min-height: var(--h-sm); padding-top: 4px; padding-bottom: 4px; white-space: normal; line-height: 1.2; text-align: center; } }
+@media (max-width: 1099px) and (pointer: coarse) { .pf-tile-act .btn.sm { min-height: var(--tap); } }
+@media (min-width: 920px) { .pf-sum { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (min-width: 760px) {
-  .pf-sum { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .pf-sum { gap: 10px; }
   .pf-tile { gap: 4px; padding: 14px 16px; }
-  .pf-tile:last-child { grid-column: auto; }
+  .pf-tile-wide { grid-column: auto; }
   .pf-tile dd.pf-num { font-size: var(--fs-xl); }
   .pf-tile-sub { min-height: 18px; }
 }
+
+/* a profit or a loss: lime up, red down, faint for nothing or unknown; "~" marks an approximate figure */
+.pf-pl.up, .pf-tile dd.pf-pl.up { color: var(--accent); }
+.pf-pl.down, .pf-tile dd.pf-pl.down { color: var(--sell); }
+.pf-pl.none, .pf-tile dd.pf-pl.none { color: var(--faint); }
+.pf-pl-pct { font-size: var(--fs-2xs); color: var(--muted); }
+.pf-approx { margin-right: 1px; color: var(--muted); font-weight: 400; cursor: help; }
+/* under the tiles: one calm line (the state of the trade history, how P&L is valued) and the period of the realized P&L */
+.pf-pnl-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; min-width: 0; margin-top: calc(var(--s5) * -1 + 10px); }
+.pf-hist { flex: 1 1 280px; min-width: 0; margin: 0; font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+.pf-hist-state { color: var(--ink-2); }
+.pf-period { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
 
 .pf-warn { padding: 10px 14px; border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: var(--radius); background: var(--warn-soft); font-size: var(--fs-sm); color: var(--ink-2); }
 .pf-warn .linkish { color: var(--ink); text-decoration: underline; }
@@ -73,7 +90,7 @@
 .pf-hold-val { grid-column: 3; grid-row: 1; text-align: right; font-size: var(--fs-base); white-space: nowrap; }
 .pf-hold-amt { grid-column: 3; grid-row: 2; text-align: right; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-hold-foot { grid-column: 1 / -1; grid-row: 4; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-width: 0; margin-top: 4px; font-size: var(--fs-xs); color: var(--ink-2); }
-.pf-hold-vol { white-space: nowrap; }
+.pf-hold-pnl { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The coin's market: price over "last trade", its line, the change. Its own line on a phone, a column from 760 px. */
 .pf-hold-px { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; min-width: 0; margin-top: 6px; }
 .pf-px-main { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; font-size: var(--fs-sm); }
@@ -98,12 +115,15 @@
   .pf-hold > .logo, .pf-hold-main { grid-row: 1; }
   .pf-hold-foot { display: contents; }
   /* the column head names the figure for the eye; the label stays in the row for a screen reader */
-  .pf-hold-vol .pf-k { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .pf-hold-amt, .pf-hold-vol { text-align: right; font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* the markup order is value, amount, volume (the value leads on a phone); the columns read amount, value, volume */
+  .pf-hold-pnl > .pf-k { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .pf-hold-amt { text-align: right; font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the P&L: dollars over the percent, right aligned in its column */
+  .pf-hold-pnl { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: end; text-align: right; font-size: var(--fs-sm); }
+  .pf-hold-pnl > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* the markup order is value, amount, P&L (the value leads on a phone); the columns read amount, value, P&L */
   .pf-hold-amt { grid-column: 4; grid-row: 1; }
   .pf-hold-val { grid-column: 5; grid-row: 1; }
-  .pf-hold-vol { grid-column: 6; grid-row: 1; }
+  .pf-hold-pnl { grid-column: 6; grid-row: 1; }
   .pf-hold-act { grid-column: 7; grid-row: 1; justify-content: flex-end; margin-left: 0; }
 }
 
@@ -160,3 +180,92 @@
 .pf-row .pf-px-main > b { font-size: var(--fs-sm); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pf-row .pf-px-meta { grid-column: 1 / -1; grid-row: 2; }
 @media (min-width: 360px) { .pf-row .pf-px-line { display: block; } }
+
+/* The list switch (Holdings / Your spores / Activity) with the tools of the list shown on its right. */
+.pf-tabs { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; min-width: 0; }
+.pf-tab-n { margin-left: 4px; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+.pf-tools { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; font-size: var(--fs-xs); }
+/* three tabs on the narrowest phones: the counts make room */
+@media (max-width: 379px) { .pf-tab-n { display: none; } }
+/* Open / Closed inside Holdings: two quiet words, the one shown underlined */
+.pf-switch { display: inline-flex; align-items: center; gap: 12px; }
+.pf-switch button { font-size: var(--fs-sm); color: var(--muted); }
+.pf-switch button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 4px; }
+
+/* Closed positions: the card of the holdings with other columns. Phone, two lines: logo, symbol over its last trade,
+   the realized P&L over its percent; then what was bought and sold, and Buy. From 760 px one line under .pf-shut-cols. */
+.pf-shut { display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(0, auto); align-items: center; gap: 2px 10px; padding: 10px 0; }
+.pf-rows .pf-shut + .pf-shut { border-top: 1px solid var(--line-soft); }
+.pf-shut-cols { display: none; }
+.pf-shut-pl { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: end; min-width: 0; text-align: right; font-size: var(--fs-base); white-space: nowrap; }
+.pf-shut-foot { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; min-width: 0; margin-top: 4px; font-size: var(--fs-xs); color: var(--ink-2); }
+.pf-shut-amt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the name block shares the first line with the logo and the figure (in a holdings row it spans two lines) */
+.pf-shut .pf-hold-main { grid-row: 1; }
+@media (min-width: 760px) {
+  .pf-shut { grid-template-columns: 28px minmax(0, 1fr) 120px 120px 130px 132px; gap: 4px 16px; }
+  .pf-holds-plain .pf-shut { grid-template-columns: 28px minmax(0, 1fr) 120px 120px 130px; }
+  .pf-shut-cols { display: grid; padding: 8px 0 6px; border-bottom: 1px solid var(--line-soft); font-size: var(--fs-2xs); color: var(--muted); }
+  .pf-shut-cols span:nth-child(n + 3) { text-align: right; }
+  .pf-shut-foot { display: contents; }
+  .pf-shut-amt { grid-row: 1; text-align: right; font-size: var(--fs-sm); }
+  .pf-shut-amt > .pf-k { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .pf-shut-foot > .pf-shut-amt:nth-child(1) { grid-column: 3; }
+  .pf-shut-foot > .pf-shut-amt:nth-child(2) { grid-column: 4; }
+  .pf-shut-pl { grid-column: 5; grid-row: 1; font-size: var(--fs-sm); }
+  .pf-shut .pf-hold-act { grid-column: 6; grid-row: 1; }
+}
+/* between 760 and 1100 px the figures take less, so the coin and its last trade stay readable */
+@media (min-width: 760px) and (max-width: 1099px) { .pf-shut { grid-template-columns: 28px minmax(0, 1fr) 88px 88px 104px 120px; } .pf-holds-plain .pf-shut { grid-template-columns: 28px minmax(0, 1fr) 88px 88px 104px; } }
+
+/* Activity: one trade a row. Phone, two lines: Buy / Sell, the coin, what was paid or received; then the time, the
+   token amount and the link to the transaction. From 760 px one line under .pf-act-cols. What was paid takes half
+   the row at most (its dollars then wrap under the amount), so the coin keeps its logo and symbol. */
+.pf-act { display: grid; grid-template-columns: auto minmax(0, 1fr) fit-content(50%); align-items: center; gap: 2px 10px; padding: 9px 0; font-size: var(--fs-sm); }
+.pf-rows .pf-act + .pf-act { border-top: 1px solid var(--line-soft); }
+.pf-act-cols { display: none; }
+.pf-act-side { grid-column: 1; grid-row: 1; font-family: var(--mono); font-weight: 600; }
+.pf-act-side.up { color: var(--accent); } .pf-act-side.down { color: var(--sell); }
+.pf-act-coin { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+.pf-act-quote { grid-column: 3; grid-row: 1; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 0 8px; min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.pf-act-usd { font-size: var(--fs-2xs); color: var(--muted); }
+.pf-act-time { grid-column: 1; grid-row: 2; font-size: var(--fs-2xs); color: var(--muted); white-space: nowrap; }
+.pf-act-amt { grid-column: 2; grid-row: 2; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-act-tx { grid-column: 3; grid-row: 2; justify-self: end; font-size: var(--fs-xs); white-space: nowrap; }
+@media (min-width: 760px) {
+  .pf-act { grid-template-columns: 76px 44px minmax(0, 1fr) 110px minmax(0, 210px) 44px; gap: 4px 16px; }
+  .pf-act-cols { display: grid; padding: 8px 0 6px; border-bottom: 1px solid var(--line-soft); font-size: var(--fs-2xs); color: var(--muted); }
+  .pf-act-cols span:nth-child(n + 4) { text-align: right; }
+  .pf-act-time, .pf-act-side, .pf-act-coin, .pf-act-amt, .pf-act-quote, .pf-act-tx { grid-row: 1; }
+  .pf-act-time { grid-column: 1; font-size: var(--fs-xs); }
+  .pf-act-side { grid-column: 2; }
+  .pf-act-coin { grid-column: 3; }
+  .pf-act-amt { grid-column: 4; text-align: right; font-size: var(--fs-sm); color: var(--ink-2); }
+  .pf-act-quote { grid-column: 5; }
+  .pf-act-tx { grid-column: 6; }
+}
+
+/* USD | SOL beside the period: one switch for every money figure of the page; off (and said why) without a SOL price */
+.pf-bar-picks { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; }
+.pf-unit button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Realized P&L over the period: a title with the figure read, one line, the dates and the low / high under it */
+.pf-chart { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px 14px; min-width: 0; }
+.pf-chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; min-width: 0; }
+.pf-chart-head h2 { font-size: var(--fs-base); font-weight: 600; }
+.pf-chart-period { margin-left: 4px; font-size: var(--fs-xs); font-weight: 400; color: var(--muted); }
+.pf-chart-read { margin: 0; min-width: 0; font-size: var(--fs-sm); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pf-chart-when { font-size: var(--fs-xs); color: var(--muted); }
+.pf-chart-box { min-width: 0; }
+.pf-chart-svg { display: block; width: 100%; touch-action: pan-y; cursor: crosshair; }
+.pf-chart-zero { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 3 4; }
+.pf-chart-cross line { stroke: var(--line-2); stroke-width: 1; }
+.pf-chart-foot { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; min-width: 0; font-size: var(--fs-2xs); color: var(--muted); }
+.pf-chart-range { min-width: 0; overflow-wrap: anywhere; }
+.pf-chart-note { margin: 0; font-size: var(--fs-2xs); color: var(--muted); }
+.pf-chart-none p { margin: 0; padding: 6px 0 2px; font-size: var(--fs-sm); color: var(--muted); }
+/* before the first answer of a period the card keeps the room of the line, so the lists under it do not jump */
+.pf-chart-wait { min-height: 130px; }
+@media (min-width: 760px) { .pf-chart { padding: 14px 18px; } .pf-chart-wait { min-height: 160px; } }
+/* on a narrow phone the low / high take the line under the two dates */
+@media (max-width: 479px) { .pf-chart-range { order: 3; flex-basis: 100%; } }
