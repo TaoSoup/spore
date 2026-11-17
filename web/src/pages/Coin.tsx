@@ -6,7 +6,8 @@
 // a wallet that can sign, the user's presets trade at once: a row of them above the widget on
 // desktop, a popover from the bar's Buy / Sell on phones (components/useInstantTrade.ts, as on the
 // Portfolio page and the map). Under the chart the Activity card (trades, children, family tree),
-// then creator fees, the agent and the folded details; under the trade widget a calm info card
+// then creator fees, the agent and the folded details; under the trade widget "Your position" (what the header's
+// wallet holds of the coin and its P&L, components/coin/YourPosition.tsx; under the chart on phones), then a calm info card
 // (what the coin is, its family, status, dominance) answers the second question: what this coin is
 // in its tree.
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type RefObject, type SyntheticEvent } from "react";
@@ -47,6 +48,7 @@ import { tradeUsd, useLive, useLiveCoinStore, type LiveCoin } from "../component
 import { Sparkline, Tween, sparkTone } from "../components/coin/viz";
 import { change24h, changeWords, daySpark } from "../components/coin/change";
 import ParentPrice, { ParentBarLine } from "../components/coin/ParentPrice";
+import YourPosition from "../components/coin/YourPosition";
 import { parentOf } from "../lib/priced-in";
 import Reveal from "../components/ui/Reveal";
 import "../components/coin.css";
@@ -221,6 +223,8 @@ export default function CoinPage() {
         <div className="coin-main">
           <CoinBar coin={coin} store={store} daily={daily.data} maxDepth={maxDepth} />
           <div className="coin-chart" ref={chartRef}><PriceChart coin={coin} onBuy={tradeBlocked || instantWhy ? undefined : onBuy} live={store} aside={<LastTrade store={store} />} /></div>
+          {/* phones: what the wallet holds of the coin, under the chart (the sticky bar has no room for it) */}
+          {narrow && <YourPosition coin={coin} store={store} solUsd={solUsd} />}
           <div className="coin-activity" ref={activityRef}>
             <Reveal><CoinActivity store={store} tab={tab} onTab={setTab} maxDepth={maxDepth} narrow={narrow} otherChildren={page.data.otherChildren ?? 0} /></Reveal>
           </div>
@@ -246,6 +250,8 @@ export default function CoinPage() {
               <PageTicket key={pf ? `ticket-${pf.n}` : "ticket"} coin={coin} solUsd={solUsd} amountRef={amountRef} current={store.coin} compact
                 initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} />
             </aside>
+            {/* under the trade card, never above it: the ticket's top does not move when the card appears */}
+            <YourPosition coin={coin} store={store} solUsd={solUsd} />
             <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />
           </div>
         )}

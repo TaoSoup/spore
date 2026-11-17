@@ -57,7 +57,13 @@ const whole = (raw: bigint, decimals: number) => Number(raw) / pow10(decimals);
 /// a / b as a number, null when b is zero or the result is not a number.
 const div = (a: number, b: number): number | null => (b === 0 ? null : fin(a / b));
 const quoteKey = (mint: string | null) => mint ?? "SOL";
-const DUST_USD = 1;
+/// A holding worth less than this (USD) counts as dust: closed in the P&L, hidden by the Portfolio's "Hide small", no
+/// "Your position" card on the coin page unless it was shown there before during the visit (lib/position.ts).
+export const DUST_USD = 1;
+/// The wording every P&L figure carries (the Portfolio page and the coin page's "Your position" card).
+export const PNL_NOTE = "P&L is valued at today's price of SOL or the parent coin. Network fees and tips are not included.";
+/// The title of the "~" before a figure that leaves out tokens without a recorded buy.
+export const APPROX_NOTE = "Approximate: some tokens were received without a recorded buy, so they are left out";
 
 /// True when the answer carries P&L: the store answered and the server tracks this wallet's trades.
 export const pnlAvailable = (pnl: Pnl | null | undefined): pnl is Pnl & { history: PnlHistory } =>

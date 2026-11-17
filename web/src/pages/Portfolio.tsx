@@ -51,7 +51,7 @@ import { useAsync, useSolBalance, useStats } from "../lib/hooks";
 import { subscribeLanded } from "../lib/balances";
 import { ago, amount, count, lamportsToSol, plural, short, signedPct, sol, tokens, usd, usdCard, when } from "../lib/format";
 import type { InstantSpec } from "../lib/instant-trade";
-import { appendPage, buildPnl, historyLine, historyRunning, mergeFirstPage, pnlAvailable, pnlPct, pnlTone, quotePrices, type PnlAmount, type PnlRow, type TradeList } from "../lib/pnl";
+import { APPROX_NOTE, appendPage, buildPnl, DUST_USD, historyLine, historyRunning, mergeFirstPage, PNL_NOTE, pnlAvailable, pnlPct, pnlTone, quotePrices, type PnlAmount, type PnlRow, type TradeList } from "../lib/pnl";
 import { makeMoney, MONEY_UNITS, type Money, type MoneyUnit } from "../lib/money";
 import { seriesPoints } from "../lib/pnl-chart";
 import { buildPortfolio, claimableRows, type PfClaim, type PfGroup, type PfRow } from "../lib/portfolio";
@@ -80,7 +80,7 @@ const FRESH_MS = POLL_MS + TRADE_SETTLE_MS;
 const BLOCK_READ_MS = 5_000;   // a "not tradable here" reason stays at least this long, so a refresh right after the click does not hide it unread
 const CARDS_STEP = 12;         // parent cards shown at first, and added by "Show more"
 const ROWS_MAX = 5;            // rows a card shows before "Show all"
-const DUST_USD = 1;             // "Hide small" drops holdings worth less than this (a holding without a price stays)
+// "Hide small" drops holdings worth less than DUST_USD (lib/pnl.ts; a holding without a price stays)
 const PNL_POLL_MS = 5_000;      // how often the P&L is asked again while the server still reads the wallet's history
 const SINCE_STEP_S = 600;       // a period's start is rounded down to this, so refreshes ask the server for the same window
 const ACTIVITY_PAGE = 25;       // trades a page of the Activity list
@@ -98,9 +98,7 @@ const sinceOf = (p: Period): number | null => {
 /// True when an answer's window is the one of the period chosen. A refresh can be some steps behind the clock, never
 /// half a day: the periods lie days apart.
 const sameWindow = (since: number | null, p: Period) => { const want = sinceOf(p); return since === null || want === null ? since === want : Math.abs(since - want) < 43_200; };
-const PNL_NOTE = "P&L is valued at today's price of SOL or the parent coin. Network fees and tips are not included.";
 const SOLD_UNKNOWN = "Coins sold without a recorded buy, or without a price to value them with";
-const APPROX_NOTE = "Approximate: some tokens were received without a recorded buy, so they are left out";
 /// Where the P&L read stands: no answer yet, failed (or rate limited), answered without P&L, answered while the
 /// holdings could not be read (realized figures only), or there.
 type PnlState = "loading" | "failed" | "off" | "nohold" | "ok";
