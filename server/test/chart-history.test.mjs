@@ -8,7 +8,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChartHistory, HIST_SOL_POOL, USDC_MINT, HIST_SETTLE_S, HIST_EXTEND_S, HIST_NONE_RETRY_S, HIST_MISMATCH_RETRY_S, HIST_RETRY_MS, HIST_MAX_QUEUE, HIST_COIN_GT_DAILY,
-  HIST_SAMPLES, HIST_LIST_PAGES, HIST_JOB_CALLS, HIST_PARTIAL_RETRY_S, HIST_OUTAGE_PAUSE_MS, HIST_SAMPLE_EXTEND_S, HIST_KEEP_S, HIST_MAX_ROWS, HIST_TOUCH_S, HIST_HOLE_MIN } from "../lib/chart-history.mjs";
+  HIST_SAMPLES, HIST_LIST_PAGES, HIST_JOB_CALLS, HIST_PARTIAL_RETRY_S, HIST_OUTAGE_PAUSE_MS, HIST_SAMPLE_EXTEND_S, HIST_KEEP_S, HIST_MAX_ROWS, HIST_TOUCH_S, HIST_HOLE_MIN,
+  HIST_ROW_CANDLES, HIST_BACK_RESERVE, HIST_BACK_LIMIT, HIST_DEEP_BYTES, HIST_DEEP_ROWS, HIST_DEEP_KEEP_S, HIST_DEEP_TRIM, CACHE_MAX_CANDLES, HIST_BUCKETS } from "../lib/chart-history.mjs";
+import { buildCandlesKeyed, mergeHistory } from "../lib/candles.mjs";
 import { Gecko } from "../lib/gecko.mjs";
 import { buildCandles, createApp } from "../lib/api.mjs";
 import { SOL_MINT } from "../lib/jupiter.mjs";
@@ -108,7 +110,7 @@ async function serveApp(w, { rates = null, chartHistory = w.hist } = {}) {
   const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
-    get: (p) => fetch(url + p).then(async (r) => { const text = await r.text(); return { status: r.status, text, body: JSON.parse(text) }; }),
+    get: (p, headers = {}) => fetch(url + p, { headers }).then(async (r) => { const text = await r.text(); return { status: r.status, text, headers: r.headers, body: text ? JSON.parse(text) : null }; }),
     close: async () => { await new Promise((r) => server.close(r)); hub.close(); rmSync(dir, { recursive: true, force: true }); },
   };
 }
@@ -302,6 +304,28 @@ test("18c. graduated, the server's GeckoTerminal day running out between the poo
   assert.ok(row, "the pool's page is stored");
   assert.deepEqual([row.state, JSON.parse(row.pools), row.cov_from, w.fetch.calls.map((c) => c.pool), w.hist.gtQueue.size], ["ok", [G_POOL], split, [G_POOL], 0]);
   assert.equal(w.ask(G).history.gecko, G_POOL);
+  w.close();
+});
+
+test("18d. graduated, a grown-back row whose coverage ends before the pool's oldest candle, the curve's call failing: the old candles below the window go and cov_from is the pool's oldest candle, not the old row's (asked again after 10 min)", async () => {
+  const w = world({ sample: false });
+  const created = NOW - 30 * 86_400, split = NOW - 10 * 3600;
+  w.m.upsertCoin({ mint: G, createdAt: created });
+  ownTrades(w.db, G, NOW - 4 * 3600, NOW - 60);
+  w.pools.set(G_POOL, { base: G, quote: SOL_MINT, usd: flat(split, NOW, R, 0.2) });
+  w.pools.set(G_CURVE, status(500));
+  // older pages grew the row back 3 days; its last fetch ended 20 h ago
+  const deep = Math.floor((NOW - 3 * 86_400) / R) * R, end = Math.floor((NOW - 20 * 3600) / R) * R;
+  w.db.histSet({ mint: G, res: R, unit: "usd", state: "ok", pools: [G_POOL, G_CURVE], covFrom: deep, covTo: end, fetchedAt: NOW - 86_400, askedAt: NOW - 86_400, data: flat(deep, end - R, R, 0.1).map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]) });
+  w.ask(G); await w.run();
+  assert.deepEqual(w.fetch.calls.map((c) => c.pool), [G_POOL, G_CURVE]);
+  const row = w.row(G, R, "usd"), lo = Math.floor((NOW - 500 * R) / R) * R;
+  assert.deepEqual([row.state, row.cov_from, JSON.parse(row.data)[0][0] >= lo - R], ["ok", split, true], "claims only from the pool's oldest candle");
+  w.pools.set(G_CURVE, { base: SOL_MINT, quote: G, usd: flat(created, split - R, R, 0.1) });
+  w.clock.t += HIST_RETRY_MS;
+  w.ask(G); await w.run();
+  assert.deepEqual(w.fetch.calls.slice(2).map((c) => c.pool), [G_POOL, G_CURVE], "the curve asked again");
+  assert.equal(w.row(G, R, "usd").cov_from, Math.floor((w.nowS() - 500 * R) / R) * R, "the whole window covered");
   w.close();
 });
 
@@ -1090,5 +1114,655 @@ test("36. lane: every chain call goes to the rpc handed in; ChartHistory asks it
   assert.equal(w.samples(A).state, "exact");
   assert.equal(w.chain.calls.length, w.hist.snapshot().chain.callsToday);
   assert.ok(w.chain.calls.every((c) => c.opts?.signal && c.opts.timeoutMs > 0), "the fill lane's read options");
+  w.close();
+});
+
+// ---------------------------------------------------------------- older pages: the chart scrolled back (`before=`)
+// These go through HTTP, whose route reads the real clock: the worlds start at the real now (as 14, 23b and 35).
+const realNow = () => Math.floor(Date.now() / 1000);
+/** A coin created `days` ago, its first stored trade `firstAgo` s ago (one trade a bucket since), GeckoTerminal candles of its curve from `gtFrom` (default: its creation). */
+function aged(w, mint = A, curve = A_CURVE, { days = 10, firstAgo = 12 * 3600, created = w.nowS() - days * 86_400, gtFrom = created, pu = 0.2, pq = 0.002, setCreated = true } = {}) {
+  if (setCreated) w.m.upsertCoin({ mint, createdAt: created });
+  const B = Math.floor((w.nowS() - firstAgo) / R) * R;
+  ownTrades(w.db, mint, B, w.nowS() - 60, { pu, pq });
+  w.pools.set(curve, { base: mint, quote: SOL_MINT, usd: flat(gtFrom, w.nowS() + 86_400, R, pu ?? 0.2), token: flat(gtFrom, w.nowS() + 86_400, R, pq, 2) });
+  return { created, B, cLo: Math.floor(created / R) * R };
+}
+/** The newest window (`history=1`), asked again after each run until nothing is pending. */
+async function newestOf(app, w, mint, res = R) {
+  for (let i = 0; i < 6; i++) {
+    const r = await app.get(`/api/candles/${mint}?res=${res}&history=1`);
+    if (!r.body.history || r.body.history.state === "done") return r;
+    await w.run();
+  }
+  throw new Error("history still pending");
+}
+const pageUrl = (mint, before, key = "usd", res = R) => `/api/candles/${mint}?res=${res}&history=1&before=${before}&key=${key}`;
+/** One older page, asked again after each run while it is loading. */
+async function pageOf(app, w, mint, before, key = "usd", res = R) {
+  for (let i = 0; i < 6; i++) {
+    const r = await app.get(pageUrl(mint, before, key, res));
+    if (r.body.state !== "loading") return r;
+    await w.run();
+  }
+  throw new Error("page still loading");
+}
+const ts = (from, to, res = R) => { const out = []; for (let t = from; t < to; t += res) out.push(t); return out; };
+const dayOf = (w) => Math.floor(w.clock.now() / 86_400_000);
+const LONG_CACHE = "public, max-age=60, stale-while-revalidate=600";
+const rowCandles = (r) => JSON.parse(r.data).map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
+
+test("back 4. validation: before without history=1, or with scope=all → 400; key=eur → 400; before=abc or 0 → 400; below the creation bucket → 200, done, next null", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { cLo } = aged(w);
+  const app = await serveApp(w);
+  try {
+    assert.deepEqual(await app.get(`/api/candles/${A}?res=300&before=${cLo + 600 * R}&key=usd`).then((r) => [r.status, r.body]), [400, { error: "before needs history=1" }]);
+    assert.deepEqual(await app.get(`/api/candles/${A}?res=300&history=1&scope=all&before=${cLo + 600 * R}&key=usd`).then((r) => [r.status, r.body]), [400, { error: "before needs history=1" }]);
+    assert.deepEqual(await app.get(pageUrl(A, cLo + 600 * R, "eur")).then((r) => [r.status, r.body]), [400, { error: "invalid key" }]);
+    assert.deepEqual(await app.get(`/api/candles/${A}?res=300&history=1&before=${cLo}`).then((r) => [r.status, r.body]), [400, { error: "invalid key" }], "no key");
+    for (const b of ["abc", "0", "-5", "1.5"]) assert.deepEqual(await app.get(pageUrl(A, b)).then((r) => [r.status, r.body]), [400, { error: "invalid before" }], b);
+    const below = await app.get(pageUrl(A, cLo - 10 * R));
+    assert.deepEqual([below.status, below.body], [200, { candles: [], priceKey: "usd", from: cLo - 10 * R, next: null, state: "done" }]);
+    assert.equal(below.headers.get("cache-control"), LONG_CACHE);
+    const at = await app.get(pageUrl(A, cLo + 7, "quote"));
+    assert.deepEqual([at.body.from, at.body.next, at.body.state, at.body.priceKey], [cLo, null, "done", "quote"], "before inside the creation bucket: nothing older");
+    assert.equal(w.fetch.calls.length, 0);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 5. the newest window: without history=1 today's read (now − 500 R) byte for byte; with history=1 it starts on a bucket boundary (its first bucket holds every stored trade of it)", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const H = 3600, start = realNow() - H * HIST_BUCKETS, t0 = Math.floor(start / H) * H;
+  put(w.db, A, "early", t0, { pu: 0.1 }); put(w.db, A, "late", t0 + H - 1, { pu: 0.3 }); put(w.db, A, "next", t0 + H, { pu: 0.4 });
+  const app = await serveApp(w, { chartHistory: null });
+  try {
+    const plain = await app.get(`/api/candles/${A}?res=${H}`);
+    assert.equal(plain.text, JSON.stringify(buildCandles(w.db.tradesSince(A, realNow() - H * 500), H)), "today's formula");
+    const hist = await app.get(`/api/candles/${A}?res=${H}&history=1`);
+    assert.deepEqual(hist.body.candles[0], { t: t0, o: 0.1, h: 0.3, l: 0.1, c: 0.3, v: 0.1 + 0.3 }, "the whole first bucket");
+    if (start > t0) assert.deepEqual(plain.body.candles[0], { t: t0, o: 0.3, h: 0.3, l: 0.3, c: 0.3, v: 0.3 }, "without it the first bucket starts mid-way");
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 6. own-only page (CHART_HISTORY=0): [lo, hi) buckets of stored trades, t < hi, priceKey = key, next = the newest older trade's bucket + R, null when none; no GeckoTerminal call", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { B } = aged(w, A, A_CURVE, { firstAgo: 4 * 86_400 });
+  const app = await serveApp(w, { chartHistory: null });
+  try {
+    const hi = Math.floor((w.nowS() - 2 * 86_400) / R) * R, lo = hi - HIST_BUCKETS * R;
+    const p = await app.get(pageUrl(A, hi));
+    assert.deepEqual(p.body.candles.map((c) => c.t), ts(lo, hi));
+    assert.ok(p.body.candles.every((c) => c.c === 0.2 && c.v === 0.2));
+    assert.deepEqual([p.body.priceKey, p.body.from, p.body.next, p.body.state], ["usd", lo, lo, "done"]);
+    assert.equal(p.headers.get("cache-control"), "public, max-age=5, stale-while-revalidate=20");
+    const q = await app.get(pageUrl(A, lo, "quote"));
+    assert.deepEqual([q.body.priceKey, q.body.candles[0].c, q.body.from, q.body.next], ["quote", 0.002, lo - HIST_BUCKETS * R, null], "back to the first stored trade, nothing older");
+    assert.deepEqual(q.body.candles.map((c) => c.t), ts(B, lo));
+    assert.equal(w.fetch.calls.length, 0);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 7. a page entirely after the first stored trade: no GeckoTerminal call, done, our candles only", async () => {
+  const w = world({ now: realNow(), sample: false });
+  aged(w, A, A_CURVE, { firstAgo: 4 * 86_400 });
+  const app = await serveApp(w);
+  try {
+    const hi = Math.floor((w.nowS() - HIST_BUCKETS * R) / R) * R, lo = hi - HIST_BUCKETS * R;
+    const p = await app.get(pageUrl(A, hi));
+    assert.deepEqual([p.body.state, p.body.gecko, p.body.chain, p.body.from, p.body.next], ["done", null, null, lo, lo]);
+    assert.deepEqual(p.body.candles.map((c) => c.t), ts(lo, hi));
+    assert.equal(w.fetch.calls.length, 0);
+    assert.equal(w.hist.gtQueue.size, 0);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 8, 9, 21. back fetch: the first older page is loading (no-store; one call before = covFrom − R, limit = min(1000, (before − cLo)/R + 1)); then done with GT candles, gecko, covFrom lowered, max-age=60; the second page needs no call; ETag → 304", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { cLo } = aged(w);
+  const app = await serveApp(w);
+  try {
+    const top = await newestOf(app, w, A);
+    const first = top.body.candles[0].t, row0 = w.row(A, R, "usd");
+    assert.equal(first, row0.cov_from, "the newest window starts where the row's coverage does");
+    const calls = w.fetch.calls.length;
+    const p = await app.get(pageUrl(A, first));
+    assert.deepEqual([p.status, p.body, p.headers.get("cache-control")], [200, { candles: [], priceKey: "usd", from: first, next: first, state: "loading" }, "no-store"]);
+    await w.run();
+    const before = first - R;
+    assert.equal(w.fetch.calls.length, calls + 1);
+    const call = w.fetch.calls.at(-1);
+    assert.deepEqual([call.pool, call.currency, call.before, call.limit], [A_CURVE, "usd", before, Math.min(HIST_BACK_LIMIT, (before - cLo) / R + 1)]);
+    const done = await app.get(pageUrl(A, first));
+    const lo = first - HIST_BUCKETS * R;
+    assert.deepEqual([done.body.state, done.body.from, done.body.next, done.body.gecko, done.body.chain], ["done", lo, lo, A_CURVE, null]);
+    assert.deepEqual(done.body.candles.map((c) => c.t), ts(lo, first));
+    assert.ok(done.body.candles.every((c) => c.c === 0.2 && c.v === 10));
+    assert.equal(done.headers.get("cache-control"), LONG_CACHE, "entirely before our first stored trade");
+    const row = w.row(A, R, "usd");
+    assert.deepEqual([row.cov_from, JSON.parse(row.data).length, row.fetched_at], [before - (HIST_BACK_LIMIT - 1) * R, JSON.parse(row0.data).length + HIST_BACK_LIMIT, row0.fetched_at]);
+    // 9: the call fetched two pages
+    const second = await app.get(pageUrl(A, done.body.next));
+    assert.deepEqual([second.body.state, second.body.from, second.body.candles.length], ["done", lo - HIST_BUCKETS * R, HIST_BUCKETS]);
+    assert.equal(w.fetch.calls.length, calls + 1, "no call for the second page");
+    // 21
+    const again = await app.get(pageUrl(A, first), { "if-none-match": done.headers.get("etag") });
+    assert.equal(again.status, 304);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 10. floor: GeckoTerminal answering fewer rows than asked → covFrom = the creation bucket (0 without createdAt), next null, no later call", async () => {
+  for (const withCreated of [true, false]) {
+    const w = world({ now: realNow(), sample: false });
+    const { cLo } = aged(w, A, A_CURVE, { days: 4, gtFrom: w.nowS() - 3 * 86_400, setCreated: withCreated });
+    const app = await serveApp(w);
+    try {
+      const first = (await newestOf(app, w, A)).body.candles[0].t;
+      const p = await pageOf(app, w, A, first);
+      const call = w.fetch.calls.at(-1);
+      assert.equal(call.limit, withCreated ? (first - R - cLo) / R + 1 : HIST_BACK_LIMIT);
+      assert.equal(w.row(A, R, "usd").cov_from, withCreated ? cLo : 0);
+      assert.deepEqual([p.body.state, p.body.next], ["done", null], "GeckoTerminal starts inside this page");
+      const calls = w.fetch.calls.length;
+      const lower = await app.get(pageUrl(A, p.body.from));
+      assert.deepEqual([lower.body.state, lower.body.candles, lower.body.next], ["done", [], null]);
+      assert.equal(w.fetch.calls.length, calls, "floored: never asked again");
+      assert.equal(w.hist.stats.backFloor, 1);
+    } finally { await app.close(); w.close(); }
+  }
+});
+
+test("back 11. seams: the newest window and every page down to next null, concatenated, are mergeHistory over the whole stretch (same t set, no duplicate, no gap, the b0 seam bucket identical)", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { cLo, B } = aged(w, A, A_CURVE, { firstAgo: 3 * 86_400 });
+  const app = await serveApp(w);
+  try {
+    const top = await newestOf(app, w, A);
+    assert.equal(top.body.history, undefined, "the first stored trade is before the window: today's body");
+    const pages = [];
+    for (let before = top.body.candles[0].t, i = 0; before != null; i++) {
+      assert.ok(i < 10);
+      const p = await pageOf(app, w, A, before);
+      assert.equal(p.body.state, "done");
+      assert.ok(p.body.next == null || p.body.next === p.body.from, "pages meet");
+      pages.unshift(p.body.candles);
+      before = p.body.next;
+    }
+    const got = [...pages.flat(), ...top.body.candles];
+    const want = mergeHistory({ own: buildCandlesKeyed(w.db.tradesSince(A, 0), R, "usd").candles, gt: rowCandles(w.row(A, R, "usd")), pts: [], key: "usd", R, lo: cLo, b0: B, B, qd: 9 }).candles;
+    assert.deepEqual(got.map((c) => c.t), ts(cLo, got.at(-1).t + R), "every bucket once, from the coin's creation");
+    assert.deepEqual(got, want);
+    assert.deepEqual(got.find((c) => c.t === B), { t: B, o: 0.2, h: 0.2, l: 0.2, c: 0.2, v: 10 }, "the seam: GeckoTerminal's open and volume, our close");
+    assert.ok(w.fetch.calls.length <= HIST_COIN_GT_DAILY - HIST_BACK_RESERVE, String(w.fetch.calls.length));
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 12. graduated: the pool, then (its start reached) the curve up to the pool's oldest bucket, combined (curve open, pool close, both volumes), also when that bucket came from an earlier fetch; row.pools gains the curve; later back fetches ask the curve only", async () => {
+  for (const variant of ["same call", "earlier fetch"]) {
+    const w = world({ now: realNow(), sample: false });
+    const created = w.nowS() - 10 * 86_400, cLo = Math.floor(created / R) * R;
+    const lw = Math.floor((w.nowS() - HIST_BUCKETS * R) / R) * R;
+    const split = variant === "same call" ? lw - 600 * R : lw - HIST_BACK_LIMIT * R;
+    w.m.upsertCoin({ mint: G, createdAt: created });
+    ownTrades(w.db, G, Math.floor((w.nowS() - 4 * 3600) / R) * R, w.nowS() - 60);
+    w.pools.set(G_POOL, { base: G, quote: SOL_MINT, usd: flat(split, w.nowS() + 86_400, R, 0.2) });
+    w.pools.set(G_CURVE, { base: SOL_MINT, quote: G, usd: flat(created, split, R, 0.1) });
+    const app = await serveApp(w);
+    try {
+      const top = await newestOf(app, w, G);
+      assert.deepEqual([top.body.candles[0].t, w.fetch.calls.map((c) => c.pool), JSON.parse(w.row(G, R, "usd").pools)], [lw, [G_POOL], [G_POOL]], "the pool covers the newest window");
+      let before = lw;
+      while (JSON.parse(w.row(G, R, "usd").pools).length < 2) {
+        const p = await pageOf(app, w, G, before);
+        assert.equal(p.body.state, "done");
+        before = p.body.next;
+      }
+      const backCalls = w.fetch.calls.slice(1).map((c) => [c.pool, c.before, c.limit]);
+      if (variant === "same call") assert.deepEqual(backCalls, [[G_POOL, lw - R, HIST_BACK_LIMIT], [G_CURVE, split, HIST_BACK_LIMIT]], "one job: the pool short, then the curve");
+      else assert.deepEqual(backCalls, [[G_POOL, lw - R, HIST_BACK_LIMIT], [G_POOL, split - R, HIST_BACK_LIMIT], [G_CURVE, split, HIST_BACK_LIMIT]], "the pool full, then empty: the curve from the stored oldest pool bucket");
+      const row = w.row(G, R, "usd"), mig = rowCandles(row).find((c) => c.t === split);
+      assert.deepEqual([mig.o, mig.c, mig.v], [0.1, 0.2, 20], "the migration's bucket combined");
+      assert.deepEqual([JSON.parse(row.pools), row.cov_from], [[G_POOL, G_CURVE], split - (HIST_BACK_LIMIT - 1) * R]);
+      const page = await pageOf(app, w, G, split + R);
+      assert.deepEqual(page.body.candles.find((c) => c.t === split), { t: split, o: 0.1, h: 0.2, l: 0.1, c: 0.2, v: 20 });
+      assert.equal(page.body.gecko, G_POOL, "credit: the newest venue");
+      // walk on until a call is needed: the curve only
+      const n = w.fetch.calls.length;
+      for (let b = page.body.next, i = 0; w.fetch.calls.length === n; i++) { assert.ok(i < 8); b = (await pageOf(app, w, G, b)).body.next; }
+      assert.deepEqual(w.fetch.calls.slice(n).map((c) => c.pool), [G_CURVE]);
+      assert.ok(w.row(G, R, "usd").cov_from >= cLo);
+    } finally { await app.close(); w.close(); }
+  }
+});
+
+test("back 13. budgets: the coin at 16 − 4 calls, the server's day spent, the asker's histnew limit, a failure within 10 min → held (200, from = next = covFrom), no request sent", async () => {
+  const cases = {
+    "coin cap": { setup: (w) => w.hist.coinCalls.set(A, { day: dayOf(w), n: HIST_COIN_GT_DAILY - HIST_BACK_RESERVE }), stat: "refusedCoinCap" },
+    "server day": { opts: { daily: 1 }, stat: "refusedBudget" },
+    "histnew": { rates: { histnew: { limit: 1, windowMs: 3_600_000 } }, stat: "limited" },
+    "failed": { setup: async (w, app, first) => { w.pools.set(A_CURVE, status(500)); assert.equal((await app.get(pageUrl(A, first))).body.state, "loading"); await w.run(); assert.equal(w.hist.stats.failed, 1); }, stat: "failed" },
+  };
+  for (const [name, k] of Object.entries(cases)) {
+    const w = world({ now: realNow(), sample: false, ...k.opts });
+    aged(w);
+    const app = await serveApp(w, { rates: k.rates ?? null });
+    try {
+      const first = (await newestOf(app, w, A)).body.candles[0].t;
+      await k.setup?.(w, app, first);
+      const calls = w.fetch.calls.length, before = { ...w.hist.stats };
+      const p = await app.get(pageUrl(A, first));
+      assert.equal(p.status, 200, name);
+      assert.deepEqual(p.body, { candles: [], priceKey: "usd", from: first, next: first, state: "held", gecko: null, chain: null }, name);
+      assert.equal(p.headers.get("cache-control"), "public, max-age=5, stale-while-revalidate=20", name);
+      await w.run();
+      assert.equal(w.fetch.calls.length, calls, `${name}: nothing sent`);
+      assert.equal(w.hist.stats.backHeld, before.backHeld + 1, name);
+      if (k.stat !== "failed") assert.equal(w.hist.stats[k.stat], before[k.stat] + 1, name);
+      assert.equal(w.row(A, R, "usd").cov_from, first, name);
+    } finally { await app.close(); w.close(); }
+  }
+});
+
+test("back 14. row cap: a row at HIST_ROW_CANDLES → held and backFull; a row 10 short asks limit 10", async () => {
+  for (const short of [0, 10]) {
+    const w = world({ now: realNow(), sample: false });
+    aged(w, A, A_CURVE, { days: 20 }); // more buckets since its creation than a row holds
+    const app = await serveApp(w);
+    try {
+      await newestOf(app, w, A);
+      const r = w.row(A, R, "usd"), data = JSON.parse(r.data), n = HIST_ROW_CANDLES - short - data.length;
+      const extra = flat(data[0][0] - n * R, data[0][0] - R, R, 0.2).map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]);
+      w.db.histSet({ mint: A, res: R, unit: "usd", state: "ok", pools: r.pools, covFrom: extra[0][0], covTo: r.cov_to, fetchedAt: r.fetched_at, askedAt: r.asked_at, data: [...extra, ...data] });
+      w.hist.cache.clear();
+      const calls = w.fetch.calls.length;
+      const p = await app.get(pageUrl(A, extra[0][0]));
+      if (!short) {
+        assert.deepEqual([p.body.state, p.body.from, p.body.next, w.hist.stats.backFull], ["held", extra[0][0], extra[0][0], 1]);
+        await w.run();
+        assert.equal(w.fetch.calls.length, calls);
+      } else {
+        assert.equal(p.body.state, "loading");
+        await w.run();
+        assert.deepEqual([w.fetch.calls.length, w.fetch.calls.at(-1).limit, w.fetch.calls.at(-1).before], [calls + 1, short, extra[0][0] - R]);
+        assert.equal(JSON.parse(w.row(A, R, "usd").data).length, HIST_ROW_CANDLES);
+        assert.equal((await app.get(pageUrl(A, w.row(A, R, "usd").cov_from))).body.state, "held", "full now");
+      }
+    } finally { await app.close(); w.close(); }
+  }
+});
+
+test("back 15. a top re-fetch keeps the older pages' candles and covFrom; past the row cap the oldest go and covFrom rises; the SOL/USD row keeps today's rule; the newest window's answer is the same before and after", async () => {
+  const w = world({ now: realNow(), sample: false });
+  aged(w);
+  const app = await serveApp(w);
+  try {
+    const first = (await newestOf(app, w, A)).body.candles[0].t;
+    const before = w.ask(A);
+    await pageOf(app, w, A, first);
+    const paged = w.row(A, R, "usd");
+    assert.ok(paged.cov_from < first);
+    assert.deepEqual(w.ask(A), before, "older candles in the row do not leak into the newest window");
+    // B moves past cov_to (retention), 7 h later: one silent extension of the row's top
+    const extend = async () => {
+      w.clock.t += 7 * 3600_000;
+      w.db.db.prepare("DELETE FROM trades WHERE mint = ?").run(A);
+      ownTrades(w.db, A, Math.floor((w.nowS() - 3600) / R) * R, w.nowS() - 60, {}, R, `t${w.nowS()}-`);
+      const n = w.fetch.calls.length;
+      w.ask(A); await w.run();
+      assert.equal(w.fetch.calls.length, n + 1);
+      assert.equal(w.fetch.calls.at(-1).before, Math.floor((w.nowS() - HIST_SETTLE_S) / R) * R - R, "a top fetch");
+    };
+    await extend();
+    const kept = w.row(A, R, "usd"), data = rowCandles(kept);
+    assert.equal(kept.cov_from, paged.cov_from, "covFrom kept");
+    assert.equal(data[0].t, paged.cov_from, "the back page's candles kept");
+    assert.ok(kept.cov_to > paged.cov_to);
+    // near the cap: the extension pushes the oldest out
+    const pad = HIST_ROW_CANDLES - 30 - data.length;
+    const extra = flat(data[0].t - pad * R, data[0].t - R, R, 0.2).map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]);
+    w.db.histSet({ mint: A, res: R, unit: "usd", state: "ok", pools: kept.pools, covFrom: extra[0][0], covTo: kept.cov_to, fetchedAt: kept.fetched_at, askedAt: kept.asked_at, data: [...extra, ...JSON.parse(kept.data)] });
+    w.hist.cache.clear();
+    await extend();
+    const capped = w.row(A, R, "usd"), cd = JSON.parse(capped.data);
+    assert.equal(cd.length, HIST_ROW_CANDLES);
+    assert.ok(capped.cov_from > extra[0][0] && capped.cov_from === cd[0][0], "covFrom rises to the oldest kept");
+  } finally { await app.close(); w.close(); }
+  // the SOL/USD reference: a stored row's candles older than its window go when it is fetched again (today's rule)
+  const v = world();
+  const s = sampler(v);
+  v.sigsOf.set(A_CURVE, [s.first, sig("old", 10, s.a - 100)]);
+  const top = Math.floor((NOW - HIST_SETTLE_S) / 3600) * 3600 - 3600, lo = top - 999 * 3600, ancient = lo - 50 * 3600;
+  v.db.histSet({ mint: SOL_MINT, res: 3600, unit: "usd", state: "ok", pools: [HIST_SOL_POOL], covFrom: ancient, covTo: NOW - 6 * 3600, fetchedAt: NOW - 7200, askedAt: NOW - 7200, data: [[ancient, 90, 90, 90, 90, 1], [NOW - 7 * 3600, 99, 99, 99, 99, 1]] });
+  v.ask(A); await v.run();
+  assert.equal(v.fetch.of(HIST_SOL_POOL).length, 1);
+  const sol = v.row(SOL_MINT, 3600, "usd");
+  assert.deepEqual([sol.cov_from, JSON.parse(sol.data)[0][0] >= lo - 3600], [lo, true], "the ancient candle went");
+  v.close();
+});
+
+test("back 16. key: a quote-keyed chart pages in quote (its :quote row, currency=token), never converted; a key without a row queues its newest job first (loading), then the back job", async () => {
+  const w = world({ now: realNow(), sample: false });
+  aged(w, A, A_CURVE, { pu: null });
+  const app = await serveApp(w);
+  try {
+    const top = await newestOf(app, w, A);
+    assert.equal(top.body.priceKey, "quote");
+    const p = await pageOf(app, w, A, top.body.candles[0].t, "quote");
+    assert.deepEqual([p.body.state, p.body.priceKey, p.body.candles[0].c, p.body.candles[0].v], ["done", "quote", 0.002, 2e9]);
+    assert.deepEqual(w.fetch.calls.map((c) => c.currency), ["token", "token"]);
+    assert.equal(w.row(A, R, "usd"), null, "nothing converted, no usd row");
+    // usd asked: the newest usd job, then the back job
+    const first = top.body.candles[0].t;
+    assert.equal((await app.get(pageUrl(A, first))).body.state, "loading");
+    await w.run();
+    assert.deepEqual(w.fetch.calls.slice(2).map((c) => [c.currency, c.before]), [["usd", Math.floor((w.nowS() - HIST_SETTLE_S) / R) * R - R]], "the newest job first");
+    const u = await pageOf(app, w, A, first);
+    assert.deepEqual(w.fetch.calls.slice(3).map((c) => [c.currency, c.before]), [["usd", w.row(A, R, "usd").cov_from + (HIST_BACK_LIMIT - 1) * R]]);
+    assert.deepEqual([u.body.state, u.body.priceKey, u.body.candles[0].c], ["done", "usd", 0.2]);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 17, 18. a samples-only coin (GeckoTerminal none) pages its stored points (s: 1, chain sampled, next from them); a page queues no chain job, nor does the newest job it queued; a mismatch row never asks GeckoTerminal", async () => {
+  const w = world({ now: realNow() });
+  const { B } = aged(w, A, A_CURVE, {});
+  w.pools.delete(A_CURVE);
+  const lw = Math.floor((w.nowS() - HIST_BUCKETS * R) / R) * R;
+  w.db.histSet({ mint: A, res: R, unit: "usd", state: "none", pools: [], covFrom: lw, covTo: w.nowS(), fetchedAt: w.nowS(), askedAt: w.nowS(), data: [] });
+  const pts = []; for (let t = w.nowS() - 5 * 86_400; t < w.nowS() - 2 * 86_400; t += 3 * 3600) pts.push([t, 0.002, 0.2, 1000, 0]);
+  w.db.samplesSet({ mint: A, state: "sampled", fromT: pts[0][0], toT: B, at: w.nowS(), askedAt: w.nowS(), data: pts });
+  const app = await serveApp(w);
+  try {
+    const p = await app.get(pageUrl(A, lw));
+    const lo = lw - HIST_BUCKETS * R, inPage = pts.filter((x) => x[0] >= lo && x[0] < lw);
+    assert.deepEqual([p.body.state, p.body.chain, p.body.gecko, p.body.from], ["done", "sampled", null, lo]);
+    assert.deepEqual(p.body.candles.map((c) => [c.t, c.c, c.s]), inPage.map((x) => [Math.floor(x[0] / R) * R, 0.2, 1]));
+    const older = pts.filter((x) => x[0] < lo).at(-1);
+    assert.equal(p.body.next, Math.floor(older[0] / R) * R + R);
+    const q = await app.get(pageUrl(A, p.body.next));
+    assert.ok(q.body.candles.length > 0 && q.body.candles.every((c) => c.s === 1));
+    assert.deepEqual([w.chain.calls.length, w.fetch.calls.length, w.hist.chainQueue.size], [0, 0, 0], "no chain job, no GeckoTerminal call");
+    // a coin without a row: the page queues its newest GeckoTerminal job, which (answered none) queues no sampling either
+    aged(w, A2, A2_CURVE);
+    w.pools.delete(A2_CURVE);
+    assert.equal((await app.get(pageUrl(A2, lw))).body.state, "loading");
+    await w.run();
+    assert.deepEqual([w.row(A2, R, "usd").state, (await app.get(pageUrl(A2, lw))).body.state], ["none", "done"]);
+    await w.run();
+    assert.deepEqual([listings(w.chain).length, w.hist.chainQueue.size, w.hist.stats.holes], [0, 0, 0]);
+    w.fetch.calls.length = 0;
+    // 18: a mismatch row
+    w.db.histSet({ mint: A, res: R, unit: "usd", state: "mismatch", pools: [], covFrom: lw, covTo: w.nowS(), fetchedAt: w.nowS(), askedAt: w.nowS(), data: [] });
+    w.hist.cache.clear();
+    const m = await app.get(pageUrl(A, lw));
+    assert.deepEqual([m.body.state, m.body.chain, m.body.candles.length], ["done", "sampled", p.body.candles.length]);
+    assert.deepEqual([w.fetch.calls.length, w.hist.gtQueue.size], [0, 0]);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 19. prune: a deep row not asked for 3 days, and the 301st deep row, keep their newest 1 000 candles (covFrom raised, fetched_at and asked_at kept); the others are untouched", () => {
+  const w = world({ sample: false });
+  // a memecoin's USD candles at 8 significant digits (~83 B of JSON each): 1 000 of them are still ~83 KB
+  const n = 1_600, t0 = NOW - n * R;
+  const data = Array.from({ length: n }, (_, i) => [t0 + i * R, 0.000012345678, 0.000012345679, 0.000012345677, 0.000012345676, 12345.678]);
+  assert.ok(JSON.stringify(data).length > HIST_DEEP_BYTES);
+  assert.ok(JSON.stringify(data.slice(0, HIST_DEEP_TRIM)).length > 80_000);
+  const row = (mint, askedAt, d = data) => ({ mint, res: R, unit: "usd", state: "ok", pools: [], covFrom: t0 - 7 * R, covTo: NOW, fetchedAt: 42, askedAt, data: d });
+  const OLD = key2(232, 0), SHALLOW = key2(233, 0), deep = (i) => key2(230 + (i >> 8), i & 255);
+  w.db.transaction(() => {
+    w.db.histSet(row(OLD, NOW - HIST_DEEP_KEEP_S - 10));
+    for (let i = 0; i < HIST_DEEP_ROWS + 1; i++) w.db.histSet(row(deep(i), NOW - 1_000 + i));
+    w.db.histSet(row(SHALLOW, NOW - HIST_DEEP_KEEP_S - 10, data.slice(0, 10)));
+  });
+  w.hist.prune();
+  assert.equal(w.hist.stats.lastError, null);
+  const len = (m) => JSON.parse(w.row(m, R, "usd").data).length;
+  for (const m of [OLD, deep(0)]) {
+    const r = w.row(m, R, "usd");
+    assert.deepEqual([len(m), r.cov_from, JSON.parse(r.data)[0][0], r.fetched_at], [HIST_DEEP_TRIM, t0 + (n - HIST_DEEP_TRIM) * R, t0 + (n - HIST_DEEP_TRIM) * R, 42]);
+  }
+  assert.equal(w.row(OLD, R, "usd").asked_at, NOW - HIST_DEEP_KEEP_S - 10);
+  assert.deepEqual([len(deep(1)), len(deep(HIST_DEEP_ROWS)), len(SHALLOW), w.row(deep(1), R, "usd").cov_from], [n, n, 10, t0 - 7 * R]);
+  assert.equal(w.hist.stats.backTrimmed, 2);
+  assert.deepEqual(w.db.histDeep(HIST_DEEP_BYTES, HIST_DEEP_ROWS, NOW - HIST_DEEP_KEEP_S), [], "trimmed rows are no longer deep (never read again)");
+  w.hist.prune();
+  assert.equal(w.hist.stats.backTrimmed, 2, "trimmed rows are no longer deep");
+  w.close();
+});
+
+test("back 20. cache bound: rows totalling over CACHE_MAX_CANDLES evict the oldest entries; the answer read again is the same", () => {
+  const w = world({ sample: false });
+  const n = HIST_ROW_CANDLES, t0 = NOW - n * R, rows = Math.floor(CACHE_MAX_CANDLES / n) + 1;
+  const data = flat(t0, t0 + (n - 1) * R, R, 0.2).map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]);
+  const coins = Array.from({ length: rows }, (_, i) => key2(240, i));
+  w.db.transaction(() => { for (const [i, mint] of coins.entries()) { addCoin(w.m, mint, key2(241, i)); w.db.histSet({ mint, res: R, unit: "usd", state: "ok", pools: [key2(241, i)], covFrom: t0, covTo: NOW, fetchedAt: NOW, askedAt: NOW, data }); } });
+  const lo = t0 + 100 * R, hi = lo + HIST_BUCKETS * R;
+  const ask = (mint) => w.hist.page(w.m.get(mint), R, "usd", { lo, hi, own: { candles: [] }, oldest: null });
+  const first = ask(coins[0]);
+  assert.deepEqual([first.state, first.candles.length, first.gecko], ["done", HIST_BUCKETS, key2(241, 0)]);
+  for (const m of coins.slice(1)) ask(m);
+  assert.ok(w.hist.cacheCandles <= CACHE_MAX_CANDLES, String(w.hist.cacheCandles));
+  assert.equal(w.hist.cache.has(`${coins[0]}:${R}:usd`), false, "the oldest went");
+  assert.equal(w.hist.cache.has(`${coins.at(-1)}:${R}:usd`), true);
+  assert.deepEqual(ask(coins[0]), first);
+  w.close();
+});
+
+test("back 22. health: the back counters are in /api/health and count", async () => {
+  const w = world({ now: realNow(), sample: false });
+  aged(w, A, A_CURVE, { days: 4, gtFrom: w.nowS() - 3 * 86_400 });
+  const app = await serveApp(w);
+  try {
+    const first = (await newestOf(app, w, A)).body.candles[0].t;
+    await pageOf(app, w, A, first);
+    w.hist.coinCalls.set(A, { day: dayOf(w), n: HIST_COIN_GT_DAILY });
+    const h = (await app.get("/api/health")).body.history.stats;
+    for (const f of ["backAsked", "backQueued", "backFetched", "backFloor", "backFull", "backHeld", "backTrimmed"]) assert.ok(f in h, f);
+    assert.deepEqual([h.backAsked, h.backQueued, h.backFetched, h.backFloor, h.backFull, h.backHeld, h.backTrimmed], [2, 1, 1, 1, 0, 0, 0]);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 23. a sparse coin (GeckoTerminal sends rows only for buckets that traded): a short answer keeps every row down to the creation bucket before it counts as the floor", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { created, cLo } = aged(w);
+  // one candle every 4 buckets: 1 000 rows reach about 4 000 buckets back, past the coin's start
+  const sparse = flat(created, w.nowS() + 86_400, R, 0.2).filter((c) => (c.t / R) % 4 === 0);
+  w.pools.set(A_CURVE, { base: A, quote: SOL_MINT, usd: sparse });
+  const app = await serveApp(w);
+  try {
+    const first = (await newestOf(app, w, A)).body.candles[0].t;
+    const p = await pageOf(app, w, A, first);
+    assert.equal(p.body.state, "done");
+    const call = w.fetch.calls.at(-1);
+    assert.equal(call.limit, HIST_BACK_LIMIT);
+    const row = w.row(A, R, "usd"), got = rowCandles(row).filter((c) => c.t < first).map((c) => c.t);
+    const want = sparse.filter((c) => c.t >= cLo && c.t < first).map((c) => c.t);
+    assert.ok(want.length < HIST_BACK_LIMIT && want[0] < call.before - (HIST_BACK_LIMIT - 1) * R, "the answer is short and reaches below limit buckets");
+    assert.deepEqual(got, want, "every row of the answer is kept");
+    assert.equal(row.cov_from, cLo, "the floor");
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 24. a row whose top retention left behind: the page below our first stored trade fills the stretch up to it (not done with a hole)", async () => {
+  const w = world({ now: realNow(), sample: false });
+  // our first stored trade 2 days ago (before the newest window); the row was fetched 3 days ago, when its top was there
+  const { B: b0 } = aged(w, A, A_CURVE, { firstAgo: 2 * 86_400 });
+  const covTo = Math.floor((w.nowS() - 3 * 86_400) / R) * R, covFrom = covTo - 2_000 * R;
+  w.db.histSet({ mint: A, res: R, unit: "usd", state: "ok", pools: [A_CURVE], covFrom, covTo, fetchedAt: covTo + 900, askedAt: w.nowS(), data: flat(covFrom, covTo - R, R, 0.2).map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]) });
+  const app = await serveApp(w);
+  try {
+    const top = await newestOf(app, w, A);
+    assert.equal(top.body.history, undefined, "the first stored trade is before the window: today's body");
+    const hi = top.body.candles[0].t, lo = hi - HIST_BUCKETS * R;
+    assert.ok(lo < covTo && b0 < hi, "the page holds the stretch [cov_to, b0)");
+    const p = await pageOf(app, w, A, hi);
+    assert.deepEqual([p.body.state, p.body.from, p.body.next], ["done", lo, lo]);
+    assert.deepEqual(p.body.candles.map((c) => c.t), ts(lo, hi), "no hole between the row's old top and b0");
+    const lim = (b0 + R - covTo) / R;
+    assert.deepEqual(w.fetch.calls.map((c) => [c.before, c.limit]), [[covTo + (lim - 1) * R, lim]], "one call from the row's top up to the seam bucket");
+    const row = w.row(A, R, "usd");
+    assert.deepEqual([row.cov_to, row.cov_from, row.fetched_at], [b0 + R, covFrom, covTo + 900]);
+    assert.equal(w.hist.stats.backFilled, 1);
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 25. held with the row's coverage above our first stored trade: the page still serves our own trades from b0", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { B } = aged(w, A, A_CURVE, { firstAgo: 3 * 86_400 });
+  const app = await serveApp(w);
+  try {
+    const first = (await newestOf(app, w, A)).body.candles[0].t, lo = first - HIST_BUCKETS * R;
+    assert.equal((await app.get(pageUrl(A, first))).body.state, "loading", "the newest job, from the page");
+    await w.run();
+    assert.equal(w.row(A, R, "usd").cov_from, first, "the row covers the newest window only");
+    w.hist.coinCalls.set(A, { day: dayOf(w), n: HIST_COIN_GT_DAILY - HIST_BACK_RESERVE });
+    const p = await app.get(pageUrl(A, first));
+    assert.ok(B > lo);
+    assert.deepEqual([p.body.state, p.body.from, p.body.next], ["held", B, B]);
+    assert.deepEqual(p.body.candles.map((c) => c.t), ts(B, first), "our stored trades");
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 25b. a row from the newest window above our first stored trade: the back fetch asks from b0 down (GeckoTerminal's candles above b0 are never shown), the row then covers [covFrom, b0 + R)", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const { B, cLo } = aged(w, A, A_CURVE, { firstAgo: 3 * 86_400 });
+  const app = await serveApp(w);
+  try {
+    const first = (await newestOf(app, w, A)).body.candles[0].t, lo = first - HIST_BUCKETS * R;
+    assert.equal((await app.get(pageUrl(A, first))).body.state, "loading", "the newest job, from the page");
+    await w.run();
+    assert.equal(w.row(A, R, "usd").cov_from, first, "the row covers the newest window only (its seam checked)");
+    const n = w.fetch.calls.length;
+    const p = await pageOf(app, w, A, first);
+    assert.deepEqual([p.body.state, p.body.from, p.body.next], ["done", lo, lo]);
+    assert.deepEqual(p.body.candles.map((c) => c.t), ts(lo, first));
+    const limit = Math.min(HIST_BACK_LIMIT, (B - cLo) / R + 1);
+    assert.deepEqual(w.fetch.calls.slice(n).map((c) => [c.pool, c.before, c.limit]), [[A_CURVE, B, limit]], "one call, from b0 down");
+    const row = w.row(A, R, "usd"), data = rowCandles(row);
+    assert.deepEqual([row.cov_from, row.cov_to, data.length], [B - (limit - 1) * R, B + R, limit], "the whole call below the seam, nothing above it kept");
+    assert.ok(data.every((c) => c.t < B + R));
+    // the next page down needs no call, and no fill upward is queued (the row reaches the seam bucket)
+    const q = await app.get(pageUrl(A, lo));
+    assert.deepEqual([q.body.state, w.fetch.calls.length, w.hist.gtQueue.size], ["done", n + 1, 0]);
+    // Retention then moves b0 into the newest window (a burst of trades): the rebased row no longer reaches the window,
+    // so the first newest window asks GeckoTerminal again at once (not after HIST_EXTEND_S from the old top fetch).
+    w.db.db.prepare("DELETE FROM trades WHERE mint = ? AND time < ?").run(A, w.nowS() - 86_400);
+    const b0 = Math.floor(w.db.tradeAfter(A, -1).time / R) * R;
+    assert.ok(b0 - first >= 2 * R, "b0 is inside the window");
+    const m = w.fetch.calls.length;
+    await app.get(`/api/candles/${A}?res=${R}&history=1`);
+    await w.run();
+    assert.deepEqual(w.fetch.calls.slice(m).map((c) => [c.pool, c.before > b0]), [[A_CURVE, true]], "the newest job runs again");
+    const nw = (await newestOf(app, w, A)).body;
+    assert.ok(nw.history?.gecko, "GeckoTerminal's candles shown");
+    assert.ok(nw.candles[0].t <= first + R && nw.candles.filter((c) => c.t < b0).length >= (b0 - first) / R - 1, "the stretch below b0 filled");
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 26. graduated, trimmed back into the pool's time after the curve was reached: the next older page asks the pool again, then the curve (no stretch of the pool left out)", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const created = w.nowS() - 10 * 86_400;
+  const lw = Math.floor((w.nowS() - HIST_BUCKETS * R) / R) * R, split = lw - 600 * R;
+  // 8 significant digits: the ~2 100 candles reached are over HIST_DEEP_BYTES
+  const P = 0.000012345678, Q = 0.000023456789;
+  w.m.upsertCoin({ mint: G, createdAt: created });
+  ownTrades(w.db, G, Math.floor((w.nowS() - 4 * 3600) / R) * R, w.nowS() - 60, { pu: P });
+  w.pools.set(G_POOL, { base: G, quote: SOL_MINT, usd: flat(split, w.nowS() + 86_400, R, P) });
+  w.pools.set(G_CURVE, { base: SOL_MINT, quote: G, usd: flat(created, split, R, Q) });
+  const app = await serveApp(w);
+  try {
+    await newestOf(app, w, G);
+    await pageOf(app, w, G, lw);
+    const reached = w.row(G, R, "usd");
+    assert.deepEqual([JSON.parse(reached.pools), reached.mig_at], [[G_POOL, G_CURVE], split]);
+    assert.ok(reached.data.length > HIST_DEEP_BYTES, String(reached.data.length));
+    // not asked for 3 days: trimmed to its newest 1 000 candles, all of them the pool's
+    w.db.db.prepare("UPDATE chart_history SET asked_at = ? WHERE mint = ?").run(w.nowS() - HIST_DEEP_KEEP_S - 10, G);
+    w.hist.prune();
+    const trimmed = w.row(G, R, "usd");
+    assert.ok(trimmed.cov_from > split, "the curve's candles went");
+    const n = w.fetch.calls.length;
+    const p = await pageOf(app, w, G, trimmed.cov_from);
+    assert.equal(p.body.state, "done");
+    assert.deepEqual(w.fetch.calls.slice(n).map((c) => [c.pool, c.before]), [[G_POOL, trimmed.cov_from - R], [G_CURVE, split]]);
+    const data = rowCandles(w.row(G, R, "usd"));
+    assert.deepEqual(data.filter((c) => c.t > split && c.t < trimmed.cov_from).map((c) => [c.t, c.c]), ts(split + R, trimmed.cov_from).map((t) => [t, P]), "the pool's stretch");
+    const mig = data.find((c) => c.t === split);
+    assert.deepEqual([mig.o, mig.c, mig.v], [Q, P, 20], "the migration's bucket combined once");
+  } finally { await app.close(); w.close(); }
+});
+
+test("back 26b. graduated after our first stored trade (the newest window all the pool's, mig_at unknown), and a legacy row naming the curve: the pool's empty answer below covFrom makes the row onCurve, so the next back fetch asks the curve only", async () => {
+  for (const variant of ["rebased", "legacy"]) {
+    const w = world({ now: realNow(), sample: false });
+    const created = w.nowS() - 10 * 86_400;
+    const lw = Math.floor((w.nowS() - HIST_BUCKETS * R) / R) * R;
+    w.m.upsertCoin({ mint: G, createdAt: created });
+    // our first stored trade 3 days ago, the migration 2.5 days ago: between it and the newest window's start
+    const B = Math.floor((w.nowS() - 3 * 86_400) / R) * R, split = Math.floor((w.nowS() - 2.5 * 86_400) / R) * R;
+    ownTrades(w.db, G, B, w.nowS() - 60);
+    w.pools.set(G_POOL, { base: G, quote: SOL_MINT, usd: flat(split, w.nowS() + 86_400, R, 0.2) });
+    w.pools.set(G_CURVE, { base: SOL_MINT, quote: G, usd: flat(created, split, R, 0.2) });
+    const app = await serveApp(w);
+    try {
+      const first = (await newestOf(app, w, G)).body.candles[0].t;
+      if (variant === "rebased") {
+        assert.equal((await app.get(pageUrl(G, first))).body.state, "loading", "the newest job, from the page");
+        await w.run();
+        assert.deepEqual([w.fetch.calls.map((c) => c.pool), w.row(G, R, "usd").mig_at], [[G_POOL], null], "the newest window never asked the curve");
+      } else {
+        // written before mig_at: the curve's candles below the pool's, the pools naming both
+        const data = [...flat(B - 300 * R, split, R, 0.2), ...flat(split + R, B, R, 0.2)].map((c) => [c.t, c.o, c.h, c.l, c.c, c.v]);
+        w.db.histSet({ mint: G, res: R, unit: "usd", state: "ok", pools: [G_POOL, G_CURVE], covFrom: B - 300 * R, covTo: B + R, fetchedAt: w.nowS(), askedAt: w.nowS(), migAt: null, data });
+        w.hist.cache.clear();
+      }
+      const n = w.fetch.calls.length;
+      for (let b = first, i = 0; w.fetch.calls.length < n + 1 || w.hist.gtQueue.size; i++) { assert.ok(i < 12); const p = await pageOf(app, w, G, b); assert.equal(p.body.state, "done"); b = p.body.next; }
+      const row = w.row(G, R, "usd");
+      assert.ok(row.mig_at != null && row.cov_from <= row.mig_at, `onCurve: ${row.cov_from} ${row.mig_at}`);
+      const m = w.fetch.calls.length;
+      for (let b = row.cov_from, i = 0; w.fetch.calls.length === m; i++) { assert.ok(i < 12); b = (await pageOf(app, w, G, b)).body.next; }
+      assert.deepEqual(w.fetch.calls.slice(m).map((c) => c.pool), [G_CURVE], "one call, the curve's");
+    } finally { await app.close(); w.close(); }
+  }
+});
+
+test("back 27. a coin younger than the newest window's first final bucket: a page below its first stored trade is held, nothing queued, no histnew token spent", async () => {
+  const w = world({ now: realNow(), sample: false });
+  const R1 = 60, created = w.nowS() - 300, B = Math.floor((created + 180) / R1) * R1;
+  w.m.upsertCoin({ mint: A, createdAt: created });
+  ownTrades(w.db, A, B, w.nowS() - 10, {}, R1);
+  let tokens = 0;
+  const own = buildCandlesKeyed(w.db.tradesRange(A, 0, B), R1, "usd");
+  for (let i = 0; i < 3; i++) {
+    const p = w.hist.page(w.m.get(A), R1, "usd", { lo: Math.floor(created / R1) * R1, hi: B, own, oldest: w.db.tradeAfter(A, -1) }, { mayQueue: () => { tokens++; return true; } });
+    assert.deepEqual([p.state, p.from, p.next], ["held", B, B]);
+    await w.run();
+  }
+  assert.deepEqual([tokens, w.hist.gtQueue.size, w.fetch.calls.length], [0, 0, 0]);
+  w.close();
+});
+
+test("back 28. a page below our first stored trade while the coin's first sampling job is queued or runs: loading (not done with next null), then the chain's points once it ends", async () => {
+  let during = null;
+  const pageAt = (w, hi) => {
+    const cLo = Math.floor(w.m.get(A).createdAt / R) * R, lo = Math.max(hi - HIST_BUCKETS * R, cLo);
+    return w.hist.page(w.m.get(A), R, "quote", { lo, hi, own: buildCandlesKeyed(w.db.tradesRange(A, lo, hi), R, "quote"), oldest: w.db.tradeAfter(A, -1) });
+  };
+  const w = world({ onCall: () => { during ??= pageAt(w, b0); } });
+  const { a, first, B } = sampler(w, A, A_CURVE, { created: NOW - 5 * 86_400 });
+  const b0 = Math.floor(B / R) * R;
+  const old = [sig("k1", 100, a + 86_400), sig("k2", 101, a + 2 * 86_400), sig("k3", 102, B - 10 * 3600)].reverse();
+  w.sigsOf.set(A_CURVE, [first, ...old, sig("old", 1, a - 100)]);
+  old.forEach((x) => w.txs.set(x.signature, curveTx(A, x)));
+  // GeckoTerminal answered none (a row of now; no USD price stored: the quote key): the newest window queues the first sampling job
+  w.db.histSet({ mint: A, res: R, unit: "quote", state: "none", pools: [], covFrom: 0, covTo: 0, fetchedAt: NOW, askedAt: NOW, data: [] });
+  w.ask(A);
+  assert.ok(w.hist.chainQueue.has(A), "the first sampling job is queued");
+  assert.deepEqual([pageAt(w, b0).state, pageAt(w, b0).next], ["loading", b0], "while it is queued");
+  await w.run();
+  assert.deepEqual([during?.state, during?.next], ["loading", b0], "while it runs");
+  const p = pageAt(w, b0);
+  assert.equal(p.state, "done");
+  assert.deepEqual([p.chain, p.candles.length, p.next != null], ["exact", 1, true], "the chain's points, and older ones below");
   w.close();
 });

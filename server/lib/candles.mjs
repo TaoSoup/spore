@@ -27,6 +27,51 @@ export function buildCandles(trades, res) {
   return { candles: [...buckets.values()].sort((a, b) => a.t - b.t), priceKey: usd ? "usd" : "quote" };
 }
 
+/** Buckets in the chart's window: the newest window (the route's read from now − 500 R) and every older page. */
+export const HIST_BUCKETS = 500;
+
+/**
+ * `buildCandles` with the price key forced (an older page of the coin page's chart is always in the newest window's
+ * key, never converted): `{ candles, priceKey: key, unpriced }`. `usd`: trades without a USD price are left out and
+ * counted (`unpriced`), volume `valueUsd ?? 0`; `quote`: every trade, volume in quote atoms (as buildCandles).
+ */
+export function buildCandlesKeyed(trades, res, key) {
+  const usd = key === "usd", buckets = new Map();
+  let unpriced = 0;
+  for (const t of trades) {
+    if (usd && t.priceUsd == null) { unpriced++; continue; }
+    const bucket = Math.floor(t.time / res) * res;
+    const price = usd ? t.priceUsd : t.priceQuote;
+    const vol = usd ? (t.valueUsd ?? 0) : Number(BigInt(t.quoteAmount));
+    const c = buckets.get(bucket);
+    if (!c) buckets.set(bucket, { t: bucket, o: price, h: price, l: price, c: price, v: vol });
+    else { c.h = Math.max(c.h, price); c.l = Math.min(c.l, price); c.c = price; c.v += vol; }
+  }
+  return { candles: [...buckets.values()].sort((a, b) => a.t - b.t), priceKey: key, unpriced };
+}
+
+/** The rows of one page: `from <= t < hi` (the page answers authoritatively for that stretch, and pages never overlap). */
+export const clipPage = (candles, from, hi) => candles.filter((c) => c.t >= from && c.t < hi);
+
+/**
+ * Where the page below `lo` starts (its `before`), or null when nothing is older: the largest of our newest stored trade
+ * before `lo` (its bucket + R), GeckoTerminal's newest stored candle before `lo` (t + R), the row's `covFrom` when
+ * GeckoTerminal was not asked down to the coin's start yet (`!gtFloor`, `covFrom > (cLo ?? 0)`: an unknown stretch lies
+ * below it) and the newest chain point before `lo` (its bucket + R). Never above `lo`; null at or below the coin's
+ * creation bucket `cLo`.
+ */
+export function pageNext({ lo, cLo = null, ownOlderT = null, gt = [], gtFloor = true, covFrom = null, pts = [], R }) {
+  const bucket = (t) => Math.floor(t / R) * R;
+  let next = -Infinity;
+  if (ownOlderT != null) next = Math.max(next, bucket(ownOlderT) + R);
+  for (let i = gt.length - 1; i >= 0; i--) if (gt[i].t < lo) { next = Math.max(next, gt[i].t + R); break; }
+  if (!gtFloor && covFrom != null && covFrom > (cLo ?? 0)) next = Math.max(next, covFrom);
+  for (let i = pts.length - 1; i >= 0; i--) if (pts[i][0] < lo) { next = Math.max(next, bucket(pts[i][0]) + R); break; }
+  if (!Number.isFinite(next)) return null;
+  next = Math.min(next, lo);
+  return cLo != null && next <= cLo ? null : next;
+}
+
 /** GeckoTerminal's timeframe and aggregate for a chart resolution (s); null for one it has no candles of. */
 export function timeframeOf(R) {
   switch (R) {

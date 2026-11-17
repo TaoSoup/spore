@@ -75,6 +75,11 @@ export type CandleFill = { state: "queued" | "running" | "waiting"; gaps: number
 /// `chain` whether chain candles are in the answer ("sampled": some are points).
 export type CandleHistory = { state: "loading" | "sampling" | "done"; gecko: string | null; chain: "exact" | "sampled" | null };
 export type Candles = { candles: Candle[]; priceKey: "usd" | "quote"; fill?: CandleFill; history?: CandleHistory };
+/// One older page of the coin page's chart (`before=`): rows of [from, before), oldest first, in the key asked for.
+/// `next`: the `before` of the page below (null: nothing older); `loading`: ask the same page again (nothing to apply);
+/// `held`: older candles exist but cannot be fetched now (the rows of [from, before) are still the server's).
+export type CandlePage = { candles: Candle[]; priceKey: "usd" | "quote"; from: number; next: number | null;
+  state: "loading" | "done" | "held"; gecko?: string | null; chain?: "exact" | "sampled" | null };
 /// `otherChildren`: children of this coin that exist on pump.fun but were not launched here (ours mode).
 export type CoinPage = { coin: Coin; children: Coin[]; trades: Trade[]; otherChildren?: number };
 /// `GET /api/fees/:mint` (DESIGN §11.6): the creator fees waiting for a coin, read live from the
@@ -319,6 +324,9 @@ export const api = {
   /// `scope: "all"` opens the candles of any tracked coin (the map's side panel); without it the route stays ours-only.
   candles: (mint: string, res = 60, scope?: "all", opts?: { history?: boolean }) =>
     request<Candles>(`/candles/${encodeURIComponent(mint)}${qs({ res, scope, history: opts?.history ? 1 : undefined })}`),
+  /// The coin page's chart scrolled back: the page of `res` candles below `before` (unix s), in the series' key.
+  candlesBefore: (mint: string, res: number, key: "usd" | "quote", before: number) =>
+    request<CandlePage>(`/candles/${encodeURIComponent(mint)}${qs({ res, history: 1, before, key })}`),
   /// Trade activity per coin for the map (§11.5): 1 h and 24 h counters. 404 on a server that predates it.
   heat: () => request<HeatResponse>("/map/heat", {}, 15_000),
   /// Family shares of the whole map (§11.5 "Dominance"); `mint` narrows `families` to that top's row ([] when it is none).

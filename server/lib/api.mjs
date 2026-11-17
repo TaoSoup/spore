@@ -31,7 +31,7 @@ import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
 import { createPortfolio } from "./portfolio.mjs";
 import { PnlTracker, ACTIVITY_MAX, sinceOf } from "./pnl-tracker.mjs";
-import { buildCandles } from "./candles.mjs";
+import { buildCandles, buildCandlesKeyed, pageNext, HIST_BUCKETS } from "./candles.mjs";
 
 export { RateLimiter };
 
@@ -564,7 +564,12 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     if (req.query.scope === "all") { if (!c.tracked) return res.status(404).json({ error: "not tracked" }); }
     else if (!model.inScope(mint)) return res.status(404).json({ error: "not a Spore coin" }); // ours mode: charts only for our coins and their ancestors
     const resSec = clampInt(req.query.res, 60, 15, 86_400);
-    const trades = model.db.tradesSince(mint, nowS() - resSec * 500);
+    if (req.query.before !== undefined) return candlePage(req, res, c, resSec);
+    // The coin page's chart reads its window from a whole bucket, so its first candle meets the older page below it at a
+    // bucket boundary (and holds every stored trade of that bucket); every other reader keeps today's unaligned start.
+    const hist = req.query.history === "1" && req.query.scope !== "all";
+    const since = nowS() - resSec * HIST_BUCKETS;
+    const trades = model.db.tradesSince(mint, hist ? Math.floor(since / resSec) * resSec : since);
     const body = buildCandles(trades, resSec);
     // Missed trades of this coin are being read back (a restart, a reconnect): `fill` says so, and the chart asks again
     // until it is gone. Absent when nothing is pending.
@@ -579,6 +584,30 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     }
     sendCachedJson(req, res, body, { maxAge: 5 });
   });
+  /**
+   * `before=T&key=usd|quote` (with `history=1` only, never `scope=all`): the next older page of the coin page's chart,
+   * the HIST_BUCKETS buckets of `res` below `T` (clamped to now; never below the coin's creation bucket) in the key the
+   * client names, `{ candles, priceKey, from, next, state, gecko?, chain? }` (README §API). A "loading" page is never
+   * cached; one entirely before our first stored trade is final enough for a minute.
+   */
+  function candlePage(req, res, c, R) {
+    if (req.query.history !== "1" || req.query.scope === "all") return res.status(400).json({ error: "before needs history=1" });
+    const T = Number(req.query.before);
+    if (!Number.isInteger(T) || T < 1) return res.status(400).json({ error: "invalid before" });
+    const key = req.query.key;
+    if (key !== "usd" && key !== "quote") return res.status(400).json({ error: "invalid key" });
+    const hi = Math.floor(Math.min(T, nowS() + R) / R) * R;
+    const cLo = c.createdAt != null ? Math.floor(c.createdAt / R) * R : null;
+    const lo = Math.max(hi - HIST_BUCKETS * R, cLo ?? 0);
+    if (hi <= lo) return sendCachedJson(req, res, { candles: [], priceKey: key, from: hi, next: null, state: "done" }, { maxAge: 60, swr: 600 });
+    const own = buildCandlesKeyed(model.db.tradesRange(c.mint, lo, hi), R, key);
+    const oldest = model.db.tradeAfter(c.mint, -1);
+    // Without history (CHART_HISTORY=0, another resolution, an untracked coin) the page is our stored trades only.
+    const page = histOf?.page(c, R, key, { lo, hi, own, oldest }, { mayQueue: () => histNew.check(req.ip ?? "?").ok })
+      ?? { candles: own.candles, priceKey: key, from: lo, next: pageNext({ lo, cLo, ownOlderT: model.db.tradeTimeBefore(c.mint, lo), R }), state: "done" };
+    const b0 = oldest ? Math.floor(oldest.time / R) * R : Infinity;
+    sendCachedJson(req, res, page, page.state === "loading" ? { cacheControl: "no-store" } : page.state === "done" && hi <= b0 ? { maxAge: 60, swr: 600 } : { maxAge: 5 });
+  }
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search
   // box accept all of pump.fun, DESIGN §11.1) is looked up live, like /api/coin/:mint does; the

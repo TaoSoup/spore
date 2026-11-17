@@ -31,6 +31,21 @@
 // waiting, the most recently asked first. Queues live in memory: the progress is in chart_history and chart_samples, and
 // the chart's poll asks again after a restart.
 //
+// Older pages (the chart scrolled back, the route's `before=`, `page()`): the 500 buckets below the newest window, then
+// below each page, in the key the client names, merged by the same mergeHistory over the same stored rows (so seams
+// agree). A GeckoTerminal row grows backward on demand only (#fetchBack: one call of up to HIST_BACK_LIMIT candles,
+// two pages, below `covFrom`, or from our first stored trade's bucket down when the row starts above it; a graduated
+// coin's pool until its start, then its curve, their migration bucket combined and kept as `mig_at`), never past the
+// coin's creation; an answer shorter than asked is GeckoTerminal's floor.
+// A row whose top retention left behind (our first stored trade moved past `covTo` while the newest window no longer
+// reaches there) is filled upward first (#fetchFwd), so a page never answers a stretch the row does not cover. Bounds: of the
+// coin's HIST_COIN_GT_DAILY calls, HIST_BACK_RESERVE are never spent on older pages (its newest window keeps working);
+// HIST_ROW_CANDLES per row (a top re-fetch keeps the older candles, dropping the oldest past the cap); deep rows (data
+// over HIST_DEEP_BYTES) not asked for HIST_DEEP_KEEP_S, or past the HIST_DEEP_ROWS most recently asked, are trimmed to
+// their newest HIST_DEEP_TRIM candles; the parsed-row cache is bounded by CACHE_MAX_CANDLES too. A page never queues
+// chain sampling (it only reads stored points), queues at most one GeckoTerminal job (RATE_HISTNEW), and a refusal is
+// "held" (the stored part served), never a 429.
+//
 // Left out on purpose: interior and head holes in GeckoTerminal's data; seek-by-time sampling (getBlock); a historical
 // pool virtual quote (the current one, as the live path and the fill); USD for chain points of a coin quoted in a listed
 // asset; finer GeckoTerminal series composing coarser ones; a persisted queue; resumable listing cursors.
@@ -40,13 +55,12 @@ import { SOL_MINT } from "./jupiter.mjs";
 import { USDC_MINT } from "./sdk.mjs";
 import { GeckoError } from "./gecko.mjs";
 import { FILL_PAGE, FILL_TX_CONCURRENCY, FILL_TX_RETRIES, FILL_OUTAGE_STREAK, FILL_OUTAGE_PAUSE_MS } from "./trade-fill.mjs";
-import { buildCandles, parseOhlcv, combineVenues, seamCheck, seamStats, holeOf, pickSamples, mergeHistory, HIST_HOLE_MIN } from "./candles.mjs";
+import { buildCandles, parseOhlcv, combineVenues, seamCheck, seamStats, holeOf, pickSamples, mergeHistory, clipPage, pageNext, HIST_HOLE_MIN, HIST_BUCKETS } from "./candles.mjs";
 
-export { HIST_HOLE_MIN, USDC_MINT };
+/** HIST_BUCKETS: buckets in the chart's window (= the route's: tradesSince(now - res × 500)) and in every older page. */
+export { HIST_HOLE_MIN, HIST_BUCKETS, USDC_MINT };
 /** The resolutions history is served for (GeckoTerminal has these: lib/candles.mjs timeframeOf). */
 export const HIST_RES = [60, 300, 900, 3600];
-/** Buckets in the chart's window (= the route's: tradesSince(now - res × 500)). */
-export const HIST_BUCKETS = 500;
 /** A GeckoTerminal candle is stored only when its bucket ended this long before the fetch (t + R <= fetchedAt − this): its trades are all indexed. */
 export const HIST_SETTLE_S = 600;
 /** An ok row is fetched again (silently) at most this often, and only when it no longer covers the seam bucket. */
@@ -90,8 +104,28 @@ export const HIST_PRUNE_MS = 3_600_000;
 export const HIST_SOL_POOL = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2";
 /** A tracked parent's stored price counts as its USD at time t only when it is at most this old (else its hourly row). */
 const PARENT_PRICE_MAX_AGE_S = 21_600;
+/** Candles in one (mint, res, unit) row at most (~225 KB of JSON): 1m ≈ 3.5 d, 5m ≈ 17 d, 15m ≈ 52 d, 1h ≈ 208 d. */
+export const HIST_ROW_CANDLES = 5_000;
+/** Of a coin's HIST_COIN_GT_DAILY calls a day, this many are never spent on older pages (its newest window keeps working). */
+export const HIST_BACK_RESERVE = 4;
+/** GeckoTerminal `limit` of one older-page call (two pages of the chart). */
+export const HIST_BACK_LIMIT = 1_000;
+/**
+ * A row whose data JSON is longer than this is "deep" (grown backward by older pages). Above any HIST_DEEP_TRIM-candle
+ * row (a candle at 8 significant digits is at most ~95 B of JSON, a memecoin's ~80 B), so a trimmed row, or one a top
+ * re-fetch grew to under HIST_DEEP_TRIM, is never selected (read and parsed) again at the next prune.
+ */
+export const HIST_DEEP_BYTES = 120_000;
+/** Deep rows kept whole; past them the least recently asked are trimmed. */
+export const HIST_DEEP_ROWS = 300;
+/** A deep row not asked for this long is trimmed. */
+export const HIST_DEEP_KEEP_S = 3 * 86_400;
+/** A trimmed row keeps its newest this many candles (covFrom = the oldest kept). */
+export const HIST_DEEP_TRIM = 1_000;
 /** Parsed rows kept in memory (a poll is one lookup, plus the route's indexed tradeAfter). */
 const CACHE_MAX = 256;
+/** The cache is bounded by candles (and samples' points) too: 256 deep rows would be ~1.3M candles (~40 MB per 400k). */
+export const CACHE_MAX_CANDLES = 400_000;
 const FAILED_MAX = 1_000;
 const DAY_MS = 86_400_000;
 const msg = (e) => String(e?.message ?? e).slice(0, 200);
@@ -104,10 +138,17 @@ function worse(a, b) {
   return RANK[a] === 0 && (a === "exact" || b === "exact") ? "exact" : a;
 }
 
+/**
+ * Whether a graduated coin's row reaches down to its migration bucket (`migAt`, set once the curve was fetched): what
+ * lies below is the curve's alone. Not from `pools`: a trim or a top re-fetch can drop the curve's candles while the
+ * pools still name it.
+ */
+const onCurve = (row) => row?.migAt != null && row.covFrom <= row.migAt;
+
 function parseRow(r) {
   const json = (v, d) => { try { const x = JSON.parse(v); return Array.isArray(x) ? x : d; } catch { return d; } };
   const candles = json(r.data, []).filter((x) => Array.isArray(x) && x.length === 6).map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
-  return { mint: r.mint, res: r.res, unit: r.unit, state: r.state, pools: json(r.pools, []), covFrom: r.cov_from, covTo: r.cov_to, fetchedAt: r.fetched_at, askedAt: r.asked_at, candles };
+  return { mint: r.mint, res: r.res, unit: r.unit, state: r.state, pools: json(r.pools, []), covFrom: r.cov_from, covTo: r.cov_to, fetchedAt: r.fetched_at, askedAt: r.asked_at, migAt: r.mig_at ?? null, candles };
 }
 function parseSamples(r) {
   let pts = [];
@@ -127,10 +168,12 @@ export class ChartHistory {
     this.enabled = this.cfg.enabled !== false && !!gecko;
     this.sampleOn = this.enabled && this.cfg.sample !== false && !!rpc;
     this.cache = new Map();       // `${mint}:${res}:${unit}` | `samples:${mint}` → parsed row (null: none stored)
-    this.gtQueue = new Map();     // `${mint}:${res}:${unit}` → { askedAt, mint, R, unit }
+    this.cacheCandles = 0;        // candles + points held by the cache (CACHE_MAX_CANDLES)
+    this.gtQueue = new Map();     // `${mint}:${res}:${unit}` (newest window) | `…:back` (an older page) → { askedAt, mint, R, unit, back? }
     this.gtRunning = null;        // the key whose GeckoTerminal job runs
     this.chainQueue = new Map();  // mint → { askedAt, a, extend, R, key }
     this.chainRunning = null;     // the mint whose sampling job runs
+    this.chainEntry = null;       // its queue entry ({ a, extend, … }): page() reads where a first job starts
     this.chainJob = null;         // its counters (#call)
     this.pauseUntil = 0; this.waking = false; // no sampling job before this (an outage, the day spent)
     this.failed = new Map();      // job key (`chain:${mint}` for sampling) → when it failed (ms)
@@ -144,7 +187,8 @@ export class ChartHistory {
     this.ac = new AbortController();
     this.started = false; this.stopped = false; this.idleWaiters = []; this.pruneTimer = null;
     this.stats = { asked: 0, queued: 0, displaced: 0, limited: 0, refusedBudget: 0, refusedCoinCap: 0, fetched: 0, extended: 0, ok: 0, none: 0, mismatch: 0, seamMismatch: 0, seamWarn: 0,
-      badCandles: 0, unaligned: 0, holes: 0, quiet: 0, exact: 0, sampled: 0, partial: 0, skippedUsd: 0, unpriced: 0, failed: 0, touched: 0, lastError: null };
+      badCandles: 0, unaligned: 0, holes: 0, quiet: 0, exact: 0, sampled: 0, partial: 0, skippedUsd: 0, unpriced: 0, failed: 0, touched: 0,
+      backAsked: 0, backQueued: 0, backFetched: 0, backFilled: 0, backFloor: 0, backFull: 0, backHeld: 0, backTrimmed: 0, lastError: null };
     this.chainStats = { listed: 0, anchorMisses: 0, txRead: 0, txRetries: 0, txUnread: 0, points: 0, outages: 0, budgetStops: 0, jobCaps: 0, yielded: 0 };
   }
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -158,9 +202,17 @@ export class ChartHistory {
 
   // ---------------------------------------------------------------- cache
   #cacheSet(k, v) {
-    this.cache.delete(k); this.cache.set(k, v);
-    if (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value);
+    const size = (x) => x?.candles?.length ?? x?.pts?.length ?? 0;
+    if (!this.cache.size) this.cacheCandles = 0; // cleared from outside: the count starts again
+    if (this.cache.has(k)) { this.cacheCandles -= size(this.cache.get(k)); this.cache.delete(k); }
+    this.cache.set(k, v); this.cacheCandles += size(v);
+    // The oldest go first, never the entry just set (it is the last one).
+    while ((this.cache.size > CACHE_MAX || this.cacheCandles > CACHE_MAX_CANDLES) && this.cache.size > 1) {
+      const old = this.cache.keys().next().value;
+      this.cacheCandles -= size(this.cache.get(old)); this.cache.delete(old);
+    }
   }
+  #cacheClear() { this.cache.clear(); this.cacheCandles = 0; }
   #row(mint, R, unit) {
     const k = `${mint}:${R}:${unit}`;
     if (this.cache.has(k)) return this.cache.get(k);
@@ -212,7 +264,7 @@ export class ChartHistory {
       let gtState;
       if (this.gtRunning === k || this.gtQueue.has(k)) {
         const q = this.gtQueue.get(k);
-        if (q) q.askedAt = this.now();
+        if (q) { q.askedAt = this.now(); q.fromPage = false; } // the newest window wants it too: its sampling follows
         gtState = row ? "silent" : "loading";
       } else if (!row) gtState = this.#enqueueGt(c.mint, R, key, mayQueue) ? "loading" : "done";
       else { if (this.#due(row, lo, b0, top, nowS)) this.#enqueueGt(c.mint, R, key, mayQueue); gtState = "done"; }
@@ -225,6 +277,78 @@ export class ChartHistory {
       if (state !== "done" || history.gecko || history.chain) out.history = history;
       return out;
     } catch (e) { this.stats.lastError = `serve ${c.mint}: ${msg(e)}`; return null; }
+  }
+  /**
+   * One older page of the coin page's chart (the route's `before=`): the buckets [lo, hi) of resolution `R` in the price
+   * key `key` the client names (never converted), merged by the same mergeHistory over the same stored rows as the
+   * newest window (serve), so a bucket two answers share is computed the same way. `own`: buildCandlesKeyed of our trades
+   * in [lo, hi); `oldest`: db.tradeAfter(mint, -1). Answers `{ candles, priceKey, from, next, state, gecko, chain }`:
+   * "loading" (a GeckoTerminal job for this stretch, or the coin's first sampling job, is queued or runs: nothing to apply,
+   * ask the same page again),
+   * "held" (older GeckoTerminal candles exist but cannot be fetched now: the day's budget, the coin's back calls, the
+   * row full, a recent failure, the asker's limit; `from` = `next` = where the stored part starts) or "done"; null when
+   * history does not apply (the route then serves our own trades only). Database reads only, synchronous. A page never
+   * queues chain sampling; it queues at most one GeckoTerminal job, asked of `mayQueue()` (a refusal is "held").
+   */
+  page(c, R, key, { lo, hi, own, oldest }, { mayQueue = () => true } = {}) {
+    if (!this.enabled || !HIST_RES.includes(R) || !c?.tracked) return null;
+    try {
+      const nowS = this.#nowS();
+      const B = oldest?.time ?? null, b0 = B == null ? Infinity : Math.floor(B / R) * R;
+      const cLo = c.createdAt != null ? Math.floor(c.createdAt / R) * R : null;
+      // A coin recorded from (about) its birth has nothing before b0 worth a call (serve's rule).
+      const needGt = lo < b0 && !(B != null && cLo != null && b0 - cLo < 2 * R);
+      const k = `${c.mint}:${R}:${key}`, kb = `${k}:back`;
+      const row = this.#row(c.mint, R, key), smp = this.#samples(c.mint);
+      this.#touch(row, smp, nowS);
+      this.stats.backAsked++;
+      const pending = (x) => { if (this.gtRunning === x) return true; const q = this.gtQueue.get(x); if (q) q.askedAt = this.now(); return !!q; };
+      const floored = row?.state === "ok" && row.covFrom <= (cLo ?? 0);
+      let state = "done", gap = false;
+      if (needGt) {
+        // The newest window and its newest final bucket (serve's): before that bucket exists a newest job writes nothing.
+        const W = nowS - HIST_BUCKETS * R, wlo = Math.floor(Math.max(W, c.createdAt ?? W) / R) * R;
+        const top = Math.floor((nowS - HIST_SETTLE_S) / R) * R - R;
+        if (pending(k)) state = "loading";
+        else if (!row) state = top >= wlo && this.#enqueueGt(c.mint, R, key, mayQueue, { fromPage: true }) ? "loading" : "held";
+        else if (row.state !== "ok") {
+          // none or mismatch: GeckoTerminal adds nothing to this page; asked again silently after its wait (as serve).
+          if (top >= wlo && this.#due(row, wlo, b0, top, nowS)) this.#enqueueGt(c.mint, R, key, mayQueue, { fromPage: true });
+        } else if (row.covTo < Math.min(hi, b0, top + R)) {
+          // The row stops below this page's stretch before our first stored trade (retention moved that trade past the
+          // row's top, and the newest window no longer reaches there to fetch it again): filled upward first (#fetchFwd).
+          gap = true;
+          state = pending(`${k}:fwd`) || this.#enqueueBack(c.mint, R, key, mayQueue, { fwd: true }) ? "loading" : "held";
+        } else if (row.covFrom > Math.max(lo, cLo ?? -Infinity) && !floored) state = pending(kb) || this.#enqueueBack(c.mint, R, key, mayQueue) ? "loading" : "held";
+      }
+      // The coin's first sampling job is queued or runs (serve's "sampling"): its points are written at the job's end, so a
+      // page over the stretch it samples (from its start up to b0) waits for them ("loading") rather than answer without
+      // them, maybe "done" with next null, which would end the client's paging for the visit.
+      const cj = this.chainRunning === c.mint ? this.chainEntry : this.chainQueue.get(c.mint);
+      if (state === "done" && this.sampleOn && !smp && cj && !cj.extend && cj.a < Math.min(hi, b0)) {
+        if (this.chainQueue.has(c.mint)) cj.askedAt = this.now();
+        state = "loading";
+      }
+      if (state === "loading") return { candles: [], priceKey: key, from: hi, next: hi, state };
+      const gt = row?.state === "ok" ? row.candles : [], pts = smp?.pts ?? [];
+      const m = mergeHistory({ own: own.candles, gt, pts, key, R, lo, b0, B, qd: this.model.quoteDecimals(c) });
+      // Held: the page answers for the stored part only, and the next ask resumes there: our own trades from b0, and
+      // GeckoTerminal's from where it was asked down to when the row reaches up to them (not across a gap at its top).
+      const from = state !== "held" ? lo : Math.min(hi, Math.max(lo, row?.state === "ok" && !gap ? Math.min(row.covFrom, b0) : b0));
+      const candles = clipPage(m.candles, from, hi);
+      const next = state === "held" ? from
+        : pageNext({ lo, cLo, ownOlderT: this.db.tradeTimeBefore(c.mint, lo), gt, gtFloor: floored || row?.state !== "ok", covFrom: row?.state === "ok" ? row.covFrom : null, pts, R });
+      if (state === "held") this.stats.backHeld++;
+      // Credits from the clipped rows (mergeHistory's flags cover the whole merge): below b0 a row is GeckoTerminal's
+      // where it has a candle (points never are), else a chain point; at b0 the seam bucket carries GeckoTerminal's open.
+      const gtAt = new Set(gt.map((x) => x.t));
+      let gtIn = false, chainN = 0, sampled = false;
+      for (const x of candles) {
+        if (x.t <= b0 && gtAt.has(x.t)) gtIn = true;
+        else if (x.t < b0) { chainN++; if (x.s) sampled = true; }
+      }
+      return { candles, priceKey: key, from, next, state, gecko: m.gtShown && gtIn ? row?.pools?.[0] ?? null : null, chain: sampled ? "sampled" : chainN ? "exact" : null };
+    } catch (e) { this.stats.lastError = `page ${c.mint}: ${msg(e)}`; return null; }
   }
   /**
    * Whether a stored row is asked again (silently): an ok row that no longer covers the seam, or whose graduated coin's
@@ -255,7 +379,7 @@ export class ChartHistory {
     q.delete(k); this.stats.displaced++;
   }
   /** Queues the GeckoTerminal job of one series; false when refused (the day spent, no room left in the coin's day for the job, failed lately, the asker's limit). */
-  #enqueueGt(mint, R, unit, mayQueue) {
+  #enqueueGt(mint, R, unit, mayQueue, { fromPage = false } = {}) {
     const k = `${mint}:${R}:${unit}`;
     if (this.gtRunning === k || this.gtQueue.has(k)) return true;
     if (this.gecko.spent()) { this.stats.refusedBudget++; return false; }
@@ -264,8 +388,29 @@ export class ChartHistory {
     if (this.#coinCount(mint) + need > HIST_COIN_GT_DAILY) { this.stats.refusedCoinCap++; return false; }
     if (this.#failedRecently(k)) return false;
     if (!mayQueue()) { this.stats.limited++; return false; }
-    this.gtQueue.set(k, { askedAt: this.now(), mint, R, unit }); this.stats.queued++;
+    this.gtQueue.set(k, { askedAt: this.now(), mint, R, unit, fromPage }); this.stats.queued++;
     this.#bound(this.gtQueue, HIST_MAX_QUEUE, k);
+    this.#pumpGt();
+    return true;
+  }
+  /**
+   * Queues the GeckoTerminal job that grows an ok row backward (an older page, #fetchBack), or with `fwd` upward from
+   * its top (#fetchFwd); refused as #enqueueGt, and also when the coin's day has no room left above HIST_BACK_RESERVE or
+   * (backward) the row holds HIST_ROW_CANDLES. The single worker runs it apart from the row's other jobs, so the row's
+   * read-modify-write never races.
+   */
+  #enqueueBack(mint, R, unit, mayQueue, { fwd = false } = {}) {
+    const kb = `${mint}:${R}:${unit}:${fwd ? "fwd" : "back"}`;
+    if (this.gtRunning === kb || this.gtQueue.has(kb)) return true;
+    if (this.gecko.spent()) { this.stats.refusedBudget++; return false; }
+    const c = this.model.get(mint), row = this.#row(mint, R, unit);
+    const need = c?.migrated && c.pool && (fwd || !onCurve(row)) ? 2 : 1;
+    if (this.#coinCount(mint) + need > HIST_COIN_GT_DAILY - HIST_BACK_RESERVE) { this.stats.refusedCoinCap++; return false; }
+    if (!fwd && (row?.candles.length ?? 0) >= HIST_ROW_CANDLES) { this.stats.backFull++; return false; }
+    if (this.#failedRecently(kb)) return false;
+    if (!mayQueue()) { this.stats.limited++; return false; }
+    this.gtQueue.set(kb, { askedAt: this.now(), mint, R, unit, back: !fwd, fwd }); this.stats.backQueued++;
+    this.#bound(this.gtQueue, HIST_MAX_QUEUE, kb);
     this.#pumpGt();
     return true;
   }
@@ -332,12 +477,36 @@ export class ChartHistory {
   prune() {
     try {
       const n = this.db.histPrune(this.#nowS() - HIST_KEEP_S, HIST_MAX_ROWS, HIST_MAX_SAMPLE_ROWS, { mint: SOL_MINT, res: 3600, unit: "usd" });
-      if (n) { this.pruned += n; this.cache.clear(); }
+      if (n) { this.pruned += n; this.#cacheClear(); }
+      this.#trimDeep();
       for (const [k, at] of this.failed) if (this.now() - at >= HIST_RETRY_MS) this.failed.delete(k);
       const day = this.#day();
       for (const [m, e] of this.coinCalls) if (e.day !== day) this.coinCalls.delete(m);
       return n;
     } catch (e) { this.stats.lastError = `prune: ${msg(e)}`; return 0; }
+  }
+  /**
+   * Deep rows (grown backward by older pages, data over HIST_DEEP_BYTES) not asked for HIST_DEEP_KEEP_S, or past the
+   * HIST_DEEP_ROWS most recently asked, keep their newest HIST_DEEP_TRIM candles (covFrom = the oldest kept; fetched_at
+   * and asked_at unchanged): an older page asks GeckoTerminal again if someone scrolls back there. The SOL/USD reference
+   * keeps its own window.
+   */
+  #trimDeep() {
+    let n = 0;
+    this.db.transaction(() => {
+      for (const { mint, res, unit } of this.db.histDeep(HIST_DEEP_BYTES, HIST_DEEP_ROWS, this.#nowS() - HIST_DEEP_KEEP_S)) {
+        if (mint === SOL_MINT) continue;
+        const r = this.db.histGet(mint, res, unit);
+        if (!r) continue;
+        const row = parseRow(r);
+        if (row.candles.length <= HIST_DEEP_TRIM) continue;
+        const kept = row.candles.slice(row.candles.length - HIST_DEEP_TRIM);
+        this.db.histSet({ ...row, covFrom: Math.max(row.covFrom, kept[0].t), data: kept.map((x) => [x.t, x.o, x.h, x.l, x.c, x.v]) });
+        n++;
+      }
+    });
+    if (n) { this.stats.backTrimmed += n; this.#cacheClear(); }
+    return n;
   }
   #pumpGt() {
     if (!this.enabled || !this.started || this.stopped || this.gtRunning) return;
@@ -355,11 +524,15 @@ export class ChartHistory {
       if (!(e instanceof GeckoError) && !e?.cap) this.log.warn?.(`history: ${this.stats.lastError}`);
     }).finally(() => { this.gtRunning = null; if (!this.stopped) setImmediate(() => this.#pumpGt()); else this.#wake(); });
   }
-  async #runGt({ mint, R, unit }) {
+  async #runGt(job) {
+    if (job.back) return this.#fetchBack(job);
+    if (job.fwd) return this.#fetchFwd(job);
+    const { mint, R, unit } = job;
     const c = this.model.get(mint);
     if (!c?.tracked) return;
     const row = await this.#fetchRow(this.#coinSpec(c, R, unit));
-    if (!row || !this.sampleOn) return;
+    // A job an older page queued leaves the chain alone (a page never queues sampling; the newest window's ask does).
+    if (!row || !this.sampleOn || job.fromPage) return;
     // The row may show a hole at once: its sampling job is queued from here (not limited: it was asked for already).
     const nowS = this.#nowS(), first = this.db.tradeAfter(mint, -1), W = nowS - HIST_BUCKETS * R;
     const B = first?.time ?? null, b0 = B == null ? Infinity : Math.floor(B / R) * R;
@@ -377,7 +550,7 @@ export class ChartHistory {
     let mint = null;
     for (const [m, e] of this.chainQueue) if (mint == null || e.askedAt > this.chainQueue.get(mint).askedAt) mint = m;
     const entry = this.chainQueue.get(mint);
-    this.chainQueue.delete(mint); this.chainRunning = mint;
+    this.chainQueue.delete(mint); this.chainRunning = mint; this.chainEntry = entry;
     this.#sample(mint, entry).catch((e) => {
       if (this.stopped || e?.aborted) return;
       if (e?.budget) {
@@ -397,7 +570,7 @@ export class ChartHistory {
       this.#fail(`chain:${mint}`); this.stats.failed++;
       this.stats.lastError = `chain ${mint}: ${msg(e)}`;
       if (!(e instanceof GeckoError)) this.log.warn?.(`history: ${this.stats.lastError}`);
-    }).finally(() => { this.chainRunning = null; if (!this.stopped) setImmediate(() => this.#pumpChain()); else this.#wake(); });
+    }).finally(() => { this.chainRunning = null; this.chainEntry = null; if (!this.stopped) setImmediate(() => this.#pumpChain()); else this.#wake(); });
   }
 
   // ---------------------------------------------------------------- GeckoTerminal
@@ -448,7 +621,7 @@ export class ChartHistory {
       return p.candles;
     };
     const first = await ask(s.pools[0], top);
-    let second = [], short = false;
+    let second = [], short = false, migAt = null;
     if (s.pools.length > 1 && (!first.length || first[0].t > lo + R)) {
       // Up to the pool's oldest bucket itself: the migration's bucket holds the curve's last trades and the pool's first,
       // and combineVenues merges the two candles of it (the curve's open, the pool's close, both volumes).
@@ -458,6 +631,7 @@ export class ChartHistory {
       // HIST_RETRY_MS (with the server's day spent, the next job meets it before it sends anything and empties the queue).
       if (before >= lo) {
         try { second = await ask(s.pools[1], before); } catch (e) { if (!first.length || e?.kind === "stopped" || e?.aborted) throw e; short = true; }
+        if (second.length) migAt = before;
       }
     }
     const candles = s.pools.length > 1 ? combineVenues(first, second) : first;
@@ -467,20 +641,165 @@ export class ChartHistory {
     const old = this.#row(s.mint, R, s.unit);
     let data = state === "ok" ? candles : [], covFrom = short ? first[0].t : lo, covTo = top + R, outPools = pools, outState = state;
     if (old?.state === "ok" && state === "ok") {
-      const byT = new Map(old.candles.filter((x) => x.t >= lo - R).map((x) => [x.t, x]));
+      // A coin row keeps what older pages fetched (#fetchBack) below lo while its coverage meets this fetch's (else the
+      // stretch between would be claimed covered: today's rule then); the SOL/USD reference keeps today's rule.
+      const keepOld = !!s.coin && old.covTo >= covFrom;
+      const keepFrom = keepOld ? Math.min(lo - R, old.covFrom) : lo - R;
+      const byT = new Map(old.candles.filter((x) => x.t >= keepFrom).map((x) => [x.t, x]));
       for (const x of candles) byT.set(x.t, x);
       data = [...byT.values()].sort((a, b) => a.t - b.t);
       outPools = [...new Set([...pools, ...old.pools])];
-      if (short) covFrom = Math.min(covFrom, old.covFrom);
+      // A short fetch (the curve's call failed) whose old row stopped below its oldest candle claims only from that candle
+      // (the old row's candles below lo − R went, and the stretch between was never fetched): #due asks the curve again.
+      if (keepOld) covFrom = Math.min(covFrom, old.covFrom);
+      // Past the row cap the oldest go, and the row covers from the oldest kept.
+      if (s.coin && data.length > HIST_ROW_CANDLES) { data = data.slice(data.length - HIST_ROW_CANDLES); covFrom = data[0].t; }
     } else if (old?.state === "ok" && state === "none") {
       outState = "ok"; data = old.candles; covFrom = old.covFrom; covTo = old.covTo; outPools = old.pools;
     }
-    const row = { mint: s.mint, res: R, unit: s.unit, state: outState, pools: outPools, covFrom, covTo, fetchedAt: nowS, askedAt: Math.max(old?.askedAt ?? 0, nowS), candles: data };
+    // The migration bucket stays known (onCurve compares it with covFrom, so a row whose curve candles went asks the pool).
+    const row = { mint: s.mint, res: R, unit: s.unit, state: outState, pools: outPools, covFrom, covTo, fetchedAt: nowS, askedAt: Math.max(old?.askedAt ?? 0, nowS), migAt: migAt ?? old?.migAt ?? null, candles: data };
     this.db.histSet({ ...row, data: data.map((x) => [x.t, x.o, x.h, x.l, x.c, x.v]) });
     this.#cacheSet(`${s.mint}:${R}:${s.unit}`, row);
     this.stats.fetched++; if (old) this.stats.extended++;
     if (outState === "ok") this.stats.ok++; else if (outState === "none") this.stats.none++;
     return row;
+  }
+  /**
+   * One older-page call (#fetchBack, #fetchFwd) for coin `c`: GeckoTerminal's `lim` rows at or before `b` of `pool`, the
+   * pair checked, parsed for buckets `lo ≤ t ≤ b` and cut to the newest `lim`: `{ candles, total, oldest }` (`total`
+   * rows as sent, `oldest` the oldest row's bucket, below `lo` or not; null without one). Refused per call when the
+   * coin's day has no room left above HIST_BACK_RESERVE (other jobs of the coin may have spent it since this one was
+   * queued).
+   */
+  async #askPage(c, R, unit, pool, b, lim, lo) {
+    const mint = c.mint;
+    if (this.#coinCount(mint) >= HIST_COIN_GT_DAILY - HIST_BACK_RESERVE) {
+      this.stats.refusedCoinCap++;
+      throw Object.assign(new Error("the coin's GeckoTerminal requests for older pages are spent today"), { cap: "coin" });
+    }
+    const currency = unit === "usd" ? "usd" : "token", scaleV = unit === "quote" ? 10 ** this.model.quoteDecimals(c) : 1, other = c.quoteMint ?? SOL_MINT;
+    const r = await this.#gt(mint, { pool, res: R, currency, token: mint, before: b, limit: lim });
+    if (r.status === 404) return { candles: [], total: 0, oldest: null };
+    const pair = new Set([r.meta?.base, r.meta?.quote]);
+    if (pair.size !== 2 || !pair.has(mint) || !pair.has(other)) { this.stats.mismatch++; throw new Error(`older page of ${pool}: the answer names another pair`); }
+    const p = parseOhlcv(r.list, { R, lo, top: b, scaleV });
+    if (!p) { this.stats.mismatch++; throw new Error(`older page of ${pool}: too many bad candles`); }
+    this.stats.badCandles += p.bad; this.stats.unaligned += p.unaligned;
+    let oldest = null;
+    for (const x of r.list) if (Array.isArray(x) && Number.isFinite(x[0])) { const t = Math.floor(x[0] / R) * R; if (oldest == null || t < oldest) oldest = t; }
+    return { candles: p.candles.length > lim ? p.candles.slice(p.candles.length - lim) : p.candles, total: p.total, oldest };
+  }
+  /**
+   * Grows an ok row backward by one call (§2.5 of the scroll-back spec): GeckoTerminal's candles below `covFrom`, up to
+   * HIST_BACK_LIMIT and the room left in the row, down to the coin's creation bucket. Every row of the answer from the
+   * creation bucket on is kept (GeckoTerminal sends no row for a bucket without trades, so a sparse coin's rows reach
+   * further back than `limit` buckets). A graduated coin whose row does not reach its migration (onCurve) asks its pool
+   * first and, once the pool's start is reached, the curve up to the pool's oldest bucket, whose two candles are
+   * combined (combineVenues, also when the pool's one was stored by an earlier fetch); its migration bucket is then
+   * kept (mig_at). An answer with fewer rows than asked is GeckoTerminal's floor: covFrom drops to the creation bucket
+   * (0 without createdAt) and no later page asks again. fetchedAt is left alone (#due measures the top fetch's age), but a rebase. No
+   * seam check: the row passed it for the same pools and currency, and every answer's pair is checked.
+   * A row whose coverage starts above the bucket after our first stored trade's (b0 + R: the newest window, or a trim,
+   * left it there, our trades having been kept from before it) is asked from b0 down instead: GeckoTerminal's candles
+   * above b0 are never shown (mergeHistory takes them below b0 and at the seam bucket only), so walking down to b0
+   * would spend calls and row room on nothing. Its candles from b0 + R up go and it covers [covFrom, b0 + R) (covTo
+   * = b0 + R): the stretch skipped is never claimed, and #fetchFwd fills upward if retention moves b0 past it. Its
+   * fetchedAt goes to 0 (the window's candles went): if retention moves b0 into the newest window, the first serve()
+   * then finds the row due at once (no HIST_EXTEND_S wait), and its newest job is queued before any chain sampling.
+   */
+  async #fetchBack({ mint, R, unit }) {
+    const c = this.model.get(mint);
+    let row = this.#row(mint, R, unit);
+    if (!c?.tracked || row?.state !== "ok") return;
+    const firstTrade = this.db.tradeAfter(mint, -1), b0 = firstTrade ? Math.floor(firstTrade.time / R) * R : Infinity;
+    if (row.covFrom > b0 + R) row = { ...row, candles: row.candles.filter((x) => x.t < b0 + R), covFrom: b0 + R, covTo: b0 + R, fetchedAt: 0 };
+    const nowS = this.#nowS(), cLo = c.createdAt != null ? Math.floor(c.createdAt / R) * R : null, floorAt = cLo ?? 0;
+    const room = HIST_ROW_CANDLES - row.candles.length;
+    if (room < 1) return;
+    const limitAt = (b, rm) => Math.min(HIST_BACK_LIMIT, rm, cLo != null ? (b - cLo) / R + 1 : HIST_BACK_LIMIT);
+    const write = (candles, covFrom, pools, floored, migAt) => {
+      const next = { ...row, candles, covFrom: Math.min(covFrom, row.covFrom), pools, migAt, askedAt: Math.max(row.askedAt, nowS) };
+      this.db.histSet({ ...next, data: candles.map((x) => [x.t, x.o, x.h, x.l, x.c, x.v]) });
+      this.#cacheSet(`${mint}:${R}:${unit}`, next);
+      this.stats.backFetched++; if (floored) this.stats.backFloor++;
+    };
+    const before = row.covFrom - R;
+    const limit = limitAt(before, room);
+    if (limit < 1) return write(row.candles, floorAt, row.pools, true, row.migAt); // nothing left above the coin's start
+    const ask = (pool, b, lim) => this.#askPage(c, R, unit, pool, b, lim, floorAt);
+    // A row written before mig_at existed whose pools name the curve: its stored oldest candle may be the curve's.
+    const legacy = row.migAt == null && row.pools.includes(c.curve);
+    const venues = c.migrated && c.pool ? (onCurve(row) ? [c.curve] : [c.pool, c.curve]) : [c.curve];
+    const first = await ask(venues[0], before, limit);
+    // How far down GeckoTerminal was asked: the oldest candle received, or the asked bottom when a full answer had none in
+    // range (its rows were older); a short empty answer adds nothing.
+    const reached = (a, b, lim) => a.candles[0]?.t ?? (a.total >= lim ? b - (lim - 1) * R : row.covFrom);
+    let got = first.candles, floored = first.total < limit, low = reached(first, before, limit), migAt = row.migAt;
+    const pools = new Set(row.pools);
+    if (first.candles.length) pools.add(venues[0]);
+    if (venues.length > 1 && first.total < limit) {
+      // The pool's start (the migration) is reached: the curve up to the pool's oldest bucket, fetched now or stored.
+      const pb = first.candles[0]?.t ?? row.candles[0]?.t ?? before;
+      const lim2 = limitAt(pb, room - first.candles.length + 1);
+      let second = null;
+      if (lim2 >= 1) {
+        try { second = await ask(venues[1], pb, lim2); } catch (e) { if (!first.candles.length || e?.kind === "stopped" || e?.aborted) throw e; }
+      }
+      if (second) {
+        const poolAt = first.candles.find((x) => x.t === pb) ?? (legacy ? null : row.candles.find((x) => x.t === pb));
+        got = [...first.candles.filter((x) => x.t !== pb), ...combineVenues(poolAt ? [poolAt] : [], second.candles)];
+        floored = second.total < lim2;
+        if (second.candles.length) pools.add(venues[1]);
+        // The pool had no row at all at or before `before`: it starts above this stretch, which is the curve's alone, so
+        // the row is onCurve after this write (covFrom ≤ row.covFrom) and later pages ask the curve only (a legacy row too).
+        if (poolAt) migAt = pb; else if (first.oldest == null) migAt = row.covFrom;
+        low = Math.min(low, reached(second, pb, lim2));
+      } else floored = false; // the curve could not be asked (its call failed, or the row is full): the pool's page is kept, not floored
+    }
+    const byT = new Map(row.candles.map((x) => [x.t, x]));
+    for (const x of got) byT.set(x.t, x);
+    write([...byT.values()].sort((a, b) => a.t - b.t), floored ? floorAt : low, [...pools], floored, migAt);
+  }
+  /**
+   * Fills an ok row upward from its top `covTo` (a page found the stretch below our first stored trade uncovered: the
+   * trades table moved past the row's top, and the newest window no longer reaches there to fetch it again): one call of
+   * up to HIST_BACK_LIMIT buckets from `covTo` up, toward our first stored trade's bucket (the seam) or the newest final
+   * bucket, whichever is lower. GeckoTerminal answers the newest rows at or before `before`, so the stretch [covTo,
+   * before] is known whatever came: covTo rises to before + R, and the page asks again for the rest. A graduated coin
+   * asks its pool, and its curve too when the pool starts inside the stretch (up to the pool's oldest bucket, combined).
+   * Past HIST_ROW_CANDLES the oldest candles go (covFrom rises to the oldest kept). fetchedAt is left alone.
+   */
+  async #fetchFwd({ mint, R, unit }) {
+    const c = this.model.get(mint), row = this.#row(mint, R, unit);
+    if (!c?.tracked || row?.state !== "ok") return;
+    const nowS = this.#nowS(), top = Math.floor((nowS - HIST_SETTLE_S) / R) * R - R;
+    const firstTrade = this.db.tradeAfter(mint, -1), b0 = firstTrade ? Math.floor(firstTrade.time / R) * R : Infinity;
+    const lo = row.covTo, to = Math.min(b0 + R, top + R);
+    if (lo >= to) return;
+    const lim = Math.min(HIST_BACK_LIMIT, (to - lo) / R), before = lo + (lim - 1) * R;
+    const venues = c.migrated && c.pool ? [c.pool, c.curve] : [c.curve];
+    const first = await this.#askPage(c, R, unit, venues[0], before, lim, lo);
+    let got = first.candles, migAt = row.migAt;
+    const pools = new Set(row.pools);
+    if (got.length) pools.add(venues[0]);
+    if (venues.length > 1 && first.total < lim && (first.oldest == null || first.oldest > lo)) {
+      // The pool starts inside the stretch: the curve below its oldest bucket, that bucket combined.
+      const pb = got[0]?.t ?? before;
+      const second = await this.#askPage(c, R, unit, venues[1], pb, (pb - lo) / R + 1, lo);
+      const poolAt = got.find((x) => x.t === pb);
+      got = [...got.filter((x) => x.t !== pb), ...combineVenues(poolAt ? [poolAt] : [], second.candles)];
+      if (second.candles.length) pools.add(venues[1]);
+      if (poolAt && second.candles.length) migAt = pb;
+    }
+    const byT = new Map(row.candles.map((x) => [x.t, x]));
+    for (const x of got) byT.set(x.t, x);
+    let data = [...byT.values()].sort((a, b) => a.t - b.t), covFrom = row.covFrom;
+    if (data.length > HIST_ROW_CANDLES) { data = data.slice(data.length - HIST_ROW_CANDLES); covFrom = data[0].t; }
+    const next = { ...row, candles: data, covFrom, covTo: before + R, pools: [...pools], migAt, askedAt: Math.max(row.askedAt, nowS) };
+    this.db.histSet({ ...next, data: data.map((x) => [x.t, x.o, x.h, x.l, x.c, x.v]) });
+    this.#cacheSet(`${mint}:${R}:${unit}`, next);
+    this.stats.backFetched++; this.stats.backFilled++;
   }
   /**
    * GeckoTerminal's closes against ours where both are complete (ours from the bucket after our first stored trade's,

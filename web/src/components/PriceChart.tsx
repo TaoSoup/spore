@@ -1,9 +1,10 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { AreaSeries, CandlestickSeries, ColorType, CrosshairMode, HistogramSeries, LineStyle, createChart, type IChartApi, type ISeriesApi, type MouseEventParams, type UTCTimestamp } from "lightweight-charts";
-import { api, pumpUrl, type Candle, type Coin, type Trade } from "../lib/api";
+import { api, pumpUrl, type Candle, type Candles, type Coin, type Trade } from "../lib/api";
 import { useEvents } from "../lib/events";
 import { useAsync, useLocalPref } from "../lib/hooks";
 import { fillPollDelay, geckoPoolUrl, historyPending, lastMarkOn, liveCandle, pendingOf, sampledSummary, thinChartText } from "../lib/chart-fill";
+import { ERROR_MS, MAX_ROWS, PAGE_POLL_MS, applyPage, backHint, firstCursor, freshBack, keepView, keyView, mergeFresh, mergeRange, normalize, pressAt, pressMove, pressMoved, seriesKey, takesAnswer, viewSpan, wantOlder, type Back, type Press } from "../lib/chart-pages";
 import { age, clock, signedPct, subscriptSmall, tokens, usd } from "../lib/format";
 import { Empty, ErrorBox, Ext, sym } from "./Bits";
 import { Delta } from "./Stat";
@@ -28,17 +29,6 @@ const toChart = (t: number) => (t + TZ) as UTCTimestamp;
 /// the quote coin. `Key` is the unit the server keyed the series by.
 type Unit = "mcap" | "usd" | "quote";
 type Key = "usd" | "quote";
-
-/// Sort, dedupe and normalise to seconds: the chart library rejects unsorted or repeated times.
-function normalize(rows: Candle[]): Candle[] {
-  const m = new Map<number, Candle>();
-  for (const c of rows) {
-    if (![c.t, c.o, c.h, c.l, c.c].every(Number.isFinite)) continue;
-    const t = c.t > 1e12 ? Math.floor(c.t / 1000) : Math.floor(c.t);
-    m.set(t, { ...c, t, v: Number.isFinite(c.v) ? c.v : 0 });
-  }
-  return [...m.values()].sort((a, b) => a.t - b.t);
-}
 
 /// Axis and legend need more resolution than the page's 3-figure usd(): candles of one coin sit
 /// within a few percent of each other, so five significant digits, subscript notation for dust.
@@ -103,7 +93,9 @@ function ChartDrawing({ kind }: { kind: "loading" | "empty" }) {
 /// Candles + volume from /api/candles, as market cap (the default), USD price or quote price. The
 /// chart instance lives for the component's whole life: resolution and unit changes swap the data,
 /// live trades extend the last candle in place (no flash, no refit), and the server's own
-/// aggregation is re-read at most every 30 s so what is shown converges on what it keeps.
+/// aggregation is re-read at most every 30 s so what is shown converges on what it keeps. Once the
+/// user moves the chart, older candles load a page at a time as the first one nears the left edge
+/// (lib/chart-pages.ts), prepended without moving the candles in view.
 /// `onBuy`: the empty state's "Buy" (the page focuses the trade widget, or opens the phone sheet).
 /// `live`: the page's live store; the header then reads the same live price and market cap as the
 /// price block above it (the OHLC legend keeps the candle's own close).
@@ -164,6 +156,21 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
   const lastReload = useRef(0);
   const dot = useRef<HTMLSpanElement>(null);
   const keyIdx = useRef<number | null>(null);
+  // Older pages (lib/chart-pages.ts). `kept`: the series' raw rows (server units, its price key), the newest window's
+  // and every page's; `rows` is them scaled to the display unit. `gen` is bumped on every reset: an answer of an older
+  // generation is dropped. `series` is what the pages are asked in; `lastData` tells a re-read from a unit change.
+  const kept = useRef<Candle[]>([]);
+  const back = useRef<Back>(freshBack("", null));
+  const gen = useRef(0);
+  const series = useRef<{ mint: string; res: number; key: Key } | null>(null);
+  const lastData = useRef<Candles | null>(null);
+  const retryT = useRef(0), waitT = useRef(0), settleT = useRef(0);
+  const [, setBackTick] = useState(0);
+  const backTick = () => setBackTick((x) => x + 1);
+  // The visible rows' first and last indices: the "in view" change.
+  const [span, setSpan] = useState<[number, number] | null>(null);
+  const olderRef = useRef<() => void>(() => {});
+  const spanRef = useRef<() => void>(() => {});
 
   /// Axis ticks: the library draws the last-value label over the tick marks without hiding them, so a
   /// tick within LABEL_CLEAR px of the last close is left blank. Re-applied when the last close moves.
@@ -238,8 +245,34 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       setAt(t == null || !p.point ? null : { x: p.point.x, y: p.point.y });
     });
     let raf = 0;
-    const later = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; placeDot(); }); };
-    chart.timeScale().subscribeVisibleLogicalRangeChange(later);
+    // The view moved: the dot follows, the "in view" span is read again, and older candles load when the first one nears the edge.
+    const later = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; placeDot(); olderRef.current(); spanRef.current(); }); };
+    // Nothing older loads before the user moves the chart (a drag or pinch that changes the view, the wheel; keys in
+    // onKey). A tap, a click, a page scroll that starts on the chart, or a finger held still to read the crosshair while
+    // the chart shifts or refits by itself does not count, so the chart keeps refitting as history arrives and asks for
+    // no page (lib/chart-pages.ts pressMoved).
+    let press: Press | null = null;
+    const range = () => chart.timeScale().getVisibleLogicalRange();
+    const down = (e: PointerEvent | TouchEvent) => {
+      // A second pointer or finger while one is held: a pinch (the first press keeps its view and place).
+      const second = "touches" in e ? e.touches.length > 1 : !e.isPrimary;
+      if (second) { press = pressMove(press, 0, 0, true); return; }
+      const at = "touches" in e ? e.touches[0] : e;
+      press = pressAt(range(), at.clientX, at.clientY);
+    };
+    const move = (e: PointerEvent | TouchEvent) => {
+      if (!press) return;
+      if ("touches" in e) { if (e.touches[0]) press = pressMove(press, e.touches[0].clientX, e.touches[0].clientY, e.touches.length > 1); }
+      else if (e.isPrimary) press = pressMove(press, e.clientX, e.clientY);
+    };
+    const up = () => { press = null; };
+    const wheel = () => { back.current.moved = true; };
+    const onRange = (r: { from: number; to: number } | null) => { if (pressMoved(press, r)) back.current.moved = true; later(); };
+    for (const ev of ["pointerdown", "touchstart"] as const) el.addEventListener(ev, down, { passive: true });
+    for (const ev of ["pointermove", "touchmove"] as const) window.addEventListener(ev, move, { passive: true });
+    for (const ev of ["pointerup", "pointercancel", "touchend", "touchcancel"] as const) window.addEventListener(ev, up, { passive: true });
+    el.addEventListener("wheel", wheel, { passive: true });
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onRange);
     chart.timeScale().subscribeSizeChange(later);
     // The time scale reports width changes only. The box's height follows the window on the coin page, and the price
     // coordinates move with it: after autoSize's own resize and the price scale's relayout (the next frames, then a
@@ -253,15 +286,24 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     });
     ro.observe(el);
     handles.current = { chart, candles, vol, area }; markOn.current = "candles";
-    return () => { cancelAnimationFrame(raf); cancelAnimationFrame(raf2); clearTimeout(settle); ro.disconnect(); chart.remove(); handles.current = null; };
+    return () => {
+      for (const ev of ["pointerdown", "touchstart"] as const) el.removeEventListener(ev, down);
+      for (const ev of ["pointermove", "touchmove"] as const) window.removeEventListener(ev, move);
+      for (const ev of ["pointerup", "pointercancel", "touchend", "touchcancel"] as const) window.removeEventListener(ev, up);
+      el.removeEventListener("wheel", wheel);
+      cancelAnimationFrame(raf); cancelAnimationFrame(raf2); clearTimeout(settle); ro.disconnect(); chart.remove(); handles.current = null;
+    };
   }, [placeDot]);
 
-  // Full (re)load: resolution or unit changed, or the server series was re-read.
-  useEffect(() => {
-    const h = handles.current; const d = data.data;
-    if (!h || !d) return;
-    const raw = normalize(d.candles);
-    rows.current = raw.map((c) => ({ ...c, o: c.o * factor, h: c.h * factor, l: c.l * factor, c: c.c * factor, v: c.v * vScale }));
+  /// Draws `kept` in the display unit. `fit`: fit the whole series (a new series, or one the user has not moved and that
+  /// has no older pages); otherwise the view keeps the same candles (lib/chart-pages.ts keepView: rows prepended by a
+  /// page or replaced by a re-read do not move it), and the keyboard's candle stays the same candle.
+  const draw = useCallback(({ fit }: { fit: boolean }) => {
+    const h = handles.current;
+    if (!h) return;
+    const ts = h.chart.timeScale();
+    const r0 = ts.getVisibleLogicalRange(), old = rows.current;
+    rows.current = kept.current.map((c) => ({ ...c, o: c.o * factor, h: c.h * factor, l: c.l * factor, c: c.c * factor, v: c.v * vScale }));
     fmtRef.current = fmt;
     h.chart.applyOptions({ localization: { priceFormatter: fmt, tickmarksPriceFormatter: tickFmt } });
     h.candles.applyOptions({ priceFormat: { type: "custom", formatter: fmt, minMove: minMoveFor(rows.current) } });
@@ -272,14 +314,112 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     h.candles.setData(rows.current.map((c) => (c.s ? { time: toChart(c.t) } : { time: toChart(c.t), open: c.o, high: c.h, low: c.l, close: c.c })));
     h.vol.setData(rows.current.map((c) => (c.s ? { time: toChart(c.t) } : { time: toChart(c.t), value: safeV(c.v), color: c.c >= c.o ? VOL_UP : VOL_DOWN })));
     placeMarks();
-    h.chart.timeScale().fitContent();
-    keyIdx.current = null;
+    if (fit) ts.fitContent();
+    else {
+      const v = keepView(r0 ? { from: r0.from, to: r0.to } : null, old, rows.current), cur = ts.getVisibleLogicalRange();
+      if (v && (!cur || Math.abs(cur.from - v.from) > 0.01 || Math.abs(cur.to - v.to) > 0.01)) ts.setVisibleLogicalRange(v);
+    }
+    if (keyIdx.current != null) {
+      const t = old[keyIdx.current]?.t, i = t == null ? -1 : rows.current.findIndex((c) => c.t >= t);
+      keyIdx.current = rows.current.length ? Math.max(0, Math.min(rows.current.length - 1, i < 0 ? rows.current.length - 1 : i)) : null;
+    }
     setVersion((v) => v + 1);
     // The price scale settles over the next frames (autoscale, the axis width): place the dot after it.
-    requestAnimationFrame(() => requestAnimationFrame(() => { placeDot(); refreshTicks(true); }));
-    const t = setTimeout(() => { placeDot(); refreshTicks(false); }, 250);
-    return () => clearTimeout(t);
-  }, [data.data, factor, fmt, vScale, placeDot, placeMarks, tickFmt, refreshTicks]);
+    requestAnimationFrame(() => requestAnimationFrame(() => { placeDot(); refreshTicks(true); spanRef.current(); }));
+    clearTimeout(settleT.current);
+    settleT.current = window.setTimeout(() => { placeDot(); refreshTicks(false); }, 250);
+  }, [factor, fmt, vScale, placeDot, placeMarks, tickFmt, refreshTicks]);
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  // Older pages are dropped with the coin or the resolution (and on unmount): no answer or retry of theirs lands. The
+  // answer on screen then is the previous series' until useAsync drops it: it must not seed the new one (a new factor
+  // redraws in the same commit), so it is marked stale.
+  const dataNow = useRef(data.data);
+  dataNow.current = data.data;
+  const staleData = useRef<Candles | null>(null);
+  useEffect(() => () => {
+    gen.current++; clearTimeout(retryT.current); clearTimeout(waitT.current);
+    back.current = freshBack("", null);
+    staleData.current = dataNow.current;
+  }, [coin.mint, res]);
+  useEffect(() => () => clearTimeout(settleT.current), []);
+
+  // Full (re)load: a new series (coin, resolution or price key: the pages reset and the view fits), a re-read of the same
+  // series (the 30 s reload, the fill/history poll: merged under the pages, the view kept once the user moved it or
+  // pages are loaded), or only the display unit changed (MC, Price, quote: redrawn from the same raw rows).
+  useEffect(() => {
+    const d = data.data;
+    if (!handles.current || !d || d === staleData.current) return;
+    const sk = seriesKey(coin.mint, res, d.priceKey);
+    if (sk !== back.current.key) {
+      gen.current++; clearTimeout(retryT.current); clearTimeout(waitT.current);
+      kept.current = normalize(d.candles);
+      back.current = freshBack(sk, firstCursor(kept.current, res, coin.createdAt));
+      series.current = { mint: coin.mint, res, key: d.priceKey };
+      lastData.current = d;
+      draw({ fit: true });
+      keyIdx.current = null;
+      setSpan(null); backTick();
+    } else if (d !== lastData.current) {
+      lastData.current = d;
+      kept.current = mergeFresh(kept.current, d.candles);
+      const b = back.current;
+      // Before any page the cursor follows the newest window's first row (history arriving, a thin chart filling in).
+      if (!b.pages && !b.busy && b.state === "idle") b.cursor = firstCursor(kept.current, res, coin.createdAt);
+      draw({ fit: !b.moved && !b.pages });
+    } else draw({ fit: false });
+  }, [data.data, draw]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /// Asks for the page below `back.cursor`, one at a time: a `loading` answer is asked again (the request counts as in
+  /// flight meanwhile), a page lands without moving the view, and the next is asked only while the edge is still near.
+  const loadOlder = () => {
+    const b = back.current, s = series.current, hi = b.cursor;
+    if (hi == null || !s) return;
+    const g = gen.current;
+    b.busy = true; backTick();
+    const settle = (next: Back) => {
+      back.current = next; backTick();
+      if (next.state === "held") { clearTimeout(waitT.current); waitT.current = window.setTimeout(() => olderRef.current(), Math.max(0, next.heldUntil - Date.now()) + 50); }
+    };
+    api.candlesBefore(s.mint, s.res, s.key, hi).then((page) => {
+      if (!takesAnswer(g, gen.current)) return;
+      if (page.priceKey !== s.key) throw new Error("another price key");
+      const r = applyPage(back.current, page, hi, Date.now());
+      if (r.apply) {
+        kept.current = mergeRange(kept.current, r.apply.rows, r.apply.lo, r.apply.hi);
+        drawRef.current({ fit: false });
+        if (kept.current.length >= MAX_ROWS && r.back.cursor != null) r.back.state = "full";
+      }
+      if (r.retryInMs != null) {
+        settle({ ...r.back, busy: true });
+        const again = () => { if (!takesAnswer(g, gen.current)) return; if (document.visibilityState === "hidden") { retryT.current = window.setTimeout(again, PAGE_POLL_MS); return; } loadRef.current(); };
+        retryT.current = window.setTimeout(again, r.retryInMs);
+        return;
+      }
+      settle({ ...r.back, busy: false });
+      requestAnimationFrame(() => olderRef.current());
+    }).catch(() => {
+      if (!takesAnswer(g, gen.current)) return;
+      // No error box: the chart itself is fine; older candles are tried again later.
+      settle({ ...back.current, busy: false, state: "held", heldUntil: Date.now() + ERROR_MS });
+    });
+  };
+  const loadRef = useRef(loadOlder);
+  loadRef.current = loadOlder;
+  /// Loads the next older page when the user moved the chart and its first candle is near the left edge.
+  const maybeOlder = () => {
+    const h = handles.current;
+    if (!h) return;
+    const r = h.chart.timeScale().getVisibleLogicalRange();
+    if (wantOlder(back.current, r ? { from: r.from, to: r.to } : null, rows.current.length, Date.now())) loadOlder();
+  };
+  olderRef.current = maybeOlder;
+  spanRef.current = () => {
+    const r = handles.current?.chart.timeScale().getVisibleLogicalRange();
+    const next = viewSpan(r ? { from: r.from, to: r.to } : null, rows.current.length);
+    setSpan((prev) => (prev && next && prev[0] === next[0] && prev[1] === next[1]) || (!prev && !next) ? prev : next);
+  };
 
   // Missed trades being read back (`fill`) or earlier history being read (`history` loading or sampling): ask again
   // every 5 s for 3 min, then every 30 s until nothing is pending (lib/chart-fill.ts; a hidden tab skips its asks). An
@@ -289,6 +429,7 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
   const pending = data.data ? pendingOf(data.data) : null;
   const filling = !!data.data?.fill, histPending = historyPending(data.data?.history);
   const hist = data.data?.history;
+  const gecko = hist?.gecko ?? back.current.gecko;
   useEffect(() => {
     if (!pending) return;
     let n = 0, alive = true, t = 0;
@@ -316,6 +457,10 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       const c: Candle | null = liveCandle(last, bucket, p, v);
       if (!c) return; // older than the last bucket: the server's re-read below will place it
       if (bucket === last.t) rows.current[rows.current.length - 1] = c; else rows.current.push(c);
+      // The raw rows get the same row in server units (the price as keyed, volume unscaled), so a redraw before the
+      // next re-read (a page landing, a unit change) keeps it.
+      const rawLast = kept.current[kept.current.length - 1], rc = rawLast ? liveCandle(rawLast, bucket, raw, v / vScale) : null;
+      if (rc) { if (bucket === rawLast.t) kept.current[kept.current.length - 1] = rc; else kept.current.push(rc); }
       h.area.update({ time: toChart(c.t), value: c.c });
       h.candles.update({ time: toChart(c.t), open: c.o, high: c.h, low: c.l, close: c.c });
       h.vol.update({ time: toChart(c.t), value: safeV(c.v), color: c.c >= c.o ? VOL_UP : VOL_DOWN });
@@ -332,7 +477,11 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
 
   const n = rows.current.length;
   const first = rows.current[0], last = rows.current[n - 1];
-  const change = useMemo(() => (first && last && first.o > 0 ? last.c / first.o - 1 : null), [first, last, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  // "in view": the first visible candle's open to the last visible one's close (the whole series before the first view event).
+  const change = useMemo(() => {
+    const a = span ? rows.current[Math.min(span[0], n - 1)] : first, z = span ? rows.current[Math.min(span[1], n - 1)] : last;
+    return a && z && a.o > 0 ? z.c / a.o - 1 : null;
+  }, [first, last, span, version]); // eslint-disable-line react-hooks/exhaustive-deps
   const shownValue = hover ? hover.c : liveValue ?? last?.c ?? null;
   const headline = shownValue == null ? "—" : unit === "mcap" ? (dollars ? usd(shownValue) : `${fmtCap(false)(shownValue)} ${coin.quoteSymbol}`) : fmt(shownValue);
   const notOurs = data.error && !data.data && /not a spore coin/i.test(data.error);
@@ -356,16 +505,23 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     const next = e.key === "ArrowLeft" ? cur - 1 : e.key === "ArrowRight" ? cur + 1 : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : null;
     if (next == null) return;
     e.preventDefault();
+    // The left arrow on the first candle, or Home: older candles (the crosshair stays on its candle when they land).
+    if (e.key === "Home" || (e.key === "ArrowLeft" && keyIdx.current === 0)) { back.current.moved = true; maybeOlder(); }
     const i = Math.max(0, Math.min(n - 1, keyIdx.current == null && (e.key === "ArrowLeft" || e.key === "ArrowRight") ? n - 1 : next));
     keyIdx.current = i;
-    const c = rows.current[i];
+    const c = rows.current[i], ts = h.chart.timeScale(), r = ts.getVisibleLogicalRange();
+    // Keys cannot drag: a candle outside the view is brought into it (a moved view, so nothing refits it). After a page
+    // landed right-anchored, Home and the left arrow then reach the new rows, and the view's change (subscribed above)
+    // asks for the next page at the left edge, as a drag would.
+    const v = keyView(r ? { from: r.from, to: r.to } : null, i);
+    if (v) { back.current.moved = true; ts.setVisibleLogicalRange(v); }
     h.chart.setCrosshairPosition(c.c, toChart(c.t), h.area);
-    const x = h.chart.timeScale().timeToCoordinate(toChart(c.t)), y = h.area.priceToCoordinate(c.c);
+    const x = ts.timeToCoordinate(toChart(c.t)), y = h.area.priceToCoordinate(c.c);
     setHover(c);
     setAt(x != null && y != null ? { x, y } : null);
   };
   const legend = hover ?? last ?? null;
-  const summary = `${sym(coin)} ${unit === "mcap" ? "market cap" : "price"}, ${n} candles at ${resLabel(res)}${change != null ? `, ${change >= 0 ? "up" : "down"} ${Math.abs(change * 100).toFixed(1)} % in view` : ""}${sampledSummary(rows.current)}. Use the arrow keys to read each candle.`;
+  const summary = `${sym(coin)} ${unit === "mcap" ? "market cap" : "price"}, ${n} candles at ${resLabel(res)}${change != null ? `, ${change >= 0 ? "up" : "down"} ${Math.abs(change * 100).toFixed(1)} % in view` : ""}${sampledSummary(rows.current)}. Use the arrow keys to read each candle; the left arrow on the first one loads older candles.`;
   const overlay = data.loading ? <div className="chart-loading"><ChartDrawing kind="loading" /><span className="chart-state mono" role="status">reading candles…</span></div>
     // In "ours" mode the server keeps candles only for Spore launches (DESIGN §11.1); a parent
     // from the wider tree is not an error, it just has no chart here.
@@ -379,7 +535,7 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
         <div className="chart-legend" aria-live="off">
           <span className="chart-k">{unit === "mcap" ? "MC" : "Price"}</span>
           <b className="chart-v mono">{headline}</b>
-          {!hover && change != null && n >= 2 && <Delta ratio={change} label="in view" title={`From the first candle's open to the last close (${n} candles at ${resLabel(res)})`} />}
+          {!hover && change != null && n >= 2 && <Delta ratio={change} label="in view" title="From the first candle in view to the last one in view" />}
           {hover && <span className="chart-when mono">{clock(hover.t)}</span>}
           {/* The last candle can be hours old while the header shows today's price: say when it closed.
               Without a live price the header is the last candle's close, and says so. */}
@@ -437,9 +593,10 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
         <div className="chart-foot">
           {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{filling ? " · filling missed trades…" : ""}
             {histPending ? " · reading earlier history…" : ""}
-            {/* The credit for GeckoTerminal's candles, shown whenever they are in view. */}
-            {hist?.gecko && <> · earlier: <Ext href={geckoPoolUrl(hist.gecko)}>GeckoTerminal ↗</Ext></>}
-            {hist?.chain === "sampled" && <span title="A line through a few real trades; highs, lows and volume are not known there"> · some earlier prices sampled from the chain</span>}
+            {backHint(back.current, n)}
+            {/* The credit for GeckoTerminal's candles, shown whenever they are in view (the newest window's or older pages'). */}
+            {gecko && <> · earlier: <Ext href={geckoPoolUrl(gecko)}>GeckoTerminal ↗</Ext></>}
+            {(hist?.chain === "sampled" || back.current.chain === "sampled") && <span title="A line through a few real trades; highs, lows and volume are not known there"> · some earlier prices sampled from the chain</span>}
             {hist?.chain === "exact" ? " · earlier trades read from the chain" : ""}
             {change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
           <span className="chart-foot-live">{aside}<LiveDot /></span>

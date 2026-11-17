@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS fill_coins_at ON fill_coins(at);
 CREATE TABLE IF NOT EXISTS chart_history (
   mint TEXT NOT NULL, res INTEGER NOT NULL, unit TEXT NOT NULL, state TEXT NOT NULL,
   pools TEXT NOT NULL DEFAULT '[]', cov_from INTEGER NOT NULL, cov_to INTEGER NOT NULL,
-  fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '[]',
+  fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '[]', mig_at INTEGER,
   PRIMARY KEY (mint, res, unit)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS chart_history_asked ON chart_history(asked_at);
@@ -201,8 +201,10 @@ export class Db {
     // per coin the prices sampled from the chain (`data` [[time, priceQuote, priceUsd|null, quoteAtoms, exact],…], the
     // stretch [from_t, to_t), `retry_at` 0 = final, `retry_ext` 1 when that retry is an extension an outage or the day's
     // cap stopped); both pruned by `asked_at` (unix s, written at most hourly). `retry_ext` came a build later: added
-    // when absent, like gone_attempts.
+    // when absent, like gone_attempts. So did `mig_at` (a graduated coin's row: the bucket where its pool's candles meet
+    // its curve's, the migration's, once the curve was fetched; null otherwise or in rows written before it).
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
+    if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -240,6 +242,9 @@ export class Db {
       // after live rows of the same second, or a child's after the rest of its own), then the rowid (the arrival order).
       tradesFor: p("SELECT * FROM trades WHERE mint = ? ORDER BY time DESC, slot DESC, rowid DESC LIMIT ?"),
       tradesSince: p("SELECT * FROM trades WHERE mint = ? AND time >= ? ORDER BY time ASC, slot ASC, rowid ASC"),
+      // An older page of the coin page's chart (/api/candles before=): [from, to), and the newest trade below a page.
+      tradesRange: p("SELECT * FROM trades WHERE mint = ? AND time >= ? AND time < ? ORDER BY time ASC, slot ASC, rowid ASC"),
+      tradeTimeBefore: p("SELECT MAX(time) AS t FROM trades WHERE mint = ? AND time < ?"),
       tradesWindow: p("SELECT mint, time, is_buy, value_usd FROM trades WHERE time >= ? ORDER BY time, rowid"),
       vol24: p("SELECT COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE mint = ? AND time >= ?"),
       vol24All: p("SELECT mint, COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE time >= ? GROUP BY mint"),
@@ -276,14 +281,19 @@ export class Db {
       // The chart history (lib/chart-history.mjs). The kept key (?2-?4: the SOL/USD reference row) survives both prunes
       // while a samples row was written since ?1 (?4 '' keeps nothing).
       histGet: p("SELECT * FROM chart_history WHERE mint = ? AND res = ? AND unit = ?"),
-      histSet: p(`INSERT OR REPLACE INTO chart_history (mint, res, unit, state, pools, cov_from, cov_to, fetched_at, asked_at, data)
-        VALUES (@mint, @res, @unit, @state, @pools, @covFrom, @covTo, @fetchedAt, @askedAt, @data)`),
+      histSet: p(`INSERT OR REPLACE INTO chart_history (mint, res, unit, state, pools, cov_from, cov_to, fetched_at, asked_at, data, mig_at)
+        VALUES (@mint, @res, @unit, @state, @pools, @covFrom, @covTo, @fetchedAt, @askedAt, @data, @migAt)`),
       histTouch: p("UPDATE chart_history SET asked_at = ?1 WHERE mint = ?2 AND res = ?3 AND unit = ?4 AND asked_at < ?1"),
       histPruneOld: p(`DELETE FROM chart_history WHERE asked_at < ?1
         AND NOT (mint = ?2 AND res = ?3 AND unit = ?4 AND EXISTS (SELECT 1 FROM chart_samples WHERE at >= ?1))`),
       histPruneOver: p(`DELETE FROM chart_history WHERE (mint, res, unit) IN (SELECT mint, res, unit FROM chart_history
         WHERE NOT (mint = ?2 AND res = ?3 AND unit = ?4 AND EXISTS (SELECT 1 FROM chart_samples WHERE at >= ?1)) ORDER BY asked_at ASC LIMIT ?5)`),
       histCount: p("SELECT COUNT(*) AS n FROM chart_history"),
+      // Deep rows (data longer than ?1 bytes: grown backward by older pages) asked before ?3, or past the ?2 most recently asked.
+      // octet_length reads a value's size from the record header; length() of TEXT loads (and counts) the whole value, which
+      // read every row's data on each hourly prune.
+      histDeep: p(`SELECT mint, res, unit FROM chart_history WHERE octet_length(data) > ?1 AND (asked_at < ?3 OR (mint, res, unit) NOT IN
+        (SELECT mint, res, unit FROM chart_history WHERE octet_length(data) > ?1 ORDER BY asked_at DESC LIMIT ?2))`),
       samplesGet: p("SELECT * FROM chart_samples WHERE mint = ?"),
       samplesSet: p(`INSERT OR REPLACE INTO chart_samples (mint, state, from_t, to_t, calls, at, asked_at, retry_at, retry_ext, data)
         VALUES (@mint, @state, @fromT, @toT, @calls, @at, @askedAt, @retryAt, @retryExt, @data)`),
@@ -399,6 +409,10 @@ export class Db {
   static trade(r) { return { sig: r.sig, mint: r.mint, slot: r.slot, time: r.time, isBuy: !!r.is_buy, user: r.user, baseAmount: r.base_amount, quoteAmount: r.quote_amount, priceQuote: r.price_quote, priceUsd: r.price_usd, valueUsd: r.value_usd }; }
   tradesFor(mint, limit = 50) { return this.q.tradesFor.all(mint, limit).map(Db.trade); }
   tradesSince(mint, since) { return this.q.tradesSince.all(mint, since).map(Db.trade); }
+  /** The mint's trades with `from <= time < to`, in (time, slot, rowid) order (as tradesSince). */
+  tradesRange(mint, from, to) { return this.q.tradesRange.all(mint, from, to).map(Db.trade); }
+  /** The time of the mint's newest trade strictly before `t`; null when it has none. */
+  tradeTimeBefore(mint, t) { return this.q.tradeTimeBefore.get(mint, t)?.t ?? null; }
   /** Every stored trade at or after `sinceS`, oldest first (trades_time index): what seeds the activity counters at boot. */
   /** Trades since `sinceS` in time order, one at a time: the boot seed reads millions of rows, and as one array they were 1.7 GB of heap at 3M. */
   *tradesWindow(sinceS) { for (const r of this.q.tradesWindow.iterate(sinceS)) yield { mint: r.mint, time: r.time, isBuy: !!r.is_buy, valueUsd: r.value_usd }; }
@@ -486,7 +500,7 @@ export class Db {
   fillCoinsPrune(beforeS) { return Number(this.q.fillCoinsPrune.run(beforeS).changes); }
   // ---- the chart history (lib/chart-history.mjs): rows come back raw (`pools` and `data` JSON strings), the caller parses them once into its cache
   histGet(mint, res, unit) { return this.q.histGet.get(mint, res, unit) ?? null; }
-  histSet(r) { this.q.histSet.run({ mint: r.mint, res: r.res, unit: r.unit, state: r.state, pools: typeof r.pools === "string" ? r.pools : JSON.stringify(r.pools ?? []), covFrom: r.covFrom, covTo: r.covTo, fetchedAt: r.fetchedAt, askedAt: r.askedAt, data: typeof r.data === "string" ? r.data : JSON.stringify(r.data ?? []) }); }
+  histSet(r) { this.q.histSet.run({ mint: r.mint, res: r.res, unit: r.unit, state: r.state, pools: typeof r.pools === "string" ? r.pools : JSON.stringify(r.pools ?? []), covFrom: r.covFrom, covTo: r.covTo, fetchedAt: r.fetchedAt, askedAt: r.askedAt, data: typeof r.data === "string" ? r.data : JSON.stringify(r.data ?? []), migAt: r.migAt ?? null }); }
   histTouch(mint, res, unit, askedAt) { return Number(this.q.histTouch.run(askedAt, mint, res, unit).changes) > 0; }
   samplesGet(mint) { return this.q.samplesGet.get(mint) ?? null; }
   samplesSet(r) { this.q.samplesSet.run({ mint: r.mint, state: r.state, fromT: r.fromT, toT: r.toT, calls: r.calls ?? 0, at: r.at, askedAt: r.askedAt, retryAt: r.retryAt ?? 0, retryExt: r.retryExt ? 1 : 0, data: typeof r.data === "string" ? r.data : JSON.stringify(r.data ?? []) }); }
@@ -507,6 +521,11 @@ export class Db {
       return n;
     });
   }
+  /**
+   * Keys `{ mint, res, unit }` of the rows whose data JSON is longer than `minBytes` that were asked before `beforeS` or
+   * are past the `keep` most recently asked such rows (lib/chart-history.mjs trims them to their newest candles).
+   */
+  histDeep(minBytes, keep, beforeS) { return this.q.histDeep.all(minBytes, keep, beforeS).map((r) => ({ mint: r.mint, res: r.res, unit: r.unit })); }
   histCounts() { return { history: this.q.histCount.get().n, samples: this.q.samplesCount.get().n }; }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
 

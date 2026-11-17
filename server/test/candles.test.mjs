@@ -3,7 +3,7 @@
 // for sampling, and the merge with our own candles. No I/O.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildCandles, timeframeOf, parseOhlcv, combineVenues, seamCheck, holeOf, pickSamples, mergeHistory, HIST_HOLE_MIN } from "../lib/candles.mjs";
+import { buildCandles, buildCandlesKeyed, clipPage, pageNext, timeframeOf, parseOhlcv, combineVenues, seamCheck, holeOf, pickSamples, mergeHistory, HIST_HOLE_MIN } from "../lib/candles.mjs";
 import { buildCandles as fromApi } from "../lib/api.mjs";
 
 const R = 300;
@@ -136,4 +136,37 @@ test("8. mergeHistory: GT below b0, own from b0; the seam combined; nothing belo
   const all = mergeHistory({ own: [], gt: [k(3000, 1, 1, 1, 1), k(9000, 2, 2, 2, 2)], pts: [[12_000, 3, null, 1, 0]], key: "quote", R, lo, b0: Infinity, B: null, qd: 9 });
   assert.deepEqual(all.candles.map((c) => c.t), [3000, 9000, 12_000]);
   assert.deepEqual([all.gtShown, all.chain], [true, "sampled"]);
+});
+
+// ---------------------------------------------------------------- older pages of the coin page's chart (scroll back)
+test("back 1. buildCandlesKeyed: usd leaves out and counts trades without a USD price; quote keeps every trade with atom volume; all priced → buildCandles' candles", () => {
+  const tr = (time, pq, pu, quote = "5", vu = pu) => ({ time, priceQuote: pq, priceUsd: pu, valueUsd: vu, quoteAmount: quote });
+  const mixed = [tr(610, 2, 200), tr(650, 3, null, "7"), tr(920, 4, 400, "1", null)];
+  assert.deepEqual(buildCandlesKeyed(mixed, R, "usd"), { candles: [k(600, 200, 200, 200, 200, 200), k(900, 400, 400, 400, 400, 0)], priceKey: "usd", unpriced: 1 });
+  assert.deepEqual(buildCandlesKeyed(mixed, R, "quote"), { candles: [k(600, 2, 3, 2, 3, 12), k(900, 4, 4, 4, 4, 1)], priceKey: "quote", unpriced: 0 });
+  const priced = [tr(610, 2, 200), tr(650, 3, 300), tr(1300, 1, 100)];
+  const b = buildCandles(priced, R);
+  assert.equal(b.priceKey, "usd");
+  assert.deepEqual(buildCandlesKeyed(priced, R, "usd").candles, b.candles);
+  assert.deepEqual(buildCandlesKeyed(mixed, R, "quote").candles, buildCandles(mixed, R).candles, "unpriced: buildCandles is quote-keyed too");
+  assert.deepEqual(buildCandlesKeyed([], R, "usd"), { candles: [], priceKey: "usd", unpriced: 0 });
+});
+
+test("back 2. clipPage keeps [from, hi) only; pageNext takes the largest candidate, never above lo, null at or below cLo, honours gtFloor", () => {
+  const cs = [k(300, 1, 1, 1, 1), k(600, 1, 1, 1, 1), k(900, 1, 1, 1, 1), k(1200, 1, 1, 1, 1)];
+  assert.deepEqual(clipPage(cs, 600, 1200).map((c) => c.t), [600, 900]);
+  assert.deepEqual(clipPage(cs, 1200, 1200), []);
+  const lo = 30_000;
+  assert.equal(pageNext({ lo, R }), null, "nothing older");
+  assert.equal(pageNext({ lo, ownOlderT: 20_150, R }), 20_400, "our newest trade below lo: its bucket + R");
+  const gt = [k(9000, 1, 1, 1, 1), k(24_000, 1, 1, 1, 1), k(30_000, 1, 1, 1, 1)];
+  assert.equal(pageNext({ lo, ownOlderT: 20_150, gt, R }), 24_300, "GeckoTerminal's newest candle below lo");
+  assert.equal(pageNext({ lo, gt, gtFloor: false, covFrom: 27_000, R }), 27_000, "an unknown stretch below covFrom");
+  assert.equal(pageNext({ lo, gt, gtFloor: true, covFrom: 27_000, R }), 24_300, "floored: covFrom says nothing");
+  assert.equal(pageNext({ lo, gtFloor: false, covFrom: 27_000, cLo: 27_000, R }), null, "covFrom at the coin's start");
+  assert.equal(pageNext({ lo, pts: [[10_000, 1, 1, 1, 0], [25_610, 1, 1, 1, 0], [31_000, 1, 1, 1, 0]], R }), 25_800, "the newest point below lo");
+  assert.equal(pageNext({ lo, gtFloor: false, covFrom: 45_000, R }), lo, "never above lo");
+  assert.equal(pageNext({ lo, ownOlderT: 20_150, cLo: 20_400, R }), null, "at the creation bucket");
+  assert.equal(pageNext({ lo, ownOlderT: 20_150, cLo: 20_100, R }), 20_400, "above it");
+  assert.equal(pageNext({ lo, gtFloor: false, covFrom: 300, R }), 300, "no createdAt: anything above 0");
 });
