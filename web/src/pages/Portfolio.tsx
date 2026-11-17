@@ -117,6 +117,19 @@ const NO_SOL_PRICE = "The SOL price is not known right now, so figures stay in d
 const target = (c: ClaimCoin): ClaimTarget => ({ mint: c.mint, symbol: c.symbol, image: c.image, quoteSymbol: c.quoteSymbol, quoteDecimals: c.quoteDecimals, total: c.total, perShare: c.perShare, depth: c.depth });
 const feeText = (k: PfClaim) => amount(tokens(k.amount, k.quoteDecimals), k.quoteSymbol);
 const mapLink = (mint: string) => `/map?focus=${encodeURIComponent(mint)}`;
+const coinLink = (mint: string) => `/c/${encodeURIComponent(mint)}`;
+/// A coin's name opens its page (chart, trade card, details); the small pin beside it shows the coin on the map, for
+/// those who want its family around it. Both are plain links, so a middle click opens either in a new tab.
+function CoinName({ mint, name, full }: { mint: string; name: string; full: string }) {
+  return (
+    <span className="pf-coin">
+      <Link to={coinLink(mint)} className="pf-sym" title={`${full}: chart and trading`}>{name}</Link>
+      <Link to={mapLink(mint)} className="pf-map" title={`${full} on the map`} aria-label={`${full} on the map`}>
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 21s-6-5.6-6-11a6 6 0 0 1 12 0c0 5.4-6 11-6 11Z" /><circle cx="12" cy="10" r="2.2" /></svg>
+      </Link>
+    </span>
+  );
+}
 /// A base58 Solana address, or null.
 function address(s: string | null): string | null {
   if (!s) return null;
@@ -720,7 +733,7 @@ function HoldingRow({ r, a, p, state, periodName }: { r: PfRow; a: Actions; p: P
     <li className="pf-hold">
       <Logo src={c.image} label={c.symbol} size={28} />
       <span className="pf-hold-main">
-        <Link to={mapLink(c.mint)} className="pf-sym" title={`${c.name ?? name} on the map`}>{name}</Link>
+        <CoinName mint={c.mint} name={name} full={c.name ?? name} />
         {c.parent && <span className="pf-name" title={`Priced in ${sym(c.parent)}`}>in {sym(c.parent)}</span>}
       </span>
       <span className="pf-hold-val">
@@ -757,7 +770,7 @@ function ClosedList({ rows, a, periodName }: { rows: PnlRow[]; a: Actions; perio
             <li key={r.mint} className="pf-shut">
               <Logo src={r.coin.image} label={r.coin.symbol} size={28} />
               <span className="pf-hold-main">
-                <Link to={mapLink(r.mint)} className="pf-sym" title={`${r.coin.name ?? name} on the map`}>{name}</Link>
+                <CoinName mint={r.mint} name={name} full={r.coin.name ?? name} />
                 <span className="pf-name" title={r.lastAt !== null ? `Last trade ${when(r.lastAt)}` : undefined}>last trade {ago(r.lastAt)}</span>
               </span>
               <span className="pf-shut-pl" title={r.realizedUsd === null ? (r.sells > 0 ? "Sold without a recorded buy, or without a price to value it with" : "Nothing sold in this period") : r.realizedPartial ? APPROX_NOTE : undefined}>
@@ -872,7 +885,7 @@ function Activity({ wallet, stamp, total, prices, readOnly, reading }: { wallet:
               <span className={`pf-act-side ${buy ? "up" : "down"}`}>{buy ? "Buy" : "Sell"}</span>
               <span className="pf-act-coin">
                 <Logo src={t.coin?.image} label={t.coin?.symbol} size={22} />
-                <Link to={mapLink(t.mint)} className="pf-sym" title={`${t.coin?.name ?? name} on the map`}>{name}</Link>
+                <CoinName mint={t.mint} name={name} full={t.coin?.name ?? name} />
               </span>
               <span className="pf-act-amt"><span className="sr-only">Amount </span><span className="pf-num">{amount(tokens(t.baseAmount, t.baseDecimals))}</span></span>
               <span className="pf-act-quote" title={dollars !== null ? (solQuote || m.unit === "usd" ? "In dollars at today's price" : "In SOL at today's prices") : undefined}>
@@ -970,7 +983,7 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
       <header className="pf-card-head">
         <Logo src={p.image} label={p.symbol} size={40} />
         <div className="pf-card-title">
-          <h3 id={id}><Link to={mapLink(p.mint)} className="pf-sym" title={`${label} on the map`}>{label}</Link>{self && <SporeTag r={self} />}</h3>
+          <h3 id={id}>{tracked ? <CoinName mint={p.mint} name={label} full={label} /> : <Link to={mapLink(p.mint)} className="pf-sym" title={`${label} on the map`}>{label}</Link>}{self && <SporeTag r={self} />}</h3>
           <span className="pf-name" title={p.mint}>{p.name ?? (tracked ? short(p.mint, 4) : "not on Spore")}</span>
         </div>
         {g.rows.length > 0 && <span className="pf-count">{plural(g.rows.length, "pair")}</span>}
@@ -990,7 +1003,7 @@ function GroupCard({ g, a }: { g: PfGroup; a: Actions }) {
               <li key={c.mint} className="pf-row">
                 <Logo src={c.image} label={c.symbol} size={28} />
                 <span className="pf-row-main">
-                  <Link to={mapLink(c.mint)} className="pf-sym" title={`${c.name ?? name} on the map`}>{name}</Link>
+                  <CoinName mint={c.mint} name={name} full={c.name ?? name} />
                   {r.feeShare && <SporeTag r={r} />}
                 </span>
                 <TradeButtons mint={c.mint} label={name} held={!!r.held} a={a} />
