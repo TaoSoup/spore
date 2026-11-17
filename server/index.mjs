@@ -18,6 +18,8 @@ import { ApiKeys } from "./lib/apikeys.mjs";
 import { Jupiter } from "./lib/jupiter.mjs";
 import { PnlTracker } from "./lib/pnl-tracker.mjs";
 import { TradeFiller } from "./lib/trade-fill.mjs";
+import { Gecko } from "./lib/gecko.mjs";
+import { ChartHistory } from "./lib/chart-history.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -100,10 +102,16 @@ const pnl = new PnlTracker({ model, rpc: rpc.lane("pnl"), cfg: cfg.pnl, log });
 // Trade gap fill: the trades the live streams missed (a restart, a reconnect) are read back when a coin's chart is opened,
 // on their own RPC lane (RPC_URL only). Made before the indexer starts: its streams report their gaps to model.tradeFill.
 const tradeFill = new TradeFiller({ model, rpc: cfg.fill.enabled ? rpc.lane("fill") : null, cfg: cfg.fill, streams: () => [indexer.live, indexer.livePools].filter(Boolean), log });
+// Chart history: the coin page's chart also shows the time before a coin's first stored trade, from GeckoTerminal's
+// public candles, and where it has none, from a few transactions read on the fill's lane while the fill is idle.
+const chartHistory = cfg.history.enabled
+  ? new ChartHistory({ model, gecko: new Gecko({ perMin: cfg.history.geckoPerMin, daily: cfg.history.geckoDaily, db, log }),
+    rpc: cfg.history.sample ? rpc.lane("fill") : null, fill: tradeFill, cfg: cfg.history, log })
+  : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -140,6 +148,7 @@ meta.start({ slicedBoot: true });
 agentRunner.start();
 pnl.start();
 tradeFill.start();
+chartHistory?.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the
 // index to settle. AGENTS=off|dry never constructs this.
 let liveTimer = null;
@@ -161,7 +170,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

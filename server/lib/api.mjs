@@ -31,6 +31,7 @@ import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
 import { createPortfolio } from "./portfolio.mjs";
 import { PnlTracker, ACTIVITY_MAX, sinceOf } from "./pnl-tracker.mjs";
+import { buildCandles } from "./candles.mjs";
 
 export { RateLimiter };
 
@@ -246,21 +247,8 @@ export function mapApiPrepared(entry) {
   return entry.apiPreparing;
 }
 
-/** Trades → OHLC candles of `res` seconds; USD when every trade has a USD price, else quote units. */
-export function buildCandles(trades, res) {
-  const usd = trades.length > 0 && trades.every((t) => t.priceUsd != null);
-  const key = usd ? "priceUsd" : "priceQuote";
-  const buckets = new Map();
-  for (const t of trades) {
-    const bucket = Math.floor(t.time / res) * res;
-    const price = t[key];
-    const vol = usd ? (t.valueUsd ?? 0) : Number(BigInt(t.quoteAmount));
-    const c = buckets.get(bucket);
-    if (!c) buckets.set(bucket, { t: bucket, o: price, h: price, l: price, c: price, v: vol });
-    else { c.h = Math.max(c.h, price); c.l = Math.min(c.l, price); c.c = price; c.v += vol; }
-  }
-  return { candles: [...buckets.values()].sort((a, b) => a.t - b.t), priceKey: usd ? "usd" : "quote" };
-}
+// Candles (lib/candles.mjs): re-exported here, where the route and the tests have always found them.
+export { buildCandles } from "./candles.mjs";
 
 /**
  * Health: what a load balancer and an operator need in one read. `ok` turns false when the live
@@ -291,7 +279,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -341,6 +329,11 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   const pnlOf = pnl ?? model.walletTrades ?? new PnlTracker({ model, now, log });
   // The trade gap fill (lib/trade-fill.mjs), when the server runs one: a chart request queues the coin's missed trades.
   const fillOf = tradeFill ?? model.tradeFill ?? null;
+  // The chart history (lib/chart-history.mjs), when the server runs one: the coin page's chart (`history=1`) also shows
+  // the time before the coin's first stored trade. New history jobs one IP may start per window (each can cost
+  // GeckoTerminal requests and chain reads); serving what is stored is not limited, and a refusal is never a 429.
+  const histOf = chartHistory ?? null;
+  const histNew = new RateLimiter({ limit: limitOf("histnew").limit, windowMs: limitOf("histnew").windowMs, now });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -383,7 +376,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -574,6 +567,13 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     // until it is gone. Absent when nothing is pending.
     const fill = fillOf?.want(mint) ?? null;
     if (fill) body.fill = fill;
+    // `history=1` (the coin page's chart only): the time before the coin's first stored trade, from GeckoTerminal or
+    // sampled from the chain; `history` says what is in the answer or still being read. Ignored with scope=all (the
+    // map's panel) and wherever it does not apply (ChartHistory.serve answers null): the body is then today's.
+    if (histOf && req.query.history === "1" && req.query.scope !== "all") {
+      const h = histOf.serve(c, resSec, body, model.db.tradeAfter(mint, -1), { mayQueue: () => histNew.check(req.ip ?? "?").ok });
+      if (h) { body.candles = h.candles; body.priceKey = h.priceKey; if (h.history) body.history = h.history; }
+    }
     sendCachedJson(req, res, body, { maxAge: 5 });
   });
 

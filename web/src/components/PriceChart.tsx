@@ -3,7 +3,7 @@ import { AreaSeries, CandlestickSeries, ColorType, CrosshairMode, HistogramSerie
 import { api, pumpUrl, type Candle, type Coin, type Trade } from "../lib/api";
 import { useEvents } from "../lib/events";
 import { useAsync, useLocalPref } from "../lib/hooks";
-import { fillPollDelay, thinChartText } from "../lib/chart-fill";
+import { fillPollDelay, geckoPoolUrl, historyPending, lastMarkOn, liveCandle, pendingOf, sampledSummary, thinChartText } from "../lib/chart-fill";
 import { age, clock, signedPct, subscriptSmall, tokens, usd } from "../lib/format";
 import { Empty, ErrorBox, Ext, sym } from "./Bits";
 import { Delta } from "./Stat";
@@ -15,6 +15,9 @@ import "./coin/terminal.css";
 
 const RES: { label: string; sec: number }[] = [{ label: "1m", sec: 60 }, { label: "5m", sec: 300 }, { label: "15m", sec: 900 }, { label: "1h", sec: 3600 }];
 const UP = "#b6ff5c", DOWN = "#ff6b7a";
+/// This chart (and only this one: sparklines, the map panel and the daily change keep the stored trades' meaning) asks
+/// for the coin's history before the server's first stored trade. One object, so data.reload() keeps asking for it.
+const WITH_HISTORY = { history: true } as const;
 const VOL_UP = "rgba(182,255,92,.34)", VOL_DOWN = "rgba(255,107,122,.34)";
 /// The chart library labels its axis and crosshair in UTC; the page (tape, legend, readout) speaks the
 /// reader's local time. Series times are shifted by the local offset at the library boundary only: the
@@ -120,7 +123,7 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
   const [res, setRes] = useLocalPref<number>("chart-res", 300);
   // Older stored values ("usd", "quote") still mean what they meant.
   const [unitPref, setUnitPref] = useLocalPref<string>("chart-unit", "mcap");
-  const data = useAsync(() => api.candles(coin.mint, res), [coin.mint, res]);
+  const data = useAsync(() => api.candles(coin.mint, res, undefined, WITH_HISTORY), [coin.mint, res]);
   const priceKey: Key = data.data?.priceKey ?? "usd";
   // Server candles are in `priceKey`; the other unit is derived with the coin's current USD-per-
   // quote rate, so historical candles in the derived unit are an approximation (flagged in the foot).
@@ -164,19 +167,21 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
 
   /// Axis ticks: the library draws the last-value label over the tick marks without hiding them, so a
   /// tick within LABEL_CLEAR px of the last close is left blank. Re-applied when the last close moves.
+  /// Prices become pixels through the area series: it has a point for every row, while a sampled chain price is only
+  /// whitespace in the candles (a series without a bar in view converts nothing). Both share the right price scale.
   const fmtRef = useRef(fmt);
   const lastY = useRef<number | null>(null);
   const tickFmt = useCallback((values: number[]) => {
     const h = handles.current, last = rows.current[rows.current.length - 1];
-    const y0 = h && last ? h.candles.priceToCoordinate(last.c) : null;
+    const y0 = h && last ? h.area.priceToCoordinate(last.c) : null;
     return values.map((v) => {
-      const y = y0 != null && h ? h.candles.priceToCoordinate(v) : null;
+      const y = y0 != null && h ? h.area.priceToCoordinate(v) : null;
       return y != null && y0 != null && Math.abs(y - y0) < LABEL_CLEAR ? "" : fmtRef.current(v);
     });
   }, []);
   const refreshTicks = useCallback((force: boolean) => {
     const h = handles.current, last = rows.current[rows.current.length - 1];
-    const y = h && last ? h.candles.priceToCoordinate(last.c) : null;
+    const y = h && last ? h.area.priceToCoordinate(last.c) : null;
     if (!h || (!force && y != null && lastY.current != null && Math.abs(y - lastY.current) < 1)) return;
     lastY.current = y;
     h.chart.applyOptions({ localization: { priceFormatter: fmtRef.current, tickmarksPriceFormatter: tickFmt } });
@@ -189,11 +194,22 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     const h = handles.current, el = dot.current, last = rows.current[rows.current.length - 1];
     if (!h || !el) return;
     const x = last ? h.chart.timeScale().timeToCoordinate(toChart(last.t)) : null;
-    const y = last ? h.candles.priceToCoordinate(last.c) : null;
+    const y = last ? h.area.priceToCoordinate(last.c) : null;
     if (x == null || y == null) { el.style.opacity = "0"; return; }
     el.style.opacity = "1";
     el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
     el.dataset.dir = last.c >= last.o ? "up" : "down";
+  }, []);
+
+  /// The last-value label and price line sit on the candles, or on the line when the newest row is a sampled price
+  /// (lib/chart-fill.ts lastMarkOn): the candles' would be missing, or stuck on an older candle's close.
+  const markOn = useRef<"area" | "candles">("candles");
+  const placeMarks = useCallback(() => {
+    const h = handles.current, on = lastMarkOn(rows.current);
+    if (!h || on === markOn.current) return;
+    markOn.current = on;
+    h.candles.applyOptions({ lastValueVisible: on === "candles", priceLineVisible: on === "candles" });
+    h.area.applyOptions({ lastValueVisible: on === "area", priceLineVisible: on === "area" });
   }, []);
 
   useEffect(() => {
@@ -212,7 +228,7 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       handleScale: { axisPressedMouseMove: true }, handleScroll: { vertTouchDrag: false },
     });
     // The gradient area under the closes sits behind the candles (added first, drawn first).
-    const area = chart.addSeries(AreaSeries, { lineColor: "rgba(182,255,92,.42)", lineWidth: 1, topColor: "rgba(182,255,92,.2)", bottomColor: "rgba(182,255,92,0)", lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+    const area = chart.addSeries(AreaSeries, { lineColor: "rgba(182,255,92,.42)", lineWidth: 1, topColor: "rgba(182,255,92,.2)", bottomColor: "rgba(182,255,92,0)", lastValueVisible: false, priceLineVisible: false, priceLineColor: "rgba(182,255,92,.55)", priceLineStyle: LineStyle.Dotted, crosshairMarkerVisible: false });
     const candles = chart.addSeries(CandlestickSeries, { upColor: UP, downColor: DOWN, borderVisible: false, wickUpColor: UP, wickDownColor: DOWN, priceLineColor: "rgba(182,255,92,.55)", priceLineStyle: LineStyle.Dotted, lastValueVisible: true });
     const vol = chart.addSeries(HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
     chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
@@ -236,7 +252,7 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       settle = window.setTimeout(() => { placeDot(); ticksRef.current(false); }, 160);
     });
     ro.observe(el);
-    handles.current = { chart, candles, vol, area };
+    handles.current = { chart, candles, vol, area }; markOn.current = "candles";
     return () => { cancelAnimationFrame(raf); cancelAnimationFrame(raf2); clearTimeout(settle); ro.disconnect(); chart.remove(); handles.current = null; };
   }, [placeDot]);
 
@@ -250,9 +266,12 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     h.chart.applyOptions({ localization: { priceFormatter: fmt, tickmarksPriceFormatter: tickFmt } });
     h.candles.applyOptions({ priceFormat: { type: "custom", formatter: fmt, minMove: minMoveFor(rows.current) } });
     h.area.applyOptions({ priceFormat: { type: "custom", formatter: fmt, minMove: minMoveFor(rows.current) } });
+    // A sampled chain price (`s`) is a point on the area's line only: no body, no volume bar (its highs, lows and volume
+    // are not known), so a sampled stretch reads as the faint line through real prices.
     h.area.setData(rows.current.map((c) => ({ time: toChart(c.t), value: c.c })));
-    h.candles.setData(rows.current.map((c) => ({ time: toChart(c.t), open: c.o, high: c.h, low: c.l, close: c.c })));
-    h.vol.setData(rows.current.map((c) => ({ time: toChart(c.t), value: safeV(c.v), color: c.c >= c.o ? VOL_UP : VOL_DOWN })));
+    h.candles.setData(rows.current.map((c) => (c.s ? { time: toChart(c.t) } : { time: toChart(c.t), open: c.o, high: c.h, low: c.l, close: c.c })));
+    h.vol.setData(rows.current.map((c) => (c.s ? { time: toChart(c.t) } : { time: toChart(c.t), value: safeV(c.v), color: c.c >= c.o ? VOL_UP : VOL_DOWN })));
+    placeMarks();
     h.chart.timeScale().fitContent();
     keyIdx.current = null;
     setVersion((v) => v + 1);
@@ -260,25 +279,28 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     requestAnimationFrame(() => requestAnimationFrame(() => { placeDot(); refreshTicks(true); }));
     const t = setTimeout(() => { placeDot(); refreshTicks(false); }, 250);
     return () => clearTimeout(t);
-  }, [data.data, factor, fmt, vScale, placeDot, tickFmt, refreshTicks]);
+  }, [data.data, factor, fmt, vScale, placeDot, placeMarks, tickFmt, refreshTicks]);
 
-  // Missed trades being read back (`fill`): ask again every 5 s for 3 min, then every 30 s until the server answers
-  // without `fill` (lib/chart-fill.ts; a hidden tab skips its asks). Only an answer with nothing pending is applied (the
-  // full reload above then refits the view once); one still pending is dropped, so the view does not refit every 5 s.
-  // Each ask also keeps the coin in the server's queue (and queues it again after a run stopped at a cap).
-  const filling = !!data.data?.fill;
+  // Missed trades being read back (`fill`) or earlier history being read (`history` loading or sampling): ask again
+  // every 5 s for 3 min, then every 30 s until nothing is pending (lib/chart-fill.ts; a hidden tab skips its asks). An
+  // answer is applied only when it moved on (pendingOf: loading to sampling, sampling to done, the fill cleared; the
+  // full reload above then refits the view, and this effect restarts for the new key or ends); one that did not is
+  // dropped, so the view does not refit every 5 s. Each ask also keeps the coin in the server's queues.
+  const pending = data.data ? pendingOf(data.data) : null;
+  const filling = !!data.data?.fill, histPending = historyPending(data.data?.history);
+  const hist = data.data?.history;
   useEffect(() => {
-    if (!filling) return;
+    if (!pending) return;
     let n = 0, alive = true, t = 0;
     const next = () => { if (alive) t = window.setTimeout(ask, fillPollDelay(n)); };
     const ask = () => {
       if (document.visibilityState === "hidden") return next();
       n++;
-      api.candles(coin.mint, res).then((d) => { if (!alive) return; if (d.fill) next(); else data.setData(() => d); }).catch(next);
+      api.candles(coin.mint, res, undefined, WITH_HISTORY).then((d) => { if (!alive) return; if (pendingOf(d) === pending) next(); else data.setData(() => d); }).catch(next);
     };
     next();
     return () => { alive = false; clearTimeout(t); };
-  }, [filling, coin.mint, res]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pending, coin.mint, res]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live: extend or open the last candle from the trade event, then let the server re-aggregate.
   useEvents({ trade: (t: Trade) => {
@@ -291,14 +313,13 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       const last = rows.current[rows.current.length - 1];
       // Volume in the unit the rows hold: USD for a USD series, whole quote tokens otherwise.
       const v = priceKey === "usd" ? (t.valueUsd ?? (t.priceUsd ?? 0) * tokens(t.baseAmount, coin.decimals)) : tokens(t.quoteAmount, quoteDecimals);
-      let c: Candle;
-      if (bucket === last.t) c = { ...last, h: Math.max(last.h, p), l: Math.min(last.l, p), c: p, v: last.v + v };
-      else if (bucket > last.t) c = { t: bucket, o: last.c, h: Math.max(last.c, p), l: Math.min(last.c, p), c: p, v };
-      else return; // older than the last bucket: the server's re-read below will place it
+      const c: Candle | null = liveCandle(last, bucket, p, v);
+      if (!c) return; // older than the last bucket: the server's re-read below will place it
       if (bucket === last.t) rows.current[rows.current.length - 1] = c; else rows.current.push(c);
       h.area.update({ time: toChart(c.t), value: c.c });
       h.candles.update({ time: toChart(c.t), open: c.o, high: c.h, low: c.l, close: c.c });
       h.vol.update({ time: toChart(c.t), value: safeV(c.v), color: c.c >= c.o ? VOL_UP : VOL_DOWN });
+      placeMarks();
       setVersion((x) => x + 1);
       requestAnimationFrame(() => requestAnimationFrame(() => { placeDot(); refreshTicks(false); }));
       // A fresh print: the last-price dot rings once (CSS; still under reduced motion).
@@ -316,6 +337,16 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
   const headline = shownValue == null ? "—" : unit === "mcap" ? (dollars ? usd(shownValue) : `${fmtCap(false)(shownValue)} ${coin.quoteSymbol}`) : fmt(shownValue);
   const notOurs = data.error && !data.data && /not a spore coin/i.test(data.error);
   const thin = !!data.data && n < 2;
+  // Leaving the thin state: the full reload fitted the view while the box was still 0 px tall (coin.css .is-thin), so
+  // the candles sat squeezed against the right edge. Fit again once the box has its size (earlier history or a fill
+  // can turn a thin chart into a full one while the page is open).
+  const wasThin = useRef(thin);
+  useEffect(() => {
+    const was = wasThin.current; wasThin.current = thin;
+    if (!was || thin) return;
+    let raf = requestAnimationFrame(() => { raf = requestAnimationFrame(() => { handles.current?.chart.timeScale().fitContent(); placeDot(); refreshTicks(true); }); });
+    return () => cancelAnimationFrame(raf);
+  }, [thin, placeDot, refreshTicks]);
   // Arrow keys step the crosshair candle by candle (Home/End jump); Escape lets go.
   const onKey = (e: ReactKeyboardEvent) => {
     const h = handles.current;
@@ -328,13 +359,13 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     const i = Math.max(0, Math.min(n - 1, keyIdx.current == null && (e.key === "ArrowLeft" || e.key === "ArrowRight") ? n - 1 : next));
     keyIdx.current = i;
     const c = rows.current[i];
-    h.chart.setCrosshairPosition(c.c, toChart(c.t), h.candles);
-    const x = h.chart.timeScale().timeToCoordinate(toChart(c.t)), y = h.candles.priceToCoordinate(c.c);
+    h.chart.setCrosshairPosition(c.c, toChart(c.t), h.area);
+    const x = h.chart.timeScale().timeToCoordinate(toChart(c.t)), y = h.area.priceToCoordinate(c.c);
     setHover(c);
     setAt(x != null && y != null ? { x, y } : null);
   };
   const legend = hover ?? last ?? null;
-  const summary = `${sym(coin)} ${unit === "mcap" ? "market cap" : "price"}, ${n} candles at ${resLabel(res)}${change != null ? `, ${change >= 0 ? "up" : "down"} ${Math.abs(change * 100).toFixed(1)} % in view` : ""}. Use the arrow keys to read each candle.`;
+  const summary = `${sym(coin)} ${unit === "mcap" ? "market cap" : "price"}, ${n} candles at ${resLabel(res)}${change != null ? `, ${change >= 0 ? "up" : "down"} ${Math.abs(change * 100).toFixed(1)} % in view` : ""}${sampledSummary(rows.current)}. Use the arrow keys to read each candle.`;
   const overlay = data.loading ? <div className="chart-loading"><ChartDrawing kind="loading" /><span className="chart-state mono" role="status">reading candles…</span></div>
     // In "ours" mode the server keeps candles only for Spore launches (DESIGN §11.1); a parent
     // from the wider tree is not an error, it just has no chart here.
@@ -370,8 +401,15 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
       </div>
       {legend && !overlay && !thin && (
         <div className={`ohlc-legend mono ${legend.c >= legend.o ? "up" : "down"} ${hover ? "is-hover" : ""}`} aria-hidden="true">
-          <span><i>O</i>{fmt(legend.o)}</span><span><i>H</i>{fmt(legend.h)}</span><span><i>L</i>{fmt(legend.l)}</span><span><i>C</i><em>{fmt(legend.c)}</em></span><span><i>V</i>{priceKey === "usd" ? usd(legend.v) : legend.v.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
-          {legend.o > 0 && <span className="ohlc-chg"><em>{signedPct(legend.c / legend.o - 1)}</em></span>}
+          {legend.s ? (
+            // A sampled chain price: only its close is known.
+            <><span><i>C</i><em>{fmt(legend.c)}</em></span><span className="ohlc-note">sampled</span></>
+          ) : (
+            <>
+              <span><i>O</i>{fmt(legend.o)}</span><span><i>H</i>{fmt(legend.h)}</span><span><i>L</i>{fmt(legend.l)}</span><span><i>C</i><em>{fmt(legend.c)}</em></span><span><i>V</i>{priceKey === "usd" ? usd(legend.v) : legend.v.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
+              {legend.o > 0 && <span className="ohlc-chg"><em>{signedPct(legend.c / legend.o - 1)}</em></span>}
+            </>
+          )}
         </div>
       )}
       <div className="chart-stage" tabIndex={!overlay && !thin ? 0 : -1} role={!overlay && !thin ? "img" : undefined} aria-label={!overlay && !thin ? summary : undefined} onKeyDown={onKey} onBlur={() => { if (keyIdx.current != null) { keyIdx.current = null; handles.current?.chart.clearCrosshairPosition(); setHover(null); setAt(null); } }}>
@@ -389,15 +427,21 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
             <ChartDrawing kind="empty" />
             <span className="chart-seed" aria-hidden="true" />
             <div className="chart-empty-text">
-              <b>{thinChartText(n, filling)}</b>
-              {onBuy && !filling && <button type="button" className="btn soft sm" onClick={onBuy}>Buy {sym(coin)}</button>}
+              <b>{thinChartText(n, filling, histPending)}</b>
+              {onBuy && !filling && !histPending && <button type="button" className="btn soft sm" onClick={onBuy}>Buy {sym(coin)}</button>}
             </div>
           </div>
         )}
       </div>
       {(aside || (!overlay && !thin)) && (
         <div className="chart-foot">
-          {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{filling ? " · filling missed trades…" : ""}{change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
+          {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{filling ? " · filling missed trades…" : ""}
+            {histPending ? " · reading earlier history…" : ""}
+            {/* The credit for GeckoTerminal's candles, shown whenever they are in view. */}
+            {hist?.gecko && <> · earlier: <Ext href={geckoPoolUrl(hist.gecko)}>GeckoTerminal ↗</Ext></>}
+            {hist?.chain === "sampled" && <span title="A line through a few real trades; highs, lows and volume are not known there"> · some earlier prices sampled from the chain</span>}
+            {hist?.chain === "exact" ? " · earlier trades read from the chain" : ""}
+            {change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
           <span className="chart-foot-live">{aside}<LiveDot /></span>
         </div>
       )}

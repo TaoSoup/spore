@@ -89,8 +89,8 @@ class Lane {
   snapshot() { return { inFlight: this.inFlight, queued: this.waiters.length, pausedMs: Math.max(0, this.pausedUntil - Date.now()) }; }
 }
 
-/** Reads a body up to `max` bytes as text; throws when the upstream answer is larger. */
-async function readText(res, max) {
+/** Reads a body up to `max` bytes as text; throws (`tooLarge`) when the upstream answer is larger. Also GeckoTerminal's pages (lib/gecko.mjs). */
+export async function readText(res, max) {
   const reader = res.body?.getReader?.();
   if (!reader) return res.text();
   const chunks = []; let size = 0;

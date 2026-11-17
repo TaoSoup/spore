@@ -171,6 +171,8 @@ html[data-motion="paused"] .ca-pill.done .ca-copied { opacity: 1; }
 .ohlc-legend.up em { color: var(--good); } .ohlc-legend.down em { color: var(--bad); }
 .ohlc-legend:not(.is-hover) { opacity: .78; }
 .ohlc-chg { margin-left: auto; }
+/* A sampled chain price (history before the first stored trade): only its close is known. */
+.ohlc-note { color: var(--muted); }
 .chart-stage { border-radius: 10px; }
 .chart-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .coin-page .chart-box { height: 340px; }

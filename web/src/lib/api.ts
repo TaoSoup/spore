@@ -63,12 +63,18 @@ export type EligibilityAgent = { bps: number; address: string | null; models?: s
 export type Eligibility = { ok: boolean; reason: string | null; depth: number | null; chain: CoinRef[]; parentCreator: string | null; grandparentCreator: string | null; shares: Shares; platform: string; launchFee?: LaunchFeeInfo | null; pool?: string; agent?: EligibilityAgent | null };
 /// The agent wallet the server prepared for one root launch (POST /api/agents/prepare).
 export type AgentPrepared = { id: string; address: string; model: string; expiresAt: number };
-export type Candle = { t: number; o: number; h: number; l: number; c: number; v: number };
+/// `s: 1`: a price sampled from the chain before the server's first stored trade (o = h = l = c, v = 0): a point on a
+/// line, its high, low and volume unknown.
+export type Candle = { t: number; o: number; h: number; l: number; c: number; v: number; s?: 1 };
 /// The server is reading this coin's missed trades back from the chain (a restart, a reconnect: server lib/trade-fill.mjs);
 /// `gaps` stretches from `from` to `to` (unix s); "waiting": the gaps have not settled yet (a later ask queues them).
 /// Absent when nothing is pending.
 export type CandleFill = { state: "queued" | "running" | "waiting"; gaps: number; from: number; to: number };
-export type Candles = { candles: Candle[]; priceKey: "usd" | "quote"; fill?: CandleFill };
+/// The chart's history before the coin's first stored trade (`history=1`, the coin page's chart only): `loading` while
+/// GeckoTerminal is asked, `sampling` while the chain is read, `gecko` the pool whose candles are shown (credit link),
+/// `chain` whether chain candles are in the answer ("sampled": some are points).
+export type CandleHistory = { state: "loading" | "sampling" | "done"; gecko: string | null; chain: "exact" | "sampled" | null };
+export type Candles = { candles: Candle[]; priceKey: "usd" | "quote"; fill?: CandleFill; history?: CandleHistory };
 /// `otherChildren`: children of this coin that exist on pump.fun but were not launched here (ours mode).
 export type CoinPage = { coin: Coin; children: Coin[]; trades: Trade[]; otherChildren?: number };
 /// `GET /api/fees/:mint` (DESIGN §11.6): the creator fees waiting for a coin, read live from the
@@ -311,7 +317,8 @@ export const api = {
   /// answers the page at `offset` as usual (the caller scans it).
   mapFamily: (mint: string, q: { offset?: number; limit?: number; v?: number | null; at?: string }, signal?: AbortSignal) => request<MapFamilyResponse>(`/map/family/${encodeURIComponent(mint)}${qs({ offset: q.offset, limit: q.limit, v: q.v, at: q.at })}`, signal ? { signal: withTimeout(signal, 30_000) } : {}, 30_000),
   /// `scope: "all"` opens the candles of any tracked coin (the map's side panel); without it the route stays ours-only.
-  candles: (mint: string, res = 60, scope?: "all") => request<Candles>(`/candles/${encodeURIComponent(mint)}${qs({ res, scope })}`),
+  candles: (mint: string, res = 60, scope?: "all", opts?: { history?: boolean }) =>
+    request<Candles>(`/candles/${encodeURIComponent(mint)}${qs({ res, scope, history: opts?.history ? 1 : undefined })}`),
   /// Trade activity per coin for the map (§11.5): 1 h and 24 h counters. 404 on a server that predates it.
   heat: () => request<HeatResponse>("/map/heat", {}, 15_000),
   /// Family shares of the whole map (§11.5 "Dominance"); `mint` narrows `families` to that top's row ([] when it is none).

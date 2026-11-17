@@ -305,6 +305,8 @@ export class TradeFiller {
     if (this.started) try { this.#beat(); this.db.kvSet("fillCalls", this.budget); } catch { /* the database is closed already */ }
     this.ac.abort(new Error("stopping")); for (const r of this.idleWaiters.splice(0)) r();
   }
+  /** Whether a fill runs or waits: the chart history's chain reads (lib/chart-history.mjs) share this lane and wait meanwhile. */
+  busy() { return this.enabled && (this.running != null || this.queue.size > 0); }
   /** Resolves when no run is under way and none waits (tests). */
   idle() { return !this.running && (!this.queue.size || !this.started || this.stopped || !this.enabled) ? Promise.resolve() : new Promise((r) => this.idleWaiters.push(r)); }
   /**
@@ -475,11 +477,12 @@ export class TradeFiller {
    * starts right below the first stored trade after the gap (`before` = its signature), which need not touch this
    * address: the node resolves `before` through the signature's slot. Checked on mainnet on 2026-11-17
    * (api.mainnet-beta.solana.com): getSignaturesForAddress(addr, { before: <a signature of a transaction that does not
-   * touch addr> }) listed addr's signatures strictly below that signature's slot, for a recent anchor, an 18 h old one
-   * and a 4-day-old one (long-term storage). Signatures in the anchor's own slot are excluded; they lie past the gap's
-   * end anyway (after its margin). An anchored first page that comes back empty is either the end of the address's
-   * history (a pool made after the gap: none of its signatures is that old) or a node that does not know the anchor;
-   * getSignatureStatuses (searchTransactionHistory) tells them apart. Known: the address has no older history. Unknown:
+   * touch addr> }) listed addr's signatures at or below that signature's slot (those earlier in the anchor's own slot
+   * included, then the lower slots), for a recent anchor, an 18 h old one, a 4-day-old one (long-term storage) and an
+   * 18-day-old one. Signatures of the anchor's own slot lie past the gap's end anyway (after its margin), and the time
+   * filter below keeps only those inside the gap. An anchored first page that comes back empty is either the end of the
+   * address's history (a pool made after the gap: none of its signatures is that old) or a node that does not know the
+   * anchor; getSignatureStatuses (searchTransactionHistory) tells them apart. Known: the address has no older history. Unknown:
    * the walk lists once more without the anchor, and stops (cut) after FILL_WINDOW_SIGS signatures above the gap, so a
    * busy address is not walked from the top on every run.
    */

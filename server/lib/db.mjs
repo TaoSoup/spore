@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS fill_coins (
   at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS fill_coins_at ON fill_coins(at);
+CREATE TABLE IF NOT EXISTS chart_history (
+  mint TEXT NOT NULL, res INTEGER NOT NULL, unit TEXT NOT NULL, state TEXT NOT NULL,
+  pools TEXT NOT NULL DEFAULT '[]', cov_from INTEGER NOT NULL, cov_to INTEGER NOT NULL,
+  fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (mint, res, unit)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS chart_history_asked ON chart_history(asked_at);
+CREATE TABLE IF NOT EXISTS chart_samples (
+  mint TEXT PRIMARY KEY, state TEXT NOT NULL, from_t INTEGER NOT NULL, to_t INTEGER NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL, asked_at INTEGER NOT NULL,
+  retry_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '[]', retry_ext INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS chart_samples_asked ON chart_samples(asked_at);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -182,6 +195,14 @@ export class Db {
     // a transaction was left unread or decoded incomplete (a later run skips it, so such a gap is never whole); `day` and `calls`, its
     // chain calls on that UTC day (FILL_COIN_DAILY); totals of rows, unread transactions and cut gaps (health,
     // debugging); and `at`, the unix s of its last save, by which rows older than the fill's 48 h are pruned.
+    // `chart_history` and `chart_samples` (the chart history before a coin's first stored trade, lib/chart-history.mjs)
+    // are new tables only as well: one row of GeckoTerminal candles per (mint, res, unit) with the state and stretch of its
+    // last fetch (`data` a JSON [[t,o,h,l,c,v],…], unit 'usd' or 'quote'; the SOL/USD reference under SOL's mint), and
+    // per coin the prices sampled from the chain (`data` [[time, priceQuote, priceUsd|null, quoteAtoms, exact],…], the
+    // stretch [from_t, to_t), `retry_at` 0 = final, `retry_ext` 1 when that retry is an extension an outage or the day's
+    // cap stopped); both pruned by `asked_at` (unix s, written at most hourly). `retry_ext` came a build later: added
+    // when absent, like gone_attempts.
+    if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -241,6 +262,7 @@ export class Db {
       uploadCount: p("SELECT COUNT(*) AS n FROM uploads"),
       priceBefore: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time <= ? ORDER BY time DESC, slot DESC, rowid DESC LIMIT 1"),
       priceAfter: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time > ? ORDER BY time ASC, slot ASC, rowid ASC LIMIT 1"),
+      usdPriceBefore: p("SELECT price_usd, time FROM trades WHERE mint = ? AND time <= ? AND price_usd IS NOT NULL ORDER BY time DESC, slot DESC, rowid DESC LIMIT 1"),
       // The trade gap fill (lib/trade-fill.mjs): whether a signature is stored (a primary-key prefix), the listing's anchor,
       // a count that stops at its cap, and the bounds of what the mint's retention keeps.
       tradeHas: p("SELECT 1 AS x FROM trades WHERE sig = ? AND mint = ? LIMIT 1"),
@@ -251,6 +273,24 @@ export class Db {
       fillCoinGet: p("SELECT * FROM fill_coins WHERE mint = ?"),
       fillCoinSet: p("INSERT OR REPLACE INTO fill_coins (mint, done, whole, partial, day, calls, rows, unread, cut, at) VALUES (@mint, @done, @whole, @partial, @day, @calls, @rows, @unread, @cut, @at)"),
       fillCoinsPrune: p("DELETE FROM fill_coins WHERE at < ?"),
+      // The chart history (lib/chart-history.mjs). The kept key (?2-?4: the SOL/USD reference row) survives both prunes
+      // while a samples row was written since ?1 (?4 '' keeps nothing).
+      histGet: p("SELECT * FROM chart_history WHERE mint = ? AND res = ? AND unit = ?"),
+      histSet: p(`INSERT OR REPLACE INTO chart_history (mint, res, unit, state, pools, cov_from, cov_to, fetched_at, asked_at, data)
+        VALUES (@mint, @res, @unit, @state, @pools, @covFrom, @covTo, @fetchedAt, @askedAt, @data)`),
+      histTouch: p("UPDATE chart_history SET asked_at = ?1 WHERE mint = ?2 AND res = ?3 AND unit = ?4 AND asked_at < ?1"),
+      histPruneOld: p(`DELETE FROM chart_history WHERE asked_at < ?1
+        AND NOT (mint = ?2 AND res = ?3 AND unit = ?4 AND EXISTS (SELECT 1 FROM chart_samples WHERE at >= ?1))`),
+      histPruneOver: p(`DELETE FROM chart_history WHERE (mint, res, unit) IN (SELECT mint, res, unit FROM chart_history
+        WHERE NOT (mint = ?2 AND res = ?3 AND unit = ?4 AND EXISTS (SELECT 1 FROM chart_samples WHERE at >= ?1)) ORDER BY asked_at ASC LIMIT ?5)`),
+      histCount: p("SELECT COUNT(*) AS n FROM chart_history"),
+      samplesGet: p("SELECT * FROM chart_samples WHERE mint = ?"),
+      samplesSet: p(`INSERT OR REPLACE INTO chart_samples (mint, state, from_t, to_t, calls, at, asked_at, retry_at, retry_ext, data)
+        VALUES (@mint, @state, @fromT, @toT, @calls, @at, @askedAt, @retryAt, @retryExt, @data)`),
+      samplesTouch: p("UPDATE chart_samples SET asked_at = ?1 WHERE mint = ?2 AND asked_at < ?1"),
+      samplesPruneOld: p("DELETE FROM chart_samples WHERE asked_at < ?"),
+      samplesPruneOver: p("DELETE FROM chart_samples WHERE rowid IN (SELECT rowid FROM chart_samples ORDER BY asked_at ASC LIMIT ?)"),
+      samplesCount: p("SELECT COUNT(*) AS n FROM chart_samples"),
       keyInsert: p("INSERT INTO api_keys (name, contact, hash, tier, created_at) VALUES (?, ?, ?, ?, ?)"),
       keyByHash: p("SELECT id, name, tier, revoked_at FROM api_keys WHERE hash = ?"),
       keysAll: p("SELECT id, name, contact, tier, created_at, revoked_at, last_used_at, requests FROM api_keys ORDER BY id"),
@@ -424,6 +464,8 @@ export class Db {
    */
   /** A mint's price row at time `t`: its last trade at or before it (priceAt), its first one after it (priceAfterT). */
   priceAt(mint, t) { const r = this.q.priceBefore.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
+  /** A mint's last trade at or before `t` that has a USD price, `{ priceUsd, time }` (a trade stored while its quote's USD was unknown is skipped). */
+  usdPriceAt(mint, t) { const r = this.q.usdPriceBefore.get(mint, t); return r ? { priceUsd: r.price_usd, time: r.time } : null; }
   priceAfterT(mint, t) { const r = this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
   // ---- the trade gap fill (lib/trade-fill.mjs)
   tradeHas(sig, mint) { return !!this.q.tradeHas.get(sig, mint); }
@@ -442,6 +484,30 @@ export class Db {
   }
   fillCoinSave(f) { this.q.fillCoinSet.run({ mint: f.mint, done: JSON.stringify([...f.done]), whole: JSON.stringify([...f.whole]), partial: JSON.stringify([...(f.partial ?? [])]), day: f.day ?? 0, calls: f.calls ?? 0, rows: f.rows ?? 0, unread: f.unread ?? 0, cut: f.cut ?? 0, at: f.at ?? 0 }); }
   fillCoinsPrune(beforeS) { return Number(this.q.fillCoinsPrune.run(beforeS).changes); }
+  // ---- the chart history (lib/chart-history.mjs): rows come back raw (`pools` and `data` JSON strings), the caller parses them once into its cache
+  histGet(mint, res, unit) { return this.q.histGet.get(mint, res, unit) ?? null; }
+  histSet(r) { this.q.histSet.run({ mint: r.mint, res: r.res, unit: r.unit, state: r.state, pools: typeof r.pools === "string" ? r.pools : JSON.stringify(r.pools ?? []), covFrom: r.covFrom, covTo: r.covTo, fetchedAt: r.fetchedAt, askedAt: r.askedAt, data: typeof r.data === "string" ? r.data : JSON.stringify(r.data ?? []) }); }
+  histTouch(mint, res, unit, askedAt) { return Number(this.q.histTouch.run(askedAt, mint, res, unit).changes) > 0; }
+  samplesGet(mint) { return this.q.samplesGet.get(mint) ?? null; }
+  samplesSet(r) { this.q.samplesSet.run({ mint: r.mint, state: r.state, fromT: r.fromT, toT: r.toT, calls: r.calls ?? 0, at: r.at, askedAt: r.askedAt, retryAt: r.retryAt ?? 0, retryExt: r.retryExt ? 1 : 0, data: typeof r.data === "string" ? r.data : JSON.stringify(r.data ?? []) }); }
+  samplesTouch(mint, askedAt) { return Number(this.q.samplesTouch.run(askedAt, mint).changes) > 0; }
+  /**
+   * Drops rows of both tables not asked for since `beforeS`, then the least recently asked past `maxRows` and
+   * `maxSampleRows`; `keep` (`{ mint, res, unit }`: the SOL/USD reference) stays while any samples row was written since
+   * `beforeS`. Returns how many rows went.
+   */
+  histPrune(beforeS, maxRows, maxSampleRows, keep = null) {
+    const k = [keep?.mint ?? "", keep?.res ?? 0, keep?.unit ?? ""];
+    return this.transaction(() => {
+      let n = Number(this.q.samplesPruneOld.run(beforeS).changes) + Number(this.q.histPruneOld.run(beforeS, ...k).changes);
+      const hs = this.q.histCount.get().n - maxRows;
+      if (hs > 0) n += Number(this.q.histPruneOver.run(beforeS, ...k, hs).changes);
+      const ss = this.q.samplesCount.get().n - maxSampleRows;
+      if (ss > 0) n += Number(this.q.samplesPruneOver.run(ss).changes);
+      return n;
+    });
+  }
+  histCounts() { return { history: this.q.histCount.get().n, samples: this.q.samplesCount.get().n }; }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
 
   // Partner API keys (lib/apikeys.mjs owns the logic; only the sha256 of a key is ever stored).

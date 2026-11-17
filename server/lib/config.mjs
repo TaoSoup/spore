@@ -11,7 +11,7 @@ import { DEFAULT_PAGES_DOMAIN, DEFAULT_PAGES_PROJECT, DEFAULT_META_DIR, DEFAULT_
 export const DEFAULT_PLATFORM_WALLET = "FcbEAMqBvJVsfcFWDbED7geyBLR88ypcY88BoUSgmeT5";
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 // Per-IP rate limits (requests per window) — DEPLOY.md documents each.
-export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000], portfolio: [20, 60_000], pnl: [60, 60_000], pnlnew: [20, 60 * 60_000] };
+export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000], portfolio: [20, 60_000], pnl: [60, 60_000], pnlnew: [20, 60 * 60_000], histnew: [120, 60 * 60_000] };
 // Command-line flags that stand in for a variable, so a package.json script needs no POSIX
 // `VAR=value node …` prefix (cmd.exe cannot run one): `npm run dev` passes --backfill-limit=150.
 // A flag wins over the environment, as that prefix did; other arguments are ignored, as before.
@@ -94,6 +94,17 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     enabled: bool("TRADE_FILL", true),
     rps: num("TRADE_FILL_RPS", rpcUrl.includes("api.mainnet-beta.solana.com") ? 1 : 3, { min: 0.1, max: 1_000 }),
     dailyCalls: num("TRADE_FILL_DAILY", 20_000, { min: 0, integer: true }), // 0 = no cap; under 200 counts as 200
+  };
+  // Chart history (lib/chart-history.mjs): the coin page's chart also shows the time before the server's first stored
+  // trade of a coin, from GeckoTerminal's public candles (keyless: 10 requests a minute per IP, errors included), and
+  // where it has none, from a few of the coin's transactions read on the trade fill's RPC_URL lane while the gap fill
+  // is idle (CHART_SAMPLE). Both day caps: 0 = no cap.
+  const history = {
+    enabled: bool("CHART_HISTORY", true),
+    sample: bool("CHART_SAMPLE", true),
+    geckoPerMin: num("GECKO_PER_MIN", 8, { min: 1, max: 600 }),
+    geckoDaily: num("GECKO_DAILY", 5_000, { min: 0, integer: true }),
+    sampleDaily: num("CHART_SAMPLE_DAILY", 5_000, { min: 0, integer: true }),
   };
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
@@ -193,5 +204,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history };
 }
