@@ -146,9 +146,12 @@ export function relayKind(encoded, encoding = "base64") {
     return null;
   } catch { return null; }
 }
-/// The most address lookup tables a relayed Jupiter swap may use: /build answers carried 1-3 (Nov 2026). Unknown tables
-/// are read from the chain, so the cap also bounds what one request costs the shared proxy lane.
-export const JUP_MAX_LOOKUPS = 4;
+/// The most address lookup tables a relayed Jupiter swap may use. /build answers carried 1-3 on Nov 13 2026, and 2-5 on
+/// Nov 17: a 5-leg route (one in 8 for a coin priced in NVDAx) takes a table per leg, and the old cap of 4 refused it, so
+/// the instant buy fell back to the ticket. Each table costs a transaction at least 34 of its 1,232 bytes, so a swap the
+/// browser can build stays far below this. The tables /build named are known already (lib/jupiter.mjs answers seed them);
+/// unknown ones are read in one call, so the cap still bounds what one request costs the shared proxy lane.
+export const JUP_MAX_LOOKUPS = 8;
 /**
  * What the relay must read to check a Jupiter swap: `staticPump` when a pump program is among its static keys (nothing to
  * read), else `tables`, the lookup tables it takes accounts from. Null when it names more than JUP_MAX_LOOKUPS tables or

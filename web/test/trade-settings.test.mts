@@ -9,7 +9,7 @@ import type { Coin } from "../src/lib/api.ts";
 import type { InstantDeps, InstantInput } from "../src/lib/instant-trade.ts";
 await import("./cjs-sdk-hook.mjs");
 const S = await import("../src/lib/trade-settings.ts");
-const { instantTrade, InstantCostError } = await import("../src/lib/instant-trade.ts");
+const { instantTrade, InstantCostError, QUOTE_RETRIES } = await import("../src/lib/instant-trade.ts");
 const { routeOf } = await import("../src/lib/trade-route.ts");
 const { PriceMovedError, UnmeasuredCostError } = await import("../src/lib/flow.ts");
 const { ExpiredError } = await import("../src/lib/pump/send.ts");
@@ -261,6 +261,23 @@ test("instant buy: the preset in lamports, quoted and sent; a connected wallet i
   assert.equal(ext.sent[0].mustMeasure, false);
 });
 
+test("instant buy: a quote that fails is asked once more, and a good second quote is sent without the ticket", async () => {
+  // Nov 17 2026: the relay refused one Jupiter route of five legs; the next build took another route
+  const { deps, calls, sent } = world({ out: 98_000_000_000n, spent: 100_030_000n });
+  let n = 0;
+  const flaky: InstantDeps = { ...deps, quote: async (...a) => { if (n++ === 0) { calls.push("quote:refused"); throw new Error("403 Forbidden: simulateTransaction: only pump.fun transactions are relayed"); } return deps.quote(...a); } };
+  const r = await instantTrade(conn, input({ spec: { side: "buy", sol: 0.1 } }), flaky);
+  assert.equal(r.kind, "done");
+  assert.deepEqual(calls, ["coin", "route", "balances", "quote:refused", "quote:buy:100000000", "send"]);
+  assert.equal(sent.length, 1, "one send, never two");
+  // a wallet short of SOL is not asked again
+  const poor = world({ out: new Error("Not enough SOL in the wallet for this buy") });
+  const p = await instantTrade(conn, input({ spec: { side: "buy", sol: 0.1 } }), poor.deps);
+  assert.equal(p.kind, "ticket");
+  if (p.kind === "ticket") assert.equal(p.reason, "sol");
+  assert.equal(poor.calls.filter((c) => c.startsWith("quote")).length, 1);
+});
+
 test("every check that fails hands the trade to the ticket, prefilled, and nothing is sent", async () => {
   const ticket = async (o: Partial<World>, i: Partial<InstantInput>, reason: string, amount: string) => {
     const { deps, calls } = world(o);
@@ -286,9 +303,10 @@ test("every check that fails hands the trade to the ticket, prefilled, and nothi
   assert.ok(!poor!.calls.some((c) => c.startsWith("quote")));
   // not enough SOL for a sell's fee
   await ticket({ sol: 10n }, { spec: { side: "sell", pct: 25 } }, "sol", "650000");
-  // the quote could not be simulated
+  // the quote could not be simulated, asked again once, still not: the ticket
   const noQuote = await ticket({ out: new Error("Simulation failed") }, { spec: { side: "buy", sol: 0.1 } }, "quote", "0.1");
   assert.ok(!noQuote!.calls.includes("send"));
+  assert.equal(noQuote!.calls.filter((c) => c.startsWith("quote")).length, 1 + QUOTE_RETRIES);
   await ticket({ out: 0n }, { spec: { side: "buy", sol: 0.1 } }, "quote", "0.1");
   // price impact over 15% (0.1 SOL is 100,000 tokens at spot; the quote gives 80,000), or no spot price to measure it
   await ticket({ out: 80_000_000_000n }, { spec: { side: "buy", sol: 0.1 } }, "impact", "0.1");

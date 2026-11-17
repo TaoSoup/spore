@@ -82,6 +82,8 @@ const REAL: InstantDeps = {
   pendingOf: (mint) => pendingTradeOf(mint), sigState: signatureState, clearPending: (sig) => clearPendingTrade(sig), now: () => Date.now(),
 };
 
+/// Fresh quotes asked after one that failed, before the trade goes to the ticket (step 7).
+export const QUOTE_RETRIES = 1;
 const tick = (c: { symbol: string | null; mint: string }) => (c.symbol ? `$${c.symbol}` : short(c.mint));
 const pctText = (x: number) => `${Math.round(x * 100)}%`;
 
@@ -154,16 +156,24 @@ export async function instantTrade(conn: Connection, input: InstantInput, deps: 
   if (early) return early;
 
   // 7. the quote: a simulation for this wallet, of this amount, now. Jupiter's minimum is part of its build.
-  let q: Awaited<ReturnType<typeof quoteTrade>>;
+  // A quote that fails is asked once more before the ticket: it is reads and a simulation only, nothing signed, and the
+  // next one is often fine. Jupiter picks its route anew on every build (2 to 5 legs for one coin, Nov 17 2026), and a
+  // pool can move between the reads and the simulation. A wallet short of SOL is not asked again: the answer would not
+  // change. Every check below still runs on the quote that came back.
+  let q!: Awaited<ReturnType<typeof quoteTrade>>;
   let micro = CU_PRICE_MICRO;
-  try {
-    const pumpFee = isJup ? null : Promise.resolve().then(() => deps.priority(conn, deps.venues(chain, side, false, []))).catch(() => CU_PRICE_MICRO);
-    q = await deps.quote(conn, user, coin, chain, isJup, side, amountIn, isJup ? slippageBps : 0);
-    micro = pumpFee ? await pumpFee : await Promise.resolve().then(() => deps.priority(conn, deps.venues(chain, side, true, q.jup?.ammKeys ?? []))).catch(() => CU_PRICE_MICRO);
-  } catch (e) {
-    const why = friendlyError(e);
-    if (/not enough SOL|no SOL yet/i.test(why)) return ticket("sol", `${why} Nothing was signed.`, true);
-    return ticket("quote", `The quote could not be simulated, so nothing was signed: ${why}`);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const pumpFee = isJup ? null : Promise.resolve().then(() => deps.priority(conn, deps.venues(chain, side, false, []))).catch(() => CU_PRICE_MICRO);
+      q = await deps.quote(conn, user, coin, chain, isJup, side, amountIn, isJup ? slippageBps : 0);
+      micro = pumpFee ? await pumpFee : await Promise.resolve().then(() => deps.priority(conn, deps.venues(chain, side, true, q.jup?.ammKeys ?? []))).catch(() => CU_PRICE_MICRO);
+      break;
+    } catch (e) {
+      const why = friendlyError(e);
+      if (/not enough SOL|no SOL yet/i.test(why)) return ticket("sol", `${why} Nothing was signed.`, true);
+      if (attempt < QUOTE_RETRIES) continue;
+      return ticket("quote", `The quote could not be simulated, so nothing was signed: ${why}`);
+    }
   }
   if (q.amountOut <= 0n) return ticket("quote", "The quote came back empty, so nothing was signed.");
 

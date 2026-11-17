@@ -226,6 +226,14 @@ test("jupiterTouchesPump: a pump program among its static keys or in a lookup ta
   assert.equal(await jupiterTouchesPump(tx([jupIx([someone().toBase58()])]), "base64", none), false);
   assert.equal(await jupiterTouchesPump(viaTable, "base64", async () => { throw new Error("rpc down"); }), false);
   assert.deepEqual(AddressLookupTableAccount.deserialize(altData(addrs)).addresses.map((a) => a.toBase58()), addrs, "the test's table bytes are what the chain stores");
+  // a 5-leg route takes a table per leg (Nov 17 2026: 2 builds in 17 of one NVDAx-priced coin): relayed when its last
+  // leg is a pump pool, the pump program in the last table
+  const legs = Array.from({ length: 5 }, (_, i) => { const a = someone().toBase58(); return { key: someone(), addrs: i === 4 ? [a, PUMP] : [a], a }; });
+  const fiveLegs = tx([jupIx([...legs.map((x) => x.a), PUMP])], legs.map((x) => table(x.key, x.addrs)));
+  assert.equal(VersionedTransaction.deserialize(Buffer.from(fiveLegs, "base64")).message.addressTableLookups.length, 5);
+  assert.equal(jupiterLookups(fiveLegs)?.tables.length, 5);
+  const byKey = new Map(legs.map((x) => [x.key.toBase58(), x.addrs]));
+  assert.equal(await jupiterTouchesPump(fiveLegs, "base64", async (ks) => ks.map((k) => byKey.get(k) ?? null)), true);
   // more tables than a Jupiter swap uses: refused before anything is read
   const five = Array.from({ length: JUP_MAX_LOOKUPS + 1 }, () => { const a = someone().toBase58(); return { t: table(someone(), [a]), a }; });
   const many = tx([jupIx(five.map((x) => x.a))], five.map((x) => x.t));
