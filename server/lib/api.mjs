@@ -655,12 +655,19 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // read on the api lane) and the coins it created (the model's creator index), each with its parent so
   // the page can group them (lib/portfolio.mjs). Cached 10 s per wallet, concurrent requests share one
   // read, and the route has its own per-IP limit on top of the api one. A failed chain read answers
-  // 200 with holdingsOk false / solLamports null. Nothing is signed.
+  // 200 with holdingsOk false / solLamports null. Nothing is signed. `?after=<slot>` is the page's reload
+  // right after a trade landed in that slot: the answer then reflects the chain at that slot or later (an
+  // older cached body is passed over, the reads carry minContextSlot) and is not cached by the browser.
+  // Anything but a positive whole number is ignored, the request is then an ordinary one; so is a slot far past any
+  // the server's reads have seen (lib/portfolio.mjs), and a node that stays behind is asked without it at last.
   const portfolio = createPortfolio({ model, rpc: apiRpc, now, log });
   app.get("/api/portfolio/:wallet", limits.portfolio, wrap(async (req, res) => {
     const { wallet } = req.params;
     if (!isMint(wallet)) return res.status(400).json({ error: "invalid wallet" });
-    sendCachedJson(req, res, await portfolio.get(wallet), { maxAge: 3 });
+    const q = req.query.after, n = typeof q === "string" && /^\d{1,16}$/.test(q) ? Number(q) : 0;
+    const after = Number.isSafeInteger(n) && n > 0 ? n : 0;
+    const body = await portfolio.get(wallet, { after });
+    sendCachedJson(req, res, body, after ? { cacheControl: "no-store" } : { maxAge: 3 });
   }));
   // Profit and loss, and the activity list, of one wallet (lib/pnl-tracker.mjs): both read the wallet's own table by
   // its index, never the trades table. Asking for the P&L makes the wallet tracked and queues the one-time read of its

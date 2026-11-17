@@ -13,7 +13,7 @@ const { instantTrade, InstantCostError } = await import("../src/lib/instant-trad
 const { routeOf } = await import("../src/lib/trade-route.ts");
 const { PriceMovedError, UnmeasuredCostError } = await import("../src/lib/flow.ts");
 const { ExpiredError } = await import("../src/lib/pump/send.ts");
-const { TOKEN_2022_ID } = await import("../src/lib/pump/trade.ts");
+const { TOKEN_2022_ID, CU_PRICE_MICRO, swapFeeLamports, swapUnits } = await import("../src/lib/pump/trade.ts");
 
 test("settings: defaults when nothing is stored, and instant trades are on unless turned off", () => {
   const d = S.parseTradeSettings({});
@@ -198,7 +198,7 @@ function coin(over: Partial<Coin> = {}): Coin {
 }
 const conn = {} as Connection;
 const SOL = 1_000_000_000n;
-type World = { coin: Coin; sol: bigint | null; token: bigint; hasAta: boolean; out: bigint | Error; spent: bigint | null; sendError: Error | null; routeFails: boolean;
+type World = { coin: Coin; sol: bigint | null; token: bigint | null; hasAta: boolean; out: bigint | Error; spent: bigint | null; sendError: Error | null; routeFails: boolean;
   /// an earlier unsettled trade of the coin (its age in ms) and what the chain says of it ("unread": the read throws)
   last: { ageMs: number; state: "confirmed" | "failed" | "unknown" | "unread" } | null };
 /// A world to trade in and the deps that read it; `calls` is every step in the order it ran.
@@ -361,4 +361,24 @@ test("a hard-blocked route is said in the row; nothing to sell and a failed send
   const none = world();
   assert.equal((await instantTrade(conn, input({ sender: { publicKey: null, sendTransaction: sender.sendTransaction } }), none.deps)).kind, "failed");
   assert.deepEqual(none.calls, []);
+});
+
+test("a token balance that could not be read: no sell is sized from it, and a buy counts the account's rent", async () => {
+  // a sell: the could-not-be-read outcome, nothing quoted, nothing signed
+  const sell = world({ token: null, hasAta: true });
+  const r = await instantTrade(conn, input({ spec: { side: "sell", pct: 100 } }), sell.deps);
+  assert.equal(r.kind, "failed");
+  if (r.kind === "failed") assert.match(r.text, /could not be read/);
+  assert.deepEqual(sell.calls, ["coin", "route", "balances"]);
+  // a buy with exactly the SOL it needs when the token account exists (no rent): past the early check when the
+  // balance was read, stopped there when it was not (the account may be missing: its rent is counted)
+  const exact = S.buyNeedLamports(100_000_000n, swapFeeLamports(swapUnits(1, null), CU_PRICE_MICRO), 0n);
+  const known = world({ sol: exact, hasAta: true, out: 98_000_000_000n, spent: 100_030_000n });
+  await instantTrade(conn, input({ spec: { side: "buy", sol: 0.1 } }), known.deps);
+  assert.ok(known.calls.some((c) => c.startsWith("quote")), "the account exists: no rent");
+  const unread = world({ sol: exact, token: null, hasAta: true, out: 98_000_000_000n, spent: 100_030_000n });
+  const u = await instantTrade(conn, input({ spec: { side: "buy", sol: 0.1 } }), unread.deps);
+  assert.equal(u.kind, "ticket");
+  if (u.kind === "ticket") assert.equal(u.reason, "sol");
+  assert.ok(!unread.calls.some((c) => c.startsWith("quote")));
 });

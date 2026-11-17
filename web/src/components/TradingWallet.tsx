@@ -224,6 +224,9 @@ function Manage({ address, focusDeposit, busy }: { address: string; focusDeposit
   const toast = useToast();
   const owner = new PublicKey(address);
   const bal = useSolBalance(connection, owner, 15_000);
+  // the header already watches this wallet's balance (lib/balances.ts): opening the panel reads it once more, now
+  const refreshBal = bal.refresh;
+  useEffect(() => { refreshBal(); }, [refreshBal]);
   const [tradeWith, setTradeWith] = useTradeWith();
   const [instantSol] = useInstantSol();
   const [section, setSection] = useState<"main" | "key" | "remove">("main");

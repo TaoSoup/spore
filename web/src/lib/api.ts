@@ -101,6 +101,9 @@ export type PortfolioHolding = { mint: string; amount: string; decimals: number;
 export type Portfolio = {
   wallet: string; at: number; solLamports: string | null; holdingsOk: boolean; holdings: PortfolioHolding[];
   untracked: number; launched: PortfolioCoin[]; launchedTotal: number;
+  /// The lowest chain slot the server's reads answered at; null when a read failed (a degraded body), absent on a
+  /// server that predates it.
+  slot?: number | null;
 };
 /// `GET /api/pnl/:wallet` and `GET /api/activity/:wallet`: the wallet's own trades and what they made.
 /// `history`: the one-off read of the wallet's past transactions. `scanned` of `total` while it runs; `cut`: older
@@ -314,7 +317,13 @@ export const api = {
   claimsFor: (wallet: string) => request<Claims>(`/claims/${encodeURIComponent(wallet)}`, {}, 30_000),
   claims: (limit = 50) => request<Claims>(`/claims${qs({ limit })}`, {}, 30_000),
   /// One wallet's holdings and launched coins; 400 on a bad address. The server reads the wallet's token accounts.
-  portfolio: (wallet: string) => request<Portfolio>(`/portfolio/${encodeURIComponent(wallet)}`, {}, 30_000),
+  /// `after`: a trade of the wallet landed at that slot, so the answer must be read at it or later (the server reads
+  /// again instead of serving its 10 s cache); such a reload also skips the browser's cache. An older server ignores it.
+  /// `fresh`: skip the browser's cache without `after` (its copy may be from before a trade, see Portfolio.tsx).
+  portfolio: (wallet: string, after?: number, fresh = false) => {
+    const a = after && after > 0 ? after : undefined;
+    return request<Portfolio>(`/portfolio/${encodeURIComponent(wallet)}${qs({ after: a })}`, a || fresh ? { cache: "no-store" } : {}, 30_000);
+  },
   /// What the wallet's trades made, per coin; `since` (unix s) windows the bought / sold / realized figures. The first
   /// request for a wallet starts the server's one-off read of its history. 429 when rate limited.
   pnl: (wallet: string, since?: number | null) => request<Pnl>(`/pnl/${encodeURIComponent(wallet)}${qs({ since })}`, {}, 20_000),

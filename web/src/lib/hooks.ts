@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import type { Connection, PublicKey } from "@solana/web3.js";
 import { api, errorMessage, type Stats } from "./api";
 import { subscribe as subscribeEvents } from "./events";
+import { refresh as refreshBalances, useBalances } from "./balances";
 
 export type Async<T> = { data: T | null; error: string | null; loading: boolean; reload: () => void; setData: (f: (d: T | null) => T | null) => void };
 
@@ -107,24 +108,15 @@ export function useLocalPref<T extends string | number>(key: string, initial: T)
   return [v, setPref];
 }
 
-/// The connected wallet's SOL balance in lamports (null until known or when no wallet). Polled so
-/// a top-up made in the wallet shows up without a reload; `refresh` is for right after a spawn.
-export function useSolBalance(conn: Connection, owner: PublicKey | null, intervalMs = 20_000): { lamports: bigint | null; error: string | null; refresh: () => void } {
-  const [lamports, setLamports] = useState<bigint | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [nonce, setNonce] = useState(0);
+/// A wallet's SOL balance in lamports (null until known or when no wallet), from the tab's one balance store
+/// (lib/balances.ts): every component showing the same wallet shares one read, one 30 s poll, and the read at the slot
+/// of each trade that lands. `refresh` reads it again now (right after a spawn); `_intervalMs` is accepted for older
+/// callers and ignored.
+export function useSolBalance(conn: Connection, owner: PublicKey | null, _intervalMs?: number): { lamports: bigint | null; error: string | null; refresh: () => void } {
+  const { sol, error } = useBalances(conn, owner);
   const key = owner?.toBase58() ?? null;
-  useEffect(() => {
-    if (!owner) { setLamports(null); setError(null); return; }
-    let alive = true;
-    const tick = () => conn.getBalance(owner, "confirmed").then((n) => { if (alive) { setLamports(BigInt(n)); setError(null); } }).catch((e) => { if (alive) setError(errorMessage(e)); });
-    tick();
-    const t = setInterval(tick, intervalMs);
-    return () => { alive = false; clearInterval(t); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conn, key, intervalMs, nonce]);
-  const refresh = useCallback(() => setNonce((n) => n + 1), []);
-  return { lamports, error, refresh };
+  const refresh = useCallback(() => { if (key) refreshBalances(key); }, [key]);
+  return { lamports: sol, error, refresh };
 }
 
 /// `true` while the media query matches; the coin page swaps the sidebar trade widget for a sticky

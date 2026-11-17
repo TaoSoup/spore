@@ -9,7 +9,15 @@
 // it launched before and the fees their splits pay it are listed with the trading wallet's own. Without a trading
 // wallet the connected wallet is shown. /portfolio?wallet=<address> shows any address
 // read-only. Numbers come from /api/portfolio/:wallet and /api/claims/:wallet (lib/portfolio.ts sorts them into the
-// two lists).
+// two lists); the SOL line comes from the tab's balance store (lib/balances.ts), which reads it again at the slot of
+// each trade that lands, and falls back to the API's figure.
+// AFTER A TRADE: the store tells the page the slot of every transaction of the wallet shown (or of the connected wallet
+// beside it) that lands, sent here or seen on the live stream. The page reloads at once (at most once per 10 s, the
+// rest at the end of that time), asking the API for figures read at that slot or later (?after=, past every cache);
+// under an open ticket, popover or claim it waits until they close (the rows must not move under them). For about 19 s
+// after such a reload the wallet's plain reloads skip the browser's cache too, which may still hold the body from
+// before the trade. A second reload 4 s later picks up the indexer's P&L and prices. Only the user's own wallets react
+// to landings: an address previewed read-only keeps the 15 s poll (a busy bot wallet would otherwise reload it nonstop).
 // ACTIVITY: the wallet's own trades, newest first (/api/activity/:wallet).
 // Profit and loss comes from /api/pnl/:wallet, joined with the holdings in lib/pnl.ts. It is a read of its own: when it
 // fails or is rate limited the rest of the page works and the P&L places show a dash. The server reads a wallet's
@@ -39,7 +47,8 @@ import { PublicKey } from "@solana/web3.js";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { api, ApiError, errorMessage, pumpUrl, solscanTx, type Candle, type Candles, type ClaimCoin, type Coin, type Pnl, type PnlSeries, type WalletTrade } from "../lib/api";
-import { useAsync, useStats } from "../lib/hooks";
+import { useAsync, useSolBalance, useStats } from "../lib/hooks";
+import { subscribeLanded } from "../lib/balances";
 import { ago, amount, count, lamportsToSol, plural, short, signedPct, sol, tokens, usd, usdCard, when } from "../lib/format";
 import type { InstantSpec } from "../lib/instant-trade";
 import { appendPage, buildPnl, historyLine, historyRunning, mergeFirstPage, pnlAvailable, pnlPct, pnlTone, quotePrices, type PnlAmount, type PnlRow, type TradeList } from "../lib/pnl";
@@ -63,7 +72,11 @@ import "../components/portfolio/portfolio.css";
 
 const POLL_MS = 15_000;
 const CLAIM_CACHE_MS = 16_000; // the API caches a coin's fees for 15 s; read again after a claim once it has turned over
-const TRADE_SETTLE_MS = 4_000; // a trade's new balance and price reach the API a few seconds after it lands
+const TRADE_SETTLE_MS = 4_000; // a trade's P&L and new price reach the indexer a few seconds after it lands
+const LANDING_GAP_MS = 10_000;  // landings reload the page at most this often (the newest slot is the one asked)
+// after a reload with ?after=, the wallet's plain reloads skip the browser's cache this long: its copy of the plain
+// answer may predate the trade, and the server lets the browser serve it up to 15 s (max-age 3 + stale-while-revalidate 12)
+const FRESH_MS = POLL_MS + TRADE_SETTLE_MS;
 const BLOCK_READ_MS = 5_000;   // a "not tradable here" reason stays at least this long, so a refresh right after the click does not hide it unread
 const CARDS_STEP = 12;         // parent cards shown at first, and added by "Show more"
 const ROWS_MAX = 5;            // rows a card shows before "Show all"
@@ -145,6 +158,8 @@ export default function Portfolio() {
   const shown = preview ?? mine;
   const readOnly = !!preview && preview !== tw.address && preview !== ext;
   const isTrading = !!shown && shown === tw.address;
+  const shownKey = useMemo(() => (shown ? new PublicKey(shown) : null), [shown]);
+  const solLive = useSolBalance(connection, shownKey).lamports;
   // The connected wallet beside a trading wallet: it signed the launches, so its pairs and fees belong on the page.
   const also = !preview && tw.address && ext && ext !== tw.address ? ext : null;
   // Tickets trade with the wallet shown: the trading wallet (unlocked on the click), or the connected wallet when
@@ -158,8 +173,22 @@ export default function Portfolio() {
   const refresh = useCallback(() => reloadRef.current(), []);
   const onClaimed = useCallback(() => { refresh(); setTimeout(refresh, CLAIM_CACHE_MS); }, [refresh]);
   const flow = useClaimFlow(onClaimed);
-  const pf = useAsync(() => (shown ? api.portfolio(shown) : Promise.resolve(null)), [shown]);
-  const pf2 = useAsync(() => (also ? api.portfolio(also).catch(() => null) : Promise.resolve(null)), [also]);
+  // The slot of the latest landed transaction of each wallet whose figures have not been read at it yet: every reload
+  // asks the API for that slot or later until an answer reaches it (a degraded answer has no slot and keeps it; an
+  // older server sends no slot, so one reload uses it up).
+  const afters = useRef(new Map<string, number>());
+  // wallet -> until when its reloads skip the browser's cache (FRESH_MS after a reload with `after`)
+  const freshUntil = useRef(new Map<string, number>());
+  const readPf = useCallback((w: string) => {
+    const after = afters.current.get(w), now = Date.now();
+    if (after !== undefined) freshUntil.current.set(w, now + FRESH_MS);
+    return api.portfolio(w, after, (freshUntil.current.get(w) ?? 0) > now).then((b) => {
+      if (after !== undefined && afters.current.get(w) === after && (b.slot === undefined || (b.slot !== null && b.slot >= after))) afters.current.delete(w);
+      return b;
+    });
+  }, []);
+  const pf = useAsync(() => (shown ? readPf(shown) : Promise.resolve(null)), [shown]);
+  const pf2 = useAsync(() => (also ? readPf(also).catch(() => null) : Promise.resolve(null)), [also]);
   // Fees are a second read: when it fails the holdings still show, without amounts to claim.
   const claims = useAsync(() => (shown ? api.claimsFor(shown) : Promise.resolve(null)), [shown]);
   const claims2 = useAsync(() => (also ? api.claimsFor(also).catch(() => null) : Promise.resolve(null)), [also]);
@@ -199,7 +228,9 @@ export default function Portfolio() {
   const chartPoints = useMemo(() => (seriesNow && seriesNow.ok !== false ? seriesPoints(seriesNow.points) : []), [seriesNow]);
   const reloadSeriesNow = seriesQ.reload;
   const reloadSeries = useCallback(() => { if (!seriesFlight.current) reloadSeriesNow(); }, [reloadSeriesNow]);
-  reloadRef.current = () => { pf.reload(); claims.reload(); reloadPnl(); reloadSeries(); if (also) { pf2.reload(); claims2.reload(); } };
+  // (a landing waiting for the page to be idle is covered by any reload)
+  const landing = useRef(false);
+  reloadRef.current = () => { landing.current = false; pf.reload(); claims.reload(); reloadPnl(); reloadSeries(); if (also) { pf2.reload(); claims2.reload(); } };
   // While the server reads the wallet's history the P&L is asked again sooner; never while the tab is hidden.
   const reading = historyRunning(pnlNow);
   useEffect(() => {
@@ -221,7 +252,8 @@ export default function Portfolio() {
   // on the page (`busy` / `begin` / `end`, shared with the ticket opener below), the toasts, and what follows each answer.
   // A preset trades at once through lib/instant-trade.ts (every check runs before it signs); what does not pass a check
   // opens the ticket with the amount filled in; nothing is sent again by itself after a failure.
-  const onLanded = useCallback(() => { refresh(); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
+  // the reload at once came from the landing notice (below); this one is for the P&L and prices
+  const onLanded = useCallback(() => { setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
   const { ready, opening, busy, begin, end, alive, settings, run: onInstant } = useInstantTrade({ onTicket: setTrade, onBlocked: showBlock, onLanded });
   // Buy / Sell through the ticket: it needs the coin's full record.
   const onTrade = useCallback(async (mint: string, side: Side) => {
@@ -242,20 +274,47 @@ export default function Portfolio() {
       end();
     }
   }, [connection, toast, ready, showBlock, busy, begin, end, alive]);
-  const closeTrade = useCallback(() => { setTrade(null); refresh(); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
+  // a trade sent from the ticket was heard as it landed; it is reloaded once the ticket is closed (the idle effect below)
+  const closeTrade = useCallback(() => { setTrade(null); setTimeout(refresh, TRADE_SETTLE_MS); }, [refresh]);
 
   // Refresh while the tab is visible, and at once when it comes back; never under an open ticket, an open preset popover
   // (the rows must not move under it) or a running claim.
   const [menus, setMenus] = useState(0);
   const onMenu = useCallback((open: boolean) => setMenus((n) => Math.max(0, n + (open ? 1 : -1))), []);
   const idle = !flow.busy && !trade && menus === 0;
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
   useEffect(() => {
     if (!shown || !idle) return;
     const tick = () => { if (!document.hidden) refresh(); };
+    // a landing heard while the page was busy (or hidden) is read as soon as it is idle again
+    if (landing.current) tick();
     const t = setInterval(tick, POLL_MS);
     document.addEventListener("visibilitychange", tick);
     return () => { clearInterval(t); document.removeEventListener("visibilitychange", tick); };
   }, [shown, idle, refresh]);
+  // A transaction of the wallet shown (or of the connected wallet beside it) landed at `slot`: the next reloads ask for
+  // that slot; idle and visible, the page reloads at once, else when it is idle again. At most one such reload per
+  // LANDING_GAP_MS: one heard sooner waits for the end of it (and asks the newest slot heard by then). Not for an
+  // address previewed read-only. The store calls this synchronously, inside the send, so nothing here may throw or wait.
+  const landAt = useRef(0);
+  useEffect(() => {
+    if (!shown || readOnly) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const reload = () => {
+      if (idleRef.current && !document.hidden) { landAt.current = Date.now(); refresh(); }
+      else landing.current = true;
+    };
+    const off = subscribeLanded((owner, slot) => {
+      if (owner !== shown && owner !== also) return;
+      afters.current.set(owner, Math.max(afters.current.get(owner) ?? 0, slot));
+      if (timer) return; // a reload is already due, and asks for this slot too
+      const wait = landAt.current + LANDING_GAP_MS - Date.now();
+      if (wait <= 0) reload();
+      else timer = setTimeout(() => { timer = null; reload(); }, wait);
+    });
+    return () => { off(); if (timer) { clearTimeout(timer); landing.current = true; } }; // (a reload still due: on the next idle tick)
+  }, [shown, also, readOnly, refresh]);
 
   // The page's portfolio: the wallet shown, with the pairs the connected wallet launched added to its own.
   const data = useMemo(() => {
@@ -321,7 +380,9 @@ export default function Portfolio() {
   const sporeRows = groups.reduce((n, g) => n + g.rows.length + (g.self && g.rows.length === 0 ? 1 : 0), 0);
   const [allHeld, setAllHeld] = useState(false);
   useEffect(() => { setAllHeld(false); }, [shown]);
-  const solBalance = data?.solLamports != null ? lamportsToSol(data.solLamports) : null;
+  // the SOL line: the store's balance (read again at each landed trade), else the API's figure
+  const solLamports = solLive ?? (data?.solLamports != null ? BigInt(data.solLamports) : null);
+  const solBalance = solLamports !== null ? lamportsToSol(solLamports) : null;
   const canClaim = !readOnly && !!flow.me;
   const actions: Actions = { opening, blocked, onTrade, flow: canClaim ? flow : null, buy: !!tradeAddr, sell: tradesShown, readOnly,
     instant: settings.instant, presets: { buy: settings.buyPresets, sell: settings.sellPresets }, ready, onInstant, onMenu };

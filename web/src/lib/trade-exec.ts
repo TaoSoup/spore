@@ -3,8 +3,8 @@
 // route's venues, and build + simulate + sign + confirm the quoted trade. The trade ticket (components/TradeWidget.tsx)
 // and the instant trade (lib/instant-trade.ts) both run these, so the two can never quote, price or send differently.
 import { PublicKey, type Connection } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { solscanTx } from "./api";
+import { readBalancesNow } from "./balances";
 import { runJupSwap, runSwap, type SwapOpts } from "./flow";
 import { quoteJup, type JupQuote } from "./jup";
 import { priorityMicroLamports, quoteSwap, routeVenues, swapUnits, type Chain, type Side, type TxSender } from "./pump";
@@ -17,15 +17,12 @@ export type TradeCoin = { mint: string; tokenProgram: string; symbol: string | n
 /// `jup`: the Jupiter route's quote (its build is what the transaction is compiled from).
 export type TradeQuote = { amountOut: bigint; units: number; unwrapped: bigint; jup?: JupQuote };
 
-/// The wallet's SOL (null: the read failed) and its balance of the coin, read from the chain now. A missing token
-/// account is the normal "never held it" case, not an error: 0 with `hasAta` false.
-export async function readTradeBalances(conn: Connection, user: PublicKey, coin: Pick<TradeCoin, "mint" | "tokenProgram">): Promise<{ sol: bigint | null; token: bigint; hasAta: boolean }> {
-  const ata = getAssociatedTokenAddressSync(new PublicKey(coin.mint), user, false, new PublicKey(coin.tokenProgram));
-  const [s, t] = await Promise.all([
-    conn.getBalance(user, "confirmed").then((n) => BigInt(n)).catch(() => null),
-    conn.getTokenAccountBalance(ata, "confirmed").then((r) => ({ amount: BigInt(r.value.amount), has: true })).catch(() => ({ amount: 0n, has: false })),
-  ]);
-  return { sol: s, token: t.amount, hasAta: t.has };
+/// The wallet's SOL and its balance of the coin, read from the chain now in one call (lib/balances.ts, at least at the
+/// slot of the wallet's last landed trade, and fed to every balance on the page). null: the read failed, never a 0 that
+/// was not read. A missing token account is the normal "never held it" case, not an error: 0 with `hasAta` false.
+export async function readTradeBalances(conn: Connection, user: PublicKey, coin: Pick<TradeCoin, "mint" | "tokenProgram">): Promise<{ sol: bigint | null; token: bigint | null; hasAta: boolean }> {
+  const r = await readBalancesNow(conn, user, coin.mint, coin.tokenProgram);
+  return { sol: r.sol, token: r.token, hasAta: r.hasAta };
 }
 
 /// A simulated quote of buying with `amountIn` lamports or selling `amountIn` base units, for `payer`: Jupiter's build

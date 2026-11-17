@@ -6,7 +6,8 @@ import { ApiError, pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/ap
 import { routeLabels } from "../lib/chain";
 import { PriceMovedError, QUOTE_PROBE, withSlippage } from "../lib/flow";
 import { JupPriceMovedError, KNOWN_MINTS, SOL_MINT, jupPath } from "../lib/jup";
-import { quoteTrade, readTradeBalances, sendTrade, tradeErrorText, tradePriority, tradeVenues, type TradeQuote } from "../lib/trade-exec";
+import { quoteTrade, sendTrade, tradeErrorText, tradePriority, tradeVenues, type TradeQuote } from "../lib/trade-exec";
+import { refresh as refreshBalances, useBalances } from "../lib/balances";
 import { BUY_HEADROOM_LAMPORTS, sellAmountOf, tradeImpact } from "../lib/trade-settings";
 import { openTradingWallet, signsAtOnce, useInstantSol, useSlippageBps, useTrader } from "../lib/trader";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
@@ -65,7 +66,8 @@ export type TradeWidgetProps = { coin: Coin; solUsd: number | null; initialSide?
   /// Another trade of the page is running (the coin page's instant trade): nothing is sent from here meanwhile, one
   /// trade at a time.
   hold?: boolean;
-  /// A change of this number reads the wallet's balances again now (the coin page, after an instant trade landed).
+  /// A change of this number reads the wallet's balances again now. (A trade that lands needs none: the balance store
+  /// reads them at its slot by itself, lib/balances.ts.)
   refresh?: number;
   /// The coin page's side card: the route as one line (the drawn route and its note open on a press), the
   /// "simulated on-chain" note in the foot, tighter spacing. Every notice, error and figure stays as it is.
@@ -119,7 +121,10 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
   // compact: the drawn route is open (a press on the route line)
   const [routeOpen, setRouteOpen] = useState(false);
   const routeId = useId();
-  const [bal, setBal] = useState<{ sol: bigint | null; token: bigint | null; hasAta: boolean }>({ sol: null, token: null, hasAta: false });
+  // The wallet's SOL and its balance of this coin, from the tab's balance store (lib/balances.ts): one read shared with the
+  // header and the other pages, polled there, and read again at the slot of every trade that lands (this one's too).
+  // `token` null: not known yet or not readable (the balance shows "…", the % buttons are off).
+  const bal = useBalances(connection, user, { mint: coin.mint, tokenProgram: coin.tokenProgram });
   const [nonce, setNonce] = useState(0);
   // Buy in dollars: the field takes USD and writes the SOL amount the rest of the widget reads, so the
   // quote, the checks and the transaction never see anything but SOL.
@@ -174,12 +179,7 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
     return () => { alive = false; };
   }, [coin.mint, connection]);
 
-  const refreshBalances = useCallback(async () => {
-    if (!user) { setBal({ sol: null, token: null, hasAta: false }); return; }
-    setBal(await readTradeBalances(connection, user, { mint: coin.mint, tokenProgram: coin.tokenProgram }));
-  }, [connection, user, coin.mint, coin.tokenProgram]);
-  useEffect(() => { refreshBalances(); const t = setInterval(refreshBalances, 20_000); return () => clearInterval(t); }, [refreshBalances]);
-  useEffect(() => { if (refresh) void refreshBalances(); }, [refresh, refreshBalances]);
+  useEffect(() => { if (refresh && userKey) refreshBalances(userKey); }, [refresh, userKey]);
 
   const [quote, setQuote] = useState<QuoteState | null>(null);
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
@@ -288,8 +288,8 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
     try {
       const { sig } = await sendTrade(connection, sender, coin, chain, q, slippage, micro, setSteps);
       toast.success(side === "buy" ? `Bought ${sym(coin)}` : `Sold ${sym(coin)}`, { href: solscanTx(sig), label: "view transaction" });
+      // (the balances need no read here: the store read them at the slot the trade landed in)
       setInput(""); setQuote(null); setSteps([]); setMoved(false);
-      refreshBalances();
       // the trade settled: the dialog around the widget may close now (it ignores a close while busy)
       onBusy?.(false);
       onClose?.();

@@ -65,8 +65,6 @@ const quoteDecimalsOf = (c: CoinT) => (c as CoinT & { quoteDecimals?: number }).
 const priceText = (c: CoinT) => (c.priceUsd != null ? usd(c.priceUsd) : price(c.priceQuote, c.quoteSymbol));
 const mcText = (c: CoinT) => (c.mcapUsd != null ? `MC ${usd(c.mcapUsd)}${c.mcapSol != null ? ` · ${sol(c.mcapSol)}` : ""}` : c.mcapSol != null ? `MC ${sol(c.mcapSol)}` : "MC —");
 const smooth = (): ScrollBehavior => (motionPaused() ? "auto" : "smooth");
-/// A trade's new balance reaches the RPC a few seconds after it lands: the widget reads it again then too.
-const TRADE_SETTLE_MS = 4_000;
 
 export default function CoinPage() {
   const { mint = "" } = useParams();
@@ -140,16 +138,9 @@ export default function CoinPage() {
     if (block.kind === "gap") toast.info(`${t.title}. ${t.body}`);
     else setInstantBlock({ mint: c.mint, short: t.short, body: t.body });
   }, [toast]);
-  // landed: the widget reads the wallet's balances again now and once the RPC caught up (the tape follows the stream)
-  const [balTick, setBalTick] = useState(0);
-  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (settleTimer.current) clearTimeout(settleTimer.current); }, []);
-  const onLanded = useCallback(() => {
-    setBalTick((n) => n + 1);
-    if (settleTimer.current) clearTimeout(settleTimer.current);
-    settleTimer.current = setTimeout(() => setBalTick((n) => n + 1), TRADE_SETTLE_MS);
-  }, []);
-  const instant = useInstantTrade({ onTicket: onInstantTicket, onBlocked: onInstantBlock, onLanded }, { signer: "chosen" });
+  // A trade that landed needs nothing here: the balance store (lib/balances.ts) reads the wallet again at its slot, and
+  // the widget shows it; the tape follows the stream.
+  const instant = useInstantTrade({ onTicket: onInstantTicket, onBlocked: onInstantBlock }, { signer: "chosen" });
   const { run: instantRun, opening: instantOpening, busy: instantBusy } = instant;
   useEffect(() => { setInstantBlock(null); setPrefill(null); }, [mint]);
   const runInstant = useCallback((spec: InstantSpec) => {
@@ -253,7 +244,7 @@ export default function CoinPage() {
               )}
               {/* remounted with the amount when an instant trade handed the trade back to it */}
               <PageTicket key={pf ? `ticket-${pf.n}` : "ticket"} coin={coin} solUsd={solUsd} amountRef={amountRef} current={store.coin} compact
-                initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} refresh={balTick} />
+                initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} />
             </aside>
             <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />
           </div>

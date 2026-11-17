@@ -116,8 +116,9 @@ export async function instantTrade(conn: Connection, input: InstantInput, deps: 
     deps.balances(conn, user, coin),
   ]);
 
-  // 4 (early, for the ticket's field). 100% is the whole balance; a smaller share is rounded down to a base unit.
-  const amountIn = spec.side === "buy" ? solToLamports(spec.sol) : sellAmountOf(bal.token, spec.pct);
+  // 4 (early, for the ticket's field). 100% is the whole balance; a smaller share is rounded down to a base unit. A
+  // balance that could not be read (null) sizes no sell: it ends below as "could not be read", nothing signed.
+  const amountIn = spec.side === "buy" ? solToLamports(spec.sol) : bal.token === null ? 0n : sellAmountOf(bal.token, spec.pct);
   const field = spec.side === "buy" ? presetText(spec.sol) : amountIn > 0n ? exactAmount(amountIn, coin.decimals) : "";
   const ticket = (reason: TicketReason, text: string, deposit = false): InstantResult => ({ kind: "ticket", coin, side, amount: field, reason, text, ...(deposit ? { deposit } : {}) });
 
@@ -130,7 +131,7 @@ export async function instantTrade(conn: Connection, input: InstantInput, deps: 
 
   if (amountIn <= 0n) {
     return { kind: "failed", coin, side, text: spec.side === "buy" ? "That buy amount is not one Spore can send. Check the presets in Trade settings."
-      : bal.token > 0n ? `${spec.pct}% of what this wallet holds of ${name} is less than its smallest unit. Nothing was sent.`
+      : bal.token !== null && bal.token > 0n ? `${spec.pct}% of what this wallet holds of ${name} is less than its smallest unit. Nothing was sent.`
       : `This wallet holds no ${name} to sell, or its balance could not be read just now. Nothing was sent.` };
   }
 
@@ -138,8 +139,10 @@ export async function instantTrade(conn: Connection, input: InstantInput, deps: 
   const capText = `over your "sign at once" limit of ${capSol > 0 ? `${capSol} SOL` : "0 SOL"}`;
   if (side === "buy" && overCap({ trader, lamports: amountIn, capSol })) return ticket("cap", `This buy is ${capText}, so it was not signed. Review it in the ticket.`);
 
-  // 6. the SOL it takes, with the estimate the ticket shows before a quote
-  const ownRent = side === "buy" && !bal.hasAta ? ataRentLamports(coin.tokenProgram) : 0n;
+  // 6. the SOL it takes, with the estimate the ticket shows before a quote. A token balance that could not be read
+  // counts the account as missing: its rent is in the check (the safe side).
+  const hasAta = bal.token !== null && bal.hasAta;
+  const ownRent = side === "buy" && !hasAta ? ataRentLamports(coin.tokenProgram) : 0n;
   const lacksSol = (fee: bigint, rent: bigint): InstantResult | null => {
     if (bal.sol === null) return null; // the read failed: the simulation of the exact transaction decides
     if (side === "buy" ? bal.sol >= buyNeedLamports(amountIn, fee, rent) : bal.sol >= fee) return null;

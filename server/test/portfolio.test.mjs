@@ -1,7 +1,10 @@
 // GET /api/portfolio/:wallet against a fake RPC: the model's creator index (built at load, kept by
 // every upsert, a coin added after boot), holdings over both token programs resolved to tracked coins
 // with their parent and USD value, the launched list, the 10 s per-wallet cache and the shared
-// in-flight read, a failed chain read answered as holdingsOk false / solLamports null, input
+// in-flight read, `after` (a post-trade reload: a body at that slot or later, minContextSlot on the
+// reads, -32016 asked again, then once without the floor; an older read under way never shared or written
+// over the newer body; a degraded read with a floor never replacing a complete body; an `after` past any
+// slot seen ignored), a failed chain read answered as holdingsOk false / solLamports null, input
 // validation and the route's own rate limit. Also: a launched coin stays listed once a curve re-read
 // names the fee-sharing config as its creator (the launcher field, or the coin's fee shares when
 // there is none), the size cap on the token-account read, and the overall deadline of the chain reads.
@@ -12,10 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../lib/api.mjs";
 import { Model } from "../lib/model.mjs";
-import { createPortfolio, PORTFOLIO_CACHE_MS, PORTFOLIO_CACHE_MAX, PORTFOLIO_LAUNCHED_MAX, PORTFOLIO_MAX_BYTES, PORTFOLIO_DEADLINE_MS } from "../lib/portfolio.mjs";
+import { createPortfolio, PORTFOLIO_CACHE_MS, PORTFOLIO_CACHE_MAX, PORTFOLIO_LAUNCHED_MAX, PORTFOLIO_MAX_BYTES, PORTFOLIO_DEADLINE_MS, PORTFOLIO_SLOT_RETRIES, PORTFOLIO_AFTER_SLACK } from "../lib/portfolio.mjs";
 import { DEFAULT_RATES } from "../lib/config.mjs";
 import { EventHub } from "../lib/events.mjs";
-import { Rpc } from "../lib/rpc.mjs";
+import { Rpc, RpcError } from "../lib/rpc.mjs";
 import { ImageCache } from "../lib/meta.mjs";
 import { PublicKey, USDC_MINT, TOKEN_PROGRAM_ID } from "../lib/sdk.mjs";
 import { buildTree, K, PLATFORM, T22, base, quiet } from "./helpers/tree.mjs";
@@ -32,14 +35,20 @@ const tokenAccount = (mint, amount, owner = WALLET) => {
 
 let server, url, model, db, hub, dir, t = 1_700_000_000_000;
 const calls = [];
-// The fake chain: token accounts per program, the SOL balance, and switches to fail or hold a read.
-const chain = { [SPL]: [], [T22]: [], lamports: 1_500_000_000, failTokens: false, failBalance: false, gate: null };
+// The fake chain: token accounts per program, the SOL balance, and switches to fail or hold a read. `slot` is the
+// node's slot; a read asking a higher minContextSlot gets -32016 while `behind` lasts, then the node has caught up.
+const chain = { [SPL]: [], [T22]: [], lamports: 1_500_000_000, failTokens: false, failBalance: false, gate: null, slot: 1, behind: 0 };
 const rpc = {
   call: async (method, params, opts) => {
     calls.push({ method, params, opts });
     if (chain.gate) await chain.gate;
-    if (method === "getBalance") { if (chain.failBalance) throw new Error("balance down"); return { context: { slot: 1 }, value: chain.lamports }; }
-    if (method === "getTokenAccountsByOwner") { if (chain.failTokens) throw new Error("tokens down"); return { context: { slot: 1 }, value: chain[params[1].programId] }; }
+    const min = (method === "getBalance" ? params[1] : params[2])?.minContextSlot ?? 0;
+    if (min > chain.slot) {
+      if (chain.behind > 0) { chain.behind--; throw new RpcError(method, -32016, "Minimum context slot has not been reached"); }
+      chain.slot = min;
+    }
+    if (method === "getBalance") { if (chain.failBalance) throw new Error("balance down"); return { context: { slot: chain.slot }, value: chain.lamports }; }
+    if (method === "getTokenAccountsByOwner") { if (chain.failTokens) throw new Error("tokens down"); return { context: { slot: chain.slot }, value: chain[params[1].programId] }; }
     throw new Error(`unexpected ${method}`);
   },
 };
@@ -98,8 +107,9 @@ test("GET /api/portfolio/:wallet: holdings of both token programs, parents, valu
   calls.length = 0;
   const { status, body, headers } = await get(`/api/portfolio/${WALLET}`);
   assert.equal(status, 200);
-  assert.deepEqual(Object.keys(body), ["wallet", "at", "solLamports", "holdingsOk", "holdings", "untracked", "launched", "launchedTotal"]);
-  assert.equal(body.wallet, WALLET); assert.equal(body.at, Math.floor(t / 1000));
+  assert.deepEqual(Object.keys(body), ["wallet", "at", "slot", "solLamports", "holdingsOk", "holdings", "untracked", "launched", "launchedTotal"]);
+  assert.equal(body.wallet, WALLET); assert.equal(body.at, Math.floor(t / 1000)); assert.equal(body.slot, 1);
+  for (const c of calls) assert.equal((c.method === "getBalance" ? c.params[1] : c.params[2]).minContextSlot, undefined); // no floor asked
   assert.equal(body.solLamports, "1500000000"); assert.equal(body.holdingsOk, true); assert.equal(body.untracked, 2);
   // One balance read and one token read per program, never the parsed form.
   assert.deepEqual(calls.map((c) => c.method).sort(), ["getBalance", "getTokenAccountsByOwner", "getTokenAccountsByOwner"]);
@@ -160,6 +170,137 @@ test("GET /api/portfolio/:wallet: one RPC round per wallet per 10 s, concurrent 
   assert.equal(fresh.body.solLamports, "7"); assert.equal(fresh.body.at, Math.floor(t / 1000));
   assert.equal(calls.length, 6);
   chain.lamports = 1_500_000_000;
+});
+
+test("GET /api/portfolio/:wallet?after=<slot>: an older body is passed over, the reads ask minContextSlot, -32016 is asked again, never browser-cached", async () => {
+  t += 60_000; // a fresh window of the route's 20/min limit, here and for the tests after this one
+  const w = key(150);
+  chain.slot = 100; calls.length = 0;
+  let r = await get(`/api/portfolio/${w}`);
+  assert.equal(r.body.slot, 100); assert.equal(calls.length, 3); assert.match(r.headers.get("cache-control"), /max-age=3/);
+  // At the cached body's slot: served from the cache, but the browser does not keep it.
+  r = await get(`/api/portfolio/${w}?after=100`);
+  assert.equal(r.body.slot, 100); assert.equal(calls.length, 3); assert.equal(r.headers.get("cache-control"), "no-store");
+  // Past it: a new read, every call asks for the slot; the node answers -32016 twice and is asked again ~400 ms later.
+  chain.lamports = 9; chain.behind = 2;
+  const t0 = Date.now();
+  r = await get(`/api/portfolio/${w}?after=105`);
+  assert.equal(r.status, 200); assert.equal(r.headers.get("cache-control"), "no-store");
+  assert.equal(r.body.solLamports, "9"); assert.equal(r.body.slot, 105); assert.equal(r.body.holdingsOk, true);
+  const fresh = calls.slice(3);
+  assert.equal(fresh.length, 5); // three reads, two of them asked twice
+  for (const c of fresh) assert.equal((c.method === "getBalance" ? c.params[1] : c.params[2]).minContextSlot, 105);
+  assert.ok(Date.now() - t0 >= 350, `answered after ${Date.now() - t0} ms`);
+  // The newer body is the cached one now: a plain request and an older slot get it without a read.
+  chain.lamports = 1;
+  assert.equal((await get(`/api/portfolio/${w}`)).body.solLamports, "9");
+  assert.equal((await get(`/api/portfolio/${w}?after=101`)).body.solLamports, "9");
+  assert.equal(calls.length, 8);
+  // Anything but one positive whole number is no floor: the cached body with the usual cache header.
+  for (const bad of ["abc", "-5", "0", "1.5", "1e9", "9999999999999999", "99999999999999999999", "", "1&after=200"]) {
+    r = await get(`/api/portfolio/${w}?after=${bad}`);
+    assert.equal(r.status, 200); assert.equal(r.body.solLamports, "9"); assert.match(r.headers.get("cache-control"), /max-age=3/, bad);
+  }
+  assert.equal(calls.length, 8);
+  chain.lamports = 1_500_000_000; chain.slot = 1; chain.behind = 0;
+  t += 60_000;
+});
+
+test("portfolio after: a read under way for an older slot is not shared, and finishing late it does not replace the newer body", async () => {
+  const w = key(151);
+  let open; const held = new Promise((r) => { open = r; });
+  const asked = [];
+  // The plain reads hang until released and answer slot 150; the reads with a floor answer at once, at that slot.
+  const fake = { call: async (method, params) => {
+    const min = (method === "getBalance" ? params[1] : params[2]).minContextSlot ?? 0;
+    asked.push(min);
+    if (!min) await held;
+    const slot = min || 150;
+    return method === "getBalance" ? { context: { slot }, value: min ? 2 : 1 } : { context: { slot }, value: [] };
+  } };
+  const p = createPortfolio({ model, rpc: fake, log: quiet, now: () => t });
+  const old = p.get(w), same = p.get(w); // the second shares the first read
+  const newer = p.get(w, { after: 200 }); // the read under way has no floor: a read of its own
+  const served = [p.get(w), p.get(w, { after: 180 }), p.get(w, { after: 200 })]; // the read for 200 serves all three
+  const n = await newer;
+  assert.equal(n.slot, 200); assert.equal(n.solLamports, "2");
+  for (const b of await Promise.all(served)) assert.equal(b, n);
+  open();
+  const o = await old;
+  assert.equal(await same, o); assert.equal(o.slot, 150); assert.equal(o.solLamports, "1");
+  // The late older read answered its own callers only: the cache still holds the newer body.
+  assert.equal(await p.get(w), n);
+  assert.equal(await p.get(w, { after: 200 }), n);
+  assert.deepEqual({ ...p.snapshot() }, { cached: 1, builds: 2, hits: 2, shared: 4, failed: 0, late: 0, fresher: 1, behind: 0, unfloored: 0, kept: 0, implausible: 0 });
+  assert.deepEqual(asked.sort((a, b) => a - b), [0, 0, 0, 200, 200, 200]);
+});
+
+test("portfolio after: a degraded body never answers it, a node behind past the retries is asked without the floor, a degraded floor read keeps the complete body, -32016 through the real client", async () => {
+  const w = key(152);
+  const p = createPortfolio({ model, rpc, log: quiet, now: () => t, slotRetryMs: 5 });
+  chain.slot = 300; chain.failTokens = true; calls.length = 0;
+  const d = await p.get(w);
+  assert.equal(d.holdingsOk, false); assert.equal(d.slot, null); // a read failed: the body has no slot
+  assert.equal(await p.get(w), d); // a plain request takes the degraded body for its short window
+  chain.failTokens = false;
+  const ok = await p.get(w, { after: 300 }); // at the node's slot, but the cached body is not complete: read again
+  assert.equal(ok.holdingsOk, true); assert.equal(ok.slot, 300);
+  assert.equal(calls.length, 6);
+  // Behind past every retry: each read is asked 1 + PORTFOLIO_SLOT_RETRIES times with the floor, then once without
+  // it. The body is complete at the node's own slot, which is below `after` (the page asks again), never degraded.
+  chain.behind = 1000; calls.length = 0;
+  const minOf = (c) => (c.method === "getBalance" ? c.params[1] : c.params[2]).minContextSlot;
+  const b = await p.get(w, { after: 400 });
+  assert.equal(b.solLamports, "1500000000"); assert.equal(b.holdingsOk, true); assert.equal(b.slot, 300);
+  for (const [m, reads] of [["getBalance", 1], ["getTokenAccountsByOwner", 2]]) {
+    const mine = calls.filter((c) => c.method === m);
+    assert.equal(mine.filter((c) => minOf(c) === 400).length, reads * (1 + PORTFOLIO_SLOT_RETRIES), m);
+    assert.equal(mine.filter((c) => minOf(c) === undefined).length, reads, m);
+  }
+  assert.equal(p.snapshot().unfloored, 3);
+  const asks = calls.length;
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(calls.length, asks, "nothing asked after the body was answered");
+  assert.equal(await p.get(w), b); // complete: cached as any body, a plain request takes it
+  // A read with a floor that comes back degraded (the RPC failed, not merely behind) does not replace the complete
+  // body: its callers get that body (slot 300 < 301, so the page asks again), and so does the next plain request.
+  chain.behind = 0; chain.failTokens = true; calls.length = 0;
+  assert.equal(await p.get(w, { after: 301 }), b);
+  assert.equal(calls.length, 3);
+  chain.failTokens = false;
+  assert.equal(await p.get(w), b);
+  assert.equal(calls.length, 3);
+  assert.equal(p.snapshot().kept, 1);
+  // An `after` far past every slot seen is no floor: the cached body, no read.
+  assert.equal(await p.get(w, { after: 301 + PORTFOLIO_AFTER_SLACK + 50 }), b);
+  assert.equal(calls.length, 3);
+  assert.equal(p.snapshot().implausible, 1);
+  chain.behind = 0; chain.slot = 1;
+  // A node far below the floor (its slot rides along in the -32016) is not asked again with it: once without, at once.
+  const far = []; const node = 1000;
+  const lagging = { call: async (method, params) => {
+    const min = (method === "getBalance" ? params[1] : params[2]).minContextSlot;
+    far.push(min ?? 0);
+    if (min > node) throw new RpcError(method, -32016, "Minimum context slot has not been reached", { contextSlot: node - 100 });
+    return method === "getBalance" ? { context: { slot: node }, value: 3 } : { context: { slot: node }, value: [] };
+  } };
+  const fp = createPortfolio({ model, rpc: lagging, log: quiet, now: () => t, slotRetryMs: 5 });
+  const fb = await fp.get(w, { after: node + 10 });
+  assert.equal(fb.solLamports, "3"); assert.equal(fb.slot, node); assert.equal(fb.holdingsOk, true);
+  assert.deepEqual(far.sort((a, c) => a - c), [0, 0, 0, node + 10, node + 10, node + 10]);
+  assert.equal(fp.snapshot().behind, 0); assert.equal(fp.snapshot().unfloored, 3);
+  // The real client hands -32016 up as an RpcError with its code (it does not retry it itself); the portfolio asks again.
+  let answers = 0;
+  const real = new Rpc({ url: "https://rpc.example", rps: 1000, apiRps: 1000, log: quiet, fetchImpl: async (u, init) => {
+    const { method, params } = JSON.parse(init.body);
+    const min = (method === "getBalance" ? params[1] : params[2]).minContextSlot;
+    if (answers++ < 2) return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32016, message: "Minimum context slot has not been reached", data: { contextSlot: min - 1 } } }));
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { context: { slot: min }, value: method === "getBalance" ? 42 : [] } }));
+  } });
+  const q = createPortfolio({ model, rpc: real.lane("api"), log: quiet, slotRetryMs: 5 });
+  const r = await q.get(w, { after: 500 });
+  assert.equal(r.solLamports, "42"); assert.equal(r.slot, 500); assert.equal(r.holdingsOk, true);
+  assert.equal(answers, 5); assert.equal(q.snapshot().behind, 2);
 });
 
 test("GET /api/portfolio/:wallet: a failed chain read degrades, is retried sooner, never 500", async () => {
@@ -335,7 +476,7 @@ test("the chain reads share one deadline: an RPC that never answers degrades the
   assert.deepEqual(a.launched.map((c) => c.mint), [key(141)]); assert.equal(a.launchedTotal, 1);
   assert.equal(signals.length, 3);
   for (const s of signals) { assert.equal(s.aborted, true); assert.match(s.reason.message, /no answer within 60 ms/); }
-  assert.deepEqual({ ...p.snapshot() }, { cached: 1, builds: 1, hits: 0, shared: 1, failed: 1, late: 1 });
+  assert.deepEqual({ ...p.snapshot() }, { cached: 1, builds: 1, hits: 0, shared: 1, failed: 1, late: 1, fresher: 0, behind: 0, unfloored: 0, kept: 0, implausible: 0 });
   // The entry holds the degraded body for the short window, then a new read starts: nothing is pinned.
   await p.get(w);
   assert.equal(p.snapshot().hits, 1);
