@@ -34,6 +34,9 @@ import SlidingPill from "../../ui/SlidingPill";
 import TradePresets from "../../TradePresets";
 import Sparkline, { candleChange, spanLabel } from "./Sparkline";
 import Brood from "./Brood";
+import ParentRow from "./ParentRow";
+import { parentOf, plainQuote, type ParentRef } from "../../../lib/priced-in";
+import { parentUsdOf } from "../../coin/ParentPrice";
 import type { Leader } from "../../../lib/map/volume";
 
 const PAGE = 40;
@@ -168,6 +171,20 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   useEffect(() => setCopied(false), [node.mint]);
   const change = candleChange(candles?.candles);
   const parent = node.parentMint ? byMint.get(node.parentMint) ?? null : null;
+  // What the coin's pool is paired with ("Priced in", panel/ParentRow): from its record, with the map's logo and ticker
+  // for a listed asset; while the record loads, the parent drawn on the map, so the row stays put from one sibling to
+  // the next. Nothing for SOL (or a stablecoin).
+  const own = c && c.mint === node.mint ? c : null;
+  const parentRef = useMemo((): ParentRef | null => {
+    if (own) {
+      const r = parentOf(own);
+      if (!r) return null;
+      const n = byMint.get(r.mint);
+      return { mint: r.mint, symbol: r.symbol ?? n?.symbol ?? null, image: r.image ?? n?.image ?? null };
+    }
+    return parent && !plainQuote(parent.mint) ? { mint: parent.mint, symbol: parent.symbol, image: parent.image } : null;
+  }, [own, parent, byMint]);
+  const parentLoaded = own ? parentUsdOf(own) : null;
   const chain = useMemo(() => {
     const out: BubbleNode[] = [];
     let cur: BubbleNode | undefined = node;
@@ -312,6 +329,10 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
     );
   const close = <button type="button" className="map-side-close" aria-label="Close" title="Close (Esc)" onClick={onClose}>×</button>;
 
+  // the token the selected coin's pool is paired with (nothing for SOL): selects it when it is on the map
+  const onMap = (m: string) => byMint.has(m);
+  const parentRow = (compact: boolean) => (parentRef ? <ParentRow key={parentRef.mint} parent={parentRef} loaded={parentLoaded} onMap={onMap} onPick={onPick} compact={compact} /> : null);
+
   if (peek) {
     return (
       <div className="map-side-in peek">
@@ -321,6 +342,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           <div className="map-side-title"><b>{nameOf(head)}</b><span className="mono muted">{sym(node)} · {usd(node.mcapUsd)} mcap</span></div>
           {changeEl}
         </div>
+        {parentRow(true)}
         {tradeActs}
         {mainActs}
       </div>
@@ -374,6 +396,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           {heatOn && <p className="map-side-heat">{heat && heat.last > 0 ? <>last trade {ago(heat.last)}{c && c.trades24h > 0 ? <> · {count(c.trades24h)} tx 24h</> : null}</> : "no trade in 24 h"}</p>}
         </div>
         <div className="map-side-spark" ref={sparkRef}>{candles === undefined || sparkW === 0 ? <Skeleton h={SPARK_H} r={8} /> : candles && candles.candles.length >= 2 ? <Sparkline candles={candles.candles} w={sparkW} h={SPARK_H} unit={candles.priceKey} title={`${sym(node)} price, last ${spanLabel(change?.spanS ?? 0)}, ${change ? signedPct(change.ratio) : "no change"}`} /> : <span className="map-spark-none">no candles yet</span>}</div>
+        {parentRow(false)}
       </div>
       {lastHidden && <p className="map-side-hidden">Hidden by the Key filter · {heat && heat.last > 0 ? <>last trade {ago(heat.last)}</> : "no trade on record"}{onShowAll && <> · <button type="button" className="linkish" onClick={onShowAll} title="Show every coin, whatever its last trade (?last=all)">show all</button></>}</p>}
       <div className="map-side-stats">

@@ -11,7 +11,7 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError, solscanAccount, type Candles, type Coin as CoinT } from "../../lib/api";
-import { usd } from "../../lib/format";
+import { short, usd } from "../../lib/format";
 import { parentOf, type ParentRef } from "../../lib/priced-in";
 import { coinCached, coinCachedAt } from "../../lib/trade-route";
 import { Logo, sym } from "../Bits";
@@ -27,12 +27,14 @@ const REFRESH_MS = 60_000;
 /// `tracked` false, and then nothing is asked again), asked for at `at` (ms); `candles`: its hourly series (null
 /// without one).
 type ParentData = { mint: string; coin: CoinT | null; at: number; tracked: boolean; candles: Candles | null };
-type Feed = { data: ParentData | null; subs: Set<() => void>; stop: () => void };
-/// One loader per parent mint while anything shows it; the last one to go stops it (and a later one starts afresh).
+type Feed = { data: ParentData | null; subs: Set<() => void>; stop: () => void; kick: () => void; linger: ReturnType<typeof setTimeout> | null };
+/// One loader per parent mint while anything shows it. It lingers a minute after the last one goes (asking nothing
+/// meanwhile), so a reselection on the map or a remount (the phone sheet's peek and full views) reads it at once.
 const feeds = new Map<string, Feed>();
+const LINGER_MS = 60_000;
 
 function startFeed(mint: string): Feed {
-  const f: Feed = { data: null, subs: new Set(), stop: () => {} };
+  const f: Feed = { data: null, subs: new Set(), stop: () => {}, kick: () => {}, linger: null };
   let alive = true, last = 0, busy = false, untracked = false;
   const load = async () => {
     if (busy || untracked || document.visibilityState === "hidden") return;
@@ -43,7 +45,9 @@ function startFeed(mint: string): Feed {
     // candles of it either: not asked). The record comes through the trade route's one-minute cache, which the
     // route above the trade widget reads too.
     const c = await coinCached(mint).catch((e) => (e instanceof ApiError && e.status === 404 ? null : undefined));
-    const k = c === null ? undefined : await api.candles(mint, 3600).catch(() => undefined);
+    // scope=all: the chart of any tracked coin (the map shows every pump.fun pair; without it ours mode answers only
+    // for our coins and their ancestors); the plain route if the server has no such scope
+    const k = c === null ? undefined : await api.candles(mint, 3600, "all").catch((e) => (e instanceof ApiError && e.status === 404 ? api.candles(mint, 3600) : Promise.reject(e))).catch(() => undefined);
     busy = false;
     if (!alive) return;
     if (c === null) untracked = true;
@@ -55,8 +59,10 @@ function startFeed(mint: string): Feed {
     for (const cb of [...f.subs]) cb();
   };
   void load();
-  const timer = setInterval(() => { if (Date.now() - last >= REFRESH_MS - 1_000) void load(); }, REFRESH_MS);
-  const onVis = () => { if (document.visibilityState === "visible" && Date.now() - last >= REFRESH_MS) void load(); };
+  const timer = setInterval(() => { if (f.subs.size && Date.now() - last >= REFRESH_MS - 1_000) void load(); }, REFRESH_MS);
+  const onVis = () => { if (f.subs.size && document.visibilityState === "visible" && Date.now() - last >= REFRESH_MS) void load(); };
+  // a reader back on a lingering feed: a fresh reading if the last is a minute old
+  f.kick = () => { if (Date.now() - last >= REFRESH_MS) void load(); };
   document.addEventListener("visibilitychange", onVis);
   f.stop = () => { alive = false; clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
   return f;
@@ -66,11 +72,18 @@ function useParentData(mint: string): ParentData | null {
   const subscribe = useCallback((cb: () => void) => {
     let f = feeds.get(mint);
     if (!f) { f = startFeed(mint); feeds.set(mint, f); }
+    else if (f.linger) { clearTimeout(f.linger); f.linger = null; f.kick(); }
     const feed = f;
     feed.subs.add(cb);
     return () => {
       feed.subs.delete(cb);
-      if (!feed.subs.size) { feed.stop(); if (feeds.get(mint) === feed) feeds.delete(mint); }
+      if (feed.subs.size || feed.linger) return;
+      feed.linger = setTimeout(() => {
+        feed.linger = null;
+        if (feed.subs.size) return;
+        feed.stop();
+        if (feeds.get(mint) === feed) feeds.delete(mint);
+      }, LINGER_MS);
     };
   }, [mint]);
   const read = useCallback(() => feeds.get(mint)?.data ?? null, [mint]);
@@ -109,7 +122,7 @@ function useSparkRoom(rootRef: RefObject<HTMLDivElement | null>, has: boolean): 
 }
 
 /// A plain number for accessible names ("0.00154", not the subscript form).
-const plainUsd = (n: number) => `$${n.toLocaleString("en-US", n >= 1 ? { maximumFractionDigits: 2 } : { maximumSignificantDigits: 3 })}`;
+export const plainUsd = (n: number) => `$${n.toLocaleString("en-US", n >= 1 ? { maximumFractionDigits: 2 } : { maximumSignificantDigits: 3 })}`;
 
 /// The card, as its own tight row of the coin bar (grid area "parent"). null for a coin priced in SOL.
 export default function ParentPrice({ store }: { store: LiveCoin }) {
@@ -118,18 +131,16 @@ export default function ParentPrice({ store }: { store: LiveCoin }) {
   return ref ? <ParentCard key={ref.mint} store={store} parent={ref} /> : null;
 }
 
-/// The parent's reading at the price shown: the newer of a child trade (applied after the parent's record was asked
-/// for) and that record; until either lands, the value from the page's first record.
-function useParentQuote(store: LiveCoin, ref: ParentRef) {
-  const live = useLive(store, (s) => s.quoteUsd);
+/// The parent's USD price as the server valued a child (its USD price over its price in parent units), or null.
+export const parentUsdOf = (c: { priceUsd: number | null; priceQuote: number | null }) =>
+  c.priceUsd != null && c.priceQuote != null && c.priceQuote > 0 && c.priceUsd > 0 ? c.priceUsd / c.priceQuote : null;
+
+export type ParentReading = ReturnType<typeof useParentReading>;
+/// The parent's reading at the price shown: the newer of `live` (a child trade applied after the parent's record was
+/// asked for) and that record; until either lands, `loaded` (the value from the child's record). The map's side panel
+/// has no live trades and passes null.
+export function useParentReading(ref: ParentRef, loaded: number | null, live: { usd: number; at: number } | null) {
   const data = useParentData(ref.mint);
-  // The parent's USD price as the server valued the child when the page loaded (its USD price over its price in
-  // parent units): what shows until a newer reading lands. From the store's first record only: a later trade without
-  // a USD price moves the parent-unit price and not the USD one.
-  const loaded = useMemo(() => {
-    const c = store.get().coin;
-    return c.priceUsd != null && c.priceQuote != null && c.priceQuote > 0 && c.priceUsd > 0 ? c.priceUsd / c.priceQuote : null;
-  }, [store]);
   const pc = data?.coin ?? null;
   const fromPc = pc?.priceUsd != null && pc.priceUsd > 0 ? pc.priceUsd : null;
   const priceUsd = live && (fromPc == null || live.at > (data?.at ?? 0)) ? live.usd : fromPc ?? loaded;
@@ -140,11 +151,20 @@ function useParentQuote(store: LiveCoin, ref: ParentRef) {
   const mcap = pc?.mcapUsd != null ? (priceUsd != null && fromPc != null && priceUsd !== fromPc ? (pc.mcapUsd * priceUsd) / fromPc : pc.mcapUsd) : null;
   return {
     pc, now, candles, delta, mcap, priceUsd,
-    label: sym({ symbol: pc?.symbol ?? ref.symbol, mint: ref.mint }),
+    label: pc?.symbol ?? ref.symbol ? sym({ symbol: pc?.symbol ?? ref.symbol, mint: ref.mint }) : short(ref.mint, 4),
     image: pc?.image ?? ref.image,
-    // a parent the index does not track has no page here
+    // a parent the index does not track has no page here; `tracked` is null until the first answer
     untracked: data?.tracked === false,
+    tracked: data ? data.tracked : null,
   };
+}
+
+/// The coin page's reading: live from the coin's trades. `loaded` is from the store's first record only: a later
+/// trade without a USD price moves the parent-unit price and not the USD one.
+function useParentQuote(store: LiveCoin, ref: ParentRef) {
+  const live = useLive(store, (s) => s.quoteUsd);
+  const loaded = useMemo(() => parentUsdOf(store.get().coin), [store]);
+  return useParentReading(ref, loaded, live);
 }
 
 function ParentCard({ store, parent: ref }: { store: LiveCoin; parent: ParentRef }) {
