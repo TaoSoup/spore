@@ -12,11 +12,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import anchor from "@coral-xyz/anchor";
-import { Db } from "../lib/db.mjs";
-import { Model } from "../lib/model.mjs";
-import { Indexer, POOL_EVENT_PROGRAMS, LIVE_EVENT_PROGRAMS, bs58 } from "../lib/indexer.mjs";
-import { EVENT_DISCRIMINATORS, EVENT_CPI_TAG, eventsInInner, eventsInLogs } from "../lib/decode.mjs";
+import { POOL_EVENT_PROGRAMS, LIVE_EVENT_PROGRAMS, bs58 } from "../lib/indexer.mjs";
+import { EVENT_CPI_TAG, eventsInInner, eventsInLogs } from "../lib/decode.mjs";
 import { createApp } from "../lib/api.mjs";
 import { loadConfig, DEFAULT_RATES } from "../lib/config.mjs";
 import { EventHub } from "../lib/events.mjs";
@@ -24,14 +21,9 @@ import { ImageCache } from "../lib/meta.mjs";
 import { Rpc } from "../lib/rpc.mjs";
 import { pnlOfTrades, applyTrade, byTradeOrder, usdNow, realizedSeries, seriesStart, seriesApply, seriesEnd, SERIES_MAX_POINTS } from "../lib/pnl.mjs";
 import { PnlTracker, tradesOfTx, PNL_CHUNK, PNL_TX_RETRIES, PNL_RETRY_FAILED_MS, PNL_RETRY_MAX_MS, PNL_TRIM_EVERY, PNL_CACHE_MS, PNL_CACHE_COINS, PNL_CACHE_SINCE_MAX, PNL_CACHE_SWEEP_MS, PNL_SLICE, PNL_EVICT_IDLE_S, PNL_OUTAGE_STREAK, PNL_OUTAGE_PAUSE_MS, PNL_GAP_MARGIN_S, ACTIVITY_MAX, PNL_UNREAD_RETRY_MS, PNL_UNREAD_RETRIES, PNL_UNREAD_MAX, PNL_UNREAD_ERRORS, PNL_CUTS_MAX, PNL_CUT_CHECK_MS } from "../lib/pnl-tracker.mjs";
-import { BN, PublicKey, pumpIdl, pumpAmmIdl, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID } from "../lib/sdk.mjs";
-import { PLATFORM, quiet, T22 } from "./helpers/tree.mjs";
-
-const key = (seed) => new PublicKey(Buffer.alloc(32, seed)).toBase58();
-const CURVE = PUMP_PROGRAM_ID.toBase58(), AMM = PUMP_AMM_PROGRAM_ID.toBase58();
-const M = key(81), POOL = key(82), KID = key(85), NOPRICE = key(86), UNKNOWN_QUOTE = key(87), FOREIGN = key(88);
-const W = key(60), W2 = key(61), W3 = key(62), OTHER = key(63);
-const T0 = 1_700_000_000;
+import { BN } from "../lib/sdk.mjs";
+import { PLATFORM, quiet } from "./helpers/tree.mjs";
+import { key, CURVE, AMM, M, KID, NOPRICE, UNKNOWN_QUOTE, FOREIGN, W, W2, W3, OTHER, T0, payload, poolEvent, curveTrade, frame, txOf, setup, fakeChain, fakeClock } from "./helpers/chain.mjs";
 
 // ---------------------------------------------------------------- the maths
 const tr = (mint, time, isBuy, baseAmount, quoteAmount, extra = {}) => ({ mint, time, isBuy, baseAmount: String(baseAmount), quoteAmount: String(quoteAmount), sig: `s${time}`, idx: 0, ...extra });
@@ -99,77 +91,7 @@ test("maths: empty and zero input, malformed amounts, trade order, the USD helpe
 });
 
 // ---------------------------------------------------------------- fixtures
-/** An event's `Program data:` payload, every field a zero of its type unless `set` names it. */
-function payload(idl, name, set) {
-  const t = idl.types.find((x) => x.name === name);
-  const v = {};
-  for (const f of t.type.fields) v[f.name] = f.type === "pubkey" ? new PublicKey(Buffer.alloc(32, 9)) : f.type === "string" ? "x" : f.type === "bool" ? false : typeof f.type === "object" ? [] : new BN(0);
-  return Buffer.concat([EVENT_DISCRIMINATORS[name], new anchor.BorshCoder(idl).types.encode(name, { ...v, ...set })]);
-}
-const poolEvent = (name, user, { pool = POOL, base = "1000000", quote = "425", at = T0, own = null } = {}) => payload(pumpAmmIdl, name, {
-  timestamp: new BN(at), pool: new PublicKey(pool), user: new PublicKey(user), pool_base_token_reserves: new BN("200000000000000"), pool_quote_token_reserves: new BN("85000000000"),
-  ...(name === "BuyEvent" ? { base_amount_out: new BN(base), quote_amount_in: new BN(quote), quote_amount_in_with_lp_fee: new BN(quote), user_quote_amount_in: new BN(own ?? 0) } : { base_amount_in: new BN(base), quote_amount_out: new BN(quote), quote_amount_out_without_lp_fee: new BN(quote), user_quote_amount_out: new BN(own ?? quote) }),
-});
-const curveTrade = (mint, user, { buy = true, base = "5000000", quote = "700", at = T0 } = {}, more = {}) => payload(pumpIdl, "TradeEvent", {
-  ...more,
-  mint: new PublicKey(mint), user: new PublicKey(user), timestamp: new BN(at), is_buy: buy, token_amount: new BN(base), quote_mint: new PublicKey(M), quote_amount: new BN(quote),
-  virtual_quote_reserves: new BN("2000000000000000"), virtual_token_reserves: new BN("1000000000000000"), real_quote_reserves: new BN("700"), real_token_reserves: new BN("500000000000000"),
-});
 const payloadWith = (make, mint, user, opts, more) => make(mint, user, opts, more);
-const frame = (program, ...events) => [`Program ${program} invoke [1]`, ...events.map((e) => `Program data: ${e.toString("base64")}`), `Program ${program} success`];
-const txOf = (logs, { slot = 100, blockTime = T0, err = null } = {}) => ({ slot, blockTime, meta: { err, logMessages: logs } });
-
-/** M: a SOL coin that graduated (its pool is tracked). KID: on its curve, quoted in M. NOPRICE: quoted in a mint nobody prices. */
-function setup() {
-  const db = new Db(":memory:");
-  const m = new Model(db, { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", log: quiet });
-  m.load();
-  m.setGlobal({ maxCurveDepth: 2, initialRealTokenReserves: "793100000000000", createV2Enabled: true, whitelistedQuoteMints: [] });
-  m.setSolUsd(100);
-  const zeros = { virtualTokenReserves: "0", virtualQuoteReserves: "0", realTokenReserves: "0", realQuoteReserves: "0" };
-  const curve = { virtualTokenReserves: "1000000000000000", virtualQuoteReserves: "2000000000000000", realTokenReserves: "500000000000000", realQuoteReserves: "0", tokenTotalSupply: "1000000000000000", initialVirtualQuoteReserves: "0", complete: false, migrated: false, creator: "CR" };
-  m.upsertCoin({ mint: M, curve: "C_M", depth: 0, quoteMint: null, ...zeros, tokenTotalSupply: "1000000000000000", migrated: true, complete: true, pool: POOL, poolBaseVault: key(83), poolQuoteVault: key(84), poolBase: "200000000000000", poolQuote: "85000000000", poolVirtualQuote: "0", creator: "CR", tracked: true });
-  m.upsertCoin({ mint: KID, curve: "C_K", depth: 1, quoteMint: M, ...curve, tracked: true });
-  m.upsertCoin({ mint: NOPRICE, curve: "C_N", depth: 0, quoteMint: UNKNOWN_QUOTE, ...curve, tracked: true });
-  m.upsertCoin({ mint: FOREIGN, curve: "C_F", depth: 0, quoteMint: null, ...curve, tracked: false });
-  for (const [mint, symbol] of [[M, "MMM"], [KID, "KID"], [NOPRICE, "NOP"], [FOREIGN, "FOR"]]) m.setMint({ mint, decimals: 6, tokenProgram: T22, name: `${symbol} coin`, symbol, onchainAt: 1 });
-  const ix = new Indexer({ rpc: { snapshot: () => ({}) }, model: m, meta: null, hub: { emit() {} }, log: quiet, opts: { backfill: false } });
-  return { db, m, ix };
-}
-/**
- * A fake chain: `sigs` newest first (`{ signature, blockTime, err }`), `txs` signature → transaction, a function of the
- * attempt number, or an Error to throw. Records every call.
- */
-function fakeChain(sigs, txs, { onCall = null } = {}) {
-  const calls = [], tries = new Map();
-  return {
-    calls,
-    count: (method) => calls.filter((c) => c.method === method).length,
-    call: async (method, params, opts) => {
-      calls.push({ method, params, opts });
-      if (onCall) await onCall(method, params, calls);
-      if (opts?.signal?.aborted) throw Object.assign(new Error("aborted"), { aborted: true });
-      if (method === "getSignaturesForAddress") {
-        const { limit, before } = params[1];
-        const from = before ? sigs.findIndex((s) => s.signature === before) + 1 : 0;
-        return sigs.slice(from, from + limit);
-      }
-      if (method === "getTransaction") {
-        const n = (tries.get(params[0]) ?? 0) + 1; tries.set(params[0], n);
-        let v = txs.get(params[0]);
-        if (typeof v === "function") v = v(n);
-        if (v instanceof Error) throw v;
-        return v ?? null;
-      }
-      throw new Error(`unexpected ${method}`);
-    },
-  };
-}
-/** A clock the throttle sleeps on: sleeping only moves it. */
-function fakeClock(start = T0 * 1000) {
-  const c = { t: start, slept: [], now: () => c.t, sleep: async (ms) => { c.slept.push(ms); c.t += ms; } };
-  return c;
-}
 const walletRows = (db, wallet) => db.walletTradesPage(wallet).map((r) => `${r.sig}/${r.idx}/${r.isBuy ? "buy" : "sell"}/${r.baseAmount}/${r.quoteAmount}`);
 
 // ---------------------------------------------------------------- live

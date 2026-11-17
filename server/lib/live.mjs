@@ -12,10 +12,18 @@
 // 2026-11-15: 278 frames/s, 1 MB/s). A dropped frame still counts as traffic for the watchdog. The reply to the
 // subscribe request is read before that filter: a provider that refuses the subscription leaves the socket open and
 // silent, and the refusal is the only thing that says why (`lastError`, a warning).
+//
+// `onGap(fromMs, toMs)` (the trade gap fill, lib/trade-fill.mjs) is told, once per socket, the stretch in which this
+// stream delivered nothing: from the previous socket's last notification (for the process's first socket, `resumeAt`:
+// when the last process was known alive) to the FIRST NOTIFICATION of the new socket, not to `onopen`. An open socket
+// proves no delivery: the subscribe request may be answered late, refused (the socket then stays open and silent until
+// the watchdog reopens it), or the provider may start sending a while later, and all of that is still the gap.
 export class LogsSubscriber {
-  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000, name = "live", mustInclude = null }) {
+  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000, name = "live", mustInclude = null, onGap = null, resumeAt = 0 }) {
     this.wsUrl = wsUrl; this.programId = programId; this.onLogs = onLogs; this.onConnect = onConnect; this.log = log; this.staleMs = staleMs;
     this.name = name; this.mustInclude = mustInclude;
+    this.onGap = onGap; this.resumeAt = resumeAt; // resumeAt: ms, 0 = unknown (no gap for the first socket)
+    this.gapConnects = 0;         // the `connects` count whose first notification was seen (onGap fired or had nothing to report)
     this.ws = null; this.stopped = false; this.backoffMs = 0; this.connectedAt = 0; this.lastMessageAt = 0; this.reconnectTimer = null;
     this.openedAt = 0;            // when the socket in use opened (0: none opened since the last reconnect was scheduled)
     this.subscribed = false;      // the provider acknowledged the subscription on this socket (or a notification arrived)
@@ -57,7 +65,15 @@ export class LogsSubscriber {
       if (msg.method !== "logsNotification") return;
       const v = msg.params?.result?.value; const slot = msg.params?.result?.context?.slot;
       if (!v || !Array.isArray(v.logs)) return;
-      this.stats.notifications++; this.subscribed = true; this.lastNotificationAt = Date.now();
+      const now = Date.now();
+      if (this.stats.connects !== this.gapConnects) {
+        // First notification on this socket: nothing reached us between the previous socket's last one (or the last
+        // process's, `resumeAt`) and now.
+        const prev = this.lastNotificationAt || this.resumeAt;
+        this.gapConnects = this.stats.connects;
+        if (prev > 0 && this.onGap) try { this.onGap(prev, now); } catch (e) { this.log.warn?.(`${this.name}: onGap failed: ${e.message}`); }
+      }
+      this.stats.notifications++; this.subscribed = true; this.lastNotificationAt = now;
       try { this.onLogs({ slot, signature: v.signature, err: v.err, logs: v.logs }); } catch (e) { this.stats.errors++; this.stats.lastError = e.message; }
     };
     ws.onerror = (ev) => { this.stats.errors++; this.stats.lastError = ev?.message ?? "socket error"; };

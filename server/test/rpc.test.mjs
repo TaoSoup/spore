@@ -98,6 +98,23 @@ test("user route: the api and proxy lanes use RPC_USER_URL, the indexer stays on
   assert.equal(new Rpc({ url: FREE, log: quiet }).userSnapshot(), null);
 });
 
+test("rpc: the fill lane never uses the metered user endpoint", async () => {
+  const { hits, fetchImpl } = routed();
+  const rpc = new Rpc({ url: FREE, rps: 1000, apiRps: 1000, fillRps: 1000, log: quiet, fetchImpl, user: { url: PAID, ...fast } });
+  const fill = rpc.lane("fill");
+  assert.equal(fill.laneName, "fill");
+  await fill.call("getSignaturesForAddress", ["a", { limit: 1 }]);
+  await fill.call("getTransaction", ["s", {}]);
+  await rpc.lane("api").call("getSlot");
+  assert.deepEqual(hits.map((h) => h.url), [FREE, FREE, PAID], "only the api lane goes to the metered endpoint");
+  assert.equal(rpc.userSnapshot().calls, 1);
+  // its rate: TRADE_FILL_RPS when given, else a quarter of the indexer's; its own concurrency
+  assert.equal(new Rpc({ url: FREE, rps: 8, log: quiet }).lanes.fill.rps, 2);
+  assert.equal(new Rpc({ url: FREE, rps: 8, fillRps: 1, fillConcurrency: 3, log: quiet }).lanes.fill.rps, 1);
+  assert.equal(new Rpc({ url: FREE, rps: 8, fillConcurrency: 3, log: quiet }).lanes.fill.concurrency, 3);
+  assert.ok("fill" in rpc.laneSnapshot());
+});
+
 test("user route: past the day's credits, requests go to RPC_URL until the next UTC day (said once); costs counted high", async () => {
   let now = Date.parse("2026-11-14T23:59:00Z");
   const { hits, fetchImpl } = routed();

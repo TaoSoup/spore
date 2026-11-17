@@ -59,10 +59,11 @@
 //
 // Not covered, by design: tokens received or sent by plain transfer are not trades; trades of coins the
 // index does not track are ignored; trades older than the scan's cap are missing (`history.cut`), and
-// so is a live trade the streams did not deliver while the server was up (a dropped socket); a live trade
-// behind a cut log is missing until the wallet is next asked for.
-import { eventsInLogs, eventsInInner, decodeEvent } from "./decode.mjs";
-import { LIVE_EVENT_PROGRAMS, peekMint, peekPool } from "./indexer.mjs";
+// so is a live trade the streams did not deliver while the server was up (a dropped socket), until the
+// trade gap fill (lib/trade-fill.mjs) reads it back: for gaps of the last 48 h, when a chart of that coin is
+// opened, and its rows reach onTrade like live ones; a live trade behind a cut log is missing until the
+// wallet is next asked for.
+import { READ_OPTS, SIG_MAX_BYTES, tick, abortableSleep, eventsOfTx, readTxWith } from "./tx-events.mjs";
 import { NATIVE_MINT } from "./sdk.mjs";
 import { applyTrade, blankEntry, listed, usdNow, seriesStart, seriesApply, seriesEnd } from "./pnl.mjs";
 
@@ -124,73 +125,25 @@ export const PNL_CUT_PAGE = 200;
 export const PNL_SERIES_CACHE_MAX = 100;
 /** `running` while unread transactions are read again and no wallet is named yet. */
 const RETRYING = "(unread)";
-const READ_OPTS = { timeoutMs: 15_000, retries: 1 };
-const SIG_MAX_BYTES = 2 * 1024 * 1024, TX_MAX_BYTES = 2 * 1024 * 1024;
 const DAY_MS = 86_400_000;
 const SOL_MINT = NATIVE_MINT.toBase58();
-const tick = () => new Promise((r) => setImmediate(r));
-/** Resolves after `ms`, or as soon as `signal` aborts. */
-const abortableSleep = (ms, signal) => new Promise((r) => {
-  if (signal?.aborted) return void r();
-  const done = () => { clearTimeout(t); signal?.removeEventListener("abort", done); r(); };
-  const t = setTimeout(done, Math.min(ms, 2 ** 31 - 1));
-  signal?.addEventListener("abort", done, { once: true });
-});
 /** The `since` a body is computed for: whole PNL_SINCE_STEP_S, 0 = everything. */
 export const sinceOf = (since) => (since > 0 ? Math.floor(since / PNL_SINCE_STEP_S) * PNL_SINCE_STEP_S : 0);
 const msg = (e) => String(e?.message ?? e).slice(0, 200);
 
 /**
- * The trades of `wallet` in one transaction as getTransaction (encoding "json") answers it: pump curve
- * TradeEvents and pump-amm Buy/SellEvents of coins the index tracks, numbered like the live path does
- * (the event's position among every tracked event of the transaction), the quote amount being what the
- * wallet paid or received with the venue's fees. `truncated`: the node cut the log. A log that is cut,
- * missing, or holds an event of a tracked coin that does not decode is not the last word: both programs
- * also emit every event as an inner instruction to themselves (decode.mjs eventsInInner), and the events
- * are then read from there, numbered the same way, so a row the live stream stored from the part of the
- * log it did get is the same row (`inner: true` marks an answer read this way). `incomplete`: trades of
- * the wallet may still be missing (neither a whole log nor the inner instructions, or an event of a
- * tracked coin that does not decode on either path, such as an old layout), so the caller counts the
- * transaction as unread. A transaction that failed on chain has no trades and is complete.
+ * The trades of `wallet` in one transaction as getTransaction (encoding "json") answers it: the events of tracked coins
+ * that lib/tx-events.mjs eventsOfTx reads (from the log, or from the inner instructions when the log is cut, missing or
+ * does not decode; numbered like the live path), kept when the wallet made them, the quote amount being what the
+ * wallet paid or received with the venue's fees. `truncated`, `incomplete` and `inner` are eventsOfTx's: an incomplete
+ * transaction counts as unread (whose trade an undecodable event was cannot be told, and the transaction is the
+ * wallet's). A transaction that failed on chain has no trades and is complete.
  */
 export function tradesOfTx(model, wallet, sig, tx) {
-  if (!tx?.meta) return { rows: [], truncated: false, incomplete: !!tx };
-  if (tx.meta.err) return { rows: [], truncated: false, incomplete: false };
-  const logs = Array.isArray(tx.meta.logMessages) ? tx.meta.logMessages : null; // null: the node kept no log for it
-  const logEvents = logs ? eventsInLogs(logs, LIVE_EVENT_PROGRAMS) : [];
-  const fromLog = rowsOfEvents(model, wallet, sig, tx, logEvents);
-  const truncated = !!logs && logs.some((l) => l === "Log truncated");
-  if (logs && !truncated && !fromLog.undecoded) return { rows: fromLog.rows, truncated: false, incomplete: false };
-  // The log does not tell everything: the same events are in the inner instructions, which the node does not cut. They
-  // are trusted only when they hold at least every event the log showed (an event only ever logged would be missed).
-  const innerEvents = eventsInInner(tx, LIVE_EVENT_PROGRAMS);
-  if (innerEvents && innerEvents.length >= logEvents.length) {
-    const fromInner = rowsOfEvents(model, wallet, sig, tx, innerEvents);
-    return { rows: fromInner.rows, truncated, incomplete: fromInner.undecoded > 0, inner: true };
-  }
-  return { rows: fromLog.rows, truncated, incomplete: true };
-}
-/** The wallet's rows among a transaction's tracked events (eventsInLogs or eventsInInner: the event's place is its `idx`), and how many events of tracked coins did not decode. */
-function rowsOfEvents(model, wallet, sig, tx, events) {
-  const rows = [];
-  let undecoded = 0;
-  const at = (e) => e.timestamp || tx.blockTime || 0, slot = tx.slot ?? 0;
-  events.forEach(({ name, data, ix }, idx) => {
-    try {
-      if (name === "TradeEvent") {
-        const mint = peekMint(data);
-        if (!model.get(mint)?.tracked) return;
-        const e = decodeEvent(name, data);
-        if (e.user === wallet) rows.push({ sig, mint, idx, slot, time: at(e), isBuy: !!e.isBuy, baseAmount: e.tokenAmount, quoteAmount: e.userQuoteAmount ?? e.quoteAmount });
-      } else if (name === "BuyEvent" || name === "SellEvent") {
-        const mint = model.pools.get(peekPool(data));
-        if (!mint || !model.get(mint)?.tracked) return;
-        const e = decodeEvent(name, data, ix);
-        if (e.user === wallet) rows.push({ sig, mint, idx, slot, time: at(e), isBuy: !!e.isBuy, baseAmount: e.baseAmount, quoteAmount: e.userQuoteAmount ?? e.quoteAmount });
-      }
-    } catch { undecoded++; } // whose trade it was cannot be told: the transaction is the wallet's, so it counts as unread
-  });
-  return { rows, undecoded };
+  const r = eventsOfTx(model, tx);
+  const slot = tx?.slot ?? 0;
+  const rows = r.events.filter(({ e }) => e.user === wallet).map(({ name, mint, idx, e }) => ({ sig, mint, idx, slot, time: e.timestamp || tx.blockTime || 0, isBuy: !!e.isBuy, baseAmount: name === "TradeEvent" ? e.tokenAmount : e.baseAmount, quoteAmount: e.userQuoteAmount ?? e.quoteAmount }));
+  return r.inner ? { rows, truncated: r.truncated, incomplete: r.incomplete, inner: true } : { rows, truncated: r.truncated, incomplete: r.incomplete };
 }
 
 export class PnlTracker {
@@ -762,26 +715,12 @@ export class PnlTracker {
    */
   async #readTx(w, s) {
     if (s.err) return { rows: [], unread: 0, error: false, answered: false };
-    let error = false, answered = false;
-    for (let attempt = 0; attempt <= PNL_TX_RETRIES; attempt++) {
-      if (attempt) this.stats.txRetries++;
-      try {
-        const tx = await this.#call("getTransaction", [s.signature, { maxSupportedTransactionVersion: 1, encoding: "json", commitment: "confirmed" }], TX_MAX_BYTES);
-        answered = true; error = false;
-        if (!tx) continue; // the node does not have it (yet)
-        this.stats.txRead++;
-        const r = tradesOfTx(this.model, w.wallet, s.signature, tx);
-        if (r.incomplete) this.stats.txUnread++;
-        if (r.inner) this.stats.txInner++;
-        return { rows: r.rows, unread: r.incomplete ? 1 : 0, error: false, answered };
-      } catch (e) {
-        if (this.ac.signal.aborted || e?.budget) throw e;
-        if (e?.tooLarge) { error = false; break; } // the same answer every time
-        error = !answered;
-      }
-    }
-    this.stats.txUnread++;
-    return { rows: [], unread: 1, error, answered };
+    const { tx, error, answered } = await readTxWith((m, p, b) => this.#call(m, p, b), s, { retries: PNL_TX_RETRIES, stats: this.stats, aborted: () => this.ac.signal.aborted });
+    if (!tx) { this.stats.txUnread++; return { rows: [], unread: 1, error, answered }; }
+    const r = tradesOfTx(this.model, w.wallet, s.signature, tx);
+    if (r.incomplete) this.stats.txUnread++;
+    if (r.inner) this.stats.txInner++;
+    return { rows: r.rows, unread: r.incomplete ? 1 : 0, error: false, answered };
   }
 
   // ---------------------------------------------------------------- answers

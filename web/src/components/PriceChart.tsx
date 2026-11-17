@@ -3,6 +3,7 @@ import { AreaSeries, CandlestickSeries, ColorType, CrosshairMode, HistogramSerie
 import { api, pumpUrl, type Candle, type Coin, type Trade } from "../lib/api";
 import { useEvents } from "../lib/events";
 import { useAsync, useLocalPref } from "../lib/hooks";
+import { fillPollDelay, thinChartText } from "../lib/chart-fill";
 import { age, clock, signedPct, subscriptSmall, tokens, usd } from "../lib/format";
 import { Empty, ErrorBox, Ext, sym } from "./Bits";
 import { Delta } from "./Stat";
@@ -261,6 +262,24 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
     return () => clearTimeout(t);
   }, [data.data, factor, fmt, vScale, placeDot, tickFmt, refreshTicks]);
 
+  // Missed trades being read back (`fill`): ask again every 5 s for 3 min, then every 30 s until the server answers
+  // without `fill` (lib/chart-fill.ts; a hidden tab skips its asks). Only an answer with nothing pending is applied (the
+  // full reload above then refits the view once); one still pending is dropped, so the view does not refit every 5 s.
+  // Each ask also keeps the coin in the server's queue (and queues it again after a run stopped at a cap).
+  const filling = !!data.data?.fill;
+  useEffect(() => {
+    if (!filling) return;
+    let n = 0, alive = true, t = 0;
+    const next = () => { if (alive) t = window.setTimeout(ask, fillPollDelay(n)); };
+    const ask = () => {
+      if (document.visibilityState === "hidden") return next();
+      n++;
+      api.candles(coin.mint, res).then((d) => { if (!alive) return; if (d.fill) next(); else data.setData(() => d); }).catch(next);
+    };
+    next();
+    return () => { alive = false; clearTimeout(t); };
+  }, [filling, coin.mint, res]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Live: extend or open the last candle from the trade event, then let the server re-aggregate.
   useEvents({ trade: (t: Trade) => {
     if (t.mint !== coin.mint) return;
@@ -370,15 +389,15 @@ function Chart({ coin, onBuy, live, aside }: { coin: Coin; onBuy?: () => void; l
             <ChartDrawing kind="empty" />
             <span className="chart-seed" aria-hidden="true" />
             <div className="chart-empty-text">
-              <b>{n === 0 ? "No trades yet — the chart starts with the first buy." : "Not enough price points yet — the chart fills in as trades land."}</b>
-              {onBuy && <button type="button" className="btn soft sm" onClick={onBuy}>Buy {sym(coin)}</button>}
+              <b>{thinChartText(n, filling)}</b>
+              {onBuy && !filling && <button type="button" className="btn soft sm" onClick={onBuy}>Buy {sym(coin)}</button>}
             </div>
           </div>
         )}
       </div>
       {(aside || (!overlay && !thin)) && (
         <div className="chart-foot">
-          {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
+          {!overlay && !thin && <span className="chart-foot-k">{n} candles · {resLabel(res)} · {unitLabel}{base !== priceKey ? ` · converted at today's ${coin.quoteSymbol} rate` : ""}{filling ? " · filling missed trades…" : ""}{change != null && <span className="sr-only">, {signedPct(change)} in view</span>}</span>}
           <span className="chart-foot-live">{aside}<LiveDot /></span>
         </div>
       )}

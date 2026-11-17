@@ -87,6 +87,14 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     maxQueue: num("PNL_MAX_QUEUE", 200, { min: 1, max: 100_000, integer: true }),
     dailyCalls: num("PNL_BACKFILL_DAILY", 100_000, { min: 0, integer: true }),
   };
+  // Trade gap fill (lib/trade-fill.mjs): the trades the live streams missed (a restart, a reconnect) are read back from the
+  // chain when a coin's chart is opened, on their own RPC_URL lane (never the metered endpoint). 1 read/s on the public
+  // RPC keeps this IP's getTransaction rate at or under 3/s with the P&L scans.
+  const fill = {
+    enabled: bool("TRADE_FILL", true),
+    rps: num("TRADE_FILL_RPS", rpcUrl.includes("api.mainnet-beta.solana.com") ? 1 : 3, { min: 0.1, max: 1_000 }),
+    dailyCalls: num("TRADE_FILL_DAILY", 20_000, { min: 0, integer: true }), // 0 = no cap; under 200 counts as 200
+  };
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
@@ -185,5 +193,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill };
 }

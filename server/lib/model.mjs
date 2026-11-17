@@ -411,6 +411,15 @@ export class Model {
    * become tracked between the two deliveries; its own primary key keeps the row single.
    */
   recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) this.activity.record(t); this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
+  /**
+   * A trade read back from the chain (lib/trade-fill.mjs): stored, and kept for a tracked trader. Nothing else, for these reasons:
+   * - Activity is not fed: its ring is time-ordered, and an hours-old row would stay counted about a day too long. The
+   *   next boot's seed counts it.
+   * - No #bump: nothing in memory changed (the trade readers, /api/trades and /api/candles, read the table).
+   * - Never upsertCoin: the event's reserves are old.
+   * - Never an SSE "trade" event: the print is not fresh.
+   */
+  storeFilled(t) { const fresh = this.db.insertTrade(t); this.walletTrades?.onTrade(t); return fresh; }
   touch(mint) { this.touched.set(mint, Date.now()); }
 
   // ---------------------------------------------------------------- "ours" (DESIGN §11.1)

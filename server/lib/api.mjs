@@ -291,7 +291,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -339,6 +339,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   };
   // Wallet P&L (lib/pnl-tracker.mjs): the server's tracker, else the model's, else one that only keeps trades from now on.
   const pnlOf = pnl ?? model.walletTrades ?? new PnlTracker({ model, now, log });
+  // The trade gap fill (lib/trade-fill.mjs), when the server runs one: a chart request queues the coin's missed trades.
+  const fillOf = tradeFill ?? model.tradeFill ?? null;
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -381,7 +383,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot() };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -567,7 +569,12 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     else if (!model.inScope(mint)) return res.status(404).json({ error: "not a Spore coin" }); // ours mode: charts only for our coins and their ancestors
     const resSec = clampInt(req.query.res, 60, 15, 86_400);
     const trades = model.db.tradesSince(mint, nowS() - resSec * 500);
-    sendCachedJson(req, res, buildCandles(trades, resSec), { maxAge: 5 });
+    const body = buildCandles(trades, resSec);
+    // Missed trades of this coin are being read back (a restart, a reconnect): `fill` says so, and the chart asks again
+    // until it is gone. Absent when nothing is pending.
+    const fill = fillOf?.want(mint) ?? null;
+    if (fill) body.fill = fill;
+    sendCachedJson(req, res, body, { maxAge: 5 });
   });
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search

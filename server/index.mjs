@@ -17,6 +17,7 @@ import { Treasury } from "./lib/treasury.mjs";
 import { ApiKeys } from "./lib/apikeys.mjs";
 import { Jupiter } from "./lib/jupiter.mjs";
 import { PnlTracker } from "./lib/pnl-tracker.mjs";
+import { TradeFiller } from "./lib/trade-fill.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -43,7 +44,7 @@ const model = new Model(db, { platformWallet: cfg.platformWallet, splitBps: cfg.
 model.load();
 configureLocalMetaHost({ domain: cfg.pagesDomain, dir: join(cfg.metaDir, "m") });
 const metahost = new MetaHost({ root: cfg.metaDir, domain: cfg.pagesDomain, project: cfg.pagesProject, log, ledger: db, quota: new DailyQuota(cfg.uploadQuota) });
-const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, pnlRps: cfg.pnl.backfillRps, log,
+const rpc = new Rpc({ url: cfg.rpcUrl, rps: cfg.rpcRps, concurrency: cfg.concurrency, apiRps: cfg.rpcApiRps, proxyRps: cfg.rpcProxyRps, pnlRps: cfg.pnl.backfillRps, fillRps: cfg.fill.rps, log,
   user: cfg.rpcUser && { ...cfg.rpcUser, creditsFile: join(cfg.dataDir, "rpc-user-credits.json") } });
 if (rpc.user) {
   const c = rpc.user.budget.snapshot();
@@ -96,10 +97,13 @@ const jupiter = cfg.jupiter.enabled ? new Jupiter({ url: cfg.jupiter.url, apiKey
 // Wallet profit and loss: tracked wallets keep their trades (the model's live hook), and each one's older history is
 // read once on its own RPC lane (RPC_URL only), throttled to PNL_BACKFILL_RPS; started once the indexer is up.
 const pnl = new PnlTracker({ model, rpc: rpc.lane("pnl"), cfg: cfg.pnl, log });
+// Trade gap fill: the trades the live streams missed (a restart, a reconnect) are read back when a coin's chart is opened,
+// on their own RPC lane (RPC_URL only). Made before the indexer starts: its streams report their gaps to model.tradeFill.
+const tradeFill = new TradeFiller({ model, rpc: cfg.fill.enabled ? rpc.lane("fill") : null, cfg: cfg.fill, streams: () => [indexer.live, indexer.livePools].filter(Boolean), log });
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -135,6 +139,7 @@ meta.start({ slicedBoot: true });
 (await import("./lib/asset-icons.mjs")).startAssetIcons({ model, log }); // listed-asset logos (token list icons) at boot and every 6 h, unref'd
 agentRunner.start();
 pnl.start();
+tradeFill.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the
 // index to settle. AGENTS=off|dry never constructs this.
 let liveTimer = null;
@@ -156,7 +161,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

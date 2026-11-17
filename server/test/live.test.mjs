@@ -29,3 +29,55 @@ test("a socket that fails to open backs off (1 s → 30 s, jittered), one timer 
     assert.equal(opened, 1, "stopped: no further attempt");
   } finally { globalThis.WebSocket = Real; }
 });
+
+/** A WebSocket the test drives: `sockets` holds every one opened. */
+function fakeSockets() {
+  const sockets = [];
+  class Fake { constructor(url) { this.url = url; this.readyState = 0; sockets.push(this); } send() {} close() { this.readyState = 3; this.onclose?.(); } open() { this.readyState = 1; this.onopen?.(); } }
+  return { Fake, sockets };
+}
+const note = (signature = "S") => JSON.stringify({ jsonrpc: "2.0", method: "logsNotification", params: { result: { context: { slot: 3 }, value: { signature, err: null, logs: ["Program data: x"] } } } });
+
+test("live: onGap fires once at the first notification of each new socket with [previous notification, now]; resumeAt gives the first socket's gap; none without either; steady traffic fires nothing", (t) => {
+  const Real = globalThis.WebSocket;
+  const { Fake, sockets } = fakeSockets();
+  globalThis.WebSocket = Fake;
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  try {
+    const gaps = [], quietLog = { info() {}, warn() {} };
+    const sub = new LogsSubscriber({ wsUrl: "wss://x.example", programId: "P", onLogs() {}, log: quietLog, onGap: (a, b) => gaps.push([a, b]), resumeAt: 400_000 }).start();
+    sockets[0].open();
+    t.mock.timers.tick(5_000);
+    sockets[0].onmessage({ data: '{"jsonrpc":"2.0","result":7,"id":1}' }); // the subscribe ack is no delivery
+    assert.deepEqual(gaps, []);
+    sockets[0].onmessage({ data: note() });
+    assert.deepEqual(gaps, [[400_000, 1_005_000]], "the first socket: from when the last process was alive to its first notification");
+    for (let i = 0; i < 5; i++) { t.mock.timers.tick(100); sockets[0].onmessage({ data: note() }); }
+    assert.equal(gaps.length, 1, "steady traffic fires nothing");
+    const last = sub.lastNotificationAt;
+    assert.equal(last, 1_005_500);
+    // the socket drops; a new one opens a while later and delivers later still: the gap ends at that first notification, not at onopen
+    sockets[0].close(); clearTimeout(sub.reconnectTimer); sub.reconnectTimer = null; sub.start();
+    t.mock.timers.tick(2_000); sockets[1].open();
+    t.mock.timers.tick(3_000); sockets[1].onmessage({ data: note() });
+    assert.deepEqual(gaps[1], [last, 1_010_500]);
+    sockets[1].onmessage({ data: note() });
+    assert.equal(gaps.length, 2, "once per socket");
+    sub.stop();
+    // neither a previous notification nor resumeAt: nothing to report for the first socket; a failing hook never reaches the stream
+    const warns = [];
+    const bare = new LogsSubscriber({ wsUrl: "wss://x.example", programId: "P", onLogs() {}, log: { info() {}, warn: (m) => warns.push(m) }, onGap: () => { throw new Error("boom"); } }).start();
+    sockets[2].open(); sockets[2].onmessage({ data: note() });
+    assert.equal(bare.stats.notifications, 1); assert.deepEqual(warns, []);
+    sockets[2].close(); clearTimeout(bare.reconnectTimer); bare.reconnectTimer = null; bare.start();
+    sockets[3].open(); sockets[3].onmessage({ data: note() });
+    assert.equal(bare.stats.notifications, 2, "the notification is still delivered");
+    assert.ok(warns.some((w) => /onGap failed: boom/.test(w)), warns.join("; "));
+    bare.stop();
+    // no hook: as before
+    const plain = new LogsSubscriber({ wsUrl: "wss://x.example", programId: "P", onLogs() {}, log: quietLog, resumeAt: 1 }).start();
+    sockets[4].open(); sockets[4].onmessage({ data: note() });
+    assert.equal(plain.stats.notifications, 1);
+    plain.stop();
+  } finally { globalThis.WebSocket = Real; }
+});

@@ -64,7 +64,11 @@ export type Eligibility = { ok: boolean; reason: string | null; depth: number | 
 /// The agent wallet the server prepared for one root launch (POST /api/agents/prepare).
 export type AgentPrepared = { id: string; address: string; model: string; expiresAt: number };
 export type Candle = { t: number; o: number; h: number; l: number; c: number; v: number };
-export type Candles = { candles: Candle[]; priceKey: "usd" | "quote" };
+/// The server is reading this coin's missed trades back from the chain (a restart, a reconnect: server lib/trade-fill.mjs);
+/// `gaps` stretches from `from` to `to` (unix s); "waiting": the gaps have not settled yet (a later ask queues them).
+/// Absent when nothing is pending.
+export type CandleFill = { state: "queued" | "running" | "waiting"; gaps: number; from: number; to: number };
+export type Candles = { candles: Candle[]; priceKey: "usd" | "quote"; fill?: CandleFill };
 /// `otherChildren`: children of this coin that exist on pump.fun but were not launched here (ours mode).
 export type CoinPage = { coin: Coin; children: Coin[]; trades: Trade[]; otherChildren?: number };
 /// `GET /api/fees/:mint` (DESIGN §11.6): the creator fees waiting for a coin, read live from the

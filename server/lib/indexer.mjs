@@ -130,9 +130,13 @@ export class Indexer {
     // on the pool events it happens to see, whatever the pool stream's state (an open socket proves no delivery): both
     // number a transaction's events the same way, so a trade both deliver is one row (sig, mint, idx) and one
     // announcement. The pool stream leaves the curve's events alone.
-    this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK,
+    // The trade gap fill (lib/trade-fill.mjs), when the server runs one, hears of every stretch a stream delivered
+    // nothing (a reconnect; since the last process was alive, for the first socket) and reads those trades back later.
+    const fill = this.model.tradeFill;
+    const gaps = fill ? { resumeAt: fill.resumeAt, onGap: (a, b) => fill.addGap(a, b) } : {};
+    this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n), onConnect: () => { this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
-    if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK,
+    if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n, POOL_EVENT_PROGRAMS) }).start();
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
@@ -953,19 +957,16 @@ export class Indexer {
     const coin = this.model.get(e.mint);
     if (!coin || coin.migrated) return;
     const c = this.model.upsertCoin({ mint: e.mint, virtualQuoteReserves: e.virtualQuoteReserves, virtualTokenReserves: e.virtualTokenReserves, realQuoteReserves: e.realQuoteReserves, realTokenReserves: e.realTokenReserves });
-    const baseDecimals = this.model.decimalsOf(c.mint), quoteDecimals = this.model.quoteDecimals(c);
-    const priceQuote = curvePriceQuote(c, baseDecimals, quoteDecimals) ?? (units(e.quoteAmount, quoteDecimals) / Math.max(units(e.tokenAmount, baseDecimals), 1e-12));
-    this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.tokenAmount, quoteAmount: e.quoteAmount, userQuoteAmount: e.userQuoteAmount, priceQuote });
+    this.#recordTrade(c, tradeOfEvent(this.model, c, "TradeEvent", e, { sig, slot: slot ?? 0, idx, time: e.timestamp || nowS() }));
   }
   #onPoolTrade(mint, e, sig, slot, idx) {
     const c = this.model.upsertCoin({ mint, poolBase: e.poolBaseReserves, poolQuote: e.poolQuoteReserves });
-    const baseDecimals = this.model.decimalsOf(mint), quoteDecimals = this.model.quoteDecimals(c);
-    const priceQuote = poolPriceQuote(e.poolQuoteReserves, e.poolBaseReserves, baseDecimals, quoteDecimals, c.poolVirtualQuote);
-    if (priceQuote == null) return false;
+    const t = tradeOfEvent(this.model, c, e.isBuy ? "BuyEvent" : "SellEvent", e, { sig, slot: slot ?? 0, idx, time: e.timestamp || nowS() });
+    if (!t) return false;
     // Not hot: the event gives the pool's reserves after the trade (decode.mjs), so the next tick has nothing to
     // re-read for it (and the pool stream names hundreds of coins a tick). The pool's virtual quote is not in the event:
     // the rolling pass and the pricing-pool pass re-read it as before.
-    return this.#recordTrade(c, { sig, idx, slot: slot ?? 0, time: e.timestamp || nowS(), isBuy: e.isBuy, user: e.user, baseAmount: e.baseAmount, quoteAmount: e.quoteAmount, userQuoteAmount: e.userQuoteAmount, priceQuote }, { hot: false });
+    return this.#recordTrade(c, t, { hot: false });
   }
   /** Stores and announces a trade; false for one already stored (both streams delivered it). */
   #recordTrade(c, t, { hot = true } = {}) {
@@ -1113,3 +1114,20 @@ export const peekMint = (data) => new PublicKey(data.subarray(8, 40)).toBase58()
 /** The pool of a pump-amm BuyEvent / SellEvent without decoding it: both put it after the discriminator and fourteen 8-byte fields. */
 export const POOL_EVENT_POOL_OFFSET = 8 + 14 * 8;
 export const peekPool = (data) => (data.length >= POOL_EVENT_POOL_OFFSET + 32 ? new PublicKey(data.subarray(POOL_EVENT_POOL_OFFSET, POOL_EVENT_POOL_OFFSET + 32)).toBase58() : null);
+
+/**
+ * The `trades` row of one decoded trade event of coin `c`, priced from the event alone: a curve TradeEvent from its own
+ * virtual reserves (the reserves after the trade; the quote per token of the swap when the curve has none), a pump-amm
+ * Buy/SellEvent from its pool reserves after the trade plus the coin's pool virtual quote (not in the event). Never the
+ * coin's current state, so the live path (right after it stored the event's reserves) and the trade gap fill (an event
+ * read back hours later, lib/trade-fill.mjs) give the same price for the same event. Null when the pool has no price.
+ * USD (`priceUsd`, `valueUsd`) is the caller's: the live path takes today's, the fill the price at the trade's time.
+ */
+export function tradeOfEvent(model, c, name, e, { sig, slot, idx, time }) {
+  const bd = model.decimalsOf(c.mint), qd = model.quoteDecimals(c);
+  const priceQuote = name === "TradeEvent"
+    ? curvePriceQuote(e, bd, qd) ?? (units(e.quoteAmount, qd) / Math.max(units(e.tokenAmount, bd), 1e-12))
+    : poolPriceQuote(e.poolQuoteReserves, e.poolBaseReserves, bd, qd, c.poolVirtualQuote);
+  if (priceQuote == null) return null;
+  return { sig, mint: c.mint, idx, slot, time, isBuy: !!e.isBuy, user: e.user, baseAmount: e.tokenAmount ?? e.baseAmount, quoteAmount: e.quoteAmount, userQuoteAmount: e.userQuoteAmount, priceQuote };
+}

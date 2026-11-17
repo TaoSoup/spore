@@ -107,6 +107,19 @@ test("root agents config (DESIGN §13): off by default, gates and tick validated
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("config: TRADE_FILL, TRADE_FILL_RPS (1 on api.mainnet-beta, 3 elsewhere) and TRADE_FILL_DAILY parse with their bounds", () => {
+  const dir = tmp();
+  try {
+    const env = { DATA_DIR: join(dir, "data"), META_DIR: join(dir, "meta") };
+    assert.deepEqual(loadConfig(env, { here: dir }).fill, { enabled: true, rps: 1, dailyCalls: 20_000 });
+    assert.equal(loadConfig({ ...env, RPC_URL: "https://rpc.example.com" }, { here: dir }).fill.rps, 3);
+    assert.deepEqual(loadConfig({ ...env, TRADE_FILL: "0", TRADE_FILL_RPS: "0.5", TRADE_FILL_DAILY: "0" }, { here: dir }).fill, { enabled: false, rps: 0.5, dailyCalls: 0 });
+    assert.equal(loadConfig({ ...env, TRADE_FILL_DAILY: "150" }, { here: dir }).fill.dailyCalls, 150, "parsed as given; the filler counts it as 200");
+    assert.throws(() => loadConfig({ ...env, TRADE_FILL: "maybe", TRADE_FILL_RPS: "0", TRADE_FILL_DAILY: "-1" }, { here: dir }), (e) => /TRADE_FILL must be 0 or 1/.test(e.message) && /TRADE_FILL_RPS/.test(e.message) && /TRADE_FILL_DAILY/.test(e.message));
+    assert.throws(() => loadConfig({ ...env, TRADE_FILL_RPS: "1001", TRADE_FILL_DAILY: "1.5" }, { here: dir }), (e) => /TRADE_FILL_RPS/.test(e.message) && /TRADE_FILL_DAILY/.test(e.message));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("RPC_USER_URL: a metered RPC for the request-driven lanes only, paced for Helius' free plan; its URL never echoed", () => {
   const dir = tmp();
   try {

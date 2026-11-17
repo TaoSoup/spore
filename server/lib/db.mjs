@@ -9,6 +9,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const SCHEMA_VERSION = 3;
+/** Trade retention per mint (insertTrade): its newest TRADE_KEEP rows whatever their age, and every row of the last TRADE_DAY_S. */
+export const TRADE_KEEP = 2000, TRADE_DAY_S = 86_400;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -100,6 +102,16 @@ CREATE TABLE IF NOT EXISTS pnl_unread (
   PRIMARY KEY (wallet, sig)
 );
 CREATE INDEX IF NOT EXISTS pnl_unread_due ON pnl_unread(next_at) WHERE next_at IS NOT NULL;
+CREATE TABLE IF NOT EXISTS fill_coins (
+  mint TEXT PRIMARY KEY,
+  done TEXT NOT NULL DEFAULT '[]',
+  whole TEXT NOT NULL DEFAULT '[]',
+  partial TEXT NOT NULL DEFAULT '[]',
+  day INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0,
+  rows INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0, cut INTEGER NOT NULL DEFAULT 0,
+  at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS fill_coins_at ON fill_coins(at);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -164,6 +176,12 @@ export class Db {
     // column's absence alone, like dead_streak (a table made before it has none); old rows start at 0, and a "gone" row
     // counts with its own `attempts` anyway.
     if (!this.db.prepare("PRAGMA table_info(img_fail)").all().some((c) => c.name === "gone_attempts")) this.db.exec("ALTER TABLE img_fail ADD COLUMN gone_attempts INTEGER NOT NULL DEFAULT 0");
+    // `fill_coins` (the trade gap fill's state per coin, lib/trade-fill.mjs) is a new table only as well: `done`, the JSON
+    // gap ids finished for the coin (filled, cut, or skipped as irrelevant); `whole`, those filled completely (the listing
+    // reached the gap's start and nothing was left unread), which a child's USD price relies on; `partial`, those in which
+    // a transaction was left unread or decoded incomplete (a later run skips it, so such a gap is never whole); `day` and `calls`, its
+    // chain calls on that UTC day (FILL_COIN_DAILY); totals of rows, unread transactions and cut gaps (health,
+    // debugging); and `at`, the unix s of its last save, by which rows older than the fill's 48 h are pruned.
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -197,8 +215,10 @@ export class Db {
       tradeTrim: p("DELETE FROM trades WHERE mint = ? AND rowid NOT IN (SELECT rowid FROM trades WHERE mint = ? ORDER BY time DESC, rowid DESC LIMIT ?)"),
       tradeTrimOld: p("DELETE FROM trades WHERE mint = ?1 AND time < ?2 AND rowid NOT IN (SELECT rowid FROM trades WHERE mint = ?1 ORDER BY time DESC, rowid DESC LIMIT ?3)"),
       tradeCount: p("SELECT COUNT(*) AS n FROM trades WHERE mint = ?"),
-      tradesFor: p("SELECT * FROM trades WHERE mint = ? ORDER BY time DESC, rowid DESC LIMIT ?"),
-      tradesSince: p("SELECT * FROM trades WHERE mint = ? AND time >= ? ORDER BY time ASC, rowid ASC"),
+      // A trade's place: time (1 s), then its slot (rows read back later by the gap fill, lib/trade-fill.mjs, can be stored
+      // after live rows of the same second, or a child's after the rest of its own), then the rowid (the arrival order).
+      tradesFor: p("SELECT * FROM trades WHERE mint = ? ORDER BY time DESC, slot DESC, rowid DESC LIMIT ?"),
+      tradesSince: p("SELECT * FROM trades WHERE mint = ? AND time >= ? ORDER BY time ASC, slot ASC, rowid ASC"),
       tradesWindow: p("SELECT mint, time, is_buy, value_usd FROM trades WHERE time >= ? ORDER BY time, rowid"),
       vol24: p("SELECT COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE mint = ? AND time >= ?"),
       vol24All: p("SELECT mint, COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE time >= ? GROUP BY mint"),
@@ -219,8 +239,18 @@ export class Db {
       uploadDelete: p("DELETE FROM uploads WHERE name = ?"),
       uploadPairCount: p("SELECT COUNT(*) AS n FROM uploads WHERE kind = 'json' AND pair = ?"),
       uploadCount: p("SELECT COUNT(*) AS n FROM uploads"),
-      priceBefore: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time <= ? ORDER BY time DESC, rowid DESC LIMIT 1"),
-      priceAfter: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time > ? ORDER BY time ASC, rowid ASC LIMIT 1"),
+      priceBefore: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time <= ? ORDER BY time DESC, slot DESC, rowid DESC LIMIT 1"),
+      priceAfter: p("SELECT price_quote, price_usd, time FROM trades WHERE mint = ? AND time > ? ORDER BY time ASC, slot ASC, rowid ASC LIMIT 1"),
+      // The trade gap fill (lib/trade-fill.mjs): whether a signature is stored (a primary-key prefix), the listing's anchor,
+      // a count that stops at its cap, and the bounds of what the mint's retention keeps.
+      tradeHas: p("SELECT 1 AS x FROM trades WHERE sig = ? AND mint = ? LIMIT 1"),
+      tradeAfter: p("SELECT sig, time FROM trades WHERE mint = ? AND time > ? ORDER BY time ASC, slot ASC, rowid ASC LIMIT 1"),
+      tradesBetween: p("SELECT COUNT(*) AS n FROM (SELECT 1 FROM trades WHERE mint = ? AND time > ? AND time <= ? LIMIT ?)"),
+      tradeOldest: p("SELECT MIN(time) AS t FROM trades WHERE mint = ?"),
+      tradeNth: p("SELECT time FROM trades WHERE mint = ? ORDER BY time DESC, rowid DESC LIMIT 1 OFFSET ?"),
+      fillCoinGet: p("SELECT * FROM fill_coins WHERE mint = ?"),
+      fillCoinSet: p("INSERT OR REPLACE INTO fill_coins (mint, done, whole, partial, day, calls, rows, unread, cut, at) VALUES (@mint, @done, @whole, @partial, @day, @calls, @rows, @unread, @cut, @at)"),
+      fillCoinsPrune: p("DELETE FROM fill_coins WHERE at < ?"),
       keyInsert: p("INSERT INTO api_keys (name, contact, hash, tier, created_at) VALUES (?, ?, ?, ?, ?)"),
       keyByHash: p("SELECT id, name, tier, revoked_at FROM api_keys WHERE hash = ?"),
       keysAll: p("SELECT id, name, contact, tier, created_at, revoked_at, last_used_at, requests FROM api_keys ORDER BY id"),
@@ -316,7 +346,7 @@ export class Db {
    * restart. The trim runs once per `every` new rows of a mint, not per insert: on a mint at the cap it used to cost
    * 1.5 ms a trade (a 2 000-row subquery to delete one row).
    */
-  insertTrade(t, keep = 2000, { max = 50_000, every = 200, dayS = 86_400 } = {}) {
+  insertTrade(t, keep = TRADE_KEEP, { max = 50_000, every = 200, dayS = TRADE_DAY_S } = {}) {
     const r = this.q.tradeInsert.run({ sig: t.sig, mint: t.mint, idx: t.idx ?? 0, slot: t.slot, time: t.time, isBuy: t.isBuy ? 1 : 0, user: t.user, baseAmount: t.baseAmount, quoteAmount: t.quoteAmount, priceQuote: t.priceQuote, priceUsd: t.priceUsd ?? null, valueUsd: t.valueUsd ?? null });
     if (!(Number(r.changes) > 0)) return false;
     const n = (this.tradeAdds.get(t.mint) ?? 0) + 1;
@@ -392,6 +422,26 @@ export class Db {
    * The price a coin last traded at, at or before `t` (unix s), else its first trade after `t`:
    * the reference of a 24 h change (the second case is a coin whose history starts inside the window).
    */
+  /** A mint's price row at time `t`: its last trade at or before it (priceAt), its first one after it (priceAfterT). */
+  priceAt(mint, t) { const r = this.q.priceBefore.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
+  priceAfterT(mint, t) { const r = this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
+  // ---- the trade gap fill (lib/trade-fill.mjs)
+  tradeHas(sig, mint) { return !!this.q.tradeHas.get(sig, mint); }
+  tradeAfter(mint, t) { const r = this.q.tradeAfter.get(mint, t); return r ? { sig: r.sig, time: r.time } : null; }
+  /** The mint's trades with a time in (a, b], counted up to `cap` (the count stops there, so a busy coin costs no more). */
+  tradesBetween(mint, a, b, cap = 1000) { return this.q.tradesBetween.get(mint, a, b, cap).n; }
+  tradeOldestTime(mint) { return this.q.tradeOldest.get(mint)?.t ?? null; }
+  /** The time of the mint's n-th newest trade (1 = the newest); null when it has fewer. */
+  tradeNthTime(mint, n) { return n >= 1 ? this.q.tradeNth.get(mint, n - 1)?.time ?? null : null; }
+  /** The fill's row of a mint, its gap id lists as Sets; null when it has none. */
+  fillCoin(mint) {
+    const r = this.q.fillCoinGet.get(mint);
+    if (!r) return null;
+    const ids = (v) => { try { const a = JSON.parse(v); return new Set(Array.isArray(a) ? a.filter(Number.isInteger) : []); } catch { return new Set(); } };
+    return { mint: r.mint, done: ids(r.done), whole: ids(r.whole), partial: ids(r.partial), day: r.day, calls: r.calls, rows: r.rows, unread: r.unread, cut: r.cut, at: r.at };
+  }
+  fillCoinSave(f) { this.q.fillCoinSet.run({ mint: f.mint, done: JSON.stringify([...f.done]), whole: JSON.stringify([...f.whole]), partial: JSON.stringify([...(f.partial ?? [])]), day: f.day ?? 0, calls: f.calls ?? 0, rows: f.rows ?? 0, unread: f.unread ?? 0, cut: f.cut ?? 0, at: f.at ?? 0 }); }
+  fillCoinsPrune(beforeS) { return Number(this.q.fillCoinsPrune.run(beforeS).changes); }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
 
   // Partner API keys (lib/apikeys.mjs owns the logic; only the sha256 of a key is ever stored).
