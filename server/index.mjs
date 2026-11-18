@@ -20,6 +20,8 @@ import { PnlTracker } from "./lib/pnl-tracker.mjs";
 import { TradeFiller } from "./lib/trade-fill.mjs";
 import { Gecko } from "./lib/gecko.mjs";
 import { ChartHistory } from "./lib/chart-history.mjs";
+import { Narrative, flagText } from "./lib/narrative.mjs";
+import { XPosts } from "./lib/xposts.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -108,10 +110,15 @@ const chartHistory = cfg.history.enabled
   ? new ChartHistory({ model, gecko: new Gecko({ perMin: cfg.history.geckoPerMin, daily: cfg.history.geckoDaily, db, log }),
     rpc: cfg.history.sample ? rpc.lane("fill") : null, fill: tradeFill, cfg: cfg.history, log })
   : null;
+// Linked posts: the X posts a family's coins link in their metadata (GET /api/narrative/:mint); their texts come from
+// X's public embed API, a few a minute, each stored once (a text with a blocked word is stored empty).
+const narrative = cfg.narrative.enabled
+  ? new Narrative({ model, posts: cfg.narrative.posts ? new XPosts({ perMin: cfg.narrative.perMin, daily: cfg.narrative.daily, db, log, flag: (text) => flagText(text) }) : null, log })
+  : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -149,6 +156,7 @@ agentRunner.start();
 pnl.start();
 tradeFill.start();
 chartHistory?.start();
+narrative?.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the
 // index to settle. AGENTS=off|dry never constructs this.
 let liveTimer = null;
@@ -170,7 +178,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

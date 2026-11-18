@@ -11,7 +11,7 @@ import { DEFAULT_PAGES_DOMAIN, DEFAULT_PAGES_PROJECT, DEFAULT_META_DIR, DEFAULT_
 export const DEFAULT_PLATFORM_WALLET = "FcbEAMqBvJVsfcFWDbED7geyBLR88ypcY88BoUSgmeT5";
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 // Per-IP rate limits (requests per window) — DEPLOY.md documents each.
-export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000], portfolio: [20, 60_000], pnl: [60, 60_000], pnlnew: [20, 60 * 60_000], histnew: [120, 60 * 60_000] };
+export const DEFAULT_RATES = { api: [300, 60_000], img: [6000, 60_000], rpc: [60, 60_000], upload: [120, 10 * 60_000], spawned: [200, 10 * 60_000], sse: [30, 60_000], jup: [20, 60_000], portfolio: [20, 60_000], pnl: [60, 60_000], pnlnew: [20, 60 * 60_000], histnew: [120, 60 * 60_000], narrnew: [120, 60 * 60_000] };
 // Command-line flags that stand in for a variable, so a package.json script needs no POSIX
 // `VAR=value node …` prefix (cmd.exe cannot run one): `npm run dev` passes --backfill-limit=150.
 // A flag wins over the environment, as that prefix did; other arguments are ignored, as before.
@@ -105,6 +105,15 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     geckoPerMin: num("GECKO_PER_MIN", 8, { min: 1, max: 600 }),
     geckoDaily: num("GECKO_DAILY", 5_000, { min: 0, integer: true }),
     sampleDaily: num("CHART_SAMPLE_DAILY", 5_000, { min: 0, integer: true }),
+  };
+  // Linked posts (lib/narrative.mjs): the X posts a family's coins link in their metadata, grouped per parent. The posts'
+  // texts come from X's public embed API (lib/xposts.mjs, keyless), paced and capped per UTC day (0 = no cap);
+  // NARRATIVE_POSTS=0 keeps the links and fetches no text.
+  const narrative = {
+    enabled: bool("NARRATIVE", true),
+    posts: bool("NARRATIVE_POSTS", true),
+    perMin: num("XPOST_PER_MIN", 20, { min: 1, max: 120 }),
+    daily: num("XPOST_DAILY", 3_000, { min: 0, integer: true }),
   };
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
@@ -204,5 +213,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative };
 }

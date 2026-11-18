@@ -282,7 +282,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, narrative = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -337,6 +337,11 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // GeckoTerminal requests and chain reads); serving what is stored is not limited, and a refusal is never a 429.
   const histOf = chartHistory ?? null;
   const histNew = new RateLimiter({ limit: limitOf("histnew").limit, windowMs: limitOf("histnew").windowMs, now });
+  // Linked posts (lib/narrative.mjs), when the server runs them: the X posts a family's coins link. Post-text fetches one
+  // IP may start per window (each is a request to X); serving what is stored is not limited, and a refusal is never a
+  // 429: the post is listed without its text (state "idle").
+  const narrOf = narrative ?? null;
+  const narrNew = new RateLimiter({ limit: limitOf("narrnew").limit, windowMs: limitOf("narrnew").windowMs, now });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -379,7 +384,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -608,6 +613,26 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     const b0 = oldest ? Math.floor(oldest.time / R) * R : Infinity;
     sendCachedJson(req, res, page, page.state === "loading" ? { cacheControl: "no-store" } : page.state === "done" && hi <= b0 ? { maxAge: 60, swr: 600 } : { maxAge: 5 });
   }
+
+  /**
+   * The posts linked by a family's coins (README §API): for a parent the X posts several of its children's creators
+   * link, for a coin its own post and the siblings linking the same one. Never cached while a post's text is being
+   * fetched (`pending`: the client asks again), 5 s while one is listed without a fetch under way ("idle"), else 30 s.
+   * A failure answers an empty body, not an error: the page shows nothing in its place.
+   */
+  app.get("/api/narrative/:mint", wrap(async (req, res) => {
+    const { mint } = req.params;
+    if (!isMint(mint)) return res.status(400).json({ error: "invalid mint" });
+    let body = null;
+    try { body = narrOf ? await narrOf.serve(mint, { mayQueue: () => narrNew.check(req.ip ?? "?").ok }) : null; }
+    catch (e) {
+      log.warn?.(`narrative ${mint}: ${String(e?.message ?? e).slice(0, 160)}`);
+      return res.json({ mint, asOf: Math.floor(now() / 1000), members: 0, linked: 0, posts: [], words: [], own: null, under: null, pending: false });
+    }
+    if (!body) return res.status(404).json({ error: "unknown mint" });
+    const idle = [...body.posts, body.own, body.under?.post].some((p) => p?.state === "idle");
+    sendCachedJson(req, res, body, body.pending ? { cacheControl: "no-store" } : idle ? { maxAge: 5, swr: 5 } : { maxAge: 30 });
+  }));
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search
   // box accept all of pump.fun, DESIGN §11.1) is looked up live, like /api/coin/:mint does; the

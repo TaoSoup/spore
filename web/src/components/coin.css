@@ -378,6 +378,26 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
 .pos-foot .linkish { font-size: 11px; color: var(--accent); }
 .pos-link { flex: none; color: var(--accent); white-space: nowrap; }
 @media (pointer: coarse) { .pos-foot .linkish, .pos-link { display: inline-flex; align-items: center; min-height: 40px; } }
+/* "Linked posts" (components/coin/CoinNarrative.tsx; the rows are components/narrative/narrative.css): under the Activity
+   card, after the info card on phones. The page has room the map panel lacks: body-size text, a reading measure. */
+.coin-narrative { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px 16px; }
+.coin-narrative .nar-row { max-width: 76ch; }
+.coin-narrative .nar-row + .nar-row, .coin-narrative .nar-row + .nar-cap { margin-top: 8px; }
+.coin-narrative .nar-top { font-size: var(--fs-sm); }
+.coin-narrative .nar-text { --nar-lh: 20px; }
+.coin-narrative .nar-text p { font-size: var(--fs-sm); }
+.coin-narrative .nar-cap, .coin-narrative .nar-note, .coin-narrative .nar-words { font-size: var(--fs-xs); }
+.coin-narrative .nar-foot { max-width: 76ch; }
+/* touch: an unseen margin makes the post link, the caption's parent and the coin chips about 40 px tall (as in the map
+   panel), and no two margins meet: the caption's parent grows upward (over the card's label), the post link downward
+   (over the post's text) */
+@media (pointer: coarse) {
+  .coin-narrative .nar-link { position: relative; padding-block: 1px 21px; margin-block: -1px -21px; }
+  .coin-narrative .nar-cap-pick, .coin-narrative .nar-cap-pick .linkish { position: relative; padding-block: 19px 4px; margin-block: -19px -4px; }
+  .coin-narrative .nar-chip { position: relative; }
+  .coin-narrative .nar-chip::after { content: ""; position: absolute; inset: -8px -4px; }
+  .coin-narrative .nar-more { display: inline-flex; align-items: center; min-height: 40px; }
+}
 .trade-foot { display: flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.4; color: var(--muted); }
 .trade-foot svg { flex: none; color: var(--accent); }
 @media (pointer: coarse) { .trade .quick > button, .trade-tabs button { min-height: 40px; } .trade .slip .seg button { min-height: 36px; } }
@@ -426,6 +446,7 @@ button.family-strip:hover { border-color: var(--line-2); color: var(--ink); }
   .coin-position { order: 2; } /* after the chart by DOM order */
   .coin-activity { order: 3; }
   .coin-info { order: 4; }
+  .coin-narrative { order: 4; } /* after the info card by DOM order */
   .coin-fees, .coin-lock { order: 5; }
   .coin-money > #agent { order: 6; }
   .coin-details { order: 7; }

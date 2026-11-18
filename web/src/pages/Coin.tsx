@@ -6,7 +6,8 @@
 // a wallet that can sign, the user's presets trade at once: a row of them above the widget on
 // desktop, a popover from the bar's Buy / Sell on phones (components/useInstantTrade.ts, as on the
 // Portfolio page and the map). Under the chart the Activity card (trades, children, family tree),
-// then creator fees, the agent and the folded details; under the trade widget "Your position" (what the header's
+// then the posts the coin or its children link (components/coin/CoinNarrative.tsx), creator fees, the agent and the
+// folded details; under the trade widget "Your position" (what the header's
 // wallet holds of the coin and its P&L, components/coin/YourPosition.tsx; under the chart on phones), then a calm info card
 // (what the coin is, its family, status, dominance) answers the second question: what this coin is
 // in its tree.
@@ -49,6 +50,7 @@ import { Sparkline, Tween, sparkTone } from "../components/coin/viz";
 import { change24h, changeWords, daySpark } from "../components/coin/change";
 import ParentPrice, { ParentBarLine } from "../components/coin/ParentPrice";
 import YourPosition from "../components/coin/YourPosition";
+import CoinNarrative from "../components/coin/CoinNarrative";
 import { parentOf } from "../lib/priced-in";
 import Reveal from "../components/ui/Reveal";
 import "../components/coin.css";
@@ -230,6 +232,8 @@ export default function CoinPage() {
           </div>
           {/* phones: the info card follows the tabs (on desktop it sits under the trade card) */}
           {narrow && <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />}
+          {/* the X posts this coin, or the coins under it, link (nothing for a coin without any); phones: after the info card */}
+          <CoinNarrative key={coin.mint} coin={coin} />
           <div className={`coin-money ${solo ? "solo" : ""}`}>
             <div className="coin-fees"><ClaimFees coin={coin} /></div>
             <AgentSlot coin={coin} />

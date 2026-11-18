@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS chart_samples (
   retry_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL DEFAULT '[]', retry_ext INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS chart_samples_asked ON chart_samples(asked_at);
+CREATE TABLE IF NOT EXISTS x_posts (
+  id TEXT PRIMARY KEY, state TEXT NOT NULL, handle TEXT, text TEXT, flagged INTEGER NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, recheck_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -203,6 +208,10 @@ export class Db {
     // cap stopped); both pruned by `asked_at` (unix s, written at most hourly). `retry_ext` came a build later: added
     // when absent, like gone_attempts. So did `mig_at` (a graduated coin's row: the bucket where its pool's candles meet
     // its curve's, the migration's, once the curve was fetched; null otherwise or in rows written before it).
+    // `x_posts` (the linked posts' texts, lib/xposts.mjs) is a new table only too: one row per X post id with what X's
+    // embed API answered, `state` 'ok' (with `handle` and `text`; `flagged` 1 = the text is withheld and stored empty) or
+    // 'none' (no such post, or not shown to us), the unix s of the fetch, of the next recheck and of the last ask
+    // (`asked_at`, written at most hourly, by which rows are pruned).
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
@@ -289,6 +298,15 @@ export class Db {
       histPruneOver: p(`DELETE FROM chart_history WHERE (mint, res, unit) IN (SELECT mint, res, unit FROM chart_history
         WHERE NOT (mint = ?2 AND res = ?3 AND unit = ?4 AND EXISTS (SELECT 1 FROM chart_samples WHERE at >= ?1)) ORDER BY asked_at ASC LIMIT ?5)`),
       histCount: p("SELECT COUNT(*) AS n FROM chart_history"),
+      // The linked posts' texts (lib/xposts.mjs).
+      xpostGet: p("SELECT * FROM x_posts WHERE id = ?"),
+      xpostSet: p(`INSERT OR REPLACE INTO x_posts (id, state, handle, text, flagged, fetched_at, asked_at, recheck_at)
+        VALUES (@id, @state, @handle, @text, @flagged, @fetchedAt, @askedAt, @recheckAt)`),
+      xpostDel: p("DELETE FROM x_posts WHERE id = ?"),
+      xpostTouch: p("UPDATE x_posts SET asked_at = ?1 WHERE id = ?2 AND asked_at < ?1"),
+      xpostPruneOld: p("DELETE FROM x_posts WHERE asked_at < ?"),
+      xpostPruneOver: p("DELETE FROM x_posts WHERE id IN (SELECT id FROM x_posts ORDER BY asked_at ASC, id ASC LIMIT ?)"),
+      xpostCount: p("SELECT COUNT(*) AS n FROM x_posts"),
       // Deep rows (data longer than ?1 bytes: grown backward by older pages) asked before ?3, or past the ?2 most recently asked.
       // octet_length reads a value's size from the record header; length() of TEXT loads (and counts) the whole value, which
       // read every row's data on each hourly prune.
@@ -527,6 +545,14 @@ export class Db {
    */
   histDeep(minBytes, keep, beforeS) { return this.q.histDeep.all(minBytes, keep, beforeS).map((r) => ({ mint: r.mint, res: r.res, unit: r.unit })); }
   histCounts() { return { history: this.q.histCount.get().n, samples: this.q.samplesCount.get().n }; }
+  // ---- the linked posts' texts (lib/xposts.mjs): one row per X post id, times in unix s
+  xpostGet(id) { const r = this.q.xpostGet.get(id); return r ? { id: r.id, state: r.state, handle: r.handle, text: r.text, flagged: !!r.flagged, fetchedAt: r.fetched_at, askedAt: r.asked_at, recheckAt: r.recheck_at } : null; }
+  xpostSet(r) { this.q.xpostSet.run({ id: r.id, state: r.state, handle: r.handle ?? null, text: r.text ?? null, flagged: r.flagged ? 1 : 0, fetchedAt: r.fetchedAt, askedAt: r.askedAt, recheckAt: r.recheckAt }); }
+  xpostDel(id) { return Number(this.q.xpostDel.run(id).changes) > 0; }
+  xpostTouch(id, at) { return Number(this.q.xpostTouch.run(at, id).changes) > 0; }
+  /** Drops the rows not asked for since `beforeS`, then the least recently asked past `maxRows`; returns how many went. */
+  xpostPrune(beforeS, maxRows) { return this.transaction(() => { let n = Number(this.q.xpostPruneOld.run(beforeS).changes); const over = this.q.xpostCount.get().n - maxRows; if (over > 0) n += Number(this.q.xpostPruneOver.run(over).changes); return n; }); }
+  xpostCount() { return this.q.xpostCount.get().n; }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
 
   // Partner API keys (lib/apikeys.mjs owns the logic; only the sha256 of a key is ever stored).

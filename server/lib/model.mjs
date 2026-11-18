@@ -213,6 +213,16 @@ export class Model {
     if (!c.launcher && c.shares) for (const s of c.shares) if (s.address && s.address !== this.platformWallet && !out.includes(s.address)) out.push(s.address);
     return out;
   }
+  /**
+   * One address standing for whoever launched a coin, or null when none is known (lib/narrative.mjs counts the distinct
+   * ones behind a linked post): the `launcher`, else the first wallet #launchWallets takes from the fee shares. Never
+   * the curve's `creator`, which turns into the sharing config's address.
+   */
+  creatorKey(c) {
+    if (c.launcher) return c.launcher;
+    if (c.shares) for (const s of c.shares) if (s.address && s.address !== this.platformWallet) return s.address;
+    return null;
+  }
   #unindexCreator(c) {
     for (const w of this.#launchWallets(c)) { const s = this.creators.get(w); if (s) { s.delete(c.mint); if (!s.size) this.creators.delete(w); } }
   }

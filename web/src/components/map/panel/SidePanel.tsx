@@ -10,7 +10,8 @@
 // copies. A listed asset's kids list is one sorted sequence over every coin
 // the family store has paged in (lib/map/family.ts, DESIGN-FAMILY-ALL §6), the drawn kids among them (a drawn one shows
 // its live node); until the family is in, it is the drawn kids with a note saying how many of the family it sorts.
-// Only the rows shown become nodes.
+// Only the rows shown become nodes. Above the tabs, one quiet block: the X posts the coin, or the coins under it, link
+// in their metadata (NarrativeBlock, /api/narrative; nothing for a coin without posts).
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { Link } from "react-router-dom";
 import { api, pumpUrl, xShareUrl, type Candles, type Coin } from "../../../lib/api";
@@ -35,6 +36,8 @@ import TradePresets from "../../TradePresets";
 import Sparkline, { candleChange, spanLabel } from "./Sparkline";
 import Brood from "./Brood";
 import ParentRow from "./ParentRow";
+import NarrativeBlock from "./NarrativeBlock";
+import { useNarrative } from "../../narrative/useNarrative";
 import { parentOf, plainQuote, type ParentRef } from "../../../lib/priced-in";
 import { parentUsdOf } from "../../coin/ParentPrice";
 import type { Leader } from "../../../lib/map/volume";
@@ -163,6 +166,9 @@ export type PanelInstant = {
 export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat, heatOn, maxDepth, map, onPick, onClose, peek = false, family = null, mode = "mcap", firstborn = EMPTY_FIRSTBORNS, leaders = [], copyList = [], copyTraded = false, heatIndex = null, volRank = null, families = null, lastHidden = false, onShowAll, onTrade, trade = null, instant = null }: Props) {
   const toast = useToast();
   const candles = useCandles(node.mint);
+  // The linked posts are asked for here, above the peek return, so the answer is in when the phone sheet opens (the
+  // block itself is not drawn in the peek). While the next coin's answer loads, `data` is still the previous coin's.
+  const nar = useNarrative(node.mint);
   const [sparkRef, sparkW] = useWidth();
   const [broodRef, broodW] = useWidth();
   // The CA pill's copy confirmation: the icon turns into a check and the pill flashes for 1.4 s.
@@ -361,6 +367,8 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
   const pickTab = (k: PanelTab) => { lastTab = k; setTabWant(k); };
   const hover = (m: string | null) => map.current?.hoverNode(m);
   const volOf = (k: BubbleNode) => heatIndex?.rows.get(k.mint)?.v24 ?? 0;
+  // the coin the posts are for: the selection, or the previous one while the block waits for the selection's answer
+  const narLabel = nar.data ? sym(nar.data.mint === node.mint ? node : byMint.get(nar.data.mint) ?? { symbol: null, mint: nar.data.mint }) : "";
   return (
     <div className="map-side-in">
       {close}
@@ -415,6 +423,7 @@ export default function SidePanel({ node, byMint, kids, coin: c, coinError, heat
           <button type="button" className="linkish" onClick={() => map.current?.fit()} title="Zoom back out to the whole map (0)">Whole map</button>
         </div>
       </div>
+      {nar.data && <NarrativeBlock data={nar.data} stale={nar.stale} label={narLabel} onPick={onPick} onHover={hover} />}
       {tab && (
         <section className="map-kids" aria-label={tab === "kids" ? `Coins under ${sym(node)}` : tab === "active" ? `Most active coins in the ${family ? sym(family.top) : sym(node)} family` : `Coins named ${sym(node)} under the same parent`} ref={broodRef}>
           {tabs.length > 1 ? (

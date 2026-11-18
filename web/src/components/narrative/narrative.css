@@ -1,0 +1,49 @@
+/* Linked posts (components/narrative/NarrativeParts.tsx): the rows the map panel's block (.nar-block) and the coin
+   page's card (.coin-narrative, components/coin.css) share. Tokens only, no fills: quiet text under hairlines.
+   Every row has a fixed height once mounted: one-line head, a text area of exactly --nar-lines lines, one-line chips.
+   Grids use minmax(0, 1fr) so a long word cannot widen the 340 px panel. */
+.nar-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+/* line 1: the link out and the post's age give way (ellipsis, the age first); the stat on the right never does */
+.nar-top { display: flex; align-items: center; min-width: 0; height: 18px; font-size: var(--fs-xs); line-height: 18px; white-space: nowrap; }
+.nar-link { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 500; transition: color var(--dur-2); }
+a.nar-link:hover, a.nar-link:focus-visible { color: var(--accent); text-decoration: none; }
+.nar-at { flex: 0 20 auto; min-width: 0; margin-left: 5px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.nar-stat { flex: none; margin-left: auto; padding-left: 10px; font-size: var(--fs-2xs); color: var(--muted); }
+/* line 2: the post's words as plain text (its line breaks already read as spaces), clamped; the box holds its lines
+   whether or not there is text */
+.nar-text { --nar-lh: 18px; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; height: calc(var(--nar-lines, 2) * var(--nar-lh)); overflow: hidden; }
+.nar-text p { margin: 0; font-size: var(--fs-xs); line-height: var(--nar-lh); color: var(--ink-2); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--nar-lines, 2); line-clamp: var(--nar-lines, 2); overflow: hidden; }
+/* while the text is fetched: one bar per line (a grid, so the bars' margins do not collapse) */
+.nar-text .sk { margin: calc((var(--nar-lh) - 10px) / 2) 0; }
+.nar-note { margin: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* line 3: the coins linking the post; a long ticker gives way, the logo and the volume never */
+.nar-chips { display: flex; gap: 12px; min-width: 0; height: 24px; }
+.nar-chip { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 5px; min-width: 0; height: 24px; padding: 0; border: 0; background: none; color: var(--ink-2); font-family: var(--mono); font-size: var(--fs-2xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.nar-chip:hover { text-decoration: none; }
+.nar-chip b { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; font-weight: 500; transition: color var(--dur-2); }
+.nar-chip span { flex: none; color: var(--muted); }
+.nar-chip:hover b, .nar-chip:focus-visible b { color: var(--accent); }
+/* the small lines around the rows */
+.nar-cap { margin: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nar-cap .linkish { font: inherit; color: var(--ink-2); transition: color var(--dur-2); }
+.nar-cap .linkish:hover, .nar-cap .linkish:focus-visible { color: var(--accent); text-decoration: none; }
+/* the caption clips (ellipsis), and would clip the focus ring around its parent control: it grows by the ring's reach
+   and pulls back by the same margin, so the ring shows whole and nothing moves */
+.nar-cap-pick { padding: 4px; margin: -4px; }
+.nar-words, .nar-foot { margin: 0; font-size: var(--fs-2xs); line-height: 1.45; overflow-wrap: anywhere; }
+.nar-words { color: var(--muted); }
+.nar-foot { color: var(--faint); }
+.nar-more { justify-self: start; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--accent); }
+.nar-more:hover { color: var(--ink); }
+
+/* the map panel's block: one row, the rest behind "Show more"; a hairline over it like the panel's other sections.
+   While another coin's answer loads it stays, dimmed (the children, not the block: the panel's entry animation holds
+   the block's own opacity). */
+.nar-block { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.nar-block > * { transition: opacity var(--dur-2); }
+.nar-block[aria-busy="true"] > * { opacity: .45; }
+.nar-block .nar-row + .nar-cap, .nar-block .nar-row + .nar-row { margin-top: 6px; }
+/* the block's first line: the caption gives way (ellipsis), "Show N more" / "Show less" on the right never does */
+.nar-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.nar-head .nar-cap { flex: 1 1 auto; min-width: 0; }
+.nar-head .nar-more { flex: none; line-height: 16px; white-space: nowrap; }
