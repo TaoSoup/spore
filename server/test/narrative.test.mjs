@@ -1,7 +1,9 @@
 // Linked posts (lib/narrative.mjs): the pure functions (post links in every form the metadata cleaner stores, post
-// times, grouping, ranking, common name words, X's embed answer, the word flag), Narrative.serve on a small family
-// (subjects, the parent's list, a coin's own post with its siblings, `under`, unavailable posts dropping out, the
-// asker's allowance, the cache, a 30 000-child walk in slices) and GET /api/narrative/:mint. A fake fetch behind the
+// times, grouping, the events, X's embed answer, the word flag), Narrative.serve on a small family (subjects, the
+// parent's timeline, an event's time staying put when its first coin stops being a member, a coin's own post with its
+// siblings, `under`, unavailable posts dropping out, which events ask for their text first, the asker's allowance, the
+// cache, 30 000-child walks in slices) and GET /api/narrative/:mint. Then Discover
+// (lib/discover.mjs): the parents with launches in the last hour, and GET /api/discover. A fake fetch behind the
 // post-text fetcher, a fake clock, sqlite in memory. No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -9,15 +11,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { Narrative, parsePost, postTime, postUrl, groupPosts, rankPosts, nameWords, nameTokens, parseOembed, flagText, postOf, NEW_S, FAMILY_TTL_MS, FAMILY_CACHE, POSTS_MAX, RANK_KEEP, TEXT_MAX, USD_CAP } from "../lib/narrative.mjs";
-import { XPosts, RECHECK_DENIED_S } from "../lib/xposts.mjs";
+import { Narrative, parsePost, postTime, postUrl, groupPosts, eventsOf, parseOembed, flagText, postOf, NEW_S, FAMILY_TTL_MS, FAMILY_CACHE, EVENTS_MAX, EVENTS_KEEP, EVENTS_FIRST, TEXT_MAX } from "../lib/narrative.mjs";
+import { Discover, DISCOVER_TTL_MS, PARENTS_MAX, WINDOW_S, BIN_S } from "../lib/discover.mjs";
+import { XPosts, RECHECK_DENIED_S, WAIT_AHEAD } from "../lib/xposts.mjs";
 import { createApp } from "../lib/api.mjs";
 import { loadConfig, DEFAULT_RATES } from "../lib/config.mjs";
 import { EventHub } from "../lib/events.mjs";
 import { ImageCache } from "../lib/meta.mjs";
 import { SOL_MINT } from "../lib/jupiter.mjs";
 import { Db } from "../lib/db.mjs";
-import { Model } from "../lib/model.mjs";
+import { Model, RECENT_S } from "../lib/model.mjs";
 import { PublicKey } from "../lib/sdk.mjs";
 import { PLATFORM, quiet, base, T22 } from "./helpers/tree.mjs";
 import { key, fakeClock, T0 } from "./helpers/chain.mjs";
@@ -27,6 +30,8 @@ const HOUR = 3600, DAY = 86_400;
 /** A post id made `agoS` before the test's start (snowflake: ms since X's epoch << 22); `n` tells ids of one moment apart. */
 const idAt = (agoS = HOUR, n = 0) => String(((BigInt((NOW_S - agoS) * 1000) - 1288834974657n) << 22n) + BigInt(n));
 const cp = (...n) => String.fromCodePoint(...n);
+/** Mint number `i` of a made-up series (`fill` tells series apart). */
+const mintN = (i, fill = 6) => { const b = Buffer.alloc(32, fill); b.writeUInt32BE(i, 28); return new PublicKey(b).toBase58(); };
 
 // ---------------------------------------------------------------- pure functions
 test("parsePost: every form a post link is stored in gives the id and nothing else", () => {
@@ -82,103 +87,44 @@ test("postTime, postUrl, postOf: the time in a snowflake id; ids without one, or
   assert.equal(postOf(null), null);
 });
 
-const mem = (mint, postId, over = {}) => ({ mint, key: mint, createdAt: NOW_S - 100, usd: 0, trades: 0, t1h: 0, postId, name: null, symbol: null, ...over });
+const mem = (mint, postId, over = {}) => ({ mint, key: mint, createdAt: NOW_S - 100, usd: 0, postId, ...over });
 
-test("groupPosts: coins per post, distinct creators (unknown ones together as one), the plain and the capped volume, first and last launch", () => {
+test("groupPosts: coins per post, distinct creators (unknown ones together as one), the volume, first and last launch", () => {
   const A = idAt(HOUR, 1), B = idAt(HOUR, 2);
   const g = groupPosts([
-    mem("m1", A, { key: "w1", usd: 9000, t1h: 3, createdAt: 50 }), mem("m2", A, { key: "w1", usd: 100.5, t1h: 1, createdAt: 40 }), mem("m3", A, { key: "w2", usd: 1999, createdAt: 60 }),
-    mem("m4", A, { key: null, usd: 1, createdAt: null }), mem("m5", A, { key: null }), mem("m6", A, { key: undefined, usd: NaN, t1h: -1 }),
+    mem("m1", A, { key: "w1", usd: 9000, createdAt: 50 }), mem("m2", A, { key: "w1", usd: 100.5, createdAt: 40 }), mem("m3", A, { key: "w2", usd: 1999, createdAt: 60 }),
+    mem("m4", A, { key: null, usd: 1, createdAt: null }), mem("m5", A, { key: null }), mem("m6", A, { key: undefined, usd: NaN }),
     mem("m7", B, { key: "w1", usd: 7 }), mem("m8", null, { key: "w9", usd: 1e6 }), mem("m9", undefined),
   ]);
   assert.deepEqual([...g.keys()], [A, B]);
-  assert.deepEqual(g.get(A), { id: A, coins: 6, creators: 3, usd: 11100.5, usdCapped: USD_CAP + 100.5 + 1999 + 1, t1h: 4, firstAt: 40, lastAt: NOW_S - 100, mints: ["m1", "m2", "m3", "m4", "m5", "m6"] });
-  assert.deepEqual(g.get(B), { id: B, coins: 1, creators: 1, usd: 7, usdCapped: 7, t1h: 0, firstAt: NOW_S - 100, lastAt: NOW_S - 100, mints: ["m7"] });
-  assert.equal(USD_CAP, 5_000);
+  assert.deepEqual(g.get(A), { id: A, coins: 6, creators: 3, usd: 11100.5, firstAt: 40, lastAt: NOW_S - 100, mints: ["m1", "m2", "m3", "m4", "m5", "m6"] });
+  assert.deepEqual(g.get(B), { id: B, coins: 1, creators: 1, usd: 7, firstAt: NOW_S - 100, lastAt: NOW_S - 100, mints: ["m7"] });
+  assert.deepEqual(groupPosts([mem("x", A, { createdAt: null }), mem("y", A, { createdAt: null })]).get(A).firstAt, null, "no coin with a creation time");
   assert.equal(groupPosts([]).size, 0);
   assert.deepEqual(groupPosts([mem("x", A, { key: null })]).get(A).creators, 1, "one coin without a known creator is one creator");
 });
 
-test("rankPosts: two creators admit a post, volume never does; fresher and more widely linked first; ties by coins then id; the same order whatever the input order", () => {
+test("eventsOf: two creators and a post time admit an event, volume never does; newest first launch first, whatever was traded or however many link it; ties by id; the same order whatever the input order", () => {
   const nowS = NOW_S;
-  const g = (id, creators, over = {}) => ({ id, coins: creators, creators, usd: 0, usdCapped: 0, t1h: 0, firstAt: null, lastAt: null, mints: [], ...over });
-  const fresh = idAt(2 * HOUR, 1), twoDays = idAt(2 * DAY, 2), week = idAt(7 * DAY, 3), ancient = idAt(40 * DAY, 4);
-  const whale = idAt(HOUR, 5), noTime = "12345", future = idAt(-3 * DAY, 6), tieA = idAt(5 * DAY, 7), tieB = idAt(5 * DAY, 8), tieC = idAt(5 * DAY, 9);
+  const g = (id, creators, firstAgo, lastAgo = firstAgo, over = {}) => ({ id, coins: creators, creators, usd: 0, firstAt: firstAgo == null ? null : nowS - firstAgo, lastAt: lastAgo == null ? null : nowS - lastAgo, mints: [], ...over });
+  const oldPost = idAt(30 * DAY, 1), busy = idAt(HOUR, 2), long = idAt(3 * HOUR, 3), whale = idAt(HOUR, 5), noTime = "12345", future = idAt(-3 * DAY, 6);
+  const tieA = idAt(5 * DAY, 7), tieB = idAt(5 * DAY, 8), noAt = idAt(4 * HOUR, 9);
   const groups = [
-    g(fresh, 2), g(twoDays, 2), g(week, 2), g(ancient, 2), g(whale, 1, { usd: 9e9, usdCapped: USD_CAP, t1h: 9999, coins: 500 }), g(noTime, 50), g(future, 50),
-    g(tieB, 3), g(tieA, 3), g(tieC, 3, { coins: 4 }),
+    g(long, 2, 2 * HOUR, 300), g(tieB, 3, 3 * HOUR), g(whale, 1, 60, 60, { usd: 9e9, coins: 500 }), g(noTime, 50, 30), g(future, 50, 30),
+    g(tieA, 2, 3 * HOUR), g(busy, 9, 3000, 2000, { usd: 9e6, coins: 40 }), g(noAt, 2, null), g(oldPost, 2, 600),
   ];
-  const ranked = rankPosts(new Map(groups.map((x) => [x.id, x])), { nowS });
-  assert.deepEqual(ranked.map((x) => x.id), [fresh, tieC, tieA, tieB, twoDays, week, ancient]);
-  assert.ok(!ranked.some((x) => x.id === whale), "one creator: not admitted, whatever its coins traded");
-  assert.ok(!ranked.some((x) => x.id === noTime || x.id === future), "an id that gives no time is not admitted");
-  const by = Object.fromEntries(ranked.map((x) => [x.id, x]));
-  const basis = 3 * Math.log2(3);
-  assert.deepEqual([by[fresh].score, by[twoDays].score, by[week].score, by[ancient].score].map((s) => Math.round((s - basis) * 1e6) / 1e6), [3, 1, 0, -4]);
-  assert.deepEqual([by[fresh].at, by[ancient].at], [NOW_S - 2 * HOUR, NOW_S - 40 * DAY]);
-  assert.ok(Math.abs(rankPosts([g(week, 2, { usdCapped: 100, t1h: 7 })], { nowS })[0].score - (basis + 1.5 * Math.log1p(100) + Math.log1p(7))) < 1e-9, "volume (weighted 1.5) and the last hour's trades add logarithmically");
-  assert.ok(Math.abs(rankPosts([g(week, 7)], { nowS })[0].score - 9) < 1e-9, "3 per doubling of 1 + creators");
-  const traded = idAt(5 * DAY, 10), wide = idAt(5 * DAY, 11);
-  assert.deepEqual(rankPosts([g(wide, 3), g(traded, 2, { usdCapped: 5 })], { nowS }).map((x) => x.id), [traded, wide], "among admitted posts a traded one passes an untraded one more creators link");
-  assert.deepEqual(rankPosts([...groups].reverse(), { nowS }).map((x) => x.id), ranked.map((x) => x.id), "an array, in any order");
-  assert.deepEqual(rankPosts(new Map(), { nowS }), []);
-});
-
-test("nameTokens: NFKC and lowercase; a-z0-9 words of 3 to 24 with a letter, or CJK-only words of 2 to 12; everything of mixed script is dropped", () => {
-  assert.deepEqual(nameTokens("Jensen's CAT-Coin 2025 x9 ab abc"), ["jensen", "cat", "coin", "abc"]);
-  assert.deepEqual(nameTokens("ｊｅｎｓｅｎ ＨＵＡＮＧ"), ["jensen", "huang"], "full-width letters fold to ASCII");
-  assert.deepEqual(nameTokens("a1b2c3 123 1a2"), ["a1b2c3", "1a2"], "digits alone are no word");
-  assert.deepEqual(nameTokens("x".repeat(24) + " " + "y".repeat(25)), ["x".repeat(24)]);
-  assert.deepEqual(nameTokens("猫 柴犬 コーヒー 한국어 こんにちは世界"), ["柴犬", "コーヒー", "한국어", "こんにちは世界"]);
-  assert.deepEqual(nameTokens("猫cat café naïve jеnsen " + "漢".repeat(13)), [], "mixed scripts, accents, a Cyrillic look-alike, an over-long run");
-  for (const bad of [null, undefined, 5, {}, "", "   ", "$$$ !!!"]) assert.deepEqual(nameTokens(bad), []);
-});
-
-test("nameWords: a word counts once per creator key (unknown keys together as one), needs max(3, 3 %) of them, no filler words, nothing of the subject's own name; at most 6, best first", () => {
-  const m = (name, k, symbol = null) => ({ mint: `${name}/${k}`, key: k, name, symbol });
-  const members = [
-    m("Jensen Huang", "w1"), m("jensen cat", "w2"), m("JENSEN", "w3", "JENSEN"), m("Jensen again", "w1"), m("Jensen once more", "w1"), // jensen: 3 keys
-    m("senate", "w4"), m("x", "w5", "SENATE"), m("Senate hearing", null), m("senate two", null), m("senate three", undefined), // senate: w4, w5 and the unknown = 3
-    m("cat one", "w6"), m("cat two", "w7"), // cat: w2, w6, w7 = 3
-    m("the coin", "w1"), m("the token", "w2"), m("the pump", "w3"), m("The Solana", "w4"), // filler
-    m("nvidia rain", "w1"), m("Nvidia supernvda", "w2"), m("NVIDIA nvd", "w3"), m("supernvda nvd rain", "w1"), m("supernvda nvd rain", "w4"), m("x", "w5", "RAIN"), m("nvd", "w2"), m("y", "w3", "SuperNVDA"), // the subject's own name, a word holding it, a word inside it
-    m("dog", "w1"), m("dog", "w2"), // 2 keys: too few
-    m("猫猫 moon", "w1"), m("猫猫", "w2"), m("猫猫", "w3"), m("moon", "w8"), m("moon", "w9"),
-  ];
-  const asked = [];
-  const words = nameWords(members, { exclude: ["nvidia", "nvda", "ai"], isSlur: (w) => { asked.push(w); return false; } });
-  assert.deepEqual(words, [{ w: "cat", n: 3 }, { w: "jensen", n: 3 }, { w: "moon", n: 3 }, { w: "rain", n: 3 }, { w: "senate", n: 3 }, { w: "猫猫", n: 3 }], "\"rain\" holds the subject's 2-letter \"ai\": too short to exclude anything");
-  assert.deepEqual(asked, words.map((x) => x.w), "the block list is asked for the candidates only, in order");
-  assert.deepEqual(nameWords(members, { exclude: ["nvidia", "nvda"], isSlur: (w) => w === "jensen" || w === "moon" }).map((x) => x.w), ["cat", "rain", "senate", "猫猫"], "a blocked word is left out");
-  assert.deepEqual(nameWords(members, { isSlur: () => false }).map((x) => `${x.w}:${x.n}`), ["nvd:4", "supernvda:4", "cat:3", "jensen:3", "moon:3", "nvidia:3"], "without the exclusion the subject's own words lead");
-  // 3 %: with 200 distinct keys a word needs 6 of them
-  const many = Array.from({ length: 200 }, (_, i) => m(i < 5 ? "rare" : i < 11 ? "common" : `unique${i}`, `k${i}`));
-  assert.deepEqual(nameWords(many, { isSlur: () => false }), [{ w: "common", n: 6 }]);
-  // at most 6, more keys first, then the alphabet
-  const eight = ["hh", "aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg"].flatMap((w, i) => Array.from({ length: 3 + (w === "ggg" ? 2 : 0) }, (_, k) => m(w, `k${i}-${k}`)));
-  assert.deepEqual(nameWords(eight, { isSlur: () => false }).map((x) => `${x.w}:${x.n}`), ["ggg:5", "aaa:3", "bbb:3", "ccc:3", "ddd:3", "eee:3"]);
-  assert.deepEqual(nameWords([], {}), []);
-  assert.deepEqual(nameWords(members, { exclude: ["nvidia", "nvda"] }).map((x) => x.w), ["cat", "jensen", "moon", "rain", "senate", "猫猫"], "the default block list passes ordinary words");
-  // a CJK word is a word from two characters on, so a subject named with one excludes it like any other
-  const shiba = ["w1", "w2", "w3"].flatMap((k) => [m("柴犬", k), m("柴犬二号", k), m("moon", k)]);
-  assert.deepEqual(nameWords(shiba, { isSlur: () => false }).map((x) => x.w), ["moon", "柴犬", "柴犬二号"]);
-  assert.deepEqual(nameWords(shiba, { exclude: nameTokens("柴犬"), isSlur: () => false }).map((x) => x.w), ["moon"], "the subject's two-character name and the word holding it");
-  assert.deepEqual(nameWords(shiba, { exclude: ["柴", "oo", 5, null], isSlur: () => false }).map((x) => x.w), ["moon", "柴犬", "柴犬二号"], "one CJK character or two Latin letters exclude nothing");
-});
-
-test("nameWords: the block list (a hash per substring) is asked about 20 times at most on a 5 000-member family", () => {
-  const vocab = Array.from({ length: 400 }, (_, i) => `word${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + ((i / 26) | 0))}x`);
-  const members = Array.from({ length: 5_000 }, (_, i) => ({ mint: `m${i}`, key: `k${i % 1700}`, name: `${vocab[i % 400]} ${vocab[(i * 7 + 3) % 400]} ${vocab[(i * 13 + 5) % 60]}`, symbol: `S${i}` }));
-  let calls = 0;
-  const words = nameWords(members, { isSlur: (w) => { calls++; return calls <= 10; } }); // the ten best candidates are refused
-  assert.equal(words.length, 6);
-  assert.ok(calls <= 20, `${calls} calls`);
-  assert.equal(calls, 16);
-  let real = 0;
-  const t0 = performance.now();
-  nameWords(members, { isSlur: () => { real++; return false; } });
-  assert.equal(real, 6, "six pass: six asked");
-  assert.ok(performance.now() - t0 < 1_000);
+  const events = eventsOf(new Map(groups.map((x) => [x.id, x])), { nowS });
+  assert.deepEqual(events.map((x) => x.id), [oldPost, busy, long, tieA, tieB, noAt], "a month-old post two coins linked ten minutes ago leads; nine creators and millions traded do not move an event");
+  assert.ok(!events.some((x) => x.id === whale), "one creator: not admitted, whatever its coins traded");
+  assert.ok(!events.some((x) => x.id === noTime || x.id === future), "an id that gives no time is not admitted");
+  const by = Object.fromEntries(events.map((x) => [x.id, x]));
+  assert.deepEqual([by[long].at, by[long].lastAt, by[long].postAt], [NOW_S - 2 * HOUR, NOW_S - 300, NOW_S - 3 * HOUR]);
+  assert.deepEqual([by[oldPost].at, by[oldPost].postAt], [NOW_S - 600, NOW_S - 30 * DAY]);
+  assert.deepEqual([by[noAt].at, by[noAt].lastAt, by[noAt].postAt], [NOW_S - 4 * HOUR, NOW_S - 4 * HOUR, NOW_S - 4 * HOUR], "no coin with a creation time: the event stands at the post's time");
+  assert.ok(events.every((x) => !("score" in x)), "no score");
+  for (let i = 1; i < events.length; i++) assert.ok(events[i - 1].at >= events[i].at, "times only go back");
+  assert.deepEqual(eventsOf([...groups].reverse(), { nowS }).map((x) => x.id), events.map((x) => x.id), "an array, in any order");
+  assert.deepEqual(eventsOf(new Map(), { nowS }), []);
 });
 
 /** X's oEmbed answer for a post, as publish.x.com sends it. */
@@ -286,8 +232,10 @@ const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(b
 const link = (id, handle = "anyone") => `https://x.com/${handle}/status/${id}`;
 
 /**
- * PAR (a SOL coin) with children: K1-K4 link post A (three creators), K5, K6 and KOLDT link B (three creators), K7
- * links C alone, K8 links nothing, K9 is untracked, KOLD is old and untraded (no member). AST is a listed asset (no
+ * PAR (a SOL coin) with children: K1-K4 link post A (three creators; launched 2 h to 1 h ago; KOLD linked it before
+ * them, so the event stands at KOLD's launch), K5, K6 and KOLDT link B
+ * (three creators; KOLDT 30 days ago, the others 1 h ago: the event stands at its first launch, so after A), K7
+ * links C alone, K8 links nothing, K9 is untracked, KOLD is old and untraded (no member: it gives A its time and nothing else). AST is a listed asset (no
  * coin) with Z1 and Z2 linking D. SOLQ is a SOL coin with a post, SOLQ2 one quoted in SOL's mint, UNT an untracked coin.
  */
 function family(w) {
@@ -311,7 +259,9 @@ function family(w) {
   w.coin(K.UNT, "UNT", { post: link(A), tracked: false });
   return w;
 }
-const item = (w, id, coins, usd24, top, s = { state: "ok", handle: `h${id.slice(-4)}`, text: `text of ${id}` }) => ({ id, url: `https://x.com/i/status/${id}`, at: postTime(id, NOW_S * 1000), coins, usd24, ...s, top: top.map(([m, u]) => w.ref(m, u)) });
+/** When the first and the last coin linking a family post was created (s before the test's start). */
+const LAUNCHED = { [A]: [NEW_S + 60, HOUR], [B]: [30 * DAY, HOUR], [D]: [HOUR, HOUR], [X]: [HOUR, HOUR] };
+const item = (w, id, coins, usd24, top, s = { state: "ok", handle: `h${id.slice(-4)}`, text: `text of ${id}` }) => ({ id, url: `https://x.com/i/status/${id}`, at: NOW_S - LAUNCHED[id][0], lastAt: NOW_S - LAUNCHED[id][1], postAt: postTime(id, NOW_S * 1000), coins, usd24, ...s, top: top.map(([m, u]) => w.ref(m, u)) });
 const WAIT = { state: "wait", handle: null, text: null }, IDLE = { state: "idle", handle: null, text: null };
 
 test("serve: who is a subject: a tracked coin or a mint with children; never SOL, an untracked coin without children or an unknown mint", async () => {
@@ -319,10 +269,11 @@ test("serve: who is a subject: a tracked coin or a mint with children; never SOL
   assert.ok(w.model.children.has(SOL_MINT), "a coin is quoted in SOL's mint");
   for (const [why, mint] of [["SOL", SOL_MINT], ["untracked", K.UNT], ["untracked child", K.K9], ["unknown", key(250)], ["no string", null], ["no string", 5]]) assert.equal(await w.narr.serve(mint), null, why);
   const leaf = await w.narr.serve(K.K8, { mayQueue: () => false });
-  assert.deepEqual([leaf.mint, leaf.asOf, leaf.members, leaf.linked, leaf.posts, leaf.words, leaf.own], [K.K8, NOW_S, 0, 0, [], [], null]);
+  assert.deepEqual([leaf.mint, leaf.asOf, leaf.members, leaf.linked, leaf.events, leaf.earlier, leaf.own], [K.K8, NOW_S, 0, 0, [], 0, null]);
   const asset = await w.narr.serve(K.AST, { mayQueue: () => false });
-  assert.deepEqual([asset.mint, asset.members, asset.linked, asset.posts.map((p) => p.id), asset.own, asset.under], [K.AST, 2, 2, [D], null, null], "a listed asset: no coin, but coins are quoted in it");
-  assert.deepEqual(Object.keys(asset), ["mint", "asOf", "members", "linked", "posts", "words", "own", "under", "pending"]);
+  assert.deepEqual([asset.mint, asset.members, asset.linked, asset.events.map((p) => p.id), asset.earlier, asset.own, asset.under], [K.AST, 2, 2, [D], 0, null, null], "a listed asset: no coin, but coins are quoted in it");
+  assert.deepEqual(Object.keys(asset), ["mint", "asOf", "members", "linked", "events", "earlier", "own", "under", "pending"]);
+  assert.deepEqual(Object.keys(asset.events[0]), ["id", "url", "at", "lastAt", "postAt", "coins", "usd24", "state", "handle", "text", "top"]);
   assert.equal(w.narr.snapshot().served, 2, "refusals are not counted");
   // A coin look-up caches the asset as an untracked coin (it is a pump.fun coin too): still a subject through its
   // children, and nothing of that record is read (its own post link, its parent).
@@ -340,7 +291,7 @@ test("serve: who is a subject: a tracked coin or a mint with children; never SOL
   w.close();
 });
 
-test("serve: a parent lists the posts two or more creators link, with their coins and volume; texts arrive (\"wait\", then \"ok\"); every link form counts; coin refs are the API's", async () => {
+test("serve: a parent lists the posts two or more creators link as events, newest first launch first, with their coins and volume; texts arrive (\"wait\", then \"ok\"); every link form counts; coin refs are the API's", async () => {
   const w = family(world());
   let asked = 0;
   const mayQueue = () => { asked++; return true; };
@@ -348,24 +299,26 @@ test("serve: a parent lists the posts two or more creators link, with their coin
   const topA = [[K.K1, 300], [K.K2, 50], [K.K4, 20]], topB = [[K.K5, 500], [K.KOLDT, 10], [K.K6, 0]];
   assert.deepEqual(first, {
     mint: K.PAR, asOf: NOW_S, members: 9, linked: 8,
-    posts: [item(w, A, 4, 370, topA, WAIT), item(w, B, 3, 510, topB, WAIT)],
-    words: [{ w: "jensen", n: 3 }, { w: "senate", n: 3 }], own: null, under: null, pending: true,
+    events: [item(w, A, 4, 370, topA, WAIT), item(w, B, 3, 510, topB, WAIT)],
+    earlier: 0, own: null, under: null, pending: true,
   });
   assert.equal(asked, 2, "one ask per post about to be fetched");
-  assert.deepEqual((await w.narr.serve(K.PAR, { mayQueue })).posts.map((p) => p.state), ["wait", "wait"]);
+  assert.deepEqual((await w.narr.serve(K.PAR, { mayQueue })).events.map((p) => p.state), ["wait", "wait"]);
   assert.equal(asked, 2, "already in line: the allowance is not asked again");
   await w.settle();
   const body = await w.narr.serve(K.PAR, { mayQueue });
-  assert.deepEqual(body.posts, [item(w, A, 4, 370, topA), item(w, B, 3, 510, topB)]);
+  assert.deepEqual(body.events, [item(w, A, 4, 370, topA), item(w, B, 3, 510, topB)]);
   assert.deepEqual([body.pending, asked, w.calls], [false, 2, [A, B]]);
-  assert.equal(body.posts[0].at, NOW_S - 2 * HOUR);
+  assert.deepEqual([body.events[0].at, body.events[0].lastAt, body.events[0].postAt], [NOW_S - NEW_S - 60, NOW_S - HOUR, NOW_S - 2 * HOUR], "KOLD linked it first, 72 h ago: no member any more, but the event keeps its time; the last member an hour ago");
+  assert.deepEqual([body.events[1].at, body.events[1].lastAt, body.events[1].postAt], [NOW_S - 30 * DAY, NOW_S - HOUR, NOW_S - 30 * HOUR], "the post's own time is kept beside the launches'");
+  assert.ok(!("posts" in body) && !("words" in body));
   // the refs: name, symbol and the proxied logo exactly as /api/coin gives them
-  const ref = body.posts[0].top[0], view = w.model.view(w.model.get(K.K1));
+  const ref = body.events[0].top[0], view = w.model.view(w.model.get(K.K1));
   assert.deepEqual([ref.name, ref.symbol, ref.image], [view.name, view.symbol, view.image]);
   assert.equal(ref.image, `/api/img?u=${encodeURIComponent("https://ipfs.io/ipfs/img-K1")}`);
   assert.ok(!JSON.stringify(body).includes("alice") && !JSON.stringify(body).includes("carol") && !JSON.stringify(body).includes("par_official"), "no handle from a link reaches the body");
   assert.ok(!JSON.stringify(body).includes(W.w1), "no creator address either");
-  assert.ok(!body.posts.some((p) => p.id === C), "one creator's post is not listed, whatever its coin traded");
+  assert.ok(!body.events.some((p) => p.id === C), "one creator's post is no event, whatever its coin traded");
   w.close();
 });
 
@@ -373,7 +326,7 @@ test("serve: a coin's own post, the siblings under its parent that link the same
   const w = family(world());
   const k1 = await w.narr.serve(K.K1);
   assert.deepEqual(k1.own, { id: A, url: `https://x.com/i/status/${A}`, at: NOW_S - 2 * HOUR, ...WAIT, siblings: 3, top: [w.ref(K.K2, 50), w.ref(K.K4, 20), w.ref(K.K3, 0)], parent: { mint: K.PAR, name: "PAR coin", symbol: "PAR" } });
-  assert.deepEqual([k1.posts, k1.under, k1.pending, k1.members], [[], null, true, 0]);
+  assert.deepEqual([k1.events, k1.earlier, k1.under, k1.pending, k1.members], [[], 0, null, true, 0]);
   await w.settle();
   const again = (await w.narr.serve(K.K1)).own;
   assert.deepEqual([again.state, again.handle, again.text], ["ok", `h${A.slice(-4)}`, `text of ${A}`]);
@@ -396,62 +349,105 @@ test("serve: a coin's own post, the siblings under its parent that link the same
   w.close();
 });
 
-test("serve: `under`: a coin without a post and without posts of its own children points at its parent's best post", async () => {
+test("serve: `under`: a coin without a post and without events of its own children points at its parent's newest listed event", async () => {
   const w = family(world());
   w.coin(K.LONE, "LONE"); w.coin(K.L1, "L1", { parent: K.LONE });
   const k8 = await w.narr.serve(K.K8);
-  assert.deepEqual([k8.own, k8.posts], [null, []]);
-  assert.deepEqual(k8.under, { mint: K.PAR, name: "PAR coin", symbol: "PAR", post: item(w, A, 4, 370, [[K.K1, 300], [K.K2, 50], [K.K4, 20]], WAIT) });
+  assert.deepEqual([k8.own, k8.events], [null, []]);
+  assert.deepEqual(k8.under, { mint: K.PAR, name: "PAR coin", symbol: "PAR", event: item(w, A, 4, 370, [[K.K1, 300], [K.K2, 50], [K.K4, 20]], WAIT) });
+  assert.ok(!("post" in k8.under));
   assert.equal(k8.pending, true);
   await w.settle();
   const settled = await w.narr.serve(K.K8);
-  assert.deepEqual([settled.under.post.state, settled.under.post.text, settled.pending], ["ok", `text of ${A}`, false]);
+  assert.deepEqual([settled.under.event.state, settled.under.event.text, settled.pending], ["ok", `text of ${A}`, false]);
   assert.deepEqual(w.calls, [A], "only the post shown was fetched");
-  assert.equal((await w.narr.serve(K.L1)).under, null, "a parent without a listed post");
+  // the newest event whose post X shows: with A unavailable it is B
+  const noA = new Narrative({ model: w.model, posts: stubPosts({ records: new Map([[A, { id: A, state: "none", handle: null, text: null }]]), canQueue: () => "cached" }), now: w.clock.now, log: quiet });
+  assert.deepEqual([(await noA.serve(K.K8)).under.event.id, (await noA.serve(K.K8)).under.event.at], [B, NOW_S - 30 * DAY]);
+  assert.equal((await w.narr.serve(K.L1)).under, null, "a parent without an event");
   assert.equal((await w.narr.serve(K.K1)).under, null, "a coin with its own post has no `under`");
   assert.equal((await w.narr.serve(K.SOLQ)).under, null);
   // a coin whose children link posts shows those, not its parent's
   w.coin(K.Q, "Q", { parent: K.PAR, launcher: W.w7 });
   w.coin(K.Q1, "Q1", { parent: K.Q, post: link(X), launcher: W.w1 }); w.coin(K.Q2, "Q2", { parent: K.Q, post: link(X), launcher: W.w2 });
   const q = await w.narr.serve(K.Q);
-  assert.deepEqual([q.posts.map((p) => p.id), q.own, q.under], [[X], null, null]);
+  assert.deepEqual([q.events.map((p) => p.id), q.own, q.under], [[X], null, null]);
   w.close();
 });
 
-/** A parent with `n` posts, post i linked by n + 2 - i creators (so they rank in order), each coin its own creator. */
-function ladder(w, n = 7) {
+test("serve: the events are a timeline: ordered by when their first coin was launched, never by volume, creators or the post's age; at most EVENTS_MAX listed, the rest counted in `earlier`", async () => {
+  const w = world({ posts: false });
+  w.coin(K.PAR, "PAR", { createdAgo: 90 * DAY });
+  const oldPost = idAt(20 * DAY, 1), busy = idAt(HOUR, 2), wide = idAt(3 * HOUR, 3);
+  let c = 0;
+  const kid = (post, createdAgo, over = {}) => { w.coin(mintN(c, 5), `T${c}`, { parent: K.PAR, post: link(post), launcher: `L${c}`, createdAgo, ...over }); c++; };
+  kid(wide, 2 * HOUR); kid(wide, 2 * HOUR - 60); kid(wide, 100); kid(wide, 90); kid(wide, 80); kid(wide, 70);   // six creators, first two hours ago
+  kid(busy, 40 * 60, { trades: 5, usd: 90_000 }); kid(busy, 30 * 60, { trades: 9, usd: 1_000 }); kid(busy, 20 * 60); // heavily traded, first 40 min ago
+  kid(oldPost, 5 * 60); kid(oldPost, 3 * 60);                                                                    // a 20-day-old post, first 5 min ago
+  const body = await w.narr.serve(K.PAR);
+  assert.deepEqual(body.events.map((e) => [e.id, NOW_S - e.at, NOW_S - e.lastAt, NOW_S - e.postAt, e.coins]), [
+    [oldPost, 5 * 60, 3 * 60, 20 * DAY, 2], [busy, 40 * 60, 20 * 60, HOUR, 3], [wide, 2 * HOUR, 70, 3 * HOUR, 6],
+  ]);
+  assert.deepEqual([body.earlier, body.events[1].usd24], [0, 459_000]);
+  w.close();
+  // more events than a body lists, and more than an entry keeps
+  const big = world({ posts: false });
+  const n = EVENTS_KEEP + 3, ids = ladder(big, n);
+  const all = await big.narr.serve(K.PAR);
+  assert.deepEqual([all.events.map((e) => ids.indexOf(e.id)), all.earlier], [Array.from({ length: EVENTS_MAX }, (_, i) => i), n - EVENTS_MAX]);
+  for (let i = 1; i < all.events.length; i++) assert.ok(all.events[i - 1].at > all.events[i].at, "newest first, no time out of place");
+  assert.deepEqual([EVENTS_MAX, EVENTS_KEEP], [12, 30]);
+  // X shows none of the newest 20: the list goes on with the next ones the entry kept; `earlier` is only what lies
+  // behind the kept ones, never the 20 newer posts that were dropped
+  const stub = stubPosts({ records: new Map(ids.slice(0, 20).map((id) => [id, { id, state: "none", handle: null, text: null }])), canQueue: () => "cached" });
+  const rest = await new Narrative({ model: big.model, posts: stub, now: big.clock.now, log: quiet }).serve(K.PAR);
+  assert.deepEqual([rest.events.map((e) => ids.indexOf(e.id)), rest.earlier], [Array.from({ length: EVENTS_KEEP - 20 }, (_, i) => 20 + i), n - EVENTS_KEEP]);
+  assert.equal(stub.log.filter((l) => l.startsWith("peek")).length, EVENTS_KEEP, "only the kept events are looked at");
+  big.close();
+});
+
+/** A parent with `n` events: post i is linked by two coins of two creators, launched 10 + i minutes ago (so event 0 is the newest). */
+function ladder(w, n = EVENTS_MAX + 2) {
   w.coin(K.PAR, "PAR", { createdAgo: 90 * DAY });
   const ids = Array.from({ length: n }, (_, i) => idAt(2 * HOUR, 100 + i));
-  let c = 0;
-  ids.forEach((id, i) => { for (let k = 0; k < n + 2 - i; k++, c++) w.coin(key(120 + c), `C${c}`, { parent: K.PAR, post: link(id), launcher: key(170 + c) }); });
+  ids.forEach((id, i) => { for (let k = 0; k < 2; k++) w.coin(mintN(2 * i + k), `C${2 * i + k}`, { parent: K.PAR, post: link(id), launcher: `L${2 * i + k}`, createdAgo: (10 + i) * 60 + k }); });
   return ids;
 }
 
-test("serve: a post X does not show (\"none\") drops out and the next ranked one takes its place; it is asked again when its recheck is due", async () => {
+test("serve: a post X does not show (\"none\") drops out and the next event takes its place; it is asked again when its recheck is due", async () => {
   const w = world();
   const ids = ladder(w);
+  const N = EVENTS_MAX, all = (from, state) => Array.from({ length: N }, (_, i) => [from + i, typeof state === "function" ? state(from + i) : state]);
   const gone = new Set([ids[0], ids[1]]);
   w.answer = (id) => (gone.has(id) ? json({}, id === ids[0] ? 404 : 403) : json(embed(id, { text: `text of ${id}` })));
   let asked = 0;
   const mayQueue = () => { asked++; return true; };
-  const states = async () => (await w.narr.serve(K.PAR, { mayQueue })).posts.map((p) => [ids.indexOf(p.id), p.state]);
-  assert.deepEqual(await states(), [[0, "wait"], [1, "wait"], [2, "wait"], [3, "wait"], [4, "wait"]], `the first ${POSTS_MAX}`);
+  const serve = () => w.narr.serve(K.PAR, { mayQueue });
+  const statesOf = (body) => body.events.map((p) => [ids.indexOf(p.id), p.state]);
+  const states = async () => statesOf(await serve());
+  const first = await serve();
+  // one in flight and WAIT_AHEAD in line read "wait"; the one behind them is queued too, and reads "idle" until it is near
+  assert.deepEqual(statesOf(first), all(0, (i) => (i <= WAIT_AHEAD ? "wait" : "idle")), `the newest ${EVENTS_MAX}`);
+  assert.equal(WAIT_AHEAD, 10);
+  assert.equal(first.earlier, 2, "two events older than the last line");
   await w.settle();
-  assert.deepEqual(await states(), [[2, "ok"], [3, "ok"], [4, "ok"], [5, "wait"], [6, "wait"]], "the two unavailable ones dropped out, the next two are fetched");
-  assert.equal(asked, 7);
+  const second = await serve();
+  assert.deepEqual(statesOf(second), all(2, (i) => (i < N ? "ok" : "wait")), "the two unavailable ones dropped out, the next two are fetched");
+  assert.equal(second.earlier, 0, "the list now ends at the oldest event: the two dropped ones are newer than every line and are not called earlier");
+  assert.equal(asked, N + 2);
   await w.settle();
-  const body = await w.narr.serve(K.PAR, { mayQueue });
-  assert.deepEqual([body.posts.map((p) => ids.indexOf(p.id)), body.posts.map((p) => p.state), body.pending, asked, w.calls.length], [[2, 3, 4, 5, 6], ["ok", "ok", "ok", "ok", "ok"], false, 7, 7]);
+  const body = await serve();
+  assert.deepEqual([body.events.map((p) => ids.indexOf(p.id)), body.events.every((p) => p.state === "ok"), body.earlier, body.pending, asked, w.calls.length], [all(2, 0).map(([i]) => i), true, 0, false, N + 2, N + 2]);
   // six hours on the refused post is due again: it is asked for once more, and shown again when X shows it
   gone.delete(ids[1]);
   w.clock.t += (RECHECK_DENIED_S + 1) * 1000;
-  assert.deepEqual((await states()).map(([i]) => i), [2, 3, 4, 5, 6], "still dropped while its recheck runs");
-  assert.equal(asked, 8);
+  assert.deepEqual((await states()).map(([i]) => i), all(2, 0).map(([i]) => i), "still dropped while its recheck runs");
+  assert.equal(asked, N + 3);
   await w.settle();
-  assert.deepEqual(w.calls.slice(7), [ids[1]]);
+  assert.deepEqual(w.calls.slice(N + 2), [ids[1]]);
   w.clock.t += FAMILY_TTL_MS;
-  assert.deepEqual(await states(), [[1, "ok"], [2, "ok"], [3, "ok"], [4, "ok"], [5, "ok"]], "back at its rank");
-  assert.deepEqual([asked, w.calls.length], [8, 8], "the 404 is not due for 7 days");
+  assert.deepEqual(await states(), all(1, "ok"), "back at its place");
+  assert.deepEqual([asked, w.calls.length], [N + 3, N + 3], "the 404 is not due for 7 days");
   w.close();
 });
 
@@ -469,6 +465,58 @@ function stubPosts({ records = new Map(), canQueue = () => "ok" } = {}) {
   };
 }
 
+test("serve: an event's time is the first tracked coin that linked the post, also when that coin is no member any more: it does not move when the coin goes quiet or trades again", async () => {
+  const P = idAt(5 * DAY, 1), ONE = idAt(6 * DAY, 2);
+  const make = (oldTrades) => {
+    const w = world({ posts: false });
+    w.coin(K.PAR, "PAR", { createdAgo: 90 * DAY });
+    w.coin(K.K1, "K1", { parent: K.PAR, post: link(P), launcher: W.w1, createdAgo: 4 * DAY, trades: oldTrades, usd: 7 }); // the first to link P
+    w.coin(K.K2, "K2", { parent: K.PAR, post: link(P), launcher: W.w2, createdAgo: 100 });
+    w.coin(K.K3, "K3", { parent: K.PAR, post: link(P), launcher: W.w3, createdAgo: 50 });
+    w.coin(K.K4, "K4", { parent: K.PAR, post: link(P), launcher: W.w4, createdAgo: 9 * DAY, tracked: false }); // untracked: never read
+    w.coin(K.K5, "K5", { parent: K.PAR, post: link(ONE), launcher: W.w5, createdAgo: 4 * DAY });                // quiet coins alone make no event
+    w.coin(K.K6, "K6", { parent: K.PAR, post: link(ONE), launcher: W.w6, createdAgo: 5 * DAY });
+    w.coin(K.K7, "K7", { parent: K.PAR, post: link(ONE), launcher: W.w7, createdAgo: 60 });
+    return w;
+  };
+  const active = make(1), quietW = make(0);
+  const a = await active.narr.serve(K.PAR), q = await quietW.narr.serve(K.PAR);
+  assert.deepEqual([a.members, a.linked, a.events.map((e) => [e.id, NOW_S - e.at, NOW_S - e.lastAt, e.coins, e.usd24])], [4, 4, [[P, 4 * DAY, 50, 3, 7]]], "while its first coin trades");
+  assert.deepEqual([q.members, q.linked, q.events.map((e) => [e.id, NOW_S - e.at, NOW_S - e.lastAt, e.coins, e.usd24])], [3, 3, [[P, 4 * DAY, 50, 2, 0]]], "the coin went quiet: the same time, and only the members are counted");
+  assert.ok(!q.events.some((e) => e.id === ONE), "one member links it: no event, however many quiet coins did");
+  // one small trade on the old coin: it is a member again, and the event has not moved
+  quietW.model.recordTrade({ sig: "DUST", mint: K.K1, idx: 0, slot: 1, time: NOW_S - 5, isBuy: true, user: "U", baseAmount: "1", quoteAmount: "2", priceQuote: 2, priceUsd: 2e-5, valueUsd: 0.01 });
+  quietW.clock.t += FAMILY_TTL_MS;
+  const again = await quietW.narr.serve(K.PAR);
+  assert.deepEqual([again.members, again.events.map((e) => [e.id, e.at, e.coins])], [4, [[P, q.events[0].at, 3]]]);
+  active.close(); quietW.close();
+});
+
+test("serve: only the first EVENTS_FIRST listed events ask for their text at full priority, the ones after them as low; a dropped post does not use up a first place", async () => {
+  const w = world({ posts: false });
+  const ids = ladder(w);
+  const wants = (stub) => stub.log.filter((l) => l.startsWith("want")).map((l) => { const [, id, cls] = l.split(" "); return [ids.indexOf(id), cls]; });
+  let stub = stubPosts(), asked = 0;
+  const body = await new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }).serve(K.PAR, { mayQueue: () => { asked++; return true; } });
+  assert.equal(EVENTS_FIRST, 5);
+  assert.deepEqual(wants(stub), Array.from({ length: EVENTS_MAX }, (_, i) => [i, i < EVENTS_FIRST ? "top" : "low"]));
+  assert.deepEqual([body.events.length, asked], [EVENTS_MAX, EVENTS_MAX], "every id queued still costs the asker one of its allowance, whatever its class");
+  // the fetcher refuses low requests (half its line is taken): the first five are fetched, the others are links
+  stub = stubPosts({ canQueue: (id, low) => (low ? "busy" : "ok") }); asked = 0;
+  const half = await new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }).serve(K.PAR, { mayQueue: () => { asked++; return true; } });
+  assert.deepEqual([half.events.map((p) => p.state), asked], [[...Array(EVENTS_FIRST).fill("wait"), ...Array(EVENTS_MAX - EVENTS_FIRST).fill("idle")], EVENTS_FIRST], "a refused low request spends no allowance");
+  // the two newest are known to be unavailable: the five first lines are events 2 to 6
+  stub = stubPosts({ records: new Map(ids.slice(0, 2).map((id) => [id, { id, state: "none", handle: null, text: null }])), canQueue: (id) => (ids.indexOf(id) < 2 ? "cached" : "ok") });
+  await new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }).serve(K.PAR);
+  assert.deepEqual(wants(stub), Array.from({ length: EVENTS_MAX }, (_, i) => [i + 2, i < EVENTS_FIRST ? "top" : "low"]));
+  // `under` asks for the parent's newest event: one line, full priority
+  w.coin(K.K8, "K8", { parent: K.PAR, launcher: W.w7 });
+  stub = stubPosts();
+  const kid = await new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }).serve(K.K8);
+  assert.deepEqual([kid.under.event.id, wants(stub)], [ids[0], [[0, "top"]]]);
+  w.close();
+});
+
 test("serve: the asker's allowance is asked once per id about to be queued, after the fetcher's own refusals, and not at all when the fetcher refuses", async () => {
   const w = world({ posts: false });
   const ids = ladder(w);
@@ -476,31 +524,29 @@ test("serve: the asker's allowance is asked once per id about to be queued, afte
   let stub = stubPosts(), asked = 0;
   let narr = new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet });
   let body = await narr.serve(K.PAR, { mayQueue: () => { asked++; return false; } });
-  assert.deepEqual([body.posts.map((p) => p.state), body.pending, asked], [Array(POSTS_MAX).fill("idle"), false, POSTS_MAX]);
+  assert.deepEqual([body.events.map((p) => p.state), body.pending, asked], [Array(EVENTS_MAX).fill("idle"), false, EVENTS_MAX]);
   assert.ok(!stub.log.some((l) => l.startsWith("want")));
   assert.deepEqual(stub.log.slice(0, 2), [`peek ${ids[0]}`, `can ${ids[0]} top ok`], "the record, then the fetcher's word");
   // allowed twice, then refused: two are fetched
   asked = 0; stub = stubPosts();
   narr = new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet });
   body = await narr.serve(K.PAR, { mayQueue: () => ++asked <= 2 });
-  assert.deepEqual([body.posts.map((p) => p.state), body.pending, asked], [["wait", "wait", "idle", "idle", "idle"], true, POSTS_MAX]);
+  assert.deepEqual([body.events.map((p) => p.state), body.pending, asked], [["wait", "wait", ...Array(EVENTS_MAX - 2).fill("idle")], true, EVENTS_MAX]);
   assert.deepEqual(stub.log.filter((l) => l.startsWith("want")), [`want ${ids[0]} top`, `want ${ids[1]} top`]);
   // the fetcher refuses (a pause, the day's budget, a failed id, an id in line): the allowance is not spent
   for (const word of ["busy", "budget", "retry", "queued", "cached", "stopped"]) {
     asked = 0; stub = stubPosts({ canQueue: () => word });
     narr = new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet });
     body = await narr.serve(K.PAR, { mayQueue: () => { asked++; return true; } });
-    assert.deepEqual([asked, body.posts.length, body.posts.every((p) => p.state === "idle"), stub.log.filter((l) => l.startsWith("want")).length], [0, POSTS_MAX, true, 0], word);
+    assert.deepEqual([asked, body.events.length, body.events.every((p) => p.state === "idle"), stub.log.filter((l) => l.startsWith("peek")).length, stub.log.filter((l) => l.startsWith("want")).length], [0, EVENTS_MAX, true, EVENTS_MAX, 0], word);
   }
-  // only ranked posts are asked for: RANK_KEEP at most are looked at, POSTS_MAX of them shown
-  assert.ok(stub.log.filter((l) => l.startsWith("peek")).length <= RANK_KEEP);
   w.close();
 });
 
 test("serve: a coin's own post is asked for as low when no sibling links it or its id gives no time; a post that is both own and listed is asked for once", async () => {
   const w = family(world({ posts: false }));
   w.coin(K.NOTIME, "NOTIME", { parent: K.PAR, post: link("12345"), launcher: W.w1 });
-  w.coin(K.E1, "E1", { parent: K.PAR, post: link("12345"), launcher: W.w2 }); // a second creator: still never ranked
+  w.coin(K.E1, "E1", { parent: K.PAR, post: link("12345"), launcher: W.w2 }); // a second creator: still never an event
   const run = async (mint) => { const stub = stubPosts(); const narr = new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }); return { body: await narr.serve(mint), log: stub.log }; };
   const k1 = await run(K.K1);
   assert.deepEqual(k1.log, [`peek ${A}`, `can ${A} top ok`, `want ${A} top`], "siblings link it: the top class");
@@ -512,23 +558,23 @@ test("serve: a coin's own post is asked for as low when no sibling links it or i
   assert.deepEqual([nt.body.own.id, nt.body.own.at, nt.body.own.siblings, nt.body.own.state], ["12345", null, 1, "wait"]);
   assert.deepEqual(nt.log, ["peek 12345", "can 12345 low ok", "want 12345 low"], "an id without a time: low, though a sibling links it");
   const par = await run(K.PAR);
-  assert.ok(!par.log.some((l) => l.includes("12345")), "and never fetched for the parent's list: it is not ranked");
-  assert.deepEqual(par.body.posts.map((p) => p.id), [A, B]);
-  // Q links X itself and so do two of its children: X is in `posts` and is `own`
+  assert.ok(!par.log.some((l) => l.includes("12345")), "and never fetched for the parent's list: it is no event");
+  assert.deepEqual([par.body.events.map((p) => p.id), par.body.earlier], [[A, B], 0]);
+  // Q links X itself and so do two of its children: X is in `events` and is `own`
   w.coin(K.Q, "Q", { parent: K.PAR, post: link(X), launcher: W.w7 });
   w.coin(K.Q1, "Q1", { parent: K.Q, post: link(X), launcher: W.w1 }); w.coin(K.Q2, "Q2", { parent: K.Q, post: link(X), launcher: W.w2 });
   const q = await run(K.Q);
-  assert.deepEqual([q.body.posts.map((p) => p.id), q.body.own.id, q.body.own.state, q.body.posts[0].state, q.body.pending], [[X], X, "wait", "wait", true]);
+  assert.deepEqual([q.body.events.map((p) => p.id), q.body.own.id, q.body.own.state, q.body.events[0].state, q.body.pending], [[X], X, "wait", "wait", true]);
   assert.deepEqual(q.log, [`peek ${X}`, `can ${X} top ok`, `want ${X} top`], "one look, one ask");
   // stored records: text only with "ok"; a flagged post has its handle and an empty text; a fetcher that throws reads "idle"
   const records = new Map([[A, { id: A, state: "ok", handle: "real", text: "", flagged: true }], [B, { id: B, state: "none", handle: null, text: null }]]);
   const stub = stubPosts({ records, canQueue: () => "cached" });
   const body = await new Narrative({ model: w.model, posts: stub, now: w.clock.now, log: quiet }).serve(K.PAR);
-  assert.deepEqual(body.posts.map((p) => [p.id, p.state, p.handle, p.text]), [[A, "ok", "real", ""]]);
+  assert.deepEqual([body.events.map((p) => [p.id, p.state, p.handle, p.text]), body.earlier], [[[A, "ok", "real", ""]], 0], "a dropped post is not counted: nothing lies behind the events looked at");
   const broken = { peek: () => { throw new Error("database is closed"); }, canQueue: () => "ok", want: () => "ok", state: () => "wait" };
   const warned = [];
   const b2 = await new Narrative({ model: w.model, posts: broken, now: w.clock.now, log: { warn: (s) => warned.push(s) } }).serve(K.PAR);
-  assert.deepEqual([b2.posts.map((p) => p.state), b2.pending, warned.length], [["idle", "idle"], false, 2]);
+  assert.deepEqual([b2.events.map((p) => p.state), b2.pending, warned.length], [["idle", "idle"], false, 2]);
   w.close();
 });
 
@@ -536,7 +582,7 @@ test("serve: without a fetcher (NARRATIVE_POSTS=0) the posts are listed as links
   const w = family(world({ posts: false }));
   let asked = 0;
   const body = await w.narr.serve(K.PAR, { mayQueue: () => { asked++; return true; } });
-  assert.deepEqual(body.posts, [item(w, A, 4, 370, [[K.K1, 300], [K.K2, 50], [K.K4, 20]], IDLE), item(w, B, 3, 510, [[K.K5, 500], [K.KOLDT, 10], [K.K6, 0]], IDLE)]);
+  assert.deepEqual(body.events, [item(w, A, 4, 370, [[K.K1, 300], [K.K2, 50], [K.K4, 20]], IDLE), item(w, B, 3, 510, [[K.K5, 500], [K.KOLDT, 10], [K.K6, 0]], IDLE)]);
   assert.deepEqual([body.pending, asked, w.narr.snapshot().posts], [false, 0, null]);
   assert.deepEqual((await w.narr.serve(K.K1)).own.state, "idle");
   w.narr.start(); w.narr.stop(); w.narr.stop();
@@ -555,7 +601,7 @@ test("serve: one walk per family for FAMILY_TTL_MS, shared by askers that come t
   assert.deepEqual([(await w.narr.serve(K.PAR)).members, snap()], [9, [1, 1]], "within the 30 s the entry is served as it is");
   w.clock.t += 1;
   const fresh = await w.narr.serve(K.PAR);
-  assert.deepEqual([fresh.members, fresh.posts[0].coins, snap()], [10, 5, [2, 1]]);
+  assert.deepEqual([fresh.members, fresh.events[0].coins, snap()], [10, 5, [2, 1]]);
   assert.ok(w.narr.snapshot().lastBuildMs >= 0 && w.narr.snapshot().maxSliceMs >= 0);
   // more subjects than the cache holds: the oldest entry goes
   const parents = Array.from({ length: FAMILY_CACHE + 1 }, (_, i) => { const b = Buffer.alloc(32, 9); b.writeUInt16BE(i, 30); return new PublicKey(b).toBase58(); });
@@ -570,22 +616,27 @@ test("serve: one walk per family for FAMILY_TTL_MS, shared by askers that come t
   w.close();
 });
 
-test("serve: a 30 000-child family is walked in slices: the event loop is never held long", async (t) => {
-  const w = world({ posts: false });
-  const N = 30_000;
-  const mintOf = (i) => { const b = Buffer.alloc(32, 7); b.writeUInt32BE(i, 28); return new PublicKey(b).toBase58(); };
+/**
+ * PAR with `n` children. `live` = n: all are members (created in the last 70 h, a third traded), 70 % link one of 4 000
+ * posts. Fewer: only the first `live` are, the others are 30 days old and untraded (no members), and all link one of
+ * 40 posts, so every post is linked by live and by dead coins.
+ */
+function crowd(w, N, live = N) {
+  const mintOf = (i) => mintN(i, 7);
   const vocab = ["jensen", "senate", "cat", "doge", "moon", "nvidia", "huang", "leather", "jacket", "chip", "frog", "pepe", "eagle", "gold", "rocket"];
   w.coin(K.PAR, "PAR", { createdAgo: 90 * DAY });
   w.db.transaction(() => {
     for (let i = 0; i < N; i++) {
       const m = mintOf(i);
-      w.model.upsertCoin({ mint: m, curve: `C${i}`, depth: 1, quoteMint: K.PAR, ...base, virtualQuoteReserves: "100000000000", createdAt: NOW_S - (i % 5000) * 50, launcher: mintOf(1_000_000 + (i % 9000)) });
+      w.model.upsertCoin({ mint: m, curve: `C${i}`, depth: 1, quoteMint: K.PAR, ...base, virtualQuoteReserves: "100000000000", createdAt: i < live ? NOW_S - (i % 5000) * 50 : NOW_S - 30 * DAY - i, launcher: mintOf(1_000_000 + (i % 9000)) });
       w.model.setMint({ mint: m, decimals: 6, tokenProgram: T22, name: `${vocab[i % 15]} ${vocab[(i * 7) % 15]} ${i}`, symbol: `S${i % 977}`, uri: `https://ipfs.io/ipfs/u${i}`, onchainAt: 1 });
-      w.model.setMeta(`https://ipfs.io/ipfs/u${i}`, { image: `https://ipfs.io/ipfs/i${i}`, description: null, twitter: i % 10 < 7 ? link(idAt(HOUR + (i % 4000), i % 4000), `u${i % 50}`) : `https://x.com/u${i}`, telegram: null, website: null, fetchedAt: 1, ok: true });
-      if (i % 3 === 0) w.model.recordTrade({ sig: `P${i}`, mint: m, idx: 0, slot: i, time: NOW_S - 100, isBuy: true, user: "U", baseAmount: "1", quoteAmount: "2", priceQuote: 2, priceUsd: 2e-5, valueUsd: 10 + (i % 100) });
+      w.model.setMeta(`https://ipfs.io/ipfs/u${i}`, { image: `https://ipfs.io/ipfs/i${i}`, description: null, twitter: i % 10 < 7 ? link(live < N ? idAt(40 * DAY, i % 40) : idAt(HOUR + (i % 4000), i % 4000), `u${i % 50}`) : `https://x.com/u${i}`, telegram: null, website: null, fetchedAt: 1, ok: true });
+      if (i % 3 === 0 && i < live) w.model.recordTrade({ sig: `P${i}`, mint: m, idx: 0, slot: i, time: NOW_S - 100, isBuy: true, user: "U", baseAmount: "1", quoteAmount: "2", priceQuote: 2, priceUsd: 2e-5, valueUsd: 10 + (i % 100) });
     }
   });
-  // A 1 ms timer running through the build: the longest stretch it could not fire in is how long the loop was held.
+}
+/** One serve of PAR with a 1 ms timer running through the build: the longest stretch it could not fire in is how long the loop was held. */
+async function timed(w) {
   let last = performance.now(), maxGap = 0;
   const iv = setInterval(() => { const now = performance.now(); if (now - last > maxGap) maxGap = now - last; last = now; }, 1);
   const t0 = performance.now();
@@ -593,9 +644,29 @@ test("serve: a 30 000-child family is walked in slices: the event loop is never 
   const wall = performance.now() - t0;
   clearInterval(iv);
   const s = w.narr.snapshot();
-  t.diagnostic(`30 000 children, all members: build ${s.lastBuildMs} ms of CPU, longest slice ${s.maxSliceMs} ms, ${wall.toFixed(1)} ms wall, longest gap between timer ticks ${maxGap.toFixed(1)} ms`);
-  assert.deepEqual([body.members, body.linked, body.posts.length, body.words.length], [N, 21_000, POSTS_MAX, 6]);
+  return { body, s, line: `build ${s.lastBuildMs} ms of CPU, longest slice ${s.maxSliceMs} ms, ${wall.toFixed(1)} ms wall, longest gap between timer ticks ${maxGap.toFixed(1)} ms` };
+}
+
+test("serve: a 30 000-child family is walked in slices: the event loop is never held long", async (t) => {
+  const w = world({ posts: false });
+  const N = 30_000;
+  crowd(w, N);
+  const { body, s, line } = await timed(w);
+  t.diagnostic(`30 000 children, all members: ${line}`);
+  assert.deepEqual([body.members, body.linked, body.events.length, body.earlier > 1_000], [N, 21_000, EVENTS_MAX, true]);
+  for (let i = 1; i < body.events.length; i++) assert.ok(body.events[i - 1].at >= body.events[i].at);
   // Generous: an unsliced walk would be one slice of the whole build (80 ms and more here). The timer gap is printed only: other test files run beside this one.
+  assert.ok(s.maxSliceMs < 50, `longest slice ${s.maxSliceMs} ms`);
+  w.close();
+});
+
+test("serve: 30 000 children of which 100 are members: the dead ones are read for the events' times only, in slices as short", async (t) => {
+  const w = world({ posts: false });
+  const N = 30_000, LIVE = 100;
+  crowd(w, N, LIVE);
+  const { body, s, line } = await timed(w);
+  t.diagnostic(`30 000 children, ${LIVE} members: ${line}`);
+  assert.deepEqual([body.members, body.linked, body.events.length], [LIVE, 70, EVENTS_MAX]);
   assert.ok(s.maxSliceMs < 50, `longest slice ${s.maxSliceMs} ms`);
   w.close();
 });
@@ -627,12 +698,12 @@ test("GET /api/narrative/:mint: 400 for no mint, 404 for no subject (and without
       assert.deepEqual([r.status, r.body], [404, { error: "unknown mint" }], mint);
     }
     const pending = await app.get(`/api/narrative/${K.PAR}`);
-    assert.deepEqual([pending.status, pending.body.pending, pending.body.posts.map((p) => p.state), pending.headers.get("cache-control")], [200, true, ["wait", "wait"], "no-store"]);
+    assert.deepEqual([pending.status, pending.body.pending, pending.body.events.map((p) => p.state), pending.headers.get("cache-control")], [200, true, ["wait", "wait"], "no-store"]);
     await w.settle();
     const done = await app.get(`/api/narrative/${K.PAR}`);
-    assert.deepEqual([done.status, done.body.pending, done.body.posts.map((p) => p.state), done.headers.get("cache-control")], [200, false, ["ok", "ok"], "public, max-age=30, stale-while-revalidate=120"]);
+    assert.deepEqual([done.status, done.body.pending, done.body.events.map((p) => p.state), done.headers.get("cache-control")], [200, false, ["ok", "ok"], "public, max-age=30, stale-while-revalidate=120"]);
     assert.deepEqual(done.body, JSON.parse(JSON.stringify(await w.narr.serve(K.PAR))), "the body is serve()'s");
-    assert.equal(done.body.posts[0].url, `https://x.com/i/status/${A}`);
+    assert.equal(done.body.events[0].url, `https://x.com/i/status/${A}`);
     const etag = done.headers.get("etag");
     assert.equal((await app.get(`/api/narrative/${K.PAR}`, { "if-none-match": etag })).status, 304);
     const health = (await app.get("/api/health")).body;
@@ -649,16 +720,16 @@ test("GET /api/narrative/:mint: 400 for no mint, 404 for no subject (and without
   const links = await serveApp(w, { narrative: new Narrative({ model: w.model, posts: null, now: w.clock.now, log: quiet }) });
   try {
     const r = await links.get(`/api/narrative/${K.PAR}`);
-    assert.deepEqual([r.status, r.body.pending, r.body.posts.map((p) => p.state), r.headers.get("cache-control")], [200, false, ["idle", "idle"], "public, max-age=5, stale-while-revalidate=5"]);
+    assert.deepEqual([r.status, r.body.pending, r.body.events.map((p) => p.state), r.headers.get("cache-control")], [200, false, ["idle", "idle"], "public, max-age=5, stale-while-revalidate=5"]);
     const leaf = await links.get(`/api/narrative/${K.K8}`);
-    assert.deepEqual([leaf.body.under.post.state, leaf.headers.get("cache-control")], ["idle", "public, max-age=5, stale-while-revalidate=5"], "an idle post under `under` counts too");
+    assert.deepEqual([leaf.body.under.event.state, leaf.headers.get("cache-control")], ["idle", "public, max-age=5, stale-while-revalidate=5"], "an idle post under `under` counts too");
     const own = await links.get(`/api/narrative/${K.K7}`);
     assert.deepEqual([own.body.own.state, own.headers.get("cache-control")], ["idle", "public, max-age=5, stale-while-revalidate=5"]);
     const empty = await links.get(`/api/narrative/${K.UNT.slice(0, -1)}`);
     assert.ok(empty.status === 400 || empty.status === 404);
     w.coin(K.EMPTY, "EMPTY");
     const none = await links.get(`/api/narrative/${K.EMPTY}`);
-    assert.deepEqual([none.status, none.body.posts, none.body.own, none.body.under, none.headers.get("cache-control")], [200, [], null, null, "public, max-age=30, stale-while-revalidate=120"], "nothing to fetch: 30 s");
+    assert.deepEqual([none.status, none.body.events, none.body.own, none.body.under, none.headers.get("cache-control")], [200, [], null, null, "public, max-age=30, stale-while-revalidate=120"], "nothing to fetch: 30 s");
   } finally { await links.close(); }
   w.close();
 });
@@ -668,23 +739,23 @@ test("GET /api/narrative/:mint: RATE_NARRNEW caps the fetches one IP starts and 
   const app = await serveApp(w, { rates: { narrnew: { limit: 1, windowMs: 3_600_000 } } });
   try {
     const first = await app.get(`/api/narrative/${K.PAR}`);
-    assert.deepEqual([first.status, first.body.posts.map((p) => p.state), first.headers.get("cache-control")], [200, ["wait", "idle"], "no-store"]);
+    assert.deepEqual([first.status, first.body.events.map((p) => p.state), first.headers.get("cache-control")], [200, ["wait", "idle"], "no-store"]);
     await w.settle();
     for (let i = 0; i < 3; i++) {
       const r = await app.get(`/api/narrative/${K.PAR}`);
-      assert.deepEqual([r.status, r.body.posts.map((p) => p.state), r.headers.get("cache-control")], [200, ["ok", "idle"], "public, max-age=5, stale-while-revalidate=5"]);
+      assert.deepEqual([r.status, r.body.events.map((p) => p.state), r.headers.get("cache-control")], [200, ["ok", "idle"], "public, max-age=5, stale-while-revalidate=5"]);
     }
     await w.settle();
     assert.deepEqual(w.calls, [A], "one fetch for this IP in the window");
     w.clock.t += 3_600_000;
-    assert.deepEqual((await app.get(`/api/narrative/${K.PAR}`)).body.posts.map((p) => p.state), ["ok", "wait"], "the next window");
+    assert.deepEqual((await app.get(`/api/narrative/${K.PAR}`)).body.events.map((p) => p.state), ["ok", "wait"], "the next window");
     await w.settle();
   } finally { await app.close(); }
   const warned = [];
   const failing = await serveApp(w, { narrative: { serve: async () => { throw new Error("boom"); }, snapshot: () => ({}) }, log: { ...quiet, warn: (s) => warned.push(s) } });
   try {
     const r = await failing.get(`/api/narrative/${K.PAR}`);
-    assert.deepEqual([r.status, r.body], [200, { mint: K.PAR, asOf: Math.floor(w.clock.now() / 1000), members: 0, linked: 0, posts: [], words: [], own: null, under: null, pending: false }]);
+    assert.deepEqual([r.status, r.body], [200, { mint: K.PAR, asOf: Math.floor(w.clock.now() / 1000), members: 0, linked: 0, events: [], earlier: 0, own: null, under: null, pending: false }]);
     assert.equal(r.headers.get("cache-control"), "no-store");
     assert.ok(warned.some((s) => /narrative .*boom/.test(s)));
   } finally { await failing.close(); }
@@ -704,4 +775,172 @@ test("config: NARRATIVE, NARRATIVE_POSTS, XPOST_PER_MIN, XPOST_DAILY and RATE_NA
       assert.throws(() => load(bad), new RegExp(Object.keys(bad)[0]), JSON.stringify(bad));
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------- Discover
+const P = Object.fromEntries(["P1", "P2", "P3", "P4", "P5", "P6", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "D1", "D2", "E1", "E2", "F1", "F2", "S1", "S2", "R1", "R2"].map((n, i) => [n, key(30 + i)]));
+
+/**
+ * Parents with coins launched around the test's start. P1 (a coin): five tracked children of three addresses inside
+ * the hour, placed on the bin edges, and three that do not count (exactly an hour old, untracked, three hours old).
+ * P2 (a listed asset, no coin): two children of two addresses, one 30 s ahead of the clock, one two minutes ahead
+ * (left out). P3: three children of one address. P4: two children without a known address. P5: one without, one with.
+ * P6: like P5 in numbers. Two coins priced in SOL's mint and two roots.
+ */
+function launches(w) {
+  for (const p of ["P1", "P3", "P4", "P5", "P6"]) w.coin(P[p], p, { createdAgo: 90 * DAY });
+  w.model.setMint({ mint: P.P2, decimals: 6, tokenProgram: T22, name: "Nvidia xStock", symbol: "NVDAx", onchainAt: 1 });
+  w.model.setAssetIcons({ [P.P2]: "https://static.example/nvdax.png" });
+  w.coin(P.A1, "A1", { parent: P.P1, launcher: W.w1, createdAgo: 0, trades: 2, usd: 50 });
+  w.coin(P.A2, "A2", { parent: P.P1, launcher: W.w2, createdAgo: BIN_S - 1 });
+  w.coin(P.A3, "A3", { parent: P.P1, launcher: W.w1, createdAgo: BIN_S, trades: 1, usd: 0.004 });
+  w.coin(P.A4, "A4", { parent: P.P1, launcher: W.w3, createdAgo: WINDOW_S - 1, trades: 1, usd: 250 });
+  w.coin(P.A5, "A5", { parent: P.P1, launcher: W.w4, createdAgo: WINDOW_S, trades: 1, usd: 9_000 });
+  w.coin(P.A6, "A6", { parent: P.P1, launcher: W.w5, createdAgo: 10, tracked: false, trades: 1, usd: 9_000 });
+  w.coin(P.A7, "A7", { parent: P.P1, launcher: W.w6, createdAgo: 3 * HOUR, trades: 1, usd: 9_000 });
+  w.coin(P.A8, "A8", { parent: P.P1, launcher: W.w3, createdAgo: 1800, trades: 1, usd: 7 });
+  w.coin(P.B1, "B1", { parent: P.P2, launcher: W.w1, createdAgo: 60 });
+  w.coin(P.B2, "B2", { parent: P.P2, launcher: W.w2, createdAgo: 2 * BIN_S + 1 });
+  w.coin(P.B3, "B3", { parent: P.P2, launcher: W.w3, createdAgo: -30 });
+  w.coin(P.B4, "B4", { parent: P.P2, launcher: W.w4, createdAgo: -120 });
+  for (const c of ["C1", "C2", "C3"]) w.coin(P[c], c, { parent: P.P3, launcher: W.w1, createdAgo: 100, trades: 1, usd: 500 });
+  w.coin(P.D1, "D1", { parent: P.P4, createdAgo: 100 }); w.coin(P.D2, "D2", { parent: P.P4, createdAgo: 200 });
+  w.coin(P.E1, "E1", { parent: P.P5, createdAgo: 100 }); w.coin(P.E2, "E2", { parent: P.P5, launcher: W.w1, createdAgo: 200, trades: 1, usd: 5 });
+  w.coin(P.F1, "F1", { parent: P.P6, launcher: W.w1, createdAgo: 100, trades: 1, usd: 5 }); w.coin(P.F2, "F2", { parent: P.P6, shares: [{ address: PLATFORM, bps: 5000 }, { address: W.w2, bps: 5000 }], createdAgo: 200 });
+  w.coin(P.S1, "S1", { parent: SOL_MINT, launcher: W.w1, createdAgo: 100 }); w.coin(P.S2, "S2", { parent: SOL_MINT, launcher: W.w2, createdAgo: 100 });
+  w.coin(P.R1, "R1", { launcher: W.w1, createdAgo: 100 }); w.coin(P.R2, "R2", { launcher: W.w2, createdAgo: 100 });
+  w.disc = new Discover({ model: w.model, now: w.clock.now });
+  return w;
+}
+const pref = (w, mint) => { const { name, symbol } = w.model.nameOf(mint); return { mint, name, symbol }; };
+
+test("discover: the parents with two or more new coins of two or more addresses in the last hour; new1h, then volume, then the mint; bins oldest first; SOL never; refs are the API's", async () => {
+  const w = launches(world({ posts: false }));
+  assert.ok(w.model.children.get(SOL_MINT).size >= 2, "coins are quoted in SOL's mint");
+  const body = await w.disc.serve();
+  const tie = [P.P5, P.P6].sort();
+  assert.deepEqual([body.asOf, body.windowS, body.binS], [NOW_S, 3600, 300]);
+  assert.deepEqual(Object.keys(body), ["asOf", "windowS", "binS", "parents"]);
+  assert.deepEqual(body.parents.map((p) => p.mint), [P.P1, P.P2, ...tie], "P3 (one address), P4 (no known address: one creator together), SOL and the roots are not listed");
+  const [p1, p2] = body.parents, by = Object.fromEntries(body.parents.map((p) => [p.mint, p]));
+  assert.deepEqual(p1, {
+    ...pref(w, P.P1), image: `/api/img?u=${encodeURIComponent("https://ipfs.io/ipfs/img-P1")}`,
+    new1h: 5, creators1h: 3, bins: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2], usd24: 357,
+    top: [w.ref(P.A4, 250), w.ref(P.A1, 100)],
+  }, "A4 at 3 599 s is in the oldest bin, A3 at 300 s in the one before the last, A1 and A2 (0 and 299 s) in the last; A3's 0.004 is in no top");
+  assert.deepEqual(Object.keys(p1), ["mint", "name", "symbol", "image", "new1h", "creators1h", "bins", "usd24", "top"]);
+  assert.deepEqual(p2, { ...pref(w, P.P2), image: `/api/img?u=${encodeURIComponent("https://static.example/nvdax.png")}`, new1h: 3, creators1h: 3, bins: [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2], usd24: 0, top: [] },
+    "a listed asset: its stored icon; a coin 30 s ahead of our clock counts as now, one two minutes ahead is left out; 601 s is two bins back");
+  assert.deepEqual([by[P.P5].new1h, by[P.P5].creators1h, by[P.P5].usd24, by[P.P5].top], [2, 2, 5, [w.ref(P.E2, 5)]], "an unknown address and a known one are two");
+  assert.deepEqual([by[P.P6].creators1h, by[P.P6].top.map((t) => t.mint)], [2, [P.F1]], "the address from the fee shares counts like a launcher");
+  for (const p of body.parents) {
+    assert.deepEqual([p.bins.length, p.bins.reduce((a, b) => a + b, 0)], [12, p.new1h]);
+    assert.ok(p.new1h >= 2 && p.creators1h >= 2 && p.top.length <= 2 && p.top.every((t) => t.usd24 > 0));
+  }
+  assert.ok(!JSON.stringify(body).includes(W.w1) && !JSON.stringify(body).includes(SOL_MINT), "no creator address, no SOL");
+  const s = w.disc.snapshot();
+  assert.deepEqual([s.builds, s.served, s.lastCoins, s.lastParents], [1, 1, 17, 4], "the pass counted the new non-SOL children only");
+  // order: more launches first, then more volume, then the mint
+  w.coin(key(90), "G1", { parent: P.P6, launcher: W.w3, createdAgo: 10 });
+  w.model.upsertCoin({ mint: P.A6, tracked: true }); // tracked only now: it joins the hour
+  w.clock.t += DISCOVER_TTL_MS;
+  const next = await w.disc.serve();
+  assert.deepEqual(next.parents.map((p) => [p.mint, p.new1h, p.usd24]), [[P.P1, 5, 9_107], [P.P6, 3, 5], [P.P2, 3, 0], [P.P5, 2, 5]], "ten seconds on A4 has left the hour and A6 joined; P6 and P2 both have three, the traded one first");
+  assert.deepEqual([next.parents[0].creators1h, next.parents[0].top.map((t) => t.mint)], [4, [P.A6, P.A1]]);
+  w.close();
+});
+
+test("discover: among parents with as many launches the more traded comes first, then the mint; at most PARENTS_MAX", async () => {
+  const w = world({ posts: false });
+  const N = PARENTS_MAX + 5, parents = Array.from({ length: N }, (_, i) => mintN(i, 3));
+  w.db.transaction(() => parents.forEach((p, i) => {
+    for (let k = 0; k < 2; k++) w.coin(mintN(2 * i + k, 4), `N${2 * i + k}`, { parent: p, launcher: `L${k}`, createdAgo: 60, trades: i === 7 && k === 0 ? 1 : 0, usd: 3 });
+  }));
+  const body = await new Discover({ model: w.model, now: w.clock.now }).serve();
+  assert.equal(body.parents.length, PARENTS_MAX);
+  assert.deepEqual(body.parents.map((p) => p.mint), [parents[7], ...parents.filter((_, i) => i !== 7).sort().slice(0, PARENTS_MAX - 1)]);
+  assert.deepEqual([body.parents[0].name, body.parents[0].image], [null, null], "a parent we know only as a mint coins are priced in");
+  w.close();
+});
+
+test("discover: one pass shared by askers that come together and served for 10 s; the hour moves on; the by-time index is kept as coins are indexed and forgets old ones", async () => {
+  const w = launches(world({ posts: false }));
+  const [a, b, c] = await Promise.all([w.disc.serve(), w.disc.serve(), w.disc.serve()]);
+  assert.ok(a === b && b === c, "one body");
+  assert.deepEqual([w.disc.snapshot().builds, w.disc.snapshot().served], [1, 3]);
+  w.coin(key(91), "G2", { parent: P.P3, launcher: W.w2, createdAgo: 5 });
+  w.clock.t += DISCOVER_TTL_MS - 1;
+  assert.ok(await w.disc.serve() === a, "within the 10 s the body is served as it is");
+  assert.equal(w.disc.snapshot().builds, 1);
+  w.clock.t += 1;
+  const fresh = await w.disc.serve();
+  assert.deepEqual([w.disc.snapshot().builds, fresh.asOf, fresh.parents[0].mint, fresh.parents[0].new1h, fresh.parents[0].creators1h, fresh.parents[0].usd24], [2, NOW_S + 10, P.P3, 4, 2, 1500], "a second address made P3 a listed parent");
+  assert.equal(DISCOVER_TTL_MS, 10_000);
+  // The index: what a restart reads back from the database is the same set; a coin whose creation time turns out old leaves it.
+  const again = new Model(w.db, { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", now: w.clock.now, log: quiet });
+  again.load();
+  assert.deepEqual([...again.recent.keys()].sort(), [...w.model.recent.keys()].sort());
+  assert.ok(w.model.recent.has(P.A5) && !w.model.recent.has(P.A7) && !w.model.recent.has(P.P1) && !w.model.recent.has(P.A6), "a coin an hour old is held (RECENT_S is two); one three hours old, a 90-day-old one and an untracked one never join");
+  w.model.upsertCoin({ mint: P.B1, createdAt: NOW_S - 30 * DAY });
+  assert.ok(!w.model.recent.has(P.B1));
+  // 20 minutes on: the coins still in the hour stand four bins further back
+  w.clock.t += 20 * 60_000 - 10_000;
+  const later = await w.disc.serve();
+  const p1 = later.parents.find((p) => p.mint === P.P1);
+  assert.deepEqual([p1.new1h, p1.bins], [4, [0, 1, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0]], "A4 left the hour; A8, A3, and A1 with A2 moved four bins back");
+  // past the hour nothing is listed; past RECENT_S the index is empty again
+  w.clock.t += WINDOW_S * 1000;
+  assert.deepEqual((await w.disc.serve()).parents, []);
+  w.clock.t += RECENT_S * 1000;
+  await w.disc.serve();
+  assert.equal(w.model.recent.size, 0);
+  w.close();
+});
+
+test("discover: 20 000 coins launched in the hour are counted in slices: the event loop is never held long, and old coins are not walked", async (t) => {
+  const w = world({ posts: false });
+  const N = 20_000, OLD = 5_000, PARENTS = 400;
+  w.db.transaction(() => {
+    for (let i = 0; i < N + OLD; i++) {
+      const m = mintN(i, 7), old = i >= N;
+      w.model.upsertCoin({ mint: m, curve: `C${i}`, depth: 1, quoteMint: mintN(i % PARENTS, 2), ...base, virtualQuoteReserves: "100000000000", createdAt: old ? NOW_S - 5 * DAY - i : NOW_S - (i % 3600), launcher: mintN(1_000_000 + (i % 9000), 1) });
+      if (i % 4 === 0) w.model.recordTrade({ sig: `P${i}`, mint: m, idx: 0, slot: i, time: NOW_S - 100, isBuy: true, user: "U", baseAmount: "1", quoteAmount: "2", priceQuote: 2, priceUsd: 2e-5, valueUsd: 10 + (i % 100) });
+    }
+  });
+  assert.equal(w.model.recent.size, N, "the index holds the new coins only");
+  const disc = new Discover({ model: w.model, now: w.clock.now });
+  let last = performance.now(), maxGap = 0;
+  const iv = setInterval(() => { const now = performance.now(); if (now - last > maxGap) maxGap = now - last; last = now; }, 1);
+  const t0 = performance.now();
+  const body = await disc.serve();
+  const wall = performance.now() - t0;
+  clearInterval(iv);
+  const s = disc.snapshot();
+  t.diagnostic(`20 000 new coins under 400 parents (+ 5 000 old): build ${s.lastBuildMs} ms of CPU, longest slice ${s.maxSliceMs} ms, ${wall.toFixed(1)} ms wall, longest gap between timer ticks ${maxGap.toFixed(1)} ms`);
+  assert.deepEqual([s.lastCoins, s.lastParents, body.parents.length], [N, PARENTS, PARENTS_MAX]);
+  assert.ok(body.parents.every((p) => p.new1h === N / PARENTS && p.bins.reduce((a, b) => a + b, 0) === p.new1h && p.top.length === 2));
+  for (let i = 1; i < body.parents.length; i++) assert.ok(body.parents[i - 1].usd24 >= body.parents[i].usd24, "as many launches each: the more traded first");
+  // One turn of the scheduler is 8 ms (SLICE_MS) plus the step that crosses it; an unsliced pass would be one slice of
+  // the whole build. Generous for a loaded machine: other test files run beside this one.
+  assert.ok(s.maxSliceMs < 30, `longest slice ${s.maxSliceMs} ms`);
+  w.close();
+});
+
+test("GET /api/discover: the body is Discover's, cached 10 s, with an ETag; it needs no linked posts; health carries its counters", async () => {
+  const w = launches(world({ posts: false }));
+  const app = await serveApp(w, { narrative: null });
+  try {
+    const r = await app.get("/api/discover");
+    // max-age alone: a stale-while-revalidate window would let a browser answer every 15 s poll with the body of the poll before
+    assert.deepEqual([r.status, r.headers.get("cache-control")], [200, "public, max-age=10"]);
+    assert.ok(!/stale/.test(r.headers.get("cache-control")));
+    assert.deepEqual(r.body, JSON.parse(JSON.stringify(await w.disc.serve())));
+    assert.deepEqual(r.body.parents.map((p) => p.mint), [P.P1, P.P2, ...[P.P5, P.P6].sort()]);
+    assert.equal((await app.get("/api/discover", { "if-none-match": r.headers.get("etag") })).status, 304);
+    const [x, y] = await Promise.all([app.get("/api/discover"), app.get("/api/discover")]);
+    assert.deepEqual(x.body, y.body);
+    const health = (await app.get("/api/health")).body;
+    assert.deepEqual([health.discover.builds, health.discover.served, health.discover.lastCoins, health.discover.lastParents, health.discover.maxSliceMs >= 0, health.narrative], [1, 4, 17, 4, true, null]);
+  } finally { await app.close(); }
+  w.close();
 });

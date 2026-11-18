@@ -2,10 +2,12 @@
 // in the coin's metadata (`twitter`, sometimes `website`); for a parent the posts its direct children link are grouped
 // and the ones several launch addresses share are listed, for a child its own post and the siblings that link the same
 // one. The posts are picked by coin creators and nothing here checks them: the body says which coins link a post, never
-// more. A link can name any handle (x.com/<anything>/status/<id> redirects to the real author), so only the id is
+// more. Each such post is one EVENT on the family's timeline, placed at the time the first coin linking it was created
+// (the first of every tracked child, also one that no longer counts as a member, so the time does not move when an old
+// coin goes quiet), newest first: the list reads as what was launched under the parent, in order. A link can name any handle (x.com/<anything>/status/<id> redirects to the real author), so only the id is
 // taken from it and the one URL sent to clients is rebuilt from those digits; a post's handle and text come from the
 // fetcher (lib/xposts.mjs).
-// The pure functions come first (links, post times, grouping, ranking, common name words, the embed answer), then the
+// The pure functions come first (links, post times, grouping, the events, the embed answer), then the
 // `Narrative` class: one sliced walk per family, cached FAMILY_TTL_MS, and the body.
 import { hasSlur, wordsOf as blockWords } from "./agents/blocklist.mjs";
 import { SOL_MINT } from "./jupiter.mjs";
@@ -15,11 +17,15 @@ import { runSliced, drain } from "./sliced.mjs";
 export const NEW_S = 72 * 3600;
 /** A family entry is served this long, and at most this many are kept (the oldest goes first). */
 export const FAMILY_TTL_MS = 30_000, FAMILY_CACHE = 300;
-/** Ranked posts an entry keeps, and how many of them a body lists. */
-export const RANK_KEEP = 12, POSTS_MAX = 5;
-/** What one coin's 24 h volume can add to a post's score (USD): one heavily traded coin does not carry a post. */
-export const USD_CAP = 5_000;
-export const WORDS_MAX = 6, TEXT_MAX = 600;
+/** Events an entry keeps (the newest), and how many of them a body lists. */
+export const EVENTS_KEEP = 30, EVENTS_MAX = 12;
+/**
+ * A body asks for the text of its first this many listed events at full priority and for the others as `low` (the
+ * fetcher refuses those from half its line and half its day on). The pages show at most 5 lines before "Show more",
+ * so the lines behind it cannot fill the line or spend the day; keep it at the largest collapsed count the web uses.
+ */
+export const EVENTS_FIRST = 5;
+export const TEXT_MAX = 600;
 
 const POST_HOSTS = new Set(["x.com", "twitter.com"].flatMap((h) => [h, `www.${h}`, `mobile.${h}`, `m.${h}`]));
 const ID_RE = /^[1-9]\d{0,18}$/, HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
@@ -69,9 +75,10 @@ export function postTime(id, nowMs = Date.now()) {
 export const postUrl = (id) => `https://x.com/i/status/${id}`;
 
 /**
- * Members by the post they link: `Map<id, { id, coins, creators, usd, usdCapped, t1h, firstAt, lastAt, mints }>`.
- * `members`: `[{ mint, key, createdAt, usd, trades, t1h, postId }]` (`key`: the creator key or null); those without a
- * `postId` are left out. `creators` counts distinct keys, every coin without one together as a single creator.
+ * Members by the post they link: `Map<id, { id, coins, creators, usd, firstAt, lastAt, mints }>`.
+ * `members`: `[{ mint, key, createdAt, usd, postId }]` (`key`: the creator key or null); those without a `postId` are
+ * left out. `creators` counts distinct keys, every coin without one together as a single creator; `firstAt` and
+ * `lastAt` are the creation times of the first and the last coin (null when none has one).
  */
 export function groupPosts(members) { return drain(groupPostsGen(members)); }
 /** groupPosts in steps (a yield every 2 048 members), for the sliced family walk. */
@@ -83,9 +90,9 @@ export function* groupPostsGen(members) {
     const id = m.postId;
     if (!id) continue;
     let g = groups.get(id);
-    if (!g) { groups.set(id, g = { id, coins: 0, creators: 0, usd: 0, usdCapped: 0, t1h: 0, firstAt: null, lastAt: null, mints: [] }); keys.set(id, new Set()); }
+    if (!g) { groups.set(id, g = { id, coins: 0, creators: 0, usd: 0, firstAt: null, lastAt: null, mints: [] }); keys.set(id, new Set()); }
     const usd = Number.isFinite(m.usd) && m.usd > 0 ? m.usd : 0;
-    g.coins++; g.usd += usd; g.usdCapped += Math.min(usd, USD_CAP); g.t1h += m.t1h > 0 ? m.t1h : 0; g.mints.push(m.mint);
+    g.coins++; g.usd += usd; g.mints.push(m.mint);
     if (m.createdAt != null) {
       if (g.firstAt == null || m.createdAt < g.firstAt) g.firstAt = m.createdAt;
       if (g.lastAt == null || m.createdAt > g.lastAt) g.lastAt = m.createdAt;
@@ -97,91 +104,22 @@ export function* groupPostsGen(members) {
 }
 
 /**
- * The groups worth listing, best first, each with its post time `at` and `score`. A post is admitted only when two or
- * more creators link it and its id gives a time; volume never admits one. Score: 3·log2(1 + creators) + 1.5·ln(1 +
- * capped volume) + ln(1 + trades in the last hour), +3 for a post under 24 h old, +1 under 72 h, −4 over 30 days.
- * Ties: more coins, then the id.
+ * The groups that are events, newest first: each with `at` and `lastAt` (when the first and the last coin linking the
+ * post was created) and `postAt` (the post's own time, from its id). A post is admitted only when two or more
+ * creators link it and its id gives a time; volume never admits one. A group none of whose coins has a creation time
+ * stands at the post's time (a coin cannot link a post before it exists). Order: `at`, newest first, then the id; no
+ * score, so the list is a timeline. The family walk lowers `firstAt` to the first of every tracked child linking the
+ * post before it calls this, so an event's time does not jump when an old coin leaves or re-enters the members.
  */
-export function rankPosts(groups, { nowS = Math.floor(Date.now() / 1000) } = {}) {
+export function eventsOf(groups, { nowS = Math.floor(Date.now() / 1000) } = {}) {
   const out = [];
   for (const g of groups instanceof Map ? groups.values() : groups) {
     if (!(g.creators >= 2)) continue;
-    const at = postTime(g.id, nowS * 1000);
-    if (at == null) continue;
-    const age = nowS - at;
-    const fresh = age < DAY_S ? 3 : age < 3 * DAY_S ? 1 : age > 30 * DAY_S ? -4 : 0;
-    out.push({ ...g, at, score: 3 * Math.log2(1 + g.creators) + 1.5 * Math.log1p(g.usdCapped) + Math.log1p(g.t1h) + fresh });
+    const postAt = postTime(g.id, nowS * 1000);
+    if (postAt == null) continue;
+    out.push({ ...g, at: g.firstAt ?? postAt, lastAt: g.lastAt ?? g.firstAt ?? postAt, postAt });
   }
-  return out.sort((a, b) => b.score - a.score || b.coins - a.coins || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-}
-
-const STOP = new Set(["coin", "coins", "token", "tokens", "the", "and", "for", "with", "from", "this", "that", "you", "your", "our", "not", "are", "was", "its",
-  "official", "sol", "solana", "pump", "pumpfun", "fun", "inu", "new", "real", "meme", "memecoin", "usd", "usdc", "http", "https", "www", "com"]);
-const WORD_SPLIT = /[^\p{L}\p{N}\p{M}]+/u, LATIN_WORD = /^[a-z0-9]{3,24}$/, HAS_LETTER = /[a-z]/;
-const CJK_WORD = /^[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}]{2,12}$/u;
-
-/**
- * The words of a coin name or symbol that can be counted: NFKC, lowercased, and only single-script ones, either
- * a-z0-9 with at least one letter (3 to 24 characters) or CJK only (2 to 12). Everything else is dropped, mixed
- * scripts first of all (look-alike letters).
- */
-export function nameTokens(text) {
-  const out = [];
-  if (typeof text !== "string" || !text) return out;
-  for (const t of text.slice(0, 200).normalize("NFKC").toLowerCase().split(WORD_SPLIT)) {
-    if (t && (LATIN_WORD.test(t) ? HAS_LETTER.test(t) : CJK_WORD.test(t))) out.push(t);
-  }
-  return out;
-}
-
-/**
- * The words most creators put in their coins' names: `[{ w, n }]`, at most WORDS_MAX, `n` = distinct creator keys
- * (coins without one count together as one) with the word in a `name` or `symbol`. A word needs max(3, 3 % of the
- * distinct keys), must not be a filler word, and must not contain or be contained in a word of `exclude` that has 3+
- * letters or is a CJK word (the subject's own name and symbol: its children repeat them). `isSlur` costs a hash per substring, so it is asked
- * only for the candidates, best first, until WORDS_MAX passed.
- */
-export function nameWords(members, opts = {}) { return drain(nameWordsGen(members, opts)); }
-/** nameWords in steps (a yield every 1 024 members), for the sliced family walk. */
-export function* nameWordsGen(members, { exclude = [], isSlur = hasSlur } = {}) {
-  // Members by key first, so a word is counted once per key with one number per word (`k`: the last key that had it).
-  const byKey = new Map();
-  let n = 0;
-  for (const m of members) {
-    if ((++n & 2047) === 0) yield;
-    const k = m.key ?? null, list = byKey.get(k);
-    if (list) list.push(m); else byKey.set(k, [m]);
-  }
-  const counts = new Map();
-  let kid = 0;
-  n = 0;
-  for (const list of byKey.values()) {
-    kid++;
-    for (const m of list) {
-      if ((++n & 1023) === 0) yield;
-      for (const text of [m.name, m.symbol]) {
-        for (const w of nameTokens(text)) {
-          const e = counts.get(w);
-          if (!e) counts.set(w, { n: 1, k: kid }); else if (e.k !== kid) { e.n++; e.k = kid; }
-        }
-      }
-    }
-  }
-  yield;
-  const min = Math.max(3, Math.ceil(0.03 * byKey.size));
-  const own = [...exclude].filter((x) => typeof x === "string" && ([...x].length >= 3 || CJK_WORD.test(x)));
-  const cands = [];
-  for (const [w, e] of counts) {
-    if (e.n < min || STOP.has(w) || own.some((x) => w.includes(x) || x.includes(w))) continue;
-    cands.push({ w, n: e.n });
-  }
-  cands.sort((a, b) => b.n - a.n || (a.w < b.w ? -1 : a.w > b.w ? 1 : 0));
-  const out = [];
-  for (const c of cands) {
-    if (out.length >= WORDS_MAX) break;
-    if (!isSlur(c.w)) out.push(c);
-  }
-  return out;
+  return out.sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0", mdash: "\u2014", ndash: "\u2013", hellip: "\u2026" };
@@ -257,7 +195,7 @@ export const postOf = (meta) => (meta ? (parsePost(meta.twitter) ?? parsePost(me
 const round2 = (x) => Math.round(x * 100) / 100;
 /** Best first among the coins of one post: 24 h volume, then the newest, then the mint. */
 const byVolume = (a, b) => b.usd - a.usd || (b.createdAt ?? 0) - (a.createdAt ?? 0) || (a.mint < b.mint ? -1 : a.mint > b.mint ? 1 : 0);
-const NO_FAMILY = Object.freeze({ at: 0, members: 0, linked: 0, ranked: Object.freeze([]), groups: new Map(), words: Object.freeze([]) });
+const NO_FAMILY = Object.freeze({ at: 0, members: 0, linked: 0, events: Object.freeze([]), admitted: 0, groups: new Map() });
 
 export class Narrative {
   /** `model`: the index; `posts`: the post-text fetcher (lib/xposts.mjs) or null (every post then reads "idle": a link without text); `now` in ms. */
@@ -284,8 +222,9 @@ export class Narrative {
   }
 
   /**
-   * The family entry of `mint`: `{ at, members, linked, ranked, groups, words }`. `ranked`: the RANK_KEEP best posts
-   * `{ id, at, coins, usd24, top }` (`top`: the refs of its 3 best coins); `groups`: every linked post, ranked or not,
+   * The family entry of `mint`: `{ at, members, linked, events, admitted, groups }`. `events`: the EVENTS_KEEP newest
+   * events `{ id, at, lastAt, postAt, coins, usd24, top }` (`top`: the refs of its 3 best coins), `admitted`: how many
+   * events there are in all; `groups`: every linked post, an event or not,
    * as `{ coins, mints, top }` (`top`: its 4 best coins `{ mint, usd }`, one more than shown so the asking coin can be
    * left out) for the sibling look-ups. A mint without children costs nothing and is not cached.
    */
@@ -307,24 +246,39 @@ export class Narrative {
     return job;
   }
 
-  /** The walk over a subject's direct children, in steps: a yield every 2 048 children or 256 members, before the grouping and before the words. */
+  /**
+   * The walk over a subject's direct children, in steps: a yield every 2 048 children or 256 metadata reads (a member,
+   * or a tracked child that is none: its post link is still read, for the event's time), before the grouping and
+   * before the events. Only members count for `members`, `linked`, an event's coins, volume, creators and top coins;
+   * which posts are events is decided by the members alone.
+   */
   *#buildGen(mint) {
     const model = this.model, nowMs = this.now(), nowS = Math.floor(nowMs / 1000), vol = model.volumes();
-    const members = [];
+    const members = [], firstSeen = new Map(); // post id → the earliest creation time among the tracked children that are no members
     let seen = 0, fresh = 0, linked = 0;
     for (const m of model.children.get(mint) ?? []) {
       if (++seen >= 2048 || fresh >= 256) { yield; seen = 0; fresh = 0; }
       const c = model.get(m);
       if (!c || !c.tracked) continue;
       const v = vol.get(m), trades = v?.trades ?? 0;
-      if (!(trades > 0) && !(c.createdAt != null && nowS - c.createdAt <= NEW_S)) continue;
-      const { name, symbol } = model.nameOf(m), postId = postOf(model.metaFor(c));
+      if (!(trades > 0) && !(c.createdAt != null && nowS - c.createdAt <= NEW_S)) {
+        // No member, but its link still dates the event: without it `at` would slide forward each time the oldest
+        // linking coin goes quiet, and one small trade on that coin would move it back. The link parse costs what a
+        // member's does, so it counts toward the same slice budget.
+        fresh++;
+        if (c.createdAt == null) continue;
+        const id = postOf(model.metaFor(c)), f = id ? firstSeen.get(id) : 0;
+        if (id && (f === undefined || c.createdAt < f)) firstSeen.set(id, c.createdAt);
+        continue;
+      }
+      const postId = postOf(model.metaFor(c));
       if (postId) linked++;
-      members.push({ mint: m, key: model.creatorKey(c), createdAt: c.createdAt ?? null, usd: v?.usd ?? 0, trades, t1h: trades > 0 ? model.activity.get(m)?.t1h ?? 0 : 0, postId, name, symbol });
+      members.push({ mint: m, key: model.creatorKey(c), createdAt: c.createdAt ?? null, usd: v?.usd ?? 0, postId });
       fresh++;
     }
     yield;
     const groups = yield* groupPostsGen(members);
+    for (const g of groups.values()) { const f = firstSeen.get(g.id); if (f !== undefined && (g.firstAt == null || f < g.firstAt)) g.firstAt = f; }
     // Each post's best coins in one pass over the members (a group can hold thousands; only four are kept).
     const tops = new Map();
     let n = 0;
@@ -338,13 +292,12 @@ export class Narrative {
     const byId = new Map();
     for (const g of groups.values()) byId.set(g.id, { coins: g.coins, mints: g.mints, top: tops.get(g.id).map((m) => ({ mint: m.mint, usd: m.usd })) });
     yield;
-    const ranked = rankPosts(groups, { nowS }).slice(0, RANK_KEEP).map((g) => ({
-      id: g.id, at: g.at, coins: g.coins, usd24: round2(g.usd), top: byId.get(g.id).top.slice(0, 3).map((t) => this.#ref(t.mint, t.usd)).filter(Boolean),
-    }));
+    const all = eventsOf(groups, { nowS });
     yield;
-    const self = model.nameOf(mint);
-    const words = yield* nameWordsGen(members, { exclude: [...nameTokens(self.name), ...nameTokens(self.symbol)] });
-    return { at: nowMs, members: members.length, linked, ranked, groups: byId, words };
+    const events = all.slice(0, EVENTS_KEEP).map((g) => ({
+      id: g.id, at: g.at, lastAt: g.lastAt, postAt: g.postAt, coins: g.coins, usd24: round2(g.usd), top: byId.get(g.id).top.slice(0, 3).map((t) => this.#ref(t.mint, t.usd)).filter(Boolean),
+    }));
+    return { at: nowMs, members: members.length, linked, events, admitted: all.length, groups: byId };
   }
 
   /**
@@ -367,15 +320,22 @@ export class Narrative {
     } catch (e) { this.log.warn?.(`narrative: post ${id}: ${String(e?.message ?? e).slice(0, 160)}`); }
     return s;
   }
-  /** The first `max` ranked posts of a family whose post is not known to be unavailable, as body items. A dropped one is still asked for again when its recheck is due. */
+  /**
+   * `{ list, examined }`: the `max` newest events of a family whose post is not known to be unavailable, as body items,
+   * and how many of the kept events were looked at to fill it (the listed ones and the dropped ones among them). A
+   * dropped one is still asked for again when its recheck is due. The first EVENTS_FIRST listed ask for their text at
+   * full priority, the ones after them as low.
+   */
   #list(fam, max, ctx) {
     const out = [];
-    for (const g of fam.ranked) {
+    let examined = 0;
+    for (const g of fam.events) {
       if (out.length >= max) break;
-      const s = this.#post(g.id, false, ctx);
-      if (s.state !== "none") out.push({ id: g.id, url: postUrl(g.id), at: g.at, coins: g.coins, usd24: g.usd24, state: s.state, handle: s.handle, text: s.text, top: g.top });
+      examined++;
+      const s = this.#post(g.id, out.length >= EVENTS_FIRST, ctx);
+      if (s.state !== "none") out.push({ id: g.id, url: postUrl(g.id), at: g.at, lastAt: g.lastAt, postAt: g.postAt, coins: g.coins, usd24: g.usd24, state: s.state, handle: s.handle, text: s.text, top: g.top });
     }
-    return out;
+    return { list: out, examined };
   }
 
   /**
@@ -393,7 +353,7 @@ export class Narrative {
     this.stats.served++;
     const fam = await this.#family(mint);
     const nowMs = this.now(), ctx = { mayQueue, seen: new Map() };
-    const posts = this.#list(fam, POSTS_MAX, ctx);
+    const { list: events, examined } = this.#list(fam, EVENTS_MAX, ctx);
     let own = null, under = null;
     if (c) {
       const parent = c.quoteMint && c.quoteMint !== SOL_MINT ? c.quoteMint : null;
@@ -410,12 +370,14 @@ export class Narrative {
         const at = postTime(id, nowMs);
         const s = this.#post(id, !siblings || at == null, ctx);
         own = { id, url: postUrl(id), at, state: s.state, handle: s.handle, text: s.text, siblings, top, parent: par };
-      } else if (parent && !posts.length) {
-        const [post] = this.#list(await this.#family(parent), 1, ctx);
-        if (post) under = { mint: parent, ...model.nameOf(parent), post };
+      } else if (parent && !events.length) {
+        const [event] = this.#list(await this.#family(parent), 1, ctx).list;
+        if (event) under = { mint: parent, ...model.nameOf(parent), event };
       }
     }
-    const pending = posts.some((p) => p.state === "wait") || own?.state === "wait" || under?.post.state === "wait";
-    return { mint, asOf: Math.floor(nowMs / 1000), members: fam.members, linked: fam.linked, posts, words: fam.words, own, under, pending };
+    const pending = events.some((p) => p.state === "wait") || own?.state === "wait" || under?.event.state === "wait";
+    // `earlier`: the events older than the last one looked at for the list, so never a newer one that was dropped
+    // because X does not show its post: the page says "N earlier events" under the list.
+    return { mint, asOf: Math.floor(nowMs / 1000), members: fam.members, linked: fam.linked, events, earlier: fam.admitted - examined, own, under, pending };
   }
 }

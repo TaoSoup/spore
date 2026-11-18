@@ -1,4 +1,4 @@
-import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Component, Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from "react-router-dom";
 import { SPORE_COIN } from "./lib/policy";
 import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
@@ -36,6 +36,9 @@ import EmbedMap from "./pages/embed/EmbedMap";
 import { EmbedNotFound } from "./pages/embed/common";
 import "./components/brand.css";
 
+// Discover is its own chunk: the page and its styles load when it is first opened.
+const Discover = lazy(() => import("./pages/Discover"));
+
 /// A page that fails to render says so in plain words, inside the shell, instead of blanking the site.
 class RouteBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -49,10 +52,12 @@ class RouteBoundary extends Component<{ children: ReactNode }, { failed: boolean
 export const BRAND = { name: "Spore", tagline: "Coins that grow coins.", title: "Spore — coins that grow coins" };
 /// The nav labels name what a visitor came to do; the titles say it in plain words (redesign
 /// 2026-10-20). Launch is not a link here: it is the bar's lime pill.
-/// The header is Map and Portfolio only (Nov 15 2026). Coins, Agents and How it works keep their pages and
-/// routes and are linked from the footer; fee claiming lives on the Portfolio page (/claim stays as a route).
+/// The header is Map, Discover and Portfolio (Map and Portfolio only since Nov 15 2026; Discover added Nov 18).
+/// Coins, Agents and How it works keep their pages and routes and are linked from the footer; fee claiming lives on
+/// the Portfolio page (/claim stays as a route).
 const PRIMARY: readonly (readonly [string, string, string])[] = [
   ["/map", "Map", "Every pump.fun coin pair, live"],
+  ["/discover", "Discover", "Parents getting new coins right now"],
   ["/portfolio", "Portfolio", "What your wallet holds and launched, with its fees to claim"],
 ];
 const MORE: readonly (readonly [string, string])[] = [["/fees", "Fees & rules"], ["/docs/api", "API"]];
@@ -342,6 +347,7 @@ function Shell() {
             <Route path="/how" element={<How />} />
             <Route path="/fees" element={<Fees />} />
             <Route path="/claim" element={<Claim />} />
+            <Route path="/discover" element={<Suspense fallback={<div className="container" aria-busy="true" />}><Discover /></Suspense>} />
             <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/docs/api" element={<ApiDocs />} />
             <Route path="/agents" element={<Agents />} />

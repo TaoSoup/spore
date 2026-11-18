@@ -16,6 +16,7 @@ import { AddressLookupTableAccount } from "@solana/web3.js";
 import { JUPITER_PROGRAM, SOL_MINT, JupiterError } from "./jupiter.mjs";
 import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLIT_BPS } from "./pricing.mjs";
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
+import { Discover } from "./discover.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
 import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
@@ -342,6 +343,9 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // 429: the post is listed without its text (state "idle").
   const narrOf = narrative ?? null;
   const narrNew = new RateLimiter({ limit: limitOf("narrnew").limit, windowMs: limitOf("narrnew").windowMs, now });
+  // Discover (lib/discover.mjs): the parents coins are being launched under in the last hour. It reads the model only
+  // (no chain, no third party), so it has no switch and no per-IP allowance: one sliced pass per 10 s at most.
+  const discover = new Discover({ model, now });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -384,7 +388,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, discover: discover.snapshot() };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -615,8 +619,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   }
 
   /**
-   * The posts linked by a family's coins (README §API): for a parent the X posts several of its children's creators
-   * link, for a coin its own post and the siblings linking the same one. Never cached while a post's text is being
+   * The posts linked by a family's coins (README §API): for a parent the timeline of X posts several of its
+   * children's creators link (one event a post, newest launch first), for a coin its own post and the siblings linking the same one. Never cached while a post's text is being
    * fetched (`pending`: the client asks again), 5 s while one is listed without a fetch under way ("idle"), else 30 s.
    * A failure answers an empty body, not an error: the page shows nothing in its place.
    */
@@ -627,12 +631,18 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     try { body = narrOf ? await narrOf.serve(mint, { mayQueue: () => narrNew.check(req.ip ?? "?").ok }) : null; }
     catch (e) {
       log.warn?.(`narrative ${mint}: ${String(e?.message ?? e).slice(0, 160)}`);
-      return res.json({ mint, asOf: Math.floor(now() / 1000), members: 0, linked: 0, posts: [], words: [], own: null, under: null, pending: false });
+      return res.json({ mint, asOf: Math.floor(now() / 1000), members: 0, linked: 0, events: [], earlier: 0, own: null, under: null, pending: false });
     }
     if (!body) return res.status(404).json({ error: "unknown mint" });
-    const idle = [...body.posts, body.own, body.under?.post].some((p) => p?.state === "idle");
+    const idle = [...body.events, body.own, body.under?.event].some((p) => p?.state === "idle");
     sendCachedJson(req, res, body, body.pending ? { cacheControl: "no-store" } : idle ? { maxAge: 5, swr: 5 } : { maxAge: 30 });
   }));
+
+  // The parents with launches in the last hour (README §API). The body is one sliced pass shared by every asker and
+  // held 10 s (lib/discover.mjs); the header says the same 10 s, so a page that polls costs a pass only now and then.
+  // No stale-while-revalidate (sendCachedJson would add 40 s): with it a browser answers each 15 s poll from its cache
+  // and refreshes behind it, so the page would always show the previous poll's list.
+  app.get("/api/discover", wrap(async (req, res) => sendCachedJson(req, res, await discover.serve(), { cacheControl: "public, max-age=10" })));
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search
   // box accept all of pump.fun, DESIGN §11.1) is looked up live, like /api/coin/:mint does; the

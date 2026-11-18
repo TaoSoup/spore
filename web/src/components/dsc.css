@@ -1,0 +1,70 @@
+/* The Discover page (pages/Discover.tsx). Every class here starts with "dsc-" (discover.css is the Coins page's);
+   the logo, the skeleton and the error box are the site's own. Rows under hairlines, not cards: one line a parent
+   from 641 px, two lines on a phone. Grids use minmax(0, 1fr) tracks, so a long name is cut with an ellipsis and
+   never widens the page. The one accent is the newest bar of a strip. */
+.dsc-page { max-width: var(--content); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s5); min-width: 0; }
+.dsc-top { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.dsc-top h1 { font-size: var(--fs-xl); line-height: 1.2; }
+.dsc-sub { font-size: var(--fs-base); color: var(--muted); }
+.dsc-link { font-size: var(--fs-sm); color: var(--muted); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+.dsc-link:hover { color: var(--ink); }
+.dsc-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px 16px; border: 1px dashed var(--line); border-radius: var(--radius); font-size: var(--fs-sm); color: var(--muted); }
+
+.dsc-rows { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; list-style: none; border-bottom: 1px solid var(--line-soft); }
+.dsc-row { min-width: 0; border-top: 1px solid var(--line-soft); }
+.dsc-row.left > .dsc-head { opacity: .6; }
+/* the row: logo, name, count, bars, leading coins, chevron. The name is the button; its hit area is the whole head,
+   and the coin links lie over it. */
+.dsc-head { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(max-content, 150px) 108px minmax(0, 1.4fr) 14px; align-items: center; gap: 2px 16px; min-width: 0; padding: 12px 6px; transition: background var(--dur-2); }
+.dsc-head:hover { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.dsc-skel { display: flex; align-items: center; gap: 16px; padding: 12px 6px; }
+.dsc-skel .sk { flex: none; }
+.dsc-name { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; min-width: 0; padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; }
+.dsc-name::after { content: ""; position: absolute; inset: 0; }
+.dsc-name b, .dsc-name span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-name b { font-family: var(--mono); font-size: var(--fs-base); font-weight: 600; color: var(--ink); transition: color var(--dur-2); }
+.dsc-name span { font-size: var(--fs-xs); color: var(--muted); }
+.dsc-head:hover .dsc-name b, .dsc-row.open .dsc-name b { color: var(--accent); }
+.dsc-count { font-size: var(--fs-sm); color: var(--muted); white-space: nowrap; }
+.dsc-count b { font-family: var(--mono); font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; }
+/* twelve bars, oldest on the left; an empty bin is a stub on the baseline */
+.dsc-bars { display: flex; align-items: flex-end; gap: 2px; width: 108px; height: 24px; }
+.dsc-bars i { flex: 1 1 0; min-height: 2px; border-radius: 1px; background: var(--line-2); }
+.dsc-bars i.none { height: 2px; background: var(--line-soft); }
+.dsc-bars i.now { background: var(--accent); }
+/* the line clips (ellipsis), and would clip the focus ring around a coin link: it grows by the ring's reach and pulls
+   back by the same margin, so the ring shows whole and nothing moves */
+.dsc-lead { min-width: 0; padding: 4px; margin: -4px; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsc-lead a { position: relative; z-index: 1; font-family: var(--mono); color: var(--ink-2); }
+.dsc-lead a span { color: var(--muted); }
+.dsc-lead a:hover, .dsc-lead a:focus-visible { color: var(--accent); text-decoration: none; }
+.dsc-chev { color: var(--muted); transition: transform var(--dur-2); }
+.dsc-row.open .dsc-chev { transform: rotate(180deg); }
+/* the open row: the parent's timeline under its name */
+.dsc-open { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; padding: 0 6px 14px 50px; }
+.dsc-links { display: flex; flex-wrap: wrap; gap: 0 14px; margin: 0; min-width: 0; font-size: var(--fs-xs); line-height: 16px; }
+.dsc-links a { color: var(--muted); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+.dsc-links a:hover, .dsc-links a:focus-visible { color: var(--ink); }
+.dsc-links span { color: var(--muted); }
+.dsc-none { margin: 0; font-size: var(--fs-xs); line-height: 24px; color: var(--muted); }
+.dsc-none .dsc-link { margin-left: 8px; font-size: inherit; font-weight: 400; }
+.dsc-wait { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 7px 0; max-width: 520px; }
+@media (pointer: coarse) {
+  .dsc-lead a::after { content: ""; position: absolute; inset: -10px -4px; }
+  .dsc-links a, .dsc-link { position: relative; }
+  .dsc-links a::after, .dsc-link::after { content: ""; position: absolute; inset: -12px -6px; }
+  /* Retry sits right under the links: its margin grows down only, so a tap on a link is the link */
+  .dsc-none .dsc-link::after { inset: 0 -6px -12px; }
+}
+/* phone: two lines. Name, count and bars on the first; the leading coins on the second, under the name. */
+@media (max-width: 640px) {
+  .dsc-head { grid-template-columns: 28px minmax(0, 1fr) max-content 60px 14px; gap: 4px 10px; padding: 12px 0; }
+  .dsc-name span:not(.sr-only) { display: none; }
+  .dsc-bars { width: 60px; gap: 1px; }
+  .dsc-lead { grid-column: 2 / -1; grid-row: 2; }
+  .dsc-lead:empty { display: none; }
+  .dsc-skel { padding: 12px 0; }
+  .dsc-open { padding: 0 0 14px; }
+}
+@media (max-width: 380px) { .dsc-count { font-size: var(--fs-xs); } }
+@media (prefers-reduced-motion: reduce) { .dsc-chev, .dsc-head { transition: none; } }

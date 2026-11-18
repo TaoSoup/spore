@@ -1,10 +1,12 @@
-// Linked posts: the X posts a family's coins link in their metadata (GET /api/narrative/:mint, `Narrative` in
-// lib/api.ts), turned into what the map panel and the coin page show (components/narrative/). Pure: no DOM, no network
-// (test/narrative.test.mts). The posts are picked by coin creators and unverified, so nothing here trusts the body: the
-// link is rebuilt from the id's digits (never the body's `url`), a handle is shown only when it has the shape of one,
-// and every word says what is counted (coins linking a post, what those coins traded), never what a post did.
-import type { Narrative, NarrativeCoin, NarrativeOwn, NarrativePost, NarrativeState } from "./api";
-import { plural, short, usd } from "./format";
+// Launch timeline: the X posts a family's coins link in their metadata (GET /api/narrative/:mint, `Narrative` in
+// lib/api.ts), as the one-line events the map panel, the coin page and the Discover page show (components/narrative/).
+// An event is one post and the coins launched linking it; the list is by the time of the first such coin, newest
+// first, as the server sends it. Pure: no DOM, no network (test/narrative.test.mts). The posts are picked by coin
+// creators and unverified, so nothing here trusts the body: the link is rebuilt from the id's digits (never the body's
+// `url`), a handle is shown only when it has the shape of one, and every word says what is counted (coins linking a
+// post, what those coins traded), never what a post did.
+import type { Narrative, NarrativeCoin, NarrativeEvent, NarrativeOwn, NarrativeState } from "./api";
+import { age, count, plural, short, usd } from "./format";
 
 /// A post id: a positive decimal of at most 19 digits (what fits X's 64-bit ids).
 const POST_ID = /^[1-9]\d{0,18}$/;
@@ -17,82 +19,100 @@ export const safePostUrl = (id: unknown): string | null => (typeof id === "strin
 /// The author's handle, only for a post whose text is known and only when it has the shape of a handle.
 export const postHandle = (p: { state: NarrativeState; handle: string | null }): string | null =>
   (p.state === "ok" && typeof p.handle === "string" && HANDLE.test(p.handle) ? p.handle : null);
-/// The post link's words: the author when known, else a plain "View post".
-export const postLinkText = (p: { state: NarrativeState; handle: string | null }): string => { const h = postHandle(p); return h ? `@${h} ↗` : "View post ↗"; };
-/// How many coins link the post: a family post's count, or the subject and its siblings; null when not known.
-const linkers = (p: NarrativePost | NarrativeOwn): number | null => ("coins" in p ? p.coins : p.siblings != null ? p.siblings + 1 : null);
-/// The spoken name of a "View post" link (several rows read the same otherwise).
-export const postLinkAria = (p: NarrativePost | NarrativeOwn): string => { const n = linkers(p); return typeof n === "number" && n > 0 ? `View the post on X, linked by ${plural(n, "coin")}` : "View the post on X"; };
-/// The post's words for a row: only a known text, as plain text for the caller to render as text. A row shows a few
-/// clamped lines, so every line break (with the blanks around it) reads as one space: an empty line between a
-/// headline and the body would otherwise use up a line of the clamp. The whole post is behind the row's link.
+/// The post's words: only a known text, as plain text for the caller to render as text. Every line break (with the
+/// blanks around it) reads as one space, so a line shows the start of the post and an opened line one paragraph.
 export const postText = (p: { state: NarrativeState; text: string | null }): string =>
   (p.state === "ok" && typeof p.text === "string" ? p.text.replace(/[ \t]*\n[ \t\n]*/g, " ").trim() : "");
+/// The link out of an opened line, and its spoken name (several lines read the same otherwise).
+export const POST_LINK = "View post ↗";
+export const postLinkAria = (coins: number | null | undefined): string => (typeof coins === "number" && coins > 0 ? `View the post on X, linked by ${plural(coins, "coin")}` : "View the post on X");
 
 const label = (c: { mint: string; symbol: string | null }) => (c.symbol ? `$${c.symbol}` : short(c.mint));
 /// Volume worth a figure: a dollar or more.
 const hasVol = (n: number | null | undefined): n is number => typeof n === "number" && Number.isFinite(n) && n >= 1;
-
-/// What is shown first, what is behind "Show more", the shared words and whether there is anything at all.
-/// `lead`: the subject's own post; else the first post its children link; else its parent's best post.
-/// `rest`: the other family posts, without the one the own post already shows. `words`: only two or more.
-export type NarrativeLead =
-  | { kind: "own"; post: NarrativeOwn }
-  | { kind: "family"; post: NarrativePost }
-  | { kind: "under"; post: NarrativePost; parent: { mint: string; name: string | null; symbol: string | null } };
-export type NarrativeView = { lead: NarrativeLead | null; rest: NarrativePost[]; words: { w: string; n: number }[]; empty: boolean };
-export function narrativeView(n: Narrative | null | undefined): NarrativeView {
-  const posts = n && Array.isArray(n.posts) ? n.posts : [];
-  const own = n?.own ?? null, under = n?.under?.post ? n.under : null;
-  const lead: NarrativeLead | null = own ? { kind: "own", post: own }
-    : posts.length > 0 ? { kind: "family", post: posts[0] }
-    : under ? { kind: "under", post: under.post, parent: { mint: under.mint, name: under.name, symbol: under.symbol } }
-    : null;
-  const rest = own ? posts.filter((p) => p.id !== own.id) : posts.slice(1);
-  const words = n && Array.isArray(n.words) && n.words.length >= 2 ? n.words : [];
-  return { lead, rest, words, empty: lead === null };
-}
-
-/// "28 coins · $12.3K vol": the coins linking the post and what they traded in 24 h (left out under $1).
-export const postStat = (p: { coins: number; usd24: number }): string => `${plural(p.coins, "coin")}${hasVol(p.usd24) ? ` · ${usd(p.usd24)} vol` : ""}`;
-/// The same in sentences, saying what the numbers are not.
-export const postStatTitle = (p: { coins: number; usd24: number }): string => {
-  const one = p.coins === 1;
-  return `${plural(p.coins, "coin")} ${one ? "links" : "link"} to this post.${hasVol(p.usd24) ? ` ${one ? "It" : "They"} traded ${usd(p.usd24)} in the last 24 h.` : ""} This is not a measure of the post.`;
-};
-/// "Also linked by 5 other coins under $NVDAx"; null when no other coin links the post (or there is no parent).
-export function siblingsLine(own: NarrativeOwn | null | undefined): string | null {
-  const n = own?.siblings;
-  if (!own || typeof n !== "number" || !(n > 0)) return null;
-  return `Also linked by ${plural(n, "other coin")}${own.parent ? ` under ${label(own.parent)}` : ""}`;
-}
 /// A coin chip's words: "$JENSEN $1.2K", as its two parts (the 24 h volume is null under $1) and as one string.
 export const chipSym = (c: NarrativeCoin): string => label(c);
 export const chipVol = (c: NarrativeCoin): string | null => (hasVol(c.usd24) ? usd(c.usd24) : null);
 export const chipText = (c: NarrativeCoin): string => { const v = chipVol(c); return v ? `${chipSym(c)} ${v}` : chipSym(c); };
-/// The small line over the first row: whose link it is (`label`: the subject's ticker), and over the rest.
+
+/* ---------- one line */
+
+/// A line's time: "5m", "2h" (lib/format age); nothing for an unknown time.
+export const lineAge = (at: number | null | undefined): string => (typeof at === "number" && Number.isFinite(at) ? age(at) : "");
+/// A line's words. `lead`: "3 coins" for an event (always there, so the line reads before the post's text is in);
+/// null for a coin's own post. `handle` and `text`: only for a known text. A line with nothing else to say reads
+/// "Linked post".
+export type LineParts = { lead: string | null; handle: string | null; text: string };
+export function lineParts(p: NarrativeEvent | NarrativeOwn): LineParts {
+  const lead = "coins" in p ? plural(p.coins, "coin") : null;
+  const h = postHandle(p), text = postText(p);
+  return { lead, handle: h ? `@${h}` : null, text: text || (lead || h ? "" : "Linked post") };
+}
+/// The line as one string, as it reads across: "3 coins · @tradfi · NVIDIA to announce".
+export const lineText = (p: NarrativeEvent | NarrativeOwn): string => { const l = lineParts(p); return [l.lead, l.handle, l.text].filter(Boolean).join(" · "); };
+/// The coin at the end of an event's line: the first of its top coins (the server sends them best 24 h volume first).
+export const lineChip = (e: { top: NarrativeCoin[] }): NarrativeCoin | null => (Array.isArray(e.top) && e.top.length > 0 ? e.top[0] : null);
+
+/* ---------- the list */
+
+/// Which lines show: the first `collapsed`, or all once opened; `more`: how many "Show N more" would add.
+export function shownLines<T>(events: readonly T[], collapsed: number, expanded: boolean): { lines: T[]; more: number } {
+  const n = Math.max(1, Math.floor(collapsed));
+  return expanded || events.length <= n ? { lines: events.slice(), more: 0 } : { lines: events.slice(0, n), more: events.length - n };
+}
+export const moreText = (more: number): string => `Show ${count(more)} more`;
+/// The list while it is in use (a line is open, or the pointer or the keyboard is on it): exactly the lines that
+/// were on screen, in their order, each with what the new read says about it (a line the new read lacks keeps what it
+/// showed). Nothing is added, so no line moves under a finger or a reader; the new lines come when the hold ends
+/// (`held` null: the new read as it is).
+export function heldLines<T extends { id: string }>(fresh: readonly T[], held: readonly T[] | null | undefined): T[] {
+  if (!held) return fresh.slice();
+  const by = new Map<string, T>();
+  for (const e of fresh) if (!by.has(e.id)) by.set(e.id, e);
+  return held.map((e) => by.get(e.id) ?? e);
+}
+/// "14 earlier events", under the last line: the events older than the last one listed, which the server counts and
+/// does not list; null when there are none.
+export const earlierNote = (earlier: number | null | undefined): string | null => (typeof earlier === "number" && earlier >= 1 ? plural(Math.floor(earlier), "earlier event") : null);
+/// "5 other coins link this post"; null when no other coin links the coin's own post.
+export function othersLine(own: NarrativeOwn | null | undefined): string | null {
+  const n = own?.siblings;
+  if (!own || typeof n !== "number" || !(n > 0)) return null;
+  return n === 1 ? "1 other coin links this post" : `${count(n)} other coins link this post`;
+}
+
+/// What a coin's block shows. `own`: the coin's own post. `events`: the timeline of the coins under it. `under`: its
+/// parent's newest event, only for a coin with neither. `empty`: nothing at all.
+export type NarrativeView = {
+  own: NarrativeOwn | null; events: NarrativeEvent[]; earlier: number;
+  under: { event: NarrativeEvent; parent: { mint: string; name: string | null; symbol: string | null } } | null;
+  empty: boolean;
+};
+export function narrativeView(n: Narrative | null | undefined): NarrativeView {
+  const events = n && Array.isArray(n.events) ? n.events : [];
+  const own = n?.own ?? null;
+  const under = !own && events.length === 0 && n?.under?.event ? { event: n.under.event, parent: { mint: n.under.mint, name: n.under.name, symbol: n.under.symbol } } : null;
+  const earlier = n && typeof n.earlier === "number" && n.earlier >= 1 ? Math.floor(n.earlier) : 0;
+  return { own, events, earlier, under, empty: !own && events.length === 0 && !under };
+}
+
+export const CAPTION_TIMELINE = "Launch timeline";
 export const CAPTION_OWN = "Linked by this coin's creator";
-export const familyCaption = (label: string): string => `Linked by coins under ${label}`;
-export const moreCaption = (label: string): string => `More posts linked by coins under ${label}`;
-/// The button that opens the rest: the other posts counted, or plain "Show more" when only the words are behind it.
-export const moreText = (posts: number): string => (posts > 0 ? `Show ${posts} more` : "Show more");
-/// "Common words in names: jensen · senate · cat".
-export const wordsLine = (words: { w: string }[]): string => `Common words in names: ${words.map((x) => x.w).join(" · ")}`;
-/// Under every list of posts: who picked them, and that nobody checked.
-export const NARRATIVE_FOOT = "Posts are picked by coin creators, not checked, and their authors may have nothing to do with these coins.";
+/// Under every list: who picked the posts, and that nobody checked.
+export const NARRATIVE_FOOT = "Posts are picked by coin creators and aren't checked.";
 
 /* ---------- asking again while post texts are fetched */
 
 type Row = { id: string; state: NarrativeState; handle: string | null; text: string | null };
-const rowsOf = (n: Narrative): Row[] => [...(n.posts ?? []), ...(n.own ? [n.own] : []), ...(n.under?.post ? [n.under.post] : [])];
-/// Some row still waits for its text.
+const rowsOf = (n: Narrative): Row[] => [...(n.events ?? []), ...(n.own ? [n.own] : []), ...(n.under?.event ? [n.under.event] : [])];
+/// Some line still waits for its text.
 export const anyWait = (n: Narrative): boolean => rowsOf(n).some((r) => r.state === "wait");
 
-/// A later answer for the same coin, laid over what is on screen: the rows shown keep their order, their count and
-/// their numbers, and take only `state`, `handle` and `text` from the fresh body, by id. A row the fresh body lacks
+/// A later answer for the same coin, laid over what is on screen: the lines shown keep their order, their count and
+/// their numbers, and take only `state`, `handle` and `text` from the fresh body, by id. A line the fresh body lacks
 /// keeps what it had, except that it stops waiting ("wait" reads as "idle"): the server no longer lists the post (it
 /// turned out not to be available, or fell out of the list), so no text is coming for it. So a poll fills texts in
-/// and never moves, adds or removes a row. `pending` follows the rows shown, so the asking ends as soon as none of
+/// and never moves, adds or removes a line. `pending` follows the lines shown, so the asking ends as soon as none of
 /// them waits. A body for another coin replaces everything.
 export function mergePoll(shown: Narrative, fresh: Narrative | null | undefined): Narrative {
   if (!fresh) return shown;
@@ -105,9 +125,30 @@ export function mergePoll(shown: Narrative, fresh: Narrative | null | undefined)
   };
   const out: Narrative = {
     ...shown,
-    posts: (shown.posts ?? []).map(take),
+    events: (shown.events ?? []).map(take),
     own: shown.own ? take(shown.own) : shown.own,
-    under: shown.under?.post ? { ...shown.under, post: take(shown.under.post) } : shown.under,
+    under: shown.under?.event ? { ...shown.under, event: take(shown.under.event) } : shown.under,
+  };
+  out.pending = anyWait(out);
+  return out;
+}
+
+/// A new read of the same coin's list (the Discover page reads an open timeline again while coins keep launching):
+/// the new body is shown as it is, new events on top, except that a text on screen is not taken away: a line the new
+/// body has without its text ("wait" or "idle") keeps the `state`, `handle` and `text` it showed.
+export function mergeRefresh(shown: Narrative | null | undefined, fresh: Narrative): Narrative {
+  if (!shown || shown.mint !== fresh.mint) return fresh;
+  const known = new Map<string, Row>();
+  for (const r of rowsOf(shown)) if (r.state === "ok" && !known.has(r.id)) known.set(r.id, r);
+  const keep = <T extends Row>(r: T): T => {
+    const k = r.state === "wait" || r.state === "idle" ? known.get(r.id) : undefined;
+    return k ? { ...r, state: k.state, handle: k.handle, text: k.text } : r;
+  };
+  const out: Narrative = {
+    ...fresh,
+    events: (fresh.events ?? []).map(keep),
+    own: fresh.own ? keep(fresh.own) : fresh.own,
+    under: fresh.under?.event ? { ...fresh.under, event: keep(fresh.under.event) } : fresh.under,
   };
   out.pending = anyWait(out);
   return out;
@@ -127,9 +168,9 @@ export function settle(n: Narrative): Narrative {
   const idle = <T extends Row>(r: T): T => (r.state === "wait" ? { ...r, state: "idle" } : r);
   return {
     ...n,
-    posts: (n.posts ?? []).map(idle),
+    events: (n.events ?? []).map(idle),
     own: n.own ? idle(n.own) : n.own,
-    under: n.under?.post ? { ...n.under, post: idle(n.under.post) } : n.under,
+    under: n.under?.event ? { ...n.under, event: idle(n.under.event) } : n.under,
     pending: false,
   };
 }

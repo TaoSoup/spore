@@ -229,26 +229,32 @@ export type AgentCoin = {
 /// SSE `agent`: a new proposal; a live agent adds `launched` once the coin is on-chain. `root` is the
 /// root mint (a CoinRef is accepted too).
 export type AgentEvent = { root: string | CoinRef; proposal: AgentProposal & { launched?: { mint: string; signature: string | null } | null } };
-/// `GET /api/narrative/:mint`: the X posts the coins of a family link in their metadata. For a parent, the posts its
-/// children link, grouped and ranked (`posts`); for a child, its own post and how many other coins under its parent link
-/// the same one (`own`); for a child with neither, its parent's best post (`under`). The posts are picked by coin
-/// creators and unverified. Times are unix seconds. The web never follows `url`: it rebuilds the link from the id
-/// (lib/narrative.ts safePostUrl), and renders `handle` and `text` as plain text only.
+/// `GET /api/narrative/:mint`: the X posts the coins of a family link in their metadata, as a timeline. For a parent,
+/// one EVENT per post its children link, newest first (`events`); for a child, its own post and how many other coins
+/// under its parent link the same one (`own`); for a child with neither, its parent's newest event (`under`). The posts
+/// are picked by coin creators and unverified. Times are unix seconds. The web never follows `url`: it rebuilds the
+/// link from the id (lib/narrative.ts safePostUrl), and renders `handle` and `text` as plain text only.
 /// A coin linking a post, with its 24 h volume in USD.
 export type NarrativeCoin = { mint: string; name: string | null; symbol: string | null; image: string | null; usd24: number };
 /// "ok": the text is known; "wait": it is being fetched (expected within ~40 s); "none": not available; "idle": not
 /// fetched now. `handle` and `text` are set only with "ok" (`text` may be "": a media-only post).
 export type NarrativeState = "ok" | "wait" | "none" | "idle";
-/// `at`: the post's time read from its id (null when unknown); `coins`: how many coins link it; `usd24`: their summed
-/// 24 h volume; `top`: up to 3 of them.
-export type NarrativePost = { id: string; url: string; at: number | null; coins: number; usd24: number; state: NarrativeState; handle: string | null; text: string | null; top: NarrativeCoin[] };
-/// The subject's own post. `siblings`: the other coins under `parent` linking it (null without a parent); `top`: up to 3 of them.
+/// One post linked by coins of the subject. `at`: when the FIRST such coin was created; `lastAt`: the last;
+/// `postAt`: the post's own time read from its id; `coins`: how many coins link it; `usd24`: their summed 24 h
+/// volume; `top`: up to 3 of them.
+export type NarrativeEvent = { id: string; url: string; at: number; lastAt: number; postAt: number; coins: number; usd24: number; state: NarrativeState; handle: string | null; text: string | null; top: NarrativeCoin[] };
+/// The subject's own post (`at`: the post's time, null when unknown). `siblings`: the other coins under `parent` linking it (null without a parent); `top`: up to 3 of them.
 export type NarrativeOwn = { id: string; url: string; at: number | null; state: NarrativeState; handle: string | null; text: string | null; siblings: number | null; top: NarrativeCoin[]; parent: { mint: string; name: string | null; symbol: string | null } | null };
-/// The parent (`mint`, `name`, `symbol`) and its best post, for a coin with no post of its own.
-export type NarrativeUnder = { mint: string; name: string | null; symbol: string | null; post: NarrativePost };
-/// `members`: the subject's children counted; `linked`: those with a post; `words`: words many of their names share
-/// (`n` = distinct creators); `pending`: some state is "wait", so asking again soon is worth it.
-export type Narrative = { mint: string; asOf: number; members: number; linked: number; posts: NarrativePost[]; words: { w: string; n: number }[]; own: NarrativeOwn | null; under: NarrativeUnder | null; pending: boolean };
+/// The parent (`mint`, `name`, `symbol`) and its newest listed event, for a coin with no post of its own.
+export type NarrativeUnder = { mint: string; name: string | null; symbol: string | null; event: NarrativeEvent };
+/// `members`: the subject's children counted; `linked`: those with a post; `events`: at most 12, by `at` newest
+/// first; `earlier`: events not listed; `pending`: some state is "wait", so asking again soon is worth it.
+export type Narrative = { mint: string; asOf: number; members: number; linked: number; events: NarrativeEvent[]; earlier: number; own: NarrativeOwn | null; under: NarrativeUnder | null; pending: boolean };
+/// `GET /api/discover`: the parents whose tracked children were launched most in the last hour (`windowS`), by at
+/// least two creators. `bins`: launches per `binS` seconds, OLDEST first (the last bin is the most recent);
+/// `usd24`: the summed 24 h volume of those new coins; `top`: at most 2 of them, best 24 h volume first.
+export type DiscoverParent = { mint: string; name: string | null; symbol: string | null; image: string | null; new1h: number; creators1h: number; bins: number[]; usd24: number; top: NarrativeCoin[] };
+export type Discover = { asOf: number; windowS: number; binS: number; parents: DiscoverParent[] };
 export type RootSort = "locked" | "children" | "new" | "volume";
 /// `GET /api/jup/build`: Jupiter's Swap API v2 /build answer, relayed as is (https://developers.jup.ag/docs/api-reference/swap/build.md).
 /// Amounts are base units as strings. Each instruction is { programId, accounts, data (base64) }.
@@ -388,9 +394,11 @@ export const api = {
   /// The agent side of one coin: its own agent (a root) or the agent that launched it (a child). A
   /// server without the route answers 404; the page then shows nothing.
   agentCoin: (mint: string) => request<AgentCoin>(`/agents/coin/${encodeURIComponent(mint)}`),
-  /// The posts linked by a family's coins (see `Narrative`). 404 for a mint that is not a subject, and on a server
+  /// The posts linked by a family's coins, as a timeline (see `Narrative`). 404 for a mint that is not a subject, and on a server
   /// without the route; the UI then shows nothing.
   narrative: (mint: string) => request<Narrative>(`/narrative/${encodeURIComponent(mint)}`),
+  /// The parents getting new coins right now (see `Discover`); the server caches it ~10 s.
+  discover: () => request<Discover>("/discover"),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).

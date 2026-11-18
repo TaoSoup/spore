@@ -94,6 +94,9 @@ const STAMP_SKIP = new Set(["refreshedAt", "sharesAt", "createdProbe", "updatedA
 const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
 
+/** How far back the by-time index of new coins (`recent`) reaches, and the size from which an insert sweeps it. */
+export const RECENT_S = 2 * 3600, RECENT_SWEEP_MIN = 4096;
+
 export class Model {
   constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW, nestedAssetFamilyDraw = NESTED_ASSET_FAMILY_DRAW, mapSinceNodes = MAP_SINCE_NODES } = {}) {
     this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw; this.nestedAssetFamilyDraw = Math.max(assetFamilyDraw, nestedAssetFamilyDraw); this.mapSinceNodes = mapSinceNodes;
@@ -110,6 +113,8 @@ export class Model {
     this.children = new Map();      // quoteMint → Set<child mint>
     this.curves = new Map();        // bonding curve address → mint (the curve itself does not store it)
     this.pools = new Map();         // pool address → mint (graduated coins; maps pump-amm events back)
+    this.recent = new Map();        // mint → createdAt (unix s) of the tracked coins created in the last RECENT_S, as indexed (lib/discover.mjs walks it)
+    this.recentSweepAt = RECENT_SWEEP_MIN;
     this.creators = new Map();      // wallet → Set<mint> of the coins it launched: launcher, curve creator, share of a coin without a launcher (/api/portfolio)
     this.solUsd = null; this.solUsdAt = 0;
     this.quoteUsd = new Map();      // USD price of listed non-SOL quote mints we can price (PUMP, …)
@@ -198,6 +203,30 @@ export class Model {
     if (c.curve) this.curves.set(c.curve, c.mint);
     if (c.pool) this.pools.set(c.pool, c.mint);
     if (moved) for (const w of this.#launchWallets(c)) { let s = this.creators.get(w); if (!s) this.creators.set(w, s = new Set()); s.add(c.mint); }
+    // The by-time index of new coins: one comparison per indexed coin, so "what launched in the last hour" never
+    // scans the model. A coin joins when it is tracked and its creation time is known and recent; old entries leave
+    // when a reader meets them (recentCoins) or, with no reader, in a sweep each time the map doubles.
+    if (c.tracked && c.createdAt != null && c.createdAt > Math.floor(this.now() / 1000) - RECENT_S) {
+      this.recent.set(c.mint, c.createdAt);
+      if (this.recent.size >= this.recentSweepAt) {
+        const cutoff = Math.floor(this.now() / 1000) - RECENT_S;
+        for (const [m, at] of this.recent) if (at <= cutoff) this.recent.delete(m);
+        this.recentSweepAt = Math.max(RECENT_SWEEP_MIN, this.recent.size * 2);
+      }
+    } else if (prev && this.recent.has(c.mint)) this.recent.delete(c.mint);
+  }
+  /**
+   * The tracked coins created after `sinceS` (unix s; at most RECENT_S back), in no order: a generator over the
+   * by-time index, so a sliced pass can stop between coins. Entries older than RECENT_S are dropped on the way.
+   */
+  *recentCoins(sinceS) {
+    const cutoff = Math.floor(this.now() / 1000) - RECENT_S;
+    for (const [m, at] of this.recent) {
+      if (at <= cutoff) { this.recent.delete(m); continue; }
+      if (at <= sinceS) continue;
+      const c = this.coins.get(m);
+      if (c) yield c;
+    }
   }
   /**
    * The wallets `creators` lists a coin under. `launcher` is the wallet of the CreateEvent, known for a

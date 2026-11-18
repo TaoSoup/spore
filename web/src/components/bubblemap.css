@@ -312,7 +312,7 @@ main.map-main { padding: 0; }
 .map-side .map-side-in > :nth-child(5) { animation-delay: 90ms; }
 .map-side .map-side-in > :nth-child(6) { animation-delay: 120ms; }
 .map-side .map-side-in > :nth-child(n+7) { animation-delay: 150ms; }
-/* the linked posts (panel/NarrativeBlock) mount when their answer is in, after the cascade: no wait on top of that */
+/* the launch timeline (panel/NarrativeBlock) mounts when its answer is in, after the cascade: no wait on top of that */
 .map-side .map-side-in > .nar-block { animation-delay: 0s; }
 @keyframes mc-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .map-side-close { position: absolute; right: 10px; top: 10px; width: 28px; height: 28px; border: 1px solid var(--line-soft); border-radius: 50%; background: rgba(255,255,255,.035); color: var(--muted); font-size: 16px; line-height: 1; display: grid; place-items: center; z-index: 3; transition: color var(--dur-2), background var(--dur-2), transform var(--dur-2) var(--ease-out), border-color var(--dur-2); }
@@ -578,17 +578,6 @@ button.map-parent:hover, a.map-parent:hover { border-color: var(--line); backgro
   .map-side-title > .map-side-ids { overflow: visible; row-gap: 18px; }
   /* the family link's span clips (ellipsis), so the span and the link grow instead and pull back by the same margin */
   .map-fam-line > span:first-child, .map-fam-line .linkish { padding-block: 12px; margin-block: -12px; }
-  /* the linked posts (components/narrative): the post link, the caption's parent, Show more / less and the coin chips
-     keep their look and the block its height; an unseen margin makes each about 40 px tall under a finger (the link
-     and the caption clip their text, so they grow and pull back instead; positioned, so the margin lies over the lines
-     around it). No two margins meet. The caption line's controls grow upward, over the block's top padding and most of
-     the gap above it (1 px short of the links row there), and 4 px down. The post link grows downward, over the
-     post's text, and 1 px up, so the 6 px between the two lines keeps them apart; the 12 px under a row's chips (8 px
-     margin) keeps those clear of the next row's link. */
-  .map-side-in .nar-link { position: relative; padding-block: 1px 21px; margin-block: -1px -21px; }
-  .map-side-in .nar-cap-pick, .map-side-in .nar-cap-pick .linkish, .map-side-in .nar-head .nar-more { position: relative; padding-block: 19px 4px; margin-block: -19px -4px; }
-  .map-side-in .nar-chip { position: relative; }
-  .map-side-in .nar-chip::after { content: ""; position: absolute; inset: -8px -4px; }
   /* 44 px touch targets (DESIGN-ELEVATE §0.6). The engine measures these boxes live (label obstacles and the
      overlay inset), so growing them only moves labels and fits clear of the larger chrome. */
   .map-page .bm-controls button { width: 44px; height: 44px; }
