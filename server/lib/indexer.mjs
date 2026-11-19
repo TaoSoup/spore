@@ -69,6 +69,11 @@ const YOUNG_S = 30 * 60;
 // A migrated pool that prices other coins (the quote mint of tracked children) is re-read once per this
 // window instead of once per full pass, so a child's chain price does not trail its parent's pool.
 const PRICING_POOL_MS = 4 * 60_000;
+// A coin that completed its curve and is not seen migrated yet is watched (#expectPool): re-read every tick for at
+// most this long, and at most this many at once (a handful graduate at a time; 5 of 581k coins sat complete and not
+// migrated on Nov 19 2026), the oldest dropped first. The rolling pass picks up any it lets go.
+export const GRADUATING_MS = 30 * 60_000;
+export const GRADUATING_MAX = 200;
 // Mint records (name, symbol and the metadata uri that leads to a coin's logo). resolveOne stores only the
 // token program, so every resolved backfill batch reads its own mints at once; the catch-up reads the ones
 // stored before that (or whose batch read failed): a bounded slice soon after boot and every 10 min after,
@@ -117,6 +122,13 @@ export class Indexer {
     this.pairSent = new Map();   // mint → when its `pair` event went out (dedupe)
     this.assetScanning = false;  // the asset walk (scanAssetQuotes) in flight
     this.poolStats = { events: 0, tracked: 0, trades: 0 }; // pump-amm Buy/SellEvents seen, of tracked pools, stored as new trades (health)
+    // Coins that completed their curve, not seen migrated: mint → { pool, at } (the canonical pool their migration
+    // creates), and that pool → mint until a pool event adopts it (#expectPool, #adoptPool).
+    this.graduating = new Map(); this.poolsExpected = new Map();
+    // Both maps live in memory only: a restart (or a stream gap that took the CompleteEvent) leaves a completed coin
+    // unexpected until the rolling pass reaches it, often after its migration. The first tick, and the first after
+    // each curve-stream (re)connect, expects every tracked coin complete and not migrated (#expectPool; 5 of 581k).
+    this.expectSweep = true;
     this.state = { phase: "idle", backfillStartedAt: null, backfillDoneAt: null, lastRefreshAt: null, lastError: null, created: { probed: 0, found: 0 }, map: { pairs: 0, deltas: 0, deltaEntries: 0 },
       mints: { batchRead: 0, batchFailed: 0, catchUpRuns: 0, catchUpRead: 0, unread: null, lastCatchUpAt: null } };
   }
@@ -135,7 +147,7 @@ export class Indexer {
     const fill = this.model.tradeFill;
     const gaps = fill ? { resumeAt: fill.resumeAt, onGap: (a, b) => fill.addGap(a, b) } : {};
     this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...gaps,
-      onLogs: (n) => this.onLogs(n), onConnect: () => { this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
+      onLogs: (n) => this.onLogs(n), onConnect: () => { this.expectSweep = true; this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
     if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n, POOL_EVENT_PROGRAMS) }).start();
     this.refreshSolUsd().catch(() => {});
@@ -901,7 +913,8 @@ export class Indexer {
           // Most of pump-amm's trades are pools of coins outside the tree: the pool's key is read in place, the event decoded only for ours.
           const counted = accept === POOL_EVENT_PROGRAMS; // health counts the pool stream's own share
           if (counted) this.poolStats.events++;
-          const mint = this.model.pools.get(peekPool(data));
+          const pool = peekPool(data);
+          const mint = this.model.pools.get(pool) ?? (this.poolsExpected.size ? this.#adoptPool(pool) : null);
           if (mint) { if (counted) this.poolStats.tracked++; if (this.#onPoolTrade(mint, decodeEvent(name, data, ix), signature, slot, idx) && counted) this.poolStats.trades++; }
         }
       } catch (e) { this.state.lastError = `${name}: ${e.message}`; }
@@ -984,8 +997,78 @@ export class Indexer {
   #onComplete(e) {
     const c = this.model.upsertCoin({ mint: e.mint, complete: true });
     this.hot.add(e.mint);
+    this.#expectPool(c);
     this.hub?.emit("coin", this.model.view(c, { all: true }));
     this.log.info(`live: ${e.mint} completed its curve`);
+  }
+  /**
+   * A coin that completed its curve trades next on the pool its migration creates, and model.pools learned that pool
+   * only once a refresh read the curve as migrated: the hot read right after the CompleteEvent comes before the
+   * migration, and the rolling pass reached the coin 0-20 min later (more when it runs behind). Every pool trade in
+   * between was dropped, the busiest minutes of a coin (Nov 15-18 2026: 70 of 73 graduated coins whose start is
+   * stored go silent right after ~$45K, median 11 min, about 42k trades lost). The canonical pool is a PDA of the
+   * mint and its quote (as ensurePools reads it), known before it exists: it is expected here, the first pool
+   * event naming it adopts it, and the coin is re-read every tick until its pool's vaults are read. One PDA
+   * search per graduation (~1 ms), none per trade.
+   */
+  #expectPool(c) {
+    if (!c || c.migrated || this.graduating.has(c.mint)) return;
+    const pool = c.pool ?? canonicalPumpPoolPdaWithQuote(pk(c.mint), normalizeQuoteMint(c.quoteMint ? pk(c.quoteMint) : null)).toBase58();
+    this.graduating.set(c.mint, { pool, at: Date.now() });
+    if (!this.model.pools.has(pool)) this.poolsExpected.set(pool, c.mint);
+    while (this.graduating.size > GRADUATING_MAX) this.#forgetPool(this.graduating.keys().next().value);
+  }
+  #forgetPool(mint) {
+    const g = this.graduating.get(mint);
+    if (!g) return;
+    this.graduating.delete(mint);
+    if (this.poolsExpected.get(g.pool) === mint) this.poolsExpected.delete(g.pool);
+  }
+  /**
+   * The first event of an expected pool: only pump's migration creates a coin's canonical pool (its creator is pump's
+   * pool-authority PDA for that mint) and the event comes from pump-amm's own frame, so the coin has migrated. Its
+   * trades are priced from the event's reserves with no virtual quote until the next tick reads the pool (expected 0
+   * on a fresh pool: the pump-amm events that carry it are the boost's). Returns the mint, or null.
+   */
+  #adoptPool(pool) {
+    const mint = pool ? this.poolsExpected.get(pool) : undefined;
+    if (!mint) return null;
+    this.poolsExpected.delete(pool);
+    if (!this.model.coins.has(mint)) { this.graduating.delete(mint); return null; }
+    this.model.upsertCoin({ mint, migrated: true, pool });
+    this.hot.add(mint);
+    this.state.poolsAdopted = (this.state.poolsAdopted ?? 0) + 1;
+    this.log.info(`live: ${mint} trades on its pool ${pool}`);
+    return mint;
+  }
+  /**
+   * One tick's watch over graduating coins, given the coins it just read: a coin seen migrated with its vaults read
+   * is done, one complete and not migrated is expected (a CompleteEvent the stream missed, read later), and an entry
+   * older than GRADUATING_MS is dropped. A restart or a stream gap is covered by refresh's sweep (expectSweep).
+   */
+  #watchGraduating(fresh) {
+    for (const c of fresh) {
+      if (c.migrated) { if (c.poolQuoteVault) this.#forgetPool(c.mint); }
+      else if (c.complete) this.#expectPool(c);
+    }
+    const old = Date.now() - GRADUATING_MS;
+    for (const [mint, g] of this.graduating) if (g.at < old) this.#forgetPool(mint);
+  }
+
+  /**
+   * A curve read held against the model's copy as it is now, not as it was when the read went out: a pump curve never
+   * un-completes or un-migrates, so a read that says otherwise predates something the stream applied while it was in
+   * flight (a pool event adopting the coin's pool, #adoptPool; a CompleteEvent), or a lagging node answered. Spread
+   * as it came, it set `migrated` back to false and priced the coin's pool trades from the frozen curve until the next
+   * tick (4700x off on the chart, Nov 19 2026 review). Its stale flags and curve reserves are dropped; the rest stays.
+   */
+  #oneWay(mint, cur) {
+    const now = this.model.get(mint);
+    if (!now || (!(now.migrated && !cur.migrated) && !(now.complete && !cur.complete))) return cur;
+    const out = { ...cur };
+    if (now.complete && !cur.complete) delete out.complete;
+    if (now.migrated && !cur.migrated) for (const k of ["migrated", "virtualTokenReserves", "virtualQuoteReserves", "realTokenReserves", "realQuoteReserves"]) delete out[k];
+    return out;
   }
 
   // ---------------------------------------------------------------- refresh loop
@@ -1010,9 +1093,15 @@ export class Indexer {
       this.model.evictUntracked();
       // Hot = live activity, recent API views, spawns the UI reported (pending "ours") and young coins:
       // all of them get their curve and sharing config re-read every tick.
-      const hotMints = new Set([...this.hot, ...[...this.model.touched].filter(([, t]) => t > recent).map(([m]) => m), ...this.model.pendingMints()]);
+      // Graduating coins too (#expectPool): until their pool's vaults are read, whatever adopted the pool.
+      const hotMints = new Set([...this.hot, ...[...this.model.touched].filter(([, t]) => t > recent).map(([m]) => m), ...this.model.pendingMints(), ...this.graduating.keys()]);
       this.hot.clear();
-      for (const c of all) if (this.isYoung(c)) hotMints.add(c.mint);
+      // The sweep rides the loop the young coins need anyway: no extra pass, and a coin it expects is read this tick.
+      const sweep = this.expectSweep; this.expectSweep = false;
+      for (const c of all) {
+        if (this.isYoung(c)) hotMints.add(c.mint);
+        if (sweep && c.complete && !c.migrated) { this.#expectPool(c); if (this.graduating.has(c.mint)) hotMints.add(c.mint); }
+      }
       const set = new Map(slice.map((c) => [c.mint, c]));
       for (const m of hotMints) { const c = this.model.get(m); if (c) set.set(m, c); }
       const coins = [...set.values()];
@@ -1023,7 +1112,7 @@ export class Indexer {
         infos.forEach((info, i) => {
           if (!info) return;
           try {
-            const cur = decodeCurve(info.data, part[i].curve);
+            const cur = this.#oneWay(part[i].mint, decodeCurve(info.data, part[i].curve));
             const wasMigrated = part[i].migrated;
             this.model.upsertCoin({ mint: part[i].mint, ...cur, refreshedAt: nowS() });
             if (cur.migrated && !wasMigrated) newlyMigrated.add(part[i].mint);
@@ -1037,6 +1126,7 @@ export class Indexer {
       for (const c of this.pricingSlice()) if (!newlyMigrated.has(c.mint)) vaults.set(c.mint, c);
       await this.refreshVaults([...vaults.values()]);
       this.state.lastVaultsAt = nowS();
+      this.#watchGraduating(fresh.map((c) => this.model.get(c.mint)).filter(Boolean));
       await this.ensureMintInfo(fresh);
       await this.ensureShares(fresh.filter((c) => hotMints.has(c.mint) || nowS() - (c.sharesAt ?? 0) > SHARES_TTL_S), { force: true });
       for (const c of coins) { const uri = this.model.mint(c.mint)?.uri; if (uri) this.meta?.request(uri, { front: hotMints.has(c.mint) }); }
@@ -1087,7 +1177,7 @@ export class Indexer {
     const curveKey = bondingCurvePda(mint).toBase58();
     const [info, mintInfo] = await rpc.getMultipleAccounts([curveKey, mint]);
     if (!info || info.owner !== PUMP_PROGRAM_ID.toBase58()) return null;
-    const cur = decodeCurve(info.data, curveKey);
+    const cur = this.#oneWay(mint, decodeCurve(info.data, curveKey));
     const m = mintInfo ? decodeMint(mintInfo.data, mintInfo.owner) : null;
     if (m) this.model.setMint({ mint, decimals: m.decimals, tokenProgram: m.tokenProgram, supply: m.supply, ...(m.metadata ?? {}), onchainAt: m.metadata ? nowS() : 0 });
     const known = this.model.get(mint);

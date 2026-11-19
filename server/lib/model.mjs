@@ -8,6 +8,7 @@ import { USDC_MINT, NATIVE_MINT, TOKEN_2022_PROGRAM_ID } from "./sdk.mjs";
 import { priceQuoteOf, chainPrices, progressOf, units, mcapCapOf, liqQuoteOf } from "./pricing.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { Activity } from "./activity.mjs";
+import { Wakeups } from "./wakeups.mjs";
 import { drain, runSliced } from "./sliced.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -94,9 +95,6 @@ const STAMP_SKIP = new Set(["refreshedAt", "sharesAt", "createdProbe", "updatedA
 const PARENT_KEYS = ["realQuoteReserves", "migrated", "poolQuote", "tracked"];
 const same = (a, b) => (a === b ? true : typeof a === "object" && typeof b === "object" && a !== null && b !== null ? JSON.stringify(a) === JSON.stringify(b) : false);
 
-/** How far back the by-time index of new coins (`recent`) reaches, and the size from which an insert sweeps it. */
-export const RECENT_S = 2 * 3600, RECENT_SWEEP_MIN = 4096;
-
 export class Model {
   constructor(db, { platformWallet, splitBps, platformMinBps = null, mode = "all", now = Date.now, log = console, assetFamilyDraw = ASSET_FAMILY_DRAW, nestedAssetFamilyDraw = NESTED_ASSET_FAMILY_DRAW, mapSinceNodes = MAP_SINCE_NODES } = {}) {
     this.db = db; this.log = log; this.now = now; this.assetFamilyDraw = assetFamilyDraw; this.nestedAssetFamilyDraw = Math.max(assetFamilyDraw, nestedAssetFamilyDraw); this.mapSinceNodes = mapSinceNodes;
@@ -113,8 +111,6 @@ export class Model {
     this.children = new Map();      // quoteMint → Set<child mint>
     this.curves = new Map();        // bonding curve address → mint (the curve itself does not store it)
     this.pools = new Map();         // pool address → mint (graduated coins; maps pump-amm events back)
-    this.recent = new Map();        // mint → createdAt (unix s) of the tracked coins created in the last RECENT_S, as indexed (lib/discover.mjs walks it)
-    this.recentSweepAt = RECENT_SWEEP_MIN;
     this.creators = new Map();      // wallet → Set<mint> of the coins it launched: launcher, curve creator, share of a coin without a launcher (/api/portfolio)
     this.solUsd = null; this.solUsdAt = 0;
     this.quoteUsd = new Map();      // USD price of listed non-SOL quote mints we can price (PUMP, …)
@@ -134,6 +130,9 @@ export class Model {
     // sqlite keeps every trade of the last 24 h up to 50 000 a mint (db.insertTrade), so the seed is exact below
     // that; a mint above it reads higher than a SQL recount until the next restart re-seeds.
     this.activity = new Activity({ now: () => Math.floor(this.now() / 1000) });
+    // Wake-ups (lib/wakeups.mjs, GET /api/discover): per-parent buyers of existing children per 5 minutes, fed by the
+    // same live trades and seeded from the same rows; the server attaches the SSE hub and the linked posts.
+    this.wakeups = new Wakeups({ model: this, now: () => this.now(), log });
     this.heatCache = null;
     this.touched = new Map();       // mint → last API access (ms); the refresh loop prioritises these
     this.updatedAt = nowS();
@@ -159,11 +158,15 @@ export class Model {
     this.pending = new Map(Object.entries(this.db.kvGet("oursPending", {})));
     for (const [mint, url] of Object.entries(this.db.kvGet("assetIcons", {}) ?? {})) if (typeof url === "string" && url.startsWith("https://")) { this.assetIcons.set(mint, url); this.imageUrls.add(url); }
     const t0 = performance.now();
-    const seeded = this.activity.seed(this.db.tradesWindow(Math.floor(this.now() / 1000) - this.activity.dayS));
+    // One read of the last 24 h feeds both the activity counters and the wake-up buckets (no event for history).
+    let seeded = 0;
+    this.wakeups.beginSeed();
+    for (const r of this.db.tradesWindow(Math.floor(this.now() / 1000) - this.activity.dayS)) { if (this.activity.record(r)) seeded++; this.wakeups.record(r); }
+    this.wakeups.endSeed();
     this.activity.seededMs = Math.round(performance.now() - t0);
     this.#bump();
     this.log.info?.(`model: ${this.coins.size} coins, ${this.mints.size} mints, ${this.meta.size} metadata entries loaded`);
-    this.log.info?.(`activity seeded ${seeded} trades in ${this.activity.seededMs} ms`);
+    this.log.info?.(`activity seeded ${seeded} trades in ${this.activity.seededMs} ms (wake-ups ${this.wakeups.stats.seedMs} ms of it, ${this.wakeups.waking.size} listed)`);
   }
 
   #bump() { this.version++; this.updatedAt = nowS(); }
@@ -203,30 +206,6 @@ export class Model {
     if (c.curve) this.curves.set(c.curve, c.mint);
     if (c.pool) this.pools.set(c.pool, c.mint);
     if (moved) for (const w of this.#launchWallets(c)) { let s = this.creators.get(w); if (!s) this.creators.set(w, s = new Set()); s.add(c.mint); }
-    // The by-time index of new coins: one comparison per indexed coin, so "what launched in the last hour" never
-    // scans the model. A coin joins when it is tracked and its creation time is known and recent; old entries leave
-    // when a reader meets them (recentCoins) or, with no reader, in a sweep each time the map doubles.
-    if (c.tracked && c.createdAt != null && c.createdAt > Math.floor(this.now() / 1000) - RECENT_S) {
-      this.recent.set(c.mint, c.createdAt);
-      if (this.recent.size >= this.recentSweepAt) {
-        const cutoff = Math.floor(this.now() / 1000) - RECENT_S;
-        for (const [m, at] of this.recent) if (at <= cutoff) this.recent.delete(m);
-        this.recentSweepAt = Math.max(RECENT_SWEEP_MIN, this.recent.size * 2);
-      }
-    } else if (prev && this.recent.has(c.mint)) this.recent.delete(c.mint);
-  }
-  /**
-   * The tracked coins created after `sinceS` (unix s; at most RECENT_S back), in no order: a generator over the
-   * by-time index, so a sliced pass can stop between coins. Entries older than RECENT_S are dropped on the way.
-   */
-  *recentCoins(sinceS) {
-    const cutoff = Math.floor(this.now() / 1000) - RECENT_S;
-    for (const [m, at] of this.recent) {
-      if (at <= cutoff) { this.recent.delete(m); continue; }
-      if (at <= sinceS) continue;
-      const c = this.coins.get(m);
-      if (c) yield c;
-    }
   }
   /**
    * The wallets `creators` lists a coin under. `launcher` is the wallet of the CreateEvent, known for a
@@ -449,11 +428,13 @@ export class Model {
    * is tracked: one Map lookup per trade otherwise. It is asked for a replayed trade too, since the wallet may have
    * become tracked between the two deliveries; its own primary key keeps the row single.
    */
-  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) this.activity.record(t); this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
+  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) { this.activity.record(t); this.wakeups.record(t); } this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
   /**
    * A trade read back from the chain (lib/trade-fill.mjs): stored, and kept for a tracked trader. Nothing else, for these reasons:
    * - Activity is not fed: its ring is time-ordered, and an hours-old row would stay counted about a day too long. The
    *   next boot's seed counts it.
+   * - Nor are the wake-ups (lib/wakeups.mjs): an old row must never start a wake-up and push an alert. The next boot's
+   *   seed counts it, with events off.
    * - No #bump: nothing in memory changed (the trade readers, /api/trades and /api/candles, read the table).
    * - Never upsertCoin: the event's reserves are old.
    * - Never an SSE "trade" event: the print is not fresh.

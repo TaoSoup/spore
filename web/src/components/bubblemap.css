@@ -312,8 +312,8 @@ main.map-main { padding: 0; }
 .map-side .map-side-in > :nth-child(5) { animation-delay: 90ms; }
 .map-side .map-side-in > :nth-child(6) { animation-delay: 120ms; }
 .map-side .map-side-in > :nth-child(n+7) { animation-delay: 150ms; }
-/* the launch timeline (panel/NarrativeBlock) mounts when its answer is in, after the cascade: no wait on top of that */
-.map-side .map-side-in > .nar-block { animation-delay: 0s; }
+/* the "Moving now" block (panel/MovingBlock) mounts when its answer is in, after the cascade: no wait on top of that */
+.map-side .map-side-in > .map-moving { animation-delay: 0s; }
 @keyframes mc-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .map-side-close { position: absolute; right: 10px; top: 10px; width: 28px; height: 28px; border: 1px solid var(--line-soft); border-radius: 50%; background: rgba(255,255,255,.035); color: var(--muted); font-size: 16px; line-height: 1; display: grid; place-items: center; z-index: 3; transition: color var(--dur-2), background var(--dur-2), transform var(--dur-2) var(--ease-out), border-color var(--dur-2); }
 .map-side-close:hover { color: var(--ink); background: var(--glass-3); border-color: rgba(255,255,255,.16); transform: rotate(90deg); }
@@ -499,6 +499,27 @@ button.map-parent:hover, a.map-parent:hover { border-color: var(--line); backgro
 .map-kid .mono { font-size: var(--fs-2xs); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .map-kid .accent { color: var(--accent); }
 .map-kid .muted { color: var(--faint); }
+/* the "Moving now" block (panel/MovingBlock): a caption and up to three coins, one 26 px line each, under a hairline like
+   the panel's other sections; about 110 px whatever it holds. While another coin's answer loads it stays, dimmed (the
+   children, not the block: the panel's entry animation holds the block's own opacity). */
+.map-moving { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+.map-moving > * { transition: opacity var(--dur-2); }
+.map-moving[aria-busy="true"] > * { opacity: .45; }
+.map-moving-cap { display: flex; align-items: center; gap: 6px; margin: 0; min-width: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); }
+.map-moving-cap span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-moving-cap i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* "st-" prefixed: the app's global .live (the stream dot) would lowercase the caption and ring its dot */
+.map-moving-cap.st-live { color: var(--good); }
+.map-moving-cap.st-cooling { color: var(--warn); }
+.map-moving ul { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; list-style: none; }
+.map-moving-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) 52px 72px; align-items: center; gap: 8px; height: 26px; padding: 0 6px; border-radius: 8px; color: var(--ink); font-size: 12px; transition: background var(--dur-1); }
+.map-moving-row:hover, .map-moving-row:focus-visible { background: linear-gradient(90deg, rgba(var(--accent-rgb), .1), rgba(var(--accent-rgb), .02)); text-decoration: none; }
+.map-moving-id { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.map-moving-id b { min-width: 0; font-family: var(--mono); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-moving-id i { flex: none; padding: 0 4px; border: 1px solid var(--line-soft); border-radius: 4px; font-size: 10px; font-style: normal; line-height: 13px; color: var(--muted); }
+.map-moving-id i.new { border-style: dashed; }
+.map-moving-row .mono { font-size: var(--fs-2xs); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.map-moving-row .muted { color: var(--faint); }
 .map-more { justify-self: start; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--accent); }
 /* a listed asset's list past what is loaded: "loading… 5,000 of 49,596", a phone's cap, a failed page */
 .map-more-note { justify-self: start; margin: 0; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--faint); font-variant-numeric: tabular-nums; }

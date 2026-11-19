@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS x_posts (
   fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, recheck_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
+CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL) WITHOUT ROWID;
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -212,6 +213,9 @@ export class Db {
     // embed API answered, `state` 'ok' (with `handle` and `text`; `flagged` 1 = the text is withheld and stored empty) or
     // 'none' (no such post, or not shown to us), the unix s of the fetch, of the next recheck and of the last ask
     // (`asked_at`, written at most hourly, by which rows are pruned).
+    // `launch_flow` (lib/wakeups.mjs, the "creator sold its buy within 10 min" fact) is a new table only too: per coin the
+    // base units its launcher bought and sold in its first 10 min, written once that window was seen whole, because the
+    // per-mint trim of `trades` deletes a busy coin's launch rows within a day. One row per tracked child, like `coins`.
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
@@ -254,7 +258,16 @@ export class Db {
       // An older page of the coin page's chart (/api/candles before=): [from, to), and the newest trade below a page.
       tradesRange: p("SELECT * FROM trades WHERE mint = ? AND time >= ? AND time < ? ORDER BY time ASC, slot ASC, rowid ASC"),
       tradeTimeBefore: p("SELECT MAX(time) AS t FROM trades WHERE mint = ? AND time < ?"),
-      tradesWindow: p("SELECT mint, time, is_buy, value_usd FROM trades WHERE time >= ? ORDER BY time, rowid"),
+      tradesWindow: p("SELECT mint, time, is_buy, value_usd, user, base_amount FROM trades WHERE time >= ? ORDER BY time, rowid"),
+      // A launcher's own buys and sells of its coin in a time range (lib/wakeups.mjs: "the creator sold its buy within 10 min").
+      // The (mint, time) index narrows the rows; amounts are u64 strings, summed as REAL (a ratio needs no more precision).
+      creatorFlow: p("SELECT is_buy, SUM(CAST(base_amount AS REAL)) AS amt FROM trades WHERE mint = ? AND time >= ? AND time < ? AND user = ? GROUP BY is_buy"),
+      tradeFirstTime: p("SELECT MIN(time) AS t FROM trades WHERE mint = ?"),
+      // The newest stored USD price of a mint (lib/wakeups.mjs: a coin the model prices in its parent only); (mint, time) index, newest first.
+      lastPriceUsd: p("SELECT price_usd FROM trades WHERE mint = ? AND price_usd > 0 ORDER BY time DESC LIMIT 1"),
+      launchFlowGet: p("SELECT bought, sold, created_at FROM launch_flow WHERE mint = ?"),
+      // The first whole record wins: a late print in a coin's window seen after it was written must not replace it.
+      launchFlowPut: p("INSERT OR IGNORE INTO launch_flow (mint, bought, sold, created_at) VALUES (?, ?, ?, ?)"),
       vol24: p("SELECT COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE mint = ? AND time >= ?"),
       vol24All: p("SELECT mint, COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE time >= ? GROUP BY mint"),
       metaGet: p("SELECT * FROM meta WHERE uri = ?"),
@@ -433,7 +446,21 @@ export class Db {
   tradeTimeBefore(mint, t) { return this.q.tradeTimeBefore.get(mint, t)?.t ?? null; }
   /** Every stored trade at or after `sinceS`, oldest first (trades_time index): what seeds the activity counters at boot. */
   /** Trades since `sinceS` in time order, one at a time: the boot seed reads millions of rows, and as one array they were 1.7 GB of heap at 3M. */
-  *tradesWindow(sinceS) { for (const r of this.q.tradesWindow.iterate(sinceS)) yield { mint: r.mint, time: r.time, isBuy: !!r.is_buy, valueUsd: r.value_usd }; }
+  *tradesWindow(sinceS) { for (const r of this.q.tradesWindow.iterate(sinceS)) yield { mint: r.mint, time: r.time, isBuy: !!r.is_buy, valueUsd: r.value_usd, user: r.user, baseAmount: r.base_amount }; }
+  /** `{ bought, sold }`: base units (as numbers) `user` bought and sold of `mint` with `from <= time < to`. */
+  creatorFlow(mint, from, to, user) {
+    let bought = 0, sold = 0;
+    for (const r of this.q.creatorFlow.all(mint, from, to, user)) { if (r.is_buy) bought = r.amt ?? 0; else sold = r.amt ?? 0; }
+    return { bought, sold };
+  }
+  /** The time of the mint's oldest stored trade, or null. */
+  tradeFirstTime(mint) { return this.q.tradeFirstTime.get(mint)?.t ?? null; }
+  /** The USD price of the mint's newest stored trade that has one, or null. */
+  lastPriceUsd(mint) { return this.q.lastPriceUsd.get(mint)?.price_usd ?? null; }
+  /** A coin's launch-window creator flow `{ bought, sold, createdAt }` (lib/wakeups.mjs), or null. */
+  launchFlowGet(mint) { const r = this.q.launchFlowGet.get(mint); return r ? { bought: r.bought, sold: r.sold, createdAt: r.created_at } : null; }
+  /** Writes it unless the coin has one; returns whether it was written. */
+  launchFlowPut(mint, bought, sold, createdAt) { return Number(this.q.launchFlowPut.run(mint, bought, sold, createdAt).changes) > 0; }
   volume24h(mint) { const r = this.q.vol24.get(mint, now() - 86_400); return { trades: r.n, usd: r.usd }; }
   /** A fresh GROUP BY over 24 h of trades; the API reads the in-memory counters (activity.mjs) instead, this is their reference. */
   volume24hAll() { return new Map(this.q.vol24All.all(now() - 86_400).map((r) => [r.mint, { trades: r.n, usd: r.usd }])); }

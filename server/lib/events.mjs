@@ -1,4 +1,4 @@
-// Server-sent events hub for /api/events: `coin`, `trade` and `stats` events plus a heartbeat
+// Server-sent events hub for /api/events: `coin`, `trade`, `stats` and `wake` (lib/wakeups.mjs) events, among others, plus a heartbeat
 // comment every 15 s so proxies and browsers keep the connection open.
 //
 // Connections are bounded (per client IP and in total) and a client that stops reading is dropped

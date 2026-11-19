@@ -250,11 +250,41 @@ export type NarrativeUnder = { mint: string; name: string | null; symbol: string
 /// `members`: the subject's children counted; `linked`: those with a post; `events`: at most 12, by `at` newest
 /// first; `earlier`: events not listed; `pending`: some state is "wait", so asking again soon is worth it.
 export type Narrative = { mint: string; asOf: number; members: number; linked: number; events: NarrativeEvent[]; earlier: number; own: NarrativeOwn | null; under: NarrativeUnder | null; pending: boolean };
-/// `GET /api/discover`: the parents whose tracked children were launched most in the last hour (`windowS`), by at
-/// least two creators. `bins`: launches per `binS` seconds, OLDEST first (the last bin is the most recent);
-/// `usd24`: the summed 24 h volume of those new coins; `top`: at most 2 of them, best 24 h volume first.
-export type DiscoverParent = { mint: string; name: string | null; symbol: string | null; image: string | null; new1h: number; creators1h: number; bins: number[]; usd24: number; top: NarrativeCoin[] };
-export type Discover = { asOf: number; windowS: number; binS: number; parents: DiscoverParent[] };
+/// `GET /api/discover`: the families whose existing coins are being bought far above their normal level (a "wake-up").
+/// Per parent and per 5-minute bucket (`bucketS`) the server counts the distinct wallets that bought (>= $1) a child
+/// launched more than 30 min before the bucket; a bucket fires at >= 50 such buyers over >= 3 coins and >= 5x the
+/// parent's trailing-24 h mean per bucket, and a new wake-up starts at most once per 3 h a parent. At most 12 families:
+/// "live" first (newest `startedAt` first), then "cooling". Every figure is measured; none says why or what comes next.
+export type WakeParent = { mint: string; name: string | null; symbol: string | null; image: string | null; isCoin: boolean };
+/// The X post linked by the most children that traded since the start (>= 2 of them). `at`: the post's time; `coins`:
+/// how many of those children link it; `handle` / `text` / `state` as in a narrative event (the server's post fetcher).
+/// The web never follows `url`: it rebuilds the link from the id (lib/narrative.ts safePostUrl).
+export type WakePost = { id: string; url: string; at: number | null; handle: string | null; text: string | null; state: NarrativeState; coins: number };
+/// A child moving now. `existing`: created before startedAt - 30 min (or with no known creation time); `sinceStart`:
+/// last price / price at startedAt, null for a new coin (its first trade would count its own launch buy) or when
+/// unknown; `copyOf`: for a new coin linking a post, how many earlier children of the parent link the same one (5: the
+/// 6th copy); `buyers15m`: only in a quiet answer, the distinct $1+ buyers over the last 3 complete buckets.
+export type WakeCoin = { mint: string; name: string | null; symbol: string | null; image: string | null; createdAt: number | null; existing: boolean; mcapUsd: number | null; sinceStart: number | null; buyers5m: number; buyers15m?: number; copyOf: number | null };
+export type WakeState = "live" | "cooling";
+/// One family waking up. `ratio`: the latest complete bucket's buyers / `baseline` (the current trailing-24 h mean per
+/// bucket, floored), 0 when the parent had no trade in that bucket; `spark`: distinct buyers per bucket for the last 2 h, OLDEST first (24 points, the last is the latest
+/// complete bucket); `coins`: at most 6, most buyers first; `more`: other children that traded in the last 5 min;
+/// `hidden`: children that traded since the start left out by the creator checks (sold out early, mass or repeat launch).
+export type WakeFamily = {
+  parent: WakeParent; startedAt: number; state: WakeState; ratio: number; peakRatio: number;
+  buyers5m: number; trades5m: number; spark: number[]; baseline: number; coinsTrading: number;
+  post: WakePost | null; coins: WakeCoin[]; more: number; hidden: number;
+};
+export type Discover = { asOf: number; bucketS: number; families: WakeFamily[] };
+/// `GET /api/discover/:mint`: the family when it is listed, else "quiet" with the top 3 children by buyers in the last
+/// 15 min (`sinceStart` null) and the other figures null or 0. 404 for a mint the server does not know.
+export type DiscoverQuiet = {
+  parent: WakeParent; state: "quiet"; startedAt: null; ratio: null; peakRatio: null; buyers5m: number; trades5m: number;
+  spark: number[] | null; baseline: number | null; coinsTrading: number; post: null; coins: WakeCoin[]; more: number; hidden: number;
+};
+export type DiscoverOne = WakeFamily | DiscoverQuiet;
+/// SSE `wake`: a wake-up started (published once, when its first bucket fires).
+export type WakeEvent = { parent: { mint: string; symbol: string | null; name: string | null }; startedAt: number; ratio: number; buyers5m: number };
 export type RootSort = "locked" | "children" | "new" | "volume";
 /// `GET /api/jup/build`: Jupiter's Swap API v2 /build answer, relayed as is (https://developers.jup.ag/docs/api-reference/swap/build.md).
 /// Amounts are base units as strings. Each instruction is { programId, accounts, data (base64) }.
@@ -397,8 +427,10 @@ export const api = {
   /// The posts linked by a family's coins, as a timeline (see `Narrative`). 404 for a mint that is not a subject, and on a server
   /// without the route; the UI then shows nothing.
   narrative: (mint: string) => request<Narrative>(`/narrative/${encodeURIComponent(mint)}`),
-  /// The parents getting new coins right now (see `Discover`); the server caches it ~10 s.
+  /// The families buying far above their normal level (see `Discover`); the server caches it 5 s.
   discover: () => request<Discover>("/discover"),
+  /// One parent's wake-up, or its quiet "moving now" coins (see `DiscoverOne`); 404 for an unknown mint.
+  discoverOf: (mint: string) => request<DiscoverOne>(`/discover/${encodeURIComponent(mint)}`),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).

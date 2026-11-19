@@ -11,12 +11,12 @@ import { join } from "node:path";
 import anchor from "@coral-xyz/anchor";
 import { Db } from "../lib/db.mjs";
 import { Model } from "../lib/model.mjs";
-import { Indexer, peekPool, POOL_EVENT_POOL_OFFSET, POOL_EVENT_PROGRAMS } from "../lib/indexer.mjs";
+import { Indexer, peekPool, POOL_EVENT_POOL_OFFSET, POOL_EVENT_PROGRAMS, GRADUATING_MAX, GRADUATING_MS } from "../lib/indexer.mjs";
 import { LogsSubscriber } from "../lib/live.mjs";
-import { EVENT_DISCRIMINATORS, decodeEvent, eventsInLogs } from "../lib/decode.mjs";
+import { BONDING_CURVE_DISCRIMINATOR, EVENT_DISCRIMINATORS, decodeEvent, eventsInLogs } from "../lib/decode.mjs";
 import { healthOf } from "../lib/api.mjs";
 import { loadConfig } from "../lib/config.mjs";
-import { BN, PublicKey, pumpIdl, pumpAmmIdl, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID } from "../lib/sdk.mjs";
+import { BN, PublicKey, pumpIdl, pumpAmmIdl, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, bondingCurvePda, canonicalPumpPoolPdaWithQuote, normalizeQuoteMint, pk } from "../lib/sdk.mjs";
 import { PLATFORM, quiet, T22 } from "./helpers/tree.mjs";
 
 const key = (seed) => new PublicKey(Buffer.alloc(32, seed)).toBase58();
@@ -303,4 +303,184 @@ test("LIVE_POOLS: on by default, 0 turns the pool stream off", () => {
     assert.equal(loadConfig(env, { here: dir }).livePools, true);
     assert.equal(loadConfig({ ...env, LIVE_POOLS: "0" }, { here: dir }).livePools, false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Graduation (Nov 19 2026): model.pools learned a graduated coin's pool only once a refresh read its curve as
+// migrated, 0-20 min after the CompleteEvent, and every pool trade in between was dropped (70 of 73 graduated coins
+// whose start was stored went silent right after ~$45K, median 11 min). The canonical pool is expected from the
+// CompleteEvent on, and its first event adopts it.
+const completeEvent = (mint) => payload(pumpIdl, "CompleteEvent", { mint: new PublicKey(mint), timestamp: new BN(Math.floor(Date.now() / 1000)) });
+const kidPool = () => canonicalPumpPoolPdaWithQuote(pk(KID), normalizeQuoteMint(pk(M))).toBase58();
+/** An RPC that knows no account (every read answers null), counting the keys asked. */
+const emptyRpc = () => { const rpc = { asked: [], snapshot: () => ({}), async getMultipleAccounts(keys) { rpc.asked.push(...keys); return keys.map(() => null); } }; return rpc; };
+
+test("a CompleteEvent expects the coin's canonical pool: its first pool event is stored, marks the coin migrated and indexes the pool", () => {
+  const { m, ix, trades } = setup();
+  const pool = kidPool();
+  // before: a trade on a pool nobody knows is dropped, as it always was
+  ix.onLogs({ slot: 4, signature: "EARLY", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) }, POOL_EVENT_PROGRAMS);
+  assert.equal(m.db.tradesFor(KID).length, 0);
+  ix.onLogs({ slot: 5, signature: "DONE", err: null, logs: frame(CURVE, completeEvent(KID)) });
+  assert.equal(m.get(KID).complete, true); assert.equal(m.get(KID).migrated, false);
+  assert.equal(ix.graduating.get(KID).pool, pool); assert.equal(ix.poolsExpected.get(pool), KID);
+  // a pool event of another pool adopts nothing
+  ix.onLogs({ slot: 6, signature: "OTHER", err: null, logs: frame(AMM, poolEvent("BuyEvent", OTHER_POOL)) }, POOL_EVENT_PROGRAMS);
+  assert.equal(ix.poolsExpected.size, 1); assert.equal(m.get(KID).migrated, false);
+  ix.hot.clear();
+  ix.onLogs({ slot: 7, signature: "FIRST", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool), poolEvent("SellEvent", pool, { base: "2000000", quote: "800", net: "790" })) }, POOL_EVENT_PROGRAMS);
+  const rows = m.db.tradesFor(KID);
+  assert.equal(rows.length, 2, "both trades of the first pool transaction");
+  assert.ok(rows.every((r) => r.priceQuote > 0), "priced from the event's reserves");
+  assert.equal(trades().length, 2);
+  const c = m.get(KID);
+  assert.equal(c.migrated, true); assert.equal(c.pool, pool); assert.equal(m.pools.get(pool), KID);
+  assert.equal(c.poolBase, "200000002000000", "the pool after the last event");
+  assert.equal(ix.poolsExpected.size, 0, "adopted once");
+  assert.equal(ix.graduating.has(KID), true, "still watched until its vaults are read");
+  assert.equal(ix.hot.has(KID), true, "the next tick reads it");
+  assert.deepEqual(ix.poolStats, { events: 4, tracked: 2, trades: 2 }, "the early and the foreign event were seen, not tracked");
+  assert.equal(ix.state.poolsAdopted, 1);
+  // later events take the usual path; a replay is one row
+  ix.onLogs({ slot: 8, signature: "NEXT", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) }, POOL_EVENT_PROGRAMS);
+  ix.onLogs({ slot: 8, signature: "NEXT", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) });
+  assert.equal(m.db.tradesFor(KID).length, 3); assert.equal(ix.state.poolsAdopted, 1);
+  // a curve trade of the coin after its migration is not stored (it cannot be one)
+  ix.onLogs({ slot: 9, signature: "CURVE", err: null, logs: frame(CURVE, curveTrade(KID)) });
+  assert.equal(m.db.tradesFor(KID).length, 3);
+});
+
+test("the refresh watches graduating coins: a complete coin it reads is expected, re-read each tick, dropped once its vaults are read or after GRADUATING_MS", async () => {
+  const { m, ix } = setup();
+  const rpc = emptyRpc(); ix.rpc = rpc;
+  const pool = kidPool();
+  // no CompleteEvent seen (a gap, a restart): the coin is complete in the model
+  m.upsertCoin({ mint: KID, complete: true });
+  await ix.refresh();
+  assert.equal(ix.graduating.get(KID)?.pool, pool, "expected from the refresh");
+  // the next tick reads it even when the rolling slice and the hot set do not hold it
+  // (60 more coins and the cursor past KID: the 50-coin slice holds neither M nor KID)
+  for (let i = 0; i < 60; i++) m.upsertCoin({ mint: `U${i}`, curve: `C_U${i}`, depth: 0, quoteMint: null, tracked: true, complete: false, migrated: false, creator: "CR" });
+  ix.opts.fullRefreshMs = 1e12; ix.cursor = 2; ix.hot.clear(); rpc.asked.length = 0;
+  await ix.refresh();
+  assert.ok(!rpc.asked.includes("C_M"), "the slice does not hold M");
+  assert.ok(rpc.asked.includes("C_K"), "its curve is read every tick");
+  // adopted by its first pool event, then read: the vaults are unknown (the RPC answers nothing), so it stays watched
+  ix.onLogs({ slot: 7, signature: "FIRST", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) }, POOL_EVENT_PROGRAMS);
+  assert.equal(m.get(KID).migrated, true);
+  rpc.asked.length = 0;
+  await ix.refresh();
+  assert.ok(rpc.asked.includes(pool), "ensurePools reads the adopted pool");
+  assert.equal(ix.graduating.has(KID), true);
+  // vaults read: done
+  m.upsertCoin({ mint: KID, poolBaseVault: key(91), poolQuoteVault: key(92) });
+  await ix.refresh();
+  assert.equal(ix.graduating.has(KID), false);
+  // a coin that stays complete and never migrates is let go after GRADUATING_MS (the rolling pass finds it again)
+  const { m: m2, ix: ix2 } = setup();
+  ix2.rpc = emptyRpc();
+  m2.upsertCoin({ mint: KID, complete: true });
+  await ix2.refresh();
+  assert.equal(ix2.poolsExpected.size, 1);
+  ix2.graduating.get(KID).at = Date.now() - GRADUATING_MS - 1;
+  ix2.opts.fullRefreshMs = 1e12; ix2.cursor = 0;
+  m2.upsertCoin({ mint: "UNRELATED", curve: "C_U", depth: 0, quoteMint: null, tracked: true, complete: false, migrated: false, creator: "CR" });
+  await ix2.refresh();
+  assert.equal(ix2.graduating.has(KID), false); assert.equal(ix2.poolsExpected.size, 0);
+});
+
+test("at most GRADUATING_MAX coins are watched, the oldest let go first; a migrated coin is never expected", () => {
+  const { m, ix } = setup();
+  for (let i = 0; i < GRADUATING_MAX + 3; i++) {
+    const mint = new PublicKey(Buffer.alloc(32, 0).fill(i % 256, 0, 1).fill(Math.floor(i / 256) + 1, 1, 2)).toBase58();
+    m.upsertCoin({ mint, curve: `C${i}`, depth: 1, quoteMint: M, tracked: true, complete: false, migrated: false, creator: "CR" });
+    ix.onLogs({ slot: i, signature: `D${i}`, err: null, logs: frame(CURVE, completeEvent(mint)) });
+  }
+  assert.equal(ix.graduating.size, GRADUATING_MAX); assert.equal(ix.poolsExpected.size, GRADUATING_MAX);
+  ix.onLogs({ slot: 999, signature: "DM", err: null, logs: frame(CURVE, completeEvent(M)) });
+  assert.equal(ix.graduating.has(M), false, "M is migrated: its pool is known already");
+});
+
+// A pump curve never un-migrates (review, Nov 19 2026): a curve read that went out before the migration and came back
+// after the first pool event adopted the pool spread `migrated: false` and the frozen curve's reserves over the
+// adoption, and the coin's pool trades were priced from that curve until the next tick (4700x off on the chart).
+/** KID's curve account as the chain held it before the migration: complete, reserves not zeroed yet. */
+function preMigrationCurve() {
+  const v = {};
+  for (const f of pumpIdl.types.find((x) => x.name === "BondingCurve").type.fields) v[f.name] = f.type === "pubkey" ? new PublicKey(f.name === "quote_mint" ? M : key(9)) : f.type === "bool" ? false : new BN(0);
+  Object.assign(v, { virtual_token_reserves: new BN("1000000000000000"), virtual_quote_reserves: new BN("2000000000000000"), token_total_supply: new BN("1000000000000000"), complete: true, depth: 1 });
+  return Buffer.concat([BONDING_CURVE_DISCRIMINATOR, new anchor.BorshCoder(pumpIdl).types.encode("BondingCurve", v)]);
+}
+
+test("a curve read in flight when the pool is adopted does not undo the adoption: migrated stays on, the pool prices the coin", async () => {
+  for (const path of ["refresh", "fetchCoin"]) {
+    const { m, ix } = setup();
+    const pool = kidPool(), data = preMigrationCurve();
+    if (path === "fetchCoin") m.upsertCoin({ mint: KID, curve: bondingCurvePda(KID).toBase58() }); // the key fetchCoin reads
+    ix.onLogs({ slot: 5, signature: "DONE", err: null, logs: frame(CURVE, completeEvent(KID)) });
+    let adopted = null;
+    ix.rpc = { snapshot: () => ({}), async getMultipleAccounts(keys) {
+      await new Promise((r) => setTimeout(r, 1));
+      const curve = keys.find((k) => k === m.get(KID).curve);
+      // the migration lands and its first pool event arrives while the read is out
+      if (curve && adopted == null) {
+        ix.onLogs({ slot: 7, signature: "FIRST", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) }, POOL_EVENT_PROGRAMS);
+        adopted = m.priceOf(KID)?.priceQuote;
+      }
+      return keys.map((k) => k === curve ? { data, owner: CURVE } : null);
+    } };
+    if (path === "refresh") await ix.refresh();
+    else await ix.fetchCoin(KID);
+    assert.equal(m.get(KID).migrated, true, `${path}: still migrated`);
+    assert.equal(m.get(KID).complete, true, path);
+    assert.equal(m.get(KID).realTokenReserves, "500000000000000", `${path}: the stale curve's reserves are not taken`);
+    assert.ok(adopted > 0); assert.equal(m.priceOf(KID)?.priceQuote, adopted, `${path}: priced from the pool, not the frozen curve`);
+    ix.onLogs({ slot: 8, signature: "SECOND", err: null, logs: frame(AMM, poolEvent("BuyEvent", pool)) }, POOL_EVENT_PROGRAMS);
+    const rows = m.db.tradesFor(KID);
+    assert.equal(rows.length, 2, path);
+    assert.ok(Math.abs(rows[1].priceUsd / rows[0].priceUsd - 1) < 0.01, `${path}: the next pool trade is priced like the first`);
+  }
+  // a read that says complete is still taken whole while the model says neither (the usual tick)
+  const { m, ix } = setup();
+  const data = preMigrationCurve();
+  ix.rpc = { snapshot: () => ({}), async getMultipleAccounts(keys) { return keys.map((k) => k === "C_K" ? { data, owner: CURVE } : null); } };
+  await ix.refresh();
+  assert.equal(m.get(KID).complete, true); assert.equal(m.get(KID).migrated, false); assert.equal(m.get(KID).virtualQuoteReserves, "2000000000000000");
+});
+
+test("a restart or a stream (re)connect expects every complete, unmigrated coin once: the first tick after reads it, later ticks do not sweep", async () => {
+  const { m, ix } = setup();
+  const rpc = emptyRpc(); ix.rpc = rpc;
+  // complete in the db, its CompleteEvent handled by the last process (or lost in a gap); nothing hot, not in the slice
+  m.upsertCoin({ mint: KID, complete: true });
+  for (let i = 0; i < 60; i++) m.upsertCoin({ mint: `U${i}`, curve: `C_U${i}`, depth: 0, quoteMint: null, tracked: true, complete: false, migrated: false, creator: "CR" });
+  ix.opts.fullRefreshMs = 1e12; ix.cursor = 2;
+  await ix.refresh();
+  assert.equal(ix.graduating.get(KID)?.pool, kidPool(), "expected on the first tick");
+  assert.equal(ix.poolsExpected.get(kidPool()), KID);
+  assert.ok(rpc.asked.includes("C_K"), "and read on it");
+  assert.equal(ix.expectSweep, false);
+  // one completing between sweeps, outside the slice and the hot set, waits for the rolling pass or the next sweep
+  // (a real key: the sweep derives its pool PDA)
+  const LATE = key(95);
+  m.upsertCoin({ mint: LATE, curve: "C_LATE", depth: 0, quoteMint: null, tracked: true, complete: true, migrated: false, creator: "CR" });
+  ix.cursor = 2; rpc.asked.length = 0;
+  await ix.refresh();
+  assert.equal(ix.graduating.has(LATE), false); assert.ok(!rpc.asked.includes("C_LATE"));
+  // a (re)connect of the curve stream sweeps again
+  const Real = globalThis.WebSocket, realFetch = globalThis.fetch;
+  const { Fake, sockets } = fakeSockets();
+  globalThis.WebSocket = Fake; globalThis.fetch = async () => { throw new Error("offline"); };
+  const realRefresh = ix.refresh.bind(ix), calls = [];
+  try {
+    ix.opts.wsUrl = "wss://x.example"; ix.opts.livePools = false;
+    ix.loadGlobal = async () => {}; ix.backfillPoolVq = async () => {}; ix.refreshPricingPools = async () => {}; ix.catchUpMintInfo = async () => {};
+    ix.refresh = (o) => { calls.push(o?.reason); return o?.reason === "reconnect" ? realRefresh(o) : Promise.resolve(); };
+    await ix.start();
+    ix.cursor = 2; rpc.asked.length = 0;
+    sockets[0].open();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(calls.includes("reconnect"));
+    assert.ok(ix.graduating.has(LATE), "swept on the reconnect's tick");
+    assert.ok(rpc.asked.includes("C_LATE"));
+  } finally { ix.stop(); globalThis.WebSocket = Real; globalThis.fetch = realFetch; }
 });

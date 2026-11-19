@@ -1,5 +1,4 @@
-// The launch timeline the map panel (map/panel/NarrativeBlock.tsx), the coin page (coin/CoinNarrative.tsx) and the
-// Discover page (pages/Discover.tsx) share: one event a line, newest first. A line is one fixed height: the time, a
+// The launch timeline of the coin page (coin/CoinNarrative.tsx): one event a line, newest first. A line is one fixed height: the time, a
 // dot on the rail, "3 coins · @handle · the post's text" cut with an ellipsis, and the top coin as a chip. While the
 // post's text is fetched the line shows the coin count alone, and the text fills in without moving anything. A click
 // opens the line in place (the whole text, the link out, up to three coins); one line is open at a time. While a line

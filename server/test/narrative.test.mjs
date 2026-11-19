@@ -2,9 +2,8 @@
 // times, grouping, the events, X's embed answer, the word flag), Narrative.serve on a small family (subjects, the
 // parent's timeline, an event's time staying put when its first coin stops being a member, a coin's own post with its
 // siblings, `under`, unavailable posts dropping out, which events ask for their text first, the asker's allowance, the
-// cache, 30 000-child walks in slices) and GET /api/narrative/:mint. Then Discover
-// (lib/discover.mjs): the parents with launches in the last hour, and GET /api/discover. A fake fetch behind the
-// post-text fetcher, a fake clock, sqlite in memory. No network.
+// cache, 30 000-child walks in slices) and GET /api/narrative/:mint. A fake fetch behind the post-text fetcher, a fake
+// clock, sqlite in memory. No network. (The wake-up list, which replaced Discover, is tested in wakeups.test.mjs.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -12,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Narrative, parsePost, postTime, postUrl, groupPosts, eventsOf, parseOembed, flagText, postOf, NEW_S, FAMILY_TTL_MS, FAMILY_CACHE, EVENTS_MAX, EVENTS_KEEP, EVENTS_FIRST, TEXT_MAX } from "../lib/narrative.mjs";
-import { Discover, DISCOVER_TTL_MS, PARENTS_MAX, WINDOW_S, BIN_S } from "../lib/discover.mjs";
 import { XPosts, RECHECK_DENIED_S, WAIT_AHEAD } from "../lib/xposts.mjs";
 import { createApp } from "../lib/api.mjs";
 import { loadConfig, DEFAULT_RATES } from "../lib/config.mjs";
@@ -20,7 +18,7 @@ import { EventHub } from "../lib/events.mjs";
 import { ImageCache } from "../lib/meta.mjs";
 import { SOL_MINT } from "../lib/jupiter.mjs";
 import { Db } from "../lib/db.mjs";
-import { Model, RECENT_S } from "../lib/model.mjs";
+import { Model } from "../lib/model.mjs";
 import { PublicKey } from "../lib/sdk.mjs";
 import { PLATFORM, quiet, base, T22 } from "./helpers/tree.mjs";
 import { key, fakeClock, T0 } from "./helpers/chain.mjs";
@@ -777,170 +775,3 @@ test("config: NARRATIVE, NARRATIVE_POSTS, XPOST_PER_MIN, XPOST_DAILY and RATE_NA
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// ---------------------------------------------------------------- Discover
-const P = Object.fromEntries(["P1", "P2", "P3", "P4", "P5", "P6", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "D1", "D2", "E1", "E2", "F1", "F2", "S1", "S2", "R1", "R2"].map((n, i) => [n, key(30 + i)]));
-
-/**
- * Parents with coins launched around the test's start. P1 (a coin): five tracked children of three addresses inside
- * the hour, placed on the bin edges, and three that do not count (exactly an hour old, untracked, three hours old).
- * P2 (a listed asset, no coin): two children of two addresses, one 30 s ahead of the clock, one two minutes ahead
- * (left out). P3: three children of one address. P4: two children without a known address. P5: one without, one with.
- * P6: like P5 in numbers. Two coins priced in SOL's mint and two roots.
- */
-function launches(w) {
-  for (const p of ["P1", "P3", "P4", "P5", "P6"]) w.coin(P[p], p, { createdAgo: 90 * DAY });
-  w.model.setMint({ mint: P.P2, decimals: 6, tokenProgram: T22, name: "Nvidia xStock", symbol: "NVDAx", onchainAt: 1 });
-  w.model.setAssetIcons({ [P.P2]: "https://static.example/nvdax.png" });
-  w.coin(P.A1, "A1", { parent: P.P1, launcher: W.w1, createdAgo: 0, trades: 2, usd: 50 });
-  w.coin(P.A2, "A2", { parent: P.P1, launcher: W.w2, createdAgo: BIN_S - 1 });
-  w.coin(P.A3, "A3", { parent: P.P1, launcher: W.w1, createdAgo: BIN_S, trades: 1, usd: 0.004 });
-  w.coin(P.A4, "A4", { parent: P.P1, launcher: W.w3, createdAgo: WINDOW_S - 1, trades: 1, usd: 250 });
-  w.coin(P.A5, "A5", { parent: P.P1, launcher: W.w4, createdAgo: WINDOW_S, trades: 1, usd: 9_000 });
-  w.coin(P.A6, "A6", { parent: P.P1, launcher: W.w5, createdAgo: 10, tracked: false, trades: 1, usd: 9_000 });
-  w.coin(P.A7, "A7", { parent: P.P1, launcher: W.w6, createdAgo: 3 * HOUR, trades: 1, usd: 9_000 });
-  w.coin(P.A8, "A8", { parent: P.P1, launcher: W.w3, createdAgo: 1800, trades: 1, usd: 7 });
-  w.coin(P.B1, "B1", { parent: P.P2, launcher: W.w1, createdAgo: 60 });
-  w.coin(P.B2, "B2", { parent: P.P2, launcher: W.w2, createdAgo: 2 * BIN_S + 1 });
-  w.coin(P.B3, "B3", { parent: P.P2, launcher: W.w3, createdAgo: -30 });
-  w.coin(P.B4, "B4", { parent: P.P2, launcher: W.w4, createdAgo: -120 });
-  for (const c of ["C1", "C2", "C3"]) w.coin(P[c], c, { parent: P.P3, launcher: W.w1, createdAgo: 100, trades: 1, usd: 500 });
-  w.coin(P.D1, "D1", { parent: P.P4, createdAgo: 100 }); w.coin(P.D2, "D2", { parent: P.P4, createdAgo: 200 });
-  w.coin(P.E1, "E1", { parent: P.P5, createdAgo: 100 }); w.coin(P.E2, "E2", { parent: P.P5, launcher: W.w1, createdAgo: 200, trades: 1, usd: 5 });
-  w.coin(P.F1, "F1", { parent: P.P6, launcher: W.w1, createdAgo: 100, trades: 1, usd: 5 }); w.coin(P.F2, "F2", { parent: P.P6, shares: [{ address: PLATFORM, bps: 5000 }, { address: W.w2, bps: 5000 }], createdAgo: 200 });
-  w.coin(P.S1, "S1", { parent: SOL_MINT, launcher: W.w1, createdAgo: 100 }); w.coin(P.S2, "S2", { parent: SOL_MINT, launcher: W.w2, createdAgo: 100 });
-  w.coin(P.R1, "R1", { launcher: W.w1, createdAgo: 100 }); w.coin(P.R2, "R2", { launcher: W.w2, createdAgo: 100 });
-  w.disc = new Discover({ model: w.model, now: w.clock.now });
-  return w;
-}
-const pref = (w, mint) => { const { name, symbol } = w.model.nameOf(mint); return { mint, name, symbol }; };
-
-test("discover: the parents with two or more new coins of two or more addresses in the last hour; new1h, then volume, then the mint; bins oldest first; SOL never; refs are the API's", async () => {
-  const w = launches(world({ posts: false }));
-  assert.ok(w.model.children.get(SOL_MINT).size >= 2, "coins are quoted in SOL's mint");
-  const body = await w.disc.serve();
-  const tie = [P.P5, P.P6].sort();
-  assert.deepEqual([body.asOf, body.windowS, body.binS], [NOW_S, 3600, 300]);
-  assert.deepEqual(Object.keys(body), ["asOf", "windowS", "binS", "parents"]);
-  assert.deepEqual(body.parents.map((p) => p.mint), [P.P1, P.P2, ...tie], "P3 (one address), P4 (no known address: one creator together), SOL and the roots are not listed");
-  const [p1, p2] = body.parents, by = Object.fromEntries(body.parents.map((p) => [p.mint, p]));
-  assert.deepEqual(p1, {
-    ...pref(w, P.P1), image: `/api/img?u=${encodeURIComponent("https://ipfs.io/ipfs/img-P1")}`,
-    new1h: 5, creators1h: 3, bins: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2], usd24: 357,
-    top: [w.ref(P.A4, 250), w.ref(P.A1, 100)],
-  }, "A4 at 3 599 s is in the oldest bin, A3 at 300 s in the one before the last, A1 and A2 (0 and 299 s) in the last; A3's 0.004 is in no top");
-  assert.deepEqual(Object.keys(p1), ["mint", "name", "symbol", "image", "new1h", "creators1h", "bins", "usd24", "top"]);
-  assert.deepEqual(p2, { ...pref(w, P.P2), image: `/api/img?u=${encodeURIComponent("https://static.example/nvdax.png")}`, new1h: 3, creators1h: 3, bins: [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2], usd24: 0, top: [] },
-    "a listed asset: its stored icon; a coin 30 s ahead of our clock counts as now, one two minutes ahead is left out; 601 s is two bins back");
-  assert.deepEqual([by[P.P5].new1h, by[P.P5].creators1h, by[P.P5].usd24, by[P.P5].top], [2, 2, 5, [w.ref(P.E2, 5)]], "an unknown address and a known one are two");
-  assert.deepEqual([by[P.P6].creators1h, by[P.P6].top.map((t) => t.mint)], [2, [P.F1]], "the address from the fee shares counts like a launcher");
-  for (const p of body.parents) {
-    assert.deepEqual([p.bins.length, p.bins.reduce((a, b) => a + b, 0)], [12, p.new1h]);
-    assert.ok(p.new1h >= 2 && p.creators1h >= 2 && p.top.length <= 2 && p.top.every((t) => t.usd24 > 0));
-  }
-  assert.ok(!JSON.stringify(body).includes(W.w1) && !JSON.stringify(body).includes(SOL_MINT), "no creator address, no SOL");
-  const s = w.disc.snapshot();
-  assert.deepEqual([s.builds, s.served, s.lastCoins, s.lastParents], [1, 1, 17, 4], "the pass counted the new non-SOL children only");
-  // order: more launches first, then more volume, then the mint
-  w.coin(key(90), "G1", { parent: P.P6, launcher: W.w3, createdAgo: 10 });
-  w.model.upsertCoin({ mint: P.A6, tracked: true }); // tracked only now: it joins the hour
-  w.clock.t += DISCOVER_TTL_MS;
-  const next = await w.disc.serve();
-  assert.deepEqual(next.parents.map((p) => [p.mint, p.new1h, p.usd24]), [[P.P1, 5, 9_107], [P.P6, 3, 5], [P.P2, 3, 0], [P.P5, 2, 5]], "ten seconds on A4 has left the hour and A6 joined; P6 and P2 both have three, the traded one first");
-  assert.deepEqual([next.parents[0].creators1h, next.parents[0].top.map((t) => t.mint)], [4, [P.A6, P.A1]]);
-  w.close();
-});
-
-test("discover: among parents with as many launches the more traded comes first, then the mint; at most PARENTS_MAX", async () => {
-  const w = world({ posts: false });
-  const N = PARENTS_MAX + 5, parents = Array.from({ length: N }, (_, i) => mintN(i, 3));
-  w.db.transaction(() => parents.forEach((p, i) => {
-    for (let k = 0; k < 2; k++) w.coin(mintN(2 * i + k, 4), `N${2 * i + k}`, { parent: p, launcher: `L${k}`, createdAgo: 60, trades: i === 7 && k === 0 ? 1 : 0, usd: 3 });
-  }));
-  const body = await new Discover({ model: w.model, now: w.clock.now }).serve();
-  assert.equal(body.parents.length, PARENTS_MAX);
-  assert.deepEqual(body.parents.map((p) => p.mint), [parents[7], ...parents.filter((_, i) => i !== 7).sort().slice(0, PARENTS_MAX - 1)]);
-  assert.deepEqual([body.parents[0].name, body.parents[0].image], [null, null], "a parent we know only as a mint coins are priced in");
-  w.close();
-});
-
-test("discover: one pass shared by askers that come together and served for 10 s; the hour moves on; the by-time index is kept as coins are indexed and forgets old ones", async () => {
-  const w = launches(world({ posts: false }));
-  const [a, b, c] = await Promise.all([w.disc.serve(), w.disc.serve(), w.disc.serve()]);
-  assert.ok(a === b && b === c, "one body");
-  assert.deepEqual([w.disc.snapshot().builds, w.disc.snapshot().served], [1, 3]);
-  w.coin(key(91), "G2", { parent: P.P3, launcher: W.w2, createdAgo: 5 });
-  w.clock.t += DISCOVER_TTL_MS - 1;
-  assert.ok(await w.disc.serve() === a, "within the 10 s the body is served as it is");
-  assert.equal(w.disc.snapshot().builds, 1);
-  w.clock.t += 1;
-  const fresh = await w.disc.serve();
-  assert.deepEqual([w.disc.snapshot().builds, fresh.asOf, fresh.parents[0].mint, fresh.parents[0].new1h, fresh.parents[0].creators1h, fresh.parents[0].usd24], [2, NOW_S + 10, P.P3, 4, 2, 1500], "a second address made P3 a listed parent");
-  assert.equal(DISCOVER_TTL_MS, 10_000);
-  // The index: what a restart reads back from the database is the same set; a coin whose creation time turns out old leaves it.
-  const again = new Model(w.db, { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", now: w.clock.now, log: quiet });
-  again.load();
-  assert.deepEqual([...again.recent.keys()].sort(), [...w.model.recent.keys()].sort());
-  assert.ok(w.model.recent.has(P.A5) && !w.model.recent.has(P.A7) && !w.model.recent.has(P.P1) && !w.model.recent.has(P.A6), "a coin an hour old is held (RECENT_S is two); one three hours old, a 90-day-old one and an untracked one never join");
-  w.model.upsertCoin({ mint: P.B1, createdAt: NOW_S - 30 * DAY });
-  assert.ok(!w.model.recent.has(P.B1));
-  // 20 minutes on: the coins still in the hour stand four bins further back
-  w.clock.t += 20 * 60_000 - 10_000;
-  const later = await w.disc.serve();
-  const p1 = later.parents.find((p) => p.mint === P.P1);
-  assert.deepEqual([p1.new1h, p1.bins], [4, [0, 1, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0]], "A4 left the hour; A8, A3, and A1 with A2 moved four bins back");
-  // past the hour nothing is listed; past RECENT_S the index is empty again
-  w.clock.t += WINDOW_S * 1000;
-  assert.deepEqual((await w.disc.serve()).parents, []);
-  w.clock.t += RECENT_S * 1000;
-  await w.disc.serve();
-  assert.equal(w.model.recent.size, 0);
-  w.close();
-});
-
-test("discover: 20 000 coins launched in the hour are counted in slices: the event loop is never held long, and old coins are not walked", async (t) => {
-  const w = world({ posts: false });
-  const N = 20_000, OLD = 5_000, PARENTS = 400;
-  w.db.transaction(() => {
-    for (let i = 0; i < N + OLD; i++) {
-      const m = mintN(i, 7), old = i >= N;
-      w.model.upsertCoin({ mint: m, curve: `C${i}`, depth: 1, quoteMint: mintN(i % PARENTS, 2), ...base, virtualQuoteReserves: "100000000000", createdAt: old ? NOW_S - 5 * DAY - i : NOW_S - (i % 3600), launcher: mintN(1_000_000 + (i % 9000), 1) });
-      if (i % 4 === 0) w.model.recordTrade({ sig: `P${i}`, mint: m, idx: 0, slot: i, time: NOW_S - 100, isBuy: true, user: "U", baseAmount: "1", quoteAmount: "2", priceQuote: 2, priceUsd: 2e-5, valueUsd: 10 + (i % 100) });
-    }
-  });
-  assert.equal(w.model.recent.size, N, "the index holds the new coins only");
-  const disc = new Discover({ model: w.model, now: w.clock.now });
-  let last = performance.now(), maxGap = 0;
-  const iv = setInterval(() => { const now = performance.now(); if (now - last > maxGap) maxGap = now - last; last = now; }, 1);
-  const t0 = performance.now();
-  const body = await disc.serve();
-  const wall = performance.now() - t0;
-  clearInterval(iv);
-  const s = disc.snapshot();
-  t.diagnostic(`20 000 new coins under 400 parents (+ 5 000 old): build ${s.lastBuildMs} ms of CPU, longest slice ${s.maxSliceMs} ms, ${wall.toFixed(1)} ms wall, longest gap between timer ticks ${maxGap.toFixed(1)} ms`);
-  assert.deepEqual([s.lastCoins, s.lastParents, body.parents.length], [N, PARENTS, PARENTS_MAX]);
-  assert.ok(body.parents.every((p) => p.new1h === N / PARENTS && p.bins.reduce((a, b) => a + b, 0) === p.new1h && p.top.length === 2));
-  for (let i = 1; i < body.parents.length; i++) assert.ok(body.parents[i - 1].usd24 >= body.parents[i].usd24, "as many launches each: the more traded first");
-  // One turn of the scheduler is 8 ms (SLICE_MS) plus the step that crosses it; an unsliced pass would be one slice of
-  // the whole build. Generous for a loaded machine: other test files run beside this one.
-  assert.ok(s.maxSliceMs < 30, `longest slice ${s.maxSliceMs} ms`);
-  w.close();
-});
-
-test("GET /api/discover: the body is Discover's, cached 10 s, with an ETag; it needs no linked posts; health carries its counters", async () => {
-  const w = launches(world({ posts: false }));
-  const app = await serveApp(w, { narrative: null });
-  try {
-    const r = await app.get("/api/discover");
-    // max-age alone: a stale-while-revalidate window would let a browser answer every 15 s poll with the body of the poll before
-    assert.deepEqual([r.status, r.headers.get("cache-control")], [200, "public, max-age=10"]);
-    assert.ok(!/stale/.test(r.headers.get("cache-control")));
-    assert.deepEqual(r.body, JSON.parse(JSON.stringify(await w.disc.serve())));
-    assert.deepEqual(r.body.parents.map((p) => p.mint), [P.P1, P.P2, ...[P.P5, P.P6].sort()]);
-    assert.equal((await app.get("/api/discover", { "if-none-match": r.headers.get("etag") })).status, 304);
-    const [x, y] = await Promise.all([app.get("/api/discover"), app.get("/api/discover")]);
-    assert.deepEqual(x.body, y.body);
-    const health = (await app.get("/api/health")).body;
-    assert.deepEqual([health.discover.builds, health.discover.served, health.discover.lastCoins, health.discover.lastParents, health.discover.maxSliceMs >= 0, health.narrative], [1, 4, 17, 4, true, null]);
-  } finally { await app.close(); }
-  w.close();
-});

@@ -5,6 +5,7 @@ import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
 import { ToastProvider } from "./components/Toast";
 import { TradingWalletHost } from "./components/TradingWallet";
 import { TradeSettingsHost } from "./components/TradeSettings";
+import WakeAlerts from "./components/WakeAlerts";
 import WalletMenu from "./components/WalletMenu";
 import OfficialCoin from "./components/OfficialCoin";
 import LiveNumber from "./components/LiveNumber";
@@ -57,7 +58,7 @@ export const BRAND = { name: "Spore", tagline: "Coins that grow coins.", title: 
 /// the Portfolio page (/claim stays as a route).
 const PRIMARY: readonly (readonly [string, string, string])[] = [
   ["/map", "Map", "Every pump.fun coin pair, live"],
-  ["/discover", "Discover", "Parents getting new coins right now"],
+  ["/discover", "Discover", "Families with buying far above their normal level"],
   ["/portfolio", "Portfolio", "What your wallet holds and launched, with its fees to claim"],
 ];
 const MORE: readonly (readonly [string, string])[] = [["/fees", "Fees & rules"], ["/docs/api", "API"]];
@@ -358,6 +359,8 @@ function Shell() {
       </main>
       <TradingWalletHost />
       <TradeSettingsHost />
+      {/* wake-up notifications, on every page while the tab is open (nothing runs until the reader turns them on on Discover) */}
+      <WakeAlerts />
       {!isMap && <footer className="footer">
         <div className="footer-grid">
           <div className="footer-col footer-about">

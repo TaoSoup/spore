@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Narrative, NarrativeCoin, NarrativeEvent, NarrativeOwn } from "../src/lib/api.ts";
 const { safePostUrl, postHandle, postText, POST_LINK, postLinkAria, chipSym, chipVol, chipText, lineAge, lineParts, lineText, lineChip, shownLines, moreText, earlierNote,
-  othersLine, narrativeView, CAPTION_TIMELINE, CAPTION_OWN, NARRATIVE_FOOT, anyWait, mergePoll, mergeRefresh, nextPollMs, settle, shownAnswer, heldLines } = await import("../src/lib/narrative.ts");
+  othersLine, narrativeView, CAPTION_TIMELINE, CAPTION_OWN, NARRATIVE_FOOT, anyWait, mergePoll, nextPollMs, settle, shownAnswer, heldLines } = await import("../src/lib/narrative.ts");
 const { api } = await import("../src/lib/api.ts");
 
 const MINT = "Par1111111111111111111111111111111111111111";
@@ -237,25 +237,6 @@ test("20. mergePoll: no fresh body keeps what is shown; a body for another coin 
   assert.equal(mergePoll(shown, undefined), shown);
   const other = body({ mint: KID, events: [event(ID3)] });
   assert.equal(mergePoll(shown, other), other);
-});
-
-test("21. mergeRefresh: a new read shows the new list, new events on top, and takes no text away", () => {
-  const shown = body({ events: [event(ID1, { text: "first" }), event(ID2, { state: "idle", handle: null, text: null })], earlier: 0 });
-  const fresh = body({ asOf: 1_763_400_030, earlier: 3, pending: true,
-    events: [event(ID3, { ...waiting, at: 1_762_860_000, coins: 2 }), event(ID1, { ...waiting, coins: 31 }), event(ID2, { state: "idle", handle: null, text: null })] });
-  const out = mergeRefresh(shown, fresh);
-  assert.deepEqual(out.events.map((e) => e.id), [ID3, ID1, ID2], "the fresh order");
-  assert.deepEqual([out.events[1].state, out.events[1].text, out.events[1].coins], ["ok", "first", 31], "the text on screen stays, the numbers are the new ones");
-  assert.equal(out.events[0].state, "wait");
-  assert.deepEqual([out.earlier, out.asOf, out.pending], [3, 1_763_400_030, true]);
-  // a fresh text or a fresh "not available" wins over what was shown
-  const told = mergeRefresh(shown, body({ events: [event(ID1, { text: "edited" }), event(ID2, { state: "none", handle: null, text: null })] }));
-  assert.deepEqual(told.events.map((e) => [e.state, e.text]), [["ok", "edited"], ["none", null]]);
-  assert.equal(told.pending, false);
-  // nothing shown, or another coin's list: the fresh body as it is
-  assert.equal(mergeRefresh(null, fresh), fresh);
-  assert.equal(mergeRefresh(body({ mint: KID, events: [event(ID1)] }), fresh), fresh);
-  assert.equal(shown.events[0].coins, 28, "the input is not changed");
 });
 
 test("22. nextPollMs: 2.5 s, 5 s, 10 s, 20 s, then no more", () => {

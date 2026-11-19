@@ -308,18 +308,25 @@ export class Narrative {
   #post(id, low, ctx) {
     let s = ctx.seen.get(id);
     if (s) return s;
-    s = { state: "idle", handle: null, text: null };
+    s = this.postState(id, { low, mayQueue: ctx.mayQueue });
     ctx.seen.set(id, s);
+    return s;
+  }
+  /** One post's `{ state, handle, text }` as #post reads it, without a body's memo: the wake-up list (lib/wakeups.mjs) asks through this. */
+  postState(id, { low = false, mayQueue = () => true } = {}) {
+    const s = { state: "idle", handle: null, text: null };
     const x = this.posts;
     if (!x) return s;
     try {
       const rec = x.peek(id);
-      if (x.canQueue(id, { low }) === "ok" && ctx.mayQueue()) x.want(id, { low });
+      if (x.canQueue(id, { low }) === "ok" && mayQueue()) x.want(id, { low });
       if (rec?.state === "ok") { s.state = "ok"; s.handle = rec.handle ?? null; s.text = rec.text ?? ""; }
       else s.state = rec ? "none" : x.state(id);
     } catch (e) { this.log.warn?.(`narrative: post ${id}: ${String(e?.message ?? e).slice(0, 160)}`); }
     return s;
   }
+  /** Every post a family's members link, `Map<id, { coins, mints, top }>` (the family entry's `groups`, same walk and cache): the wake-up list counts a coin's earlier copies from it. */
+  async groupsOf(mint) { return (await this.#family(mint)).groups; }
   /**
    * `{ list, examined }`: the `max` newest events of a family whose post is not known to be unavailable, as body items,
    * and how many of the kept events were looked at to fill it (the listed ones and the dropped ones among them). A

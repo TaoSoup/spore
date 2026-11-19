@@ -1,5 +1,5 @@
 // Launch timeline: the X posts a family's coins link in their metadata (GET /api/narrative/:mint, `Narrative` in
-// lib/api.ts), as the one-line events the map panel, the coin page and the Discover page show (components/narrative/).
+// lib/api.ts), as the one-line events the coin page shows (components/narrative/).
 // An event is one post and the coins launched linking it; the list is by the time of the first such coin, newest
 // first, as the server sends it. Pure: no DOM, no network (test/narrative.test.mts). The posts are picked by coin
 // creators and unverified, so nothing here trusts the body: the link is rebuilt from the id's digits (never the body's
@@ -128,27 +128,6 @@ export function mergePoll(shown: Narrative, fresh: Narrative | null | undefined)
     events: (shown.events ?? []).map(take),
     own: shown.own ? take(shown.own) : shown.own,
     under: shown.under?.event ? { ...shown.under, event: take(shown.under.event) } : shown.under,
-  };
-  out.pending = anyWait(out);
-  return out;
-}
-
-/// A new read of the same coin's list (the Discover page reads an open timeline again while coins keep launching):
-/// the new body is shown as it is, new events on top, except that a text on screen is not taken away: a line the new
-/// body has without its text ("wait" or "idle") keeps the `state`, `handle` and `text` it showed.
-export function mergeRefresh(shown: Narrative | null | undefined, fresh: Narrative): Narrative {
-  if (!shown || shown.mint !== fresh.mint) return fresh;
-  const known = new Map<string, Row>();
-  for (const r of rowsOf(shown)) if (r.state === "ok" && !known.has(r.id)) known.set(r.id, r);
-  const keep = <T extends Row>(r: T): T => {
-    const k = r.state === "wait" || r.state === "idle" ? known.get(r.id) : undefined;
-    return k ? { ...r, state: k.state, handle: k.handle, text: k.text } : r;
-  };
-  const out: Narrative = {
-    ...fresh,
-    events: (fresh.events ?? []).map(keep),
-    own: fresh.own ? keep(fresh.own) : fresh.own,
-    under: fresh.under?.event ? { ...fresh.under, event: keep(fresh.under.event) } : fresh.under,
   };
   out.pending = anyWait(out);
   return out;

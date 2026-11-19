@@ -16,7 +16,7 @@ import { AddressLookupTableAccount } from "@solana/web3.js";
 import { JUPITER_PROGRAM, SOL_MINT, JupiterError } from "./jupiter.mjs";
 import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLIT_BPS } from "./pricing.mjs";
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
-import { Discover } from "./discover.mjs";
+import { Wakeups } from "./wakeups.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
 import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
@@ -343,9 +343,11 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // 429: the post is listed without its text (state "idle").
   const narrOf = narrative ?? null;
   const narrNew = new RateLimiter({ limit: limitOf("narrnew").limit, windowMs: limitOf("narrnew").windowMs, now });
-  // Discover (lib/discover.mjs): the parents coins are being launched under in the last hour. It reads the model only
-  // (no chain, no third party), so it has no switch and no per-IP allowance: one sliced pass per 10 s at most.
-  const discover = new Discover({ model, now });
+  // Wake-ups (lib/wakeups.mjs): families whose existing coins many more wallets are buying than usual. The model feeds
+  // them; here they get the hub (the `wake` event) and the linked posts (post texts, copies) when nothing else gave
+  // them. They read the model and stored rows only (no chain, no third party): no switch, no per-IP allowance.
+  const wake = model.wakeups ?? new Wakeups({ model, now, log });
+  wake.attach({ hub: wake.hub ?? hub ?? null, narrative: wake.narrative ?? narrOf });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -388,7 +390,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, discover: discover.snapshot() };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot() };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -638,11 +640,21 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     sendCachedJson(req, res, body, body.pending ? { cacheControl: "no-store" } : idle ? { maxAge: 5, swr: 5 } : { maxAge: 30 });
   }));
 
-  // The parents with launches in the last hour (README §API). The body is one sliced pass shared by every asker and
-  // held 10 s (lib/discover.mjs); the header says the same 10 s, so a page that polls costs a pass only now and then.
-  // No stale-while-revalidate (sendCachedJson would add 40 s): with it a browser answers each 15 s poll from its cache
-  // and refreshes behind it, so the page would always show the previous poll's list.
-  app.get("/api/discover", wrap(async (req, res) => sendCachedJson(req, res, await discover.serve(), { cacheControl: "public, max-age=10" })));
+  // The families waking up (README §API). One sliced build shared by every asker and held 5 s (lib/wakeups.mjs); the
+  // header says the same 5 s. No stale-while-revalidate (sendCachedJson would add 20 s): with it a browser answers each
+  // poll from its cache and refreshes behind it, so the page would always show the previous poll's list, and the first
+  // minutes of a wake-up are the ones that matter.
+  const WAKE_CACHE = { cacheControl: "public, max-age=5" };
+  app.get("/api/discover", wrap(async (req, res) => sendCachedJson(req, res, await wake.serve(), WAKE_CACHE)));
+  // One parent: its family when it is waking, else "quiet" with the children most wallets bought in the last 15 min
+  // (the map panel's "Moving now"). 404 for SOL and for a mint that is neither a tracked coin nor a parent.
+  app.get("/api/discover/:mint", wrap(async (req, res) => {
+    const { mint } = req.params;
+    if (!isMint(mint)) return res.status(400).json({ error: "invalid mint" });
+    const body = await wake.serveOne(mint);
+    if (!body) return res.status(404).json({ error: "unknown mint" });
+    sendCachedJson(req, res, body, WAKE_CACHE);
+  }));
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search
   // box accept all of pump.fun, DESIGN §11.1) is looked up live, like /api/coin/:mint does; the
