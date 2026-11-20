@@ -3,9 +3,10 @@
 // (GET /api/discover, `Discover` in lib/api.ts; SSE `wake`), as words, a sparkline and an order. Pure: no DOM, no
 // network, no storage (test/discover.test.mts). Every line says what is measured ("buying 14x its normal", "170 buyers
 // in 5 min"), never why, never what a coin will do, and a linked post is only what coincided.
-import type { DiscoverOne, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
-import { count, plural, short } from "./format";
+import type { CoinRow, CoinSafety, DiscoverOne, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
+import { compact, count, plural, short } from "./format";
 import { postHandle, postText, safePostUrl } from "./narrative";
+import { PRESET_COUNT } from "./trade-settings";
 
 /// How often the page reads the list while its tab is visible (the server caches it 5 s). A wake-up is measured per
 /// 5-minute bucket, so a read every 10 s shows a closed bucket within seconds of the server.
@@ -85,16 +86,22 @@ export const TAG_TITLE = { existing: "Launched more than 30 min before this fami
 /// The same tag on a family that is not waking up (the map panel's quiet answer measures against now).
 export const TAG_TITLE_QUIET = { existing: "Launched more than 30 min ago", new: "Launched in the last 30 min" } as const;
 
-/// The card's foot: "8 more trading · 23 hidden: creator sold out or repeat launch", each part only when it is not 0;
-/// null when both are.
+/// The card's foot: "8 more trading · 23 hidden: creator sold out or repeat launch · 4 dust", each part only when it is
+/// not 0; null when all are. `footParts` gives each part with its own tooltip.
 export const HIDDEN_WHY = "creator sold out or repeat launch";
-export function footLine(more: number | null | undefined, hidden: number | null | undefined): string | null {
-  const parts: string[] = [];
-  if (whole(more) > 0) parts.push(`${count(whole(more))} more trading`);
-  if (whole(hidden) > 0) parts.push(`${count(whole(hidden))} hidden: ${HIDDEN_WHY}`);
-  return parts.length ? parts.join(" · ") : null;
-}
 export const HIDDEN_TITLE = "Left out: the creator sold 90% or more of its own buy within 10 minutes, launched 10 or more coins in the hour before, or launched the same ticker under this parent again.";
+export const DUST_TITLE = "Left out: coins trading now with a market cap under $1,000.";
+export function footParts(more: number | null | undefined, hidden: number | null | undefined, dust?: number | null): { text: string; title?: string }[] {
+  const parts: { text: string; title?: string }[] = [];
+  if (whole(more) > 0) parts.push({ text: `${count(whole(more))} more trading` });
+  if (whole(hidden) > 0) parts.push({ text: `${count(whole(hidden))} hidden: ${HIDDEN_WHY}`, title: HIDDEN_TITLE });
+  if (whole(dust) > 0) parts.push({ text: `${count(whole(dust))} dust`, title: DUST_TITLE });
+  return parts;
+}
+export function footLine(more: number | null | undefined, hidden: number | null | undefined, dust?: number | null): string | null {
+  const parts = footParts(more, hidden, dust);
+  return parts.length ? parts.map((p) => p.text).join(" · ") : null;
+}
 
 /// The muted post line: "Linked post · @handle · 6 min ago · the post's text" once the text is known; before that (or
 /// without one) "Post linked by 4 coins". It always says on screen that the coins link it (a phone has no hover for
@@ -170,8 +177,8 @@ function keepShown(f: WakeFamily, r: FamilyRow): FamilyRow {
   const fresh = new Map<string, WakeCoin>();
   for (const c of Array.isArray(f.coins) ? f.coins : []) if (c && typeof c.mint === "string" && !fresh.has(c.mint)) fresh.set(c.mint, c);
   const coins = (Array.isArray(r.coins) ? r.coins : []).map((c) => fresh.get(c.mint) ?? c);
-  const foot = footLine(r.more, r.hidden) !== null;
-  return { ...f, coins, state: r.state, post: r.post ? f.post ?? r.post : null, more: foot ? f.more : r.more, hidden: foot ? f.hidden : r.hidden };
+  const foot = footLine(r.more, r.hidden, r.dust) !== null;
+  return { ...f, coins, state: r.state, post: r.post ? f.post ?? r.post : null, more: foot ? f.more : r.more, hidden: foot ? f.hidden : r.hidden, dust: foot ? f.dust : r.dust };
 }
 export const LEFT_PILL = "No longer listed";
 
@@ -192,6 +199,305 @@ export function movingBuyers(d: Pick<DiscoverOne, "state">, c: Pick<WakeCoin, "b
 }
 export const movingCoins = (d: DiscoverOne | null | undefined): WakeCoin[] =>
   (d && Array.isArray(d.coins) ? d.coins.filter((c) => c && typeof c.mint === "string" && (whole(c.buyers5m) > 0 || whole(c.buyers15m) > 0)).slice(0, 3) : []);
+
+// ---- the page's controls: timeframe, tab and buy-amount slot (per-viewer conveniences in localStorage)
+
+/// The timeframes of a coin row's numbers (`tf=` on /api/discover and /api/trending); 5m unless the reader picked another.
+export const TFS: readonly Tf[] = ["1m", "5m", "30m", "1h"];
+export const DEFAULT_TF: Tf = "5m";
+export const TF_KEY = "spore:dsc-tf";
+export const TAB_KEY = "spore:dsc-tab";
+/// Which of the trade settings' three buy presets (P1, P2, P3) the rows' Buy uses. Only the index is kept here: the
+/// amounts stay in the trade settings (lib/trader.ts useTradeSettings), edited in their own dialog.
+export const SLOT_KEY = "spore:dsc-slot";
+export type DscTab = "waking" | "trending";
+export const parseTf = (raw: unknown): Tf => ((TFS as readonly unknown[]).includes(raw) ? (raw as Tf) : DEFAULT_TF);
+export const parseTab = (raw: unknown): DscTab => (raw === "trending" ? "trending" : "waking");
+export function parseSlot(raw: unknown): number {
+  if (typeof raw !== "string" || !/^\d$/.test(raw)) return 0;
+  const n = Number(raw);
+  return n < PRESET_COUNT ? n : 0;
+}
+/// Storage is reached through a thunk: reading `localStorage` itself throws where site data is blocked.
+type Store = { getItem(k: string): string | null; setItem(k: string, v: string): void };
+export function readPref<T>(store: () => Store | null | undefined, key: string, parse: (raw: string | null) => T): T {
+  try { return parse(store()?.getItem(key) ?? null); } catch { return parse(null); }
+}
+export function writePref(store: () => Store | null | undefined, key: string, value: string): void {
+  try { store()?.setItem(key, value); } catch { /* blocked storage: the choice lasts for this visit only */ }
+}
+/// "the last 5 min", "the last minute", "the last hour".
+const TF_WORDS: Record<Tf, string> = { "1m": "minute", "5m": "5 min", "30m": "30 min", "1h": "hour" };
+export const tfWords = (tf: Tf): string => `the last ${TF_WORDS[tf] ?? TF_WORDS[DEFAULT_TF]}`;
+export const TF_TITLE: Record<Tf, string> = { "1m": "Numbers over the last minute", "5m": "Numbers over the last 5 minutes", "30m": "Numbers over the last 30 minutes", "1h": "Numbers over the last hour" };
+export const emptyTrending = (tf: Tf): string => `Nothing is being bought in ${tfWords(tf)}.`;
+export const trendingSub = (tf: Tf): string => `Coins by how many wallets bought them in ${tfWords(tf)}`;
+/// The Buy button's words: "Buy 0.5 SOL".
+export const buyLabel = (sol: number): string => `Buy ${finite(sol) && sol > 0 ? +sol.toFixed(4) : "—"} SOL`;
+
+// ---- a coin row's numbers
+
+export type Tone = "up" | "down" | "flat";
+/// A change in percent: "+12.3%" up, "−4%" down, "0%" flat under 0.05; whole from 100% up ("+1,150%"); "—" unknown.
+export function chgText(chg: number | null | undefined): { text: string; tone: Tone } {
+  if (!finite(chg)) return { text: "—", tone: "flat" };
+  const a = Math.abs(chg);
+  if (a < 0.05) return { text: "0%", tone: "flat" };
+  const s = a >= 100 ? count(Math.round(a)) : a.toFixed(1).replace(/\.0$/, "");
+  return chg > 0 ? { text: `+${s}%`, tone: "up" } : { text: `−${s}%`, tone: "down" };
+}
+/// Txns: the total, and buys / sells under it. The two parts are compact ("2.35K"): each sits on its own short line
+/// of a cell about 58 px wide on a phone, where "2,345 / 1,567" ran into the next column.
+export function txns(tf: CoinRow["tf"]): { total: string; buys: string; sells: string } {
+  const b = whole(tf?.buys), s = whole(tf?.sells);
+  return tf ? { total: count(b + s), buys: compact(b), sells: compact(s) } : { total: "—", buys: "—", sells: "—" };
+}
+/// A share as it is shown: whole from 10% up, else 1 dp. The amber rule compares this, not the raw share, so a chip
+/// never reads "Top 10 50%" in neutral under "Amber at 50% or more" (the server sends 49.6).
+export const shownPct = (n: number): number => (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+/// A share of supply: "4%", "0.4%", "12%", "<0.1%".
+export function pctText(n: number | null | undefined): string {
+  if (!finite(n) || n < 0) return "—";
+  if (n === 0) return "0%";
+  if (n < 0.1) return "<0.1%";
+  const v = shownPct(n);
+  return n >= 10 ? `${count(v)}%` : `${v.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+/// The safety chips: measured shares of supply, neutral, amber at or above a stated threshold (named in the title).
+/// "…" for the two chain figures (dev, top 10) while the server is still reading them ("pending" is about those reads;
+/// the sniper share comes from the recorded launch, known or not at once); a figure that is not known is not shown.
+/// A known figure shows whatever the state: the sniper share stays when the chain read failed ("unknown").
+export const SAFETY_AMBER = { dev: 10, top10: 50, snipers: 20 } as const;
+export type SafetyChip = { key: keyof typeof SAFETY_AMBER; text: string; amber: boolean; pending: boolean; title: string };
+const SAFETY_WORDS = {
+  dev: { label: "Dev", title: (p: string) => `The creator's wallet holds ${p} of the supply now. Amber at ${SAFETY_AMBER.dev}% or more.`, wait: "Reading the creator's holding from the chain" },
+  top10: { label: "Top 10", title: (p: string) => `The 10 largest holders hold ${p} of the supply, not counting the bonding curve or pool. Amber at ${SAFETY_AMBER.top10}% or more.`, wait: "Reading the largest holders from the chain" },
+  snipers: { label: "Snipers", title: (p: string) => `Wallets other than the creator bought ${p} of the supply in the launch block or the first 3 seconds. Amber at ${SAFETY_AMBER.snipers}% or more.`, wait: "Reading the launch buys" },
+} as const;
+export function safetyChips(s: CoinSafety | null | undefined): SafetyChip[] {
+  if (!s || typeof s !== "object") return [];
+  const vals = { dev: s.devPct, top10: s.top10Pct, snipers: s.sniperPct };
+  const out: SafetyChip[] = [];
+  for (const key of ["dev", "top10", "snipers"] as const) {
+    const v = vals[key], w = SAFETY_WORDS[key];
+    if (finite(v) && v >= 0) out.push({ key, text: `${w.label} ${pctText(v)}`, amber: shownPct(v) >= SAFETY_AMBER[key], pending: false, title: w.title(pctText(v)) });
+    else if (s.state === "pending" && key !== "snipers") out.push({ key, text: `${w.label} …`, amber: false, pending: true, title: w.wait });
+  }
+  return out;
+}
+
+/// A coin row's sparkline: the USD close of each 2-minute step over the last hour (30 points, oldest first) in a w x h
+/// box. Steps before the first trade (null) are skipped, so the line starts where the coin's trading does; the scale is
+/// the points' own low to high. Green ("up") when the last close is at or above the first, red ("down") otherwise.
+export const COIN_SPARK_POINTS = 30;
+export type CoinSparkGeom = { d: string; tone: Tone; first: number | null; last: number | null };
+export function coinSparkPath(p: unknown, w: number, h: number, pad = 1.5): CoinSparkGeom {
+  const src = Array.isArray(p) ? p.slice(-COIN_SPARK_POINTS) : [];
+  const off = COIN_SPARK_POINTS - src.length;
+  const pts: { i: number; v: number }[] = [];
+  src.forEach((v, i) => { if (finite(v) && v > 0) pts.push({ i: i + off, v }); });
+  if (!pts.length) return { d: "", tone: "flat", first: null, last: null };
+  let lo = Infinity, hi = -Infinity;
+  for (const q of pts) { if (q.v < lo) lo = q.v; if (q.v > hi) hi = q.v; }
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  const x = (i: number) => r1(pad + (i * (w - 2 * pad)) / (COIN_SPARK_POINTS - 1));
+  const y = (v: number) => r1(hi === lo ? h / 2 : h - pad - ((v - lo) / (hi - lo)) * (h - 2 * pad));
+  // one point alone is drawn as a short level stroke, so a coin with a single trade still shows a mark
+  const d = pts.length === 1
+    ? `M${r1(x(pts[0].i) - 2)},${y(pts[0].v)}L${x(pts[0].i)},${y(pts[0].v)}`
+    : pts.map((q, k) => `${k ? "L" : "M"}${x(q.i)},${y(q.v)}`).join("");
+  const first = pts[0].v, last = pts[pts.length - 1].v;
+  return { d, tone: last >= first ? "up" : "down", first, last };
+}
+export function coinSparkLabel(g: Pick<CoinSparkGeom, "first" | "last">): string {
+  if (!finite(g.first) || !finite(g.last)) return "Price over the last hour: no trades";
+  return `Price over the last hour: ${chgText((g.last / g.first - 1) * 100).text} from the first trade shown to the last`;
+}
+
+// ---- live numbers between reads (SSE "trade")
+
+/// A row on screen can carry `flash` (the market cap moved on a trade: its cell flashes once; `n` restarts the
+/// animation), `liveAt` (the on-chain time of the last trade applied, so an older trade arriving late changes nothing)
+/// and `liveRecvAt` (when that trade reached this page, ms on this browser's clock: what a read is compared with, see
+/// carryLive).
+export type Flash = { dir: "up" | "down"; n: number };
+export type Live = { flash?: Flash; liveAt?: number; liveRecvAt?: number };
+/// `at`: when the SSE trade arrived here (Date.now()).
+export type LiveTrade = Pick<Trade, "mint" | "time" | "priceUsd"> & { at?: number };
+const r1dp = (n: number) => Math.round(n * 10) / 10;
+/// A row after one trade of its coin: the price, the market cap (scaled by new / old price), the change against the
+/// timeframe's start price, and the sparkline's last close (the window slides on when the trade is in a later step;
+/// the steps passed over keep the last close, as the server fills them). Anything else waits for the next read.
+/// Returns the same object when the trade does not apply. `quiet`: no flash (a live price carried over a read).
+export function liveMerge<R extends CoinRow & Live>(row: R, t: LiveTrade, quiet = false): R {
+  const p = t.priceUsd;
+  if (!row || t.mint !== row.mint || !finite(p) || p <= 0 || !finite(t.time)) return row;
+  if (finite(row.liveAt) && t.time < row.liveAt) return row;
+  const old = row.priceUsd;
+  const mcapUsd = finite(old) && old > 0 && finite(row.mcapUsd) ? row.mcapUsd * (p / old) : row.mcapUsd;
+  const tf = row.tf && finite(row.tf.p0) && row.tf.p0 > 0 ? { ...row.tf, chg: r1dp((p / row.tf.p0 - 1) * 100) } : row.tf;
+  let spark = row.spark;
+  if (spark && Array.isArray(spark.p) && spark.p.length && finite(spark.from) && finite(spark.step) && spark.step > 0) {
+    const len = spark.p.length, idx = Math.floor((t.time - spark.from) / spark.step);
+    if (idx === len - 1) spark = { ...spark, p: [...spark.p.slice(0, -1), p] };
+    else if (idx >= len) {
+      const k = Math.min(len, idx - len + 1);
+      let close: number | null = null;
+      for (let i = len - 1; i >= 0 && close === null; i--) { const v = spark.p[i]; if (finite(v)) close = v; }
+      const pts = [...spark.p.slice(k), ...Array.from({ length: k - 1 }, () => close), p];
+      spark = { ...spark, from: spark.from + (idx - len + 1) * spark.step, p: pts.slice(-len) };
+    }
+  }
+  const dir = finite(old) ? (p > old ? "up" : p < old ? "down" : null) : null;
+  const flash = !quiet && dir ? { dir, n: (row.flash?.n ?? 0) + 1 } : row.flash;
+  return { ...row, priceUsd: p, mcapUsd, tf, spark, flash, liveAt: t.time, liveRecvAt: finite(t.at) ? t.at : row.liveRecvAt };
+}
+/// The trades of a batch by mint, oldest first.
+export function tradesByMint(ts: readonly LiveTrade[]): Map<string, LiveTrade[]> {
+  const by = new Map<string, LiveTrade[]>();
+  for (const t of ts) if (t && typeof t.mint === "string") { const l = by.get(t.mint); if (l) l.push(t); else by.set(t.mint, [t]); }
+  for (const l of by.values()) l.sort((a, b) => a.time - b.time);
+  return by;
+}
+/// Rows after a batch of trades; the same array when none applied (so nothing renders again).
+export function liveRows<R extends CoinRow & Live>(rows: readonly R[], by: Map<string, LiveTrade[]>): R[] {
+  let changed = false;
+  const out = rows.map((r) => {
+    const ts = r ? by.get(r.mint) : undefined;
+    if (!ts) return r;
+    let n = r;
+    for (const t of ts) n = liveMerge(n, t);
+    if (n !== r) changed = true;
+    return n;
+  });
+  return changed ? out : (rows as R[]);
+}
+export function liveFamilies<F extends { coins: (CoinRow & Live)[] }>(rows: readonly F[], by: Map<string, LiveTrade[]>): F[] {
+  let changed = false;
+  const out = rows.map((f) => {
+    if (!Array.isArray(f.coins)) return f;
+    const coins = liveRows(f.coins, by);
+    if (coins === f.coins) return f;
+    changed = true;
+    return { ...f, coins };
+  });
+  return changed ? out : (rows as F[]);
+}
+/// How long before a read's answer arrived a live trade may have reached the page and still be missing from it: the
+/// server caches the answer 5 s (wakeups.mjs WAKE_TTL_MS) and it takes a moment to arrive. Not the answer's `asOf`: that
+/// is the server's clock, a trade's time is the chain's (a few seconds behind on a busy slot or a lagging indexer), so
+/// comparing the two dropped a live price on most reads of a busy coin.
+export const LIVE_CARRY_MS = 7_000;
+/// After a read (its answer arrived at `readAt`, ms on this browser's clock): a coin whose last live trade arrived
+/// within LIVE_CARRY_MS before that keeps the live price, so a read does not pull the market cap back and forth. The
+/// stream gives trades in the order the server applies them, so a trade that arrived earlier is in the answer. A row
+/// not carried keeps `liveAt` as a floor, so a trade older than one already applied (late on the stream) does not
+/// move the server's newer price back.
+export function carryLive<R extends CoinRow & Live>(fresh: readonly R[], shown: readonly (CoinRow & Live)[], readAt: number, windowMs = LIVE_CARRY_MS): R[] {
+  const was = new Map<string, CoinRow & Live>();
+  for (const r of shown) if (r && finite(r.liveAt)) was.set(r.mint, r);
+  if (!was.size) return fresh as R[];
+  return fresh.map((r) => {
+    const w = r ? was.get(r.mint) : undefined;
+    if (!w) return r;
+    const recent = finite(w.liveRecvAt) && w.liveRecvAt > readAt - windowMs && finite(w.priceUsd);
+    if (!recent) return finite(r.liveAt) ? r : { ...r, liveAt: w.liveAt };
+    const n = liveMerge(r, { mint: r.mint, time: w.liveAt as number, priceUsd: w.priceUsd as number, at: w.liveRecvAt }, true);
+    return n === r ? r : { ...n, flash: w.flash };
+  });
+}
+export function carryLiveFamilies<F extends { coins: (CoinRow & Live)[] }>(fresh: readonly F[], shown: readonly F[], readAt: number, windowMs = LIVE_CARRY_MS): F[] {
+  const all = shown.flatMap((f) => (Array.isArray(f.coins) ? f.coins : []));
+  if (!all.some((c) => c && finite(c.liveAt))) return fresh as F[];
+  return fresh.map((f) => (Array.isArray(f.coins) ? { ...f, coins: carryLive(f.coins, all, readAt, windowMs) } : f));
+}
+/// The mints whose trades the page follows: the coin rows on screen (a folded card shows none).
+export function screenMints(fams: readonly { coins?: { mint: string }[]; state?: string }[] | null, trend: readonly { mint: string }[] | null, opened?: ReadonlySet<string>): Set<string> {
+  const s = new Set<string>();
+  for (const f of fams ?? []) {
+    const folded = f.state === "cooling" && !(opened && "parent" in f && opened.has((f as { parent: { mint: string } }).parent.mint));
+    if (!folded) for (const c of Array.isArray(f.coins) ? f.coins : []) if (c && typeof c.mint === "string") s.add(c.mint);
+  }
+  for (const r of trend ?? []) if (r && typeof r.mint === "string") s.add(r.mint);
+  return s;
+}
+
+// ---- the family card: chart markers, the post as a block, the folded line
+
+/// Where the wake-up's start and the post's time fall on the family chart (sparkGeom's x, as a percent of its width):
+/// null outside the 2 h it shows. A time in the bucket after the last complete one sits on the last point.
+export function chartMarks(f: { sparkFrom?: number | null; startedAt: number | null; post?: { at: number | null } | null }, bucketS: number, w = 240, pad = 2): { start: number | null; post: number | null } {
+  const at = (t: number | null | undefined): number | null => {
+    if (!finite(f.sparkFrom) || !finite(t) || !(bucketS > 0)) return null;
+    const i = (t - f.sparkFrom) / bucketS;
+    if (i < 0 || i >= SPARK_POINTS + 1) return null;
+    const x = pad + (Math.min(i, SPARK_POINTS - 1) * (w - 2 * pad)) / (SPARK_POINTS - 1);
+    return Math.round((x / w) * 1000) / 10;
+  };
+  return { start: at(f.startedAt), post: at(f.post?.at) };
+}
+export const startMarkTitle = (startedAt: number, nowS: number): string => `Buying jumped here: the wake-up started ${minAgo(startedAt, nowS)}`;
+export const postMarkTitle = (at: number, nowS: number): string => `The linked post was posted here, ${minAgo(at, nowS)}`;
+/// The family chart in words: the sparkline's sentence, then the two markers when they are shown.
+export function familyChartLabel(f: Pick<WakeFamily, "spark" | "baseline" | "startedAt" | "post"> & { sparkFrom?: number }, bucketS: number, nowS: number): string {
+  const m = chartMarks(f, bucketS);
+  return [sparkLabel(f), m.start !== null ? startMarkTitle(f.startedAt, nowS) : "", m.post !== null && f.post && finite(f.post.at) ? postMarkTitle(f.post.at, nowS) : ""].filter(Boolean).join(". ");
+}
+
+/// A span of time: "6 min", "1 h 23 min", "5 h", "3 days".
+export function durText(s: number): string {
+  const m = Math.round(Math.abs(s) / 60);
+  if (m < 60) return `${Math.max(1, m)} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  if (h < 48) return h < 3 && r > 0 ? `${h} h ${r} min` : `${h} h`;
+  return `${Math.floor(h / 24)} days`;
+}
+/// When the post was posted, against the start of the buying: "Posted 6 min before buying jumped", "... after ...",
+/// "Posted as buying jumped" within a minute; without a lead "Posted 3 h ago"; "" when its time is unknown. Only the
+/// order in time: a post is what coincided, never the cause.
+export function postLead(p: Pick<WakePost, "at" | "lead">, startedAt: number | null | undefined, nowS: number): string {
+  const lead = p.lead !== undefined ? p.lead : finite(p.at) && finite(startedAt) ? startedAt - p.at : null;
+  if (finite(lead)) return Math.abs(lead) < 60 ? "Posted as buying jumped" : `Posted ${durText(lead)} ${lead > 0 ? "before" : "after"} buying jumped`;
+  return finite(p.at) ? `Posted ${minAgo(p.at, nowS)}` : "";
+}
+/// The post's words as a block: the known text with its paragraphs (blank runs cut to one empty line), plain text.
+export const postBody = (p: Pick<WakePost, "state" | "text">): string =>
+  (p.state === "ok" && typeof p.text === "string" ? p.text.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim() : "");
+export type PostBlock = { href: string | null; handle: string | null; lead: string; text: string; linked: string };
+export function postBlock(p: WakePost, startedAt: number | null | undefined, nowS: number): PostBlock {
+  const h = postHandle(p);
+  return { href: safePostUrl(p.id), handle: h ? `@${h}` : null, lead: postLead(p, startedAt, nowS), text: postBody(p), linked: `Linked by ${plural(whole(p.coins), "coin")}` };
+}
+/// A cooling card folded to one line: "$SYM · cooling · started 1 h 23 min ago · down from 19x".
+export function coolingLine(f: Pick<WakeFamily, "parent" | "startedAt" | "peakRatio">, nowS: number): string {
+  const p = f.parent, name = p.symbol ? `$${p.symbol}` : p.name || short(p.mint);
+  return [name, "cooling", `started ${minAgo(f.startedAt, nowS)}`, finite(f.peakRatio) && f.peakRatio > 0 ? `down from ${ratioX(f.peakRatio)}` : ""].filter(Boolean).join(" · ");
+}
+
+// ---- the Trending tab
+
+/// A trending row on screen (`left`: the server stopped listing it while the list was in use; dimmed, gone once idle).
+export type TrendShown = TrendRow & Live & { left?: boolean };
+/// The rows after a read, held like the families (familyRows): idle, the server's order; in use, the rows on screen
+/// keep their places with fresh numbers, a new coin goes last and one that left stays, marked.
+export function trendRows(fresh: { rows?: unknown } | null | undefined, shown: readonly TrendShown[], hold = false): TrendShown[] {
+  const by = new Map<string, TrendRow>();
+  for (const r of fresh && Array.isArray(fresh.rows) ? (fresh.rows as TrendRow[]) : []) if (r && typeof r.mint === "string" && !by.has(r.mint)) by.set(r.mint, r);
+  if (!hold) return [...by.values()];
+  const kept = new Set<string>(), rows: TrendShown[] = [];
+  for (const r of shown) {
+    if (kept.has(r.mint)) continue;
+    kept.add(r.mint);
+    const f = by.get(r.mint);
+    rows.push(f ?? (r.left ? r : { ...r, left: true }));
+  }
+  for (const [m, r] of by) if (!kept.has(m)) rows.push(r);
+  return rows;
+}
+/// The small tags of a trending row: "under $FIONA" (its parent) and the family's state when it is on Discover.
+export const parentTag = (r: Pick<TrendRow, "parent">): string | null => (r.parent && typeof r.parent.mint === "string" ? `under ${r.parent.symbol ? `$${r.parent.symbol}` : short(r.parent.mint)}` : null);
+export const familyPill = (r: Pick<TrendRow, "family">): string | null => (r.family === "live" ? "waking up" : r.family === "cooling" ? "cooling" : null);
 
 // ---- alerts
 

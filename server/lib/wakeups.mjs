@@ -76,11 +76,17 @@
 // (`launch_flow`) once the window closed, because the per-mint trim of `trades` deletes a busy coin's launch rows
 // within a day. Without a record, the stored rows decide only when they still reach back to the launch; otherwise
 // the fact is unknown (asked again later, counted in health `factsUnknown`) and the coin is not left out.
+// The same launch window records the sniper share (a Discover row's `safety.sniperPct`): base units bought by wallets
+// other than the launcher in the creation slot or the first SNIPE_S seconds, also O(1) per trade, written with it.
+//
+// The coins a body lists are lib/coinrows.mjs rows over the asked timeframe (?tf=), read from one shared snapshot of
+// the last hour's trades: a family lists only coins somebody bought ($1+) in the trailing 5 minutes and none under
+// $1,000 of market cap (dust), so a cooling family's old coins drop out instead of filling the page.
 import { SOL_MINT } from "./jupiter.mjs";
 import { imageProxyUrl } from "./meta.mjs";
-import { units } from "./pricing.mjs";
 import { postOf, postTime, postUrl } from "./narrative.mjs";
 import { runSliced } from "./sliced.mjs";
+import { TF_DEFAULT, isDust } from "./coinrows.mjs";
 
 /** Bucket width (s), buckets in the 24 h baseline, buckets in the 2 h spark. */
 export const BUCKET_S = 300, BASE_BUCKETS = 288, SPARK_BUCKETS = 24;
@@ -108,6 +114,10 @@ export const DEAD_SOLD = 0.9, DEAD_SOLD_S = 600, DEAD_LAUNCHES = 10, DEAD_LAUNCH
 export const FACTS_MAX = 50_000, FACT_YOUNG_MS = 30_000, FACT_UNKNOWN_MS = 10 * 60_000, CREATORS_MAX = 2_000;
 /** A launch window whose first trade was seen this soon (s) after creation is whole (the dev buy is in the create transaction); launch windows held at most. */
 export const LAUNCH_SEEN_S = 30, LAUNCH_MAX = 20_000;
+/** The sniper window: buys by others up to this many seconds after creation (or in the creation slot). */
+export const SNIPE_S = 3;
+/** Family coins looked at per build, at most (most buyers first): each is a row with prices, and dust is left out. */
+export const FAMILY_SCAN = 64;
 /** Children one quiet answer looks at, at most (ranked by buyers). */
 export const QUIET_SCAN = 256;
 const TICK_MS = 2_000, WAKES_MAX = 50, QUIET_CACHE = 500, PRUNE_EVERY_S = 600;
@@ -163,8 +173,10 @@ export class Wakeups {
     this.launch = new Map();  // coin mint → { at, first, key, bought, sold }: launch windows still open, about in creation order
     this.facts = new Map();   // coin mint → { why, unknown, until (ms) }, oldest first
     this.creatorIdx = new Map(); // creator key → { size, times, firsts }, oldest first
-    this.hit = null; this.job = null; this.built = new Map(); // the last list body, the build under way, every family it built by parent
-    this.quiet = new Map(); this.quietJobs = new Map();
+    this.snipes = new Map();  // coin mint → { pct, until (ms) }: sniper shares, oldest first
+    this.hits = new Map(); this.jobs = new Map(); // per timeframe: the last list build ({ at, built: every family it built by parent, body }), the build under way
+    this.quiet = new Map(); this.quietJobs = new Map(); // keyed tf + newline + mint
+    this.listed = new Set(); this.listedAt = null; // the parents the list shows (at most LIST_MAX), as of second listedAt: familyState
     this.timer = null;
     this.stats = { trades: 0, seedRows: 0, seedMs: null, closes: 0, started: 0, seededWakes: 0, events: 0, capped: 0, builds: 0, lastBuildMs: null, maxSliceMs: 0, served: 0, quietBuilt: 0, factQueries: 0, factsUnknown: 0, launchSaved: 0, launchSkipped: 0, launchDropped: 0, relisted: 0, rollCapped: 0, live: 0, cooling: 0 };
   }
@@ -231,10 +243,11 @@ export class Wakeups {
     if (this.seeding && time > this.seedT) this.#seedTo(time);
     const c = this.model.coins.get(t.mint);
     if (!c || !c.tracked) return;
+    // Every tracked coin's launch window, a SOL root's too: /api/trending lists roots, with their creator facts and sniper share.
+    if (c.createdAt != null && time >= c.createdAt && time < c.createdAt + DEAD_SOLD_S) this.#launchTrade(c, t, time);
     const p = c.quoteMint;
     if (!p || p === SOL_MINT) return;
     if (this.seeding) this.stats.seedRows++; else this.stats.trades++;
-    if (c.createdAt != null && time >= c.createdAt && time < c.createdAt + DEAD_SOLD_S) this.#launchTrade(c, t, time);
     let P = this.parents.get(p);
     if (!P) this.parents.set(p, P = parentState(p));
     if (P.k >= 0) { if (k > P.k) this.#close(P); else k = P.k; }
@@ -389,13 +402,14 @@ export class Wakeups {
     if (!e) {
       const key = this.model.creatorKey(c);
       if (!key) return; // nobody to attribute the trades to: the stored rows decide later, while they last
-      this.launch.set(c.mint, e = { at: c.createdAt, first: time, key, bought: 0, sold: 0 });
+      this.launch.set(c.mint, e = { at: c.createdAt, first: time, key, bought: 0, sold: 0, snipe: 0, slot: c.createdSlot ?? null });
       if (this.launch.size > LAUNCH_MAX) { this.launch.delete(this.launch.keys().next().value); this.stats.launchDropped++; }
     }
-    if (t.user !== e.key) return;
     const a = Number(t.baseAmount);
     if (!(a > 0)) return;
-    if (t.isBuy) e.bought += a; else e.sold += a;
+    if (t.user === e.key) { if (t.isBuy) e.bought += a; else e.sold += a; return; }
+    // Anyone else buying in the creation slot or its first seconds: the sniper share (a bot's buy lands in the launch block).
+    if (t.isBuy && (time <= e.at + SNIPE_S || (e.slot != null && Number(t.slot) === e.slot))) e.snipe += a;
   }
 
   /**
@@ -413,7 +427,7 @@ export class Wakeups {
     }
     if (!due.length) return;
     const db = this.model.db;
-    const put = () => { for (const [m, e] of due) if (db.launchFlowPut(m, e.bought, e.sold, e.at)) this.stats.launchSaved++; };
+    const put = () => { for (const [m, e] of due) if (db.launchFlowPut(m, e.bought, e.sold, e.at, e.snipe)) this.stats.launchSaved++; };
     try { if (due.length > 1 && !db.db?.isTransaction) db.transaction(put); else put(); }
     catch (e) { this.log.warn?.(`wakeups: launch flows: ${e?.message ?? e}`); }
   }
@@ -570,8 +584,43 @@ export class Wakeups {
     const first = db.tradeFirstTime(c.mint);
     if (first == null || first > c.createdAt + LAUNCH_SEEN_S) return null;
     const f = db.creatorFlow(c.mint, c.createdAt, end, key);
-    if (db.launchFlowPut(c.mint, f.bought, f.sold, c.createdAt)) this.stats.launchSaved++;
+    if (db.launchFlowPut(c.mint, f.bought, f.sold, c.createdAt, db.sniperFlow(c.mint, c.createdAt, SNIPE_S, key, c.createdSlot ?? null, DEAD_SOLD_S))) this.stats.launchSaved++;
     return f;
+  }
+
+  /**
+   * The share of supply (percent, 1 dp) wallets other than the launcher bought in the coin's creation slot or its first
+   * SNIPE_S seconds, or null when unknown (no launcher known, the window not seen from the launch, or no record and the
+   * launch rows gone). From the open launch window, else its sqlite record, else the stored rows while they reach the
+   * launch. Cached like the creator facts: final once known and the coin is 10 min old, a young one asked again after
+   * FACT_YOUNG_MS, an unknown one after FACT_UNKNOWN_MS.
+   */
+  sniperOf(c, nowMs = this.now()) {
+    const hit = this.snipes.get(c.mint);
+    if (hit && nowMs < hit.until) return hit.pct;
+    const db = this.model.db, key = this.model.creatorKey(c), at = c.createdAt, nowS = Math.floor(nowMs / 1000);
+    let supply = 0;
+    try { supply = Number(BigInt(c.tokenTotalSupply ?? 0)); } catch { supply = 0; }
+    let v = null;
+    if (key && at != null && supply > 0 && nowS >= at + SNIPE_S + GRACE_S) {
+      const e = this.launch.get(c.mint);
+      if (e && e.key === key && e.first <= at + LAUNCH_SEEN_S) v = e.snipe;
+      else {
+        const rec = db.launchFlowGet(c.mint);
+        if (rec?.sniped != null) v = rec.sniped;
+        else {
+          this.stats.factQueries++;
+          const first = db.tradeFirstTime(c.mint);
+          if (first != null && first <= at + LAUNCH_SEEN_S) v = db.sniperFlow(c.mint, at, SNIPE_S, key, c.createdSlot ?? null, DEAD_SOLD_S);
+        }
+      }
+    }
+    const pct = v == null ? null : r1((v / supply) * 100);
+    const young = at != null && nowS < at + DEAD_SOLD_S;
+    this.snipes.delete(c.mint);
+    this.snipes.set(c.mint, { pct, until: young ? nowMs + FACT_YOUNG_MS : v == null ? nowMs + FACT_UNKNOWN_MS : Infinity });
+    while (this.snipes.size > FACTS_MAX) this.snipes.delete(this.snipes.keys().next().value);
+    return pct;
   }
 
   // ---------------------------------------------------------------- bodies
@@ -584,41 +633,78 @@ export class Wakeups {
     if (!n?.postState) return { state: "idle", handle: null, text: null };
     try { return n.postState(id); } catch (e) { this.log.warn?.(`wakeups: post ${id}: ${e?.message ?? e}`); return { state: "idle", handle: null, text: null }; }
   }
+
   /**
-   * The coin a body lists (README §API): `w` the wake-up (null in a quiet answer, `at` then stands for its start); `px`
-   * the build's cache of stored USD prices (mint → price or null).
+   * `"live"` / `"cooling"` for a parent whose family the list shows now (among its first LIST_MAX, the list's own
+   * order), else null: the trending rows' family tag, which the page words as "listed under Waking up". A family
+   * waking past the 12th is not on that list, so it gets no tag. The order is worked out at most once a second (a
+   * sort of the waking parents, a few dozen), not per row.
    */
-  #coin(c, { buyers5m, w, at, groups, postId, px }) {
-    const model = this.model, r = model.ref(c), m = c.mint;
-    const existing = c.createdAt == null || c.createdAt < at - EXISTING_S;
-    const pr = model.priceOf(m);
-    let usd = pr?.priceUsd != null && Number.isFinite(pr.priceUsd) ? pr.priceUsd : null;
-    // A coin under a stock/asset parent or a newer coin parent has no USD price in the model: its newest stored trade's.
-    if (usd == null) { if (px.has(m)) usd = px.get(m); else { usd = model.db.lastPriceUsd(m); px.set(m, usd); } }
-    let mcapUsd = null;
-    try { const v = usd == null ? null : r2(usd * units(c.tokenTotalSupply ?? 0, model.decimalsOf(m))); mcapUsd = Number.isFinite(v) ? v : null; } catch { mcapUsd = null; }
-    let sinceStart = null, copyOf = null;
-    if (w && existing) {
-      // A new coin has none: measured from its first trade it counts its own launch buy (the web shows "new").
-      let p0 = w.prices.get(m);
-      if (!p0) { p0 = model.db.priceRef(m, w.startedAt); if (p0) w.prices.set(m, p0); }
-      // In USD when both prices have one (what a holder sees), else in the parent.
-      if (p0 && pr) {
-        if (p0.priceUsd > 0 && pr.priceUsd != null && Number.isFinite(pr.priceUsd)) sinceStart = r2(pr.priceUsd / p0.priceUsd);
-        else if (p0.priceQuote > 0 && Number.isFinite(pr.priceQuote)) sinceStart = r2(pr.priceQuote / p0.priceQuote);
-      }
-    } else if (w) {
-      if (postId && groups) {
-        const g = groups.get(postId);
-        copyOf = 0;
-        if (g) for (const x of g.mints) { if (x === m) continue; const o = model.coins.get(x); if (o?.createdAt != null && o.createdAt < c.createdAt) copyOf++; }
-      }
+  familyState(mint, nowS = this.#nowS()) {
+    const P = this.parents.get(mint), w = P?.wake;
+    if (!w || this.#over(w, nowS)) return null;
+    if (this.listedAt !== nowS) {
+      this.listedAt = nowS;
+      this.listed = new Set(this.#order(nowS, true).slice(0, LIST_MAX).map((a) => a.P));
     }
-    return { mint: m, name: r.name, symbol: r.symbol, image: r.image, createdAt: c.createdAt ?? null, existing, mcapUsd, sinceStart, buyers5m, copyOf };
+    if (!this.listed.has(P)) return null;
+    return this.#live(w, Math.max(this.#complete(nowS), P.lastK)) ? "live" : "cooling";
+  }
+  /** The waking parents in the list's order: live first, newest start first, then cooling ones; `skipOver` leaves out wake-ups already over (no tick ran). */
+  #order(nowS, skipOver = false) {
+    const Lg = this.#complete(nowS), act = [];
+    for (const P of this.waking) {
+      if (skipOver && this.#over(P.wake, nowS)) continue;
+      const L = Math.max(Lg, P.lastK);
+      act.push({ P, L, live: this.#live(P.wake, L) });
+    }
+    return act.sort((a, b) => (b.live - a.live) || b.P.wake.startedAt - a.P.wake.startedAt || byMint(a.P.mint, b.P.mint));
+  }
+  /** A coin's `sinceStart` when its parent is waking (null otherwise): what a trending row shows beside the family's. */
+  sinceStartOf(c) {
+    const w = c?.quoteMint ? this.parents.get(c.quoteMint)?.wake : null;
+    return w ? this.#sinceStart(c, w) : null;
+  }
+  /**
+   * An existing coin's price now over its price at the wake-up's start (its last trade at or before it, else its first
+   * after), in USD when both have one (what a holder sees), else in the parent; 2 dp. Null for a new coin: measured from
+   * its first trade it would count its own launch buy (the web shows "new").
+   */
+  #sinceStart(c, w) {
+    if (!(c.createdAt == null || c.createdAt < w.startedAt - EXISTING_S)) return null;
+    const model = this.model, m = c.mint, pr = model.priceOf(m);
+    let p0 = w.prices.get(m);
+    if (!p0) { p0 = model.db.priceRef(m, w.startedAt); if (p0) w.prices.set(m, p0); }
+    if (!p0 || !pr) return null;
+    if (p0.priceUsd > 0 && pr.priceUsd != null && Number.isFinite(pr.priceUsd)) return r2(pr.priceUsd / p0.priceUsd);
+    if (p0.priceQuote > 0 && Number.isFinite(pr.priceQuote)) return r2(pr.priceQuote / p0.priceQuote);
+    return null;
   }
 
-  /** One family of the list, in steps (a yield every 32 coins: a coin's first creator check may read sqlite). */
-  *#familyGen(P, L, nowMs, groups, px) {
+  /**
+   * A family's coin (README §API): the lib/coinrows.mjs row over timeframe `tf` with the family's `sinceStart` and
+   * `copyOf` (a new coin that links an X post: how many earlier children of the parent link it; null otherwise).
+   */
+  #coin(c, { snap, tf, w, groups, postId, px }) {
+    const row = this.model.coinRows.row(c, snap, tf, { at: w.startedAt, sinceStart: this.#sinceStart(c, w), px, safety: false });
+    let copyOf = null;
+    if (!row.existing && postId && groups) {
+      const g = groups.get(postId);
+      copyOf = 0;
+      if (g) for (const x of g.mints) { if (x === c.mint) continue; const o = this.model.coins.get(x); if (o?.createdAt != null && o.createdAt < c.createdAt) copyOf++; }
+    }
+    row.copyOf = copyOf;
+    return row;
+  }
+
+  /**
+   * One family of the list, in steps (a yield every 32 coins: a coin's first creator check may read sqlite). Its coins:
+   * the children traded since the start that somebody bought ($1+) in the trailing 5 minutes (`buyers5m` from the
+   * snapshot), most such buyers first, then USD volume since the start, then the mint; creator-fact coins left out and
+   * counted in `hidden`, dust (a known market cap under $1,000) left out and counted in `dust` (among the FAMILY_SCAN
+   * looked at), at most COINS_MAX listed; `more` the others not listed with a trade in the trailing 5 minutes.
+   */
+  *#familyGen(P, L, nowMs, groups, px, snap, tf, listed) {
     const model = this.model, w = P.wake, fresh = P.lastK === L, last = fresh ? P.hist[0]?.coins ?? null : null;
     const cands = [], posts = new Map();
     let hidden = 0, n = 0;
@@ -629,12 +715,10 @@ export class Wakeups {
       const postId = postOf(model.metaFor(c));
       if (postId) posts.set(postId, (posts.get(postId) ?? 0) + 1);
       if (this.deadWhy(c, nowMs)) { hidden++; continue; }
-      const s = last?.get(m);
-      cands.push({ c, buyers: s ? s.buyers.size : 0, usd: e.usd, traded: !!s, postId });
+      const T = snap.per.get(m)?.tf[1];
+      cands.push({ c, buyers: T ? T.buyers : 0, usd: e.usd, traded: !!T && T.buys + T.sells > 0, postId });
     }
     cands.sort((x, y) => y.buyers - x.buyers || y.usd - x.usd || byMint(x.c.mint, y.c.mint));
-    let more = 0;
-    for (let i = COINS_MAX; i < cands.length; i++) if (cands[i].traded) more++;
     yield;
     // The post most children traded since the start link (two or more); one X does not show is passed over.
     const ranked = [...posts].filter(([, k]) => k >= 2).sort((x, y) => y[1] - x[1] || (postTime(y[0], nowMs) ?? 0) - (postTime(x[0], nowMs) ?? 0) || byMint(x[0], y[0]));
@@ -642,39 +726,53 @@ export class Wakeups {
     for (const [id, k] of ranked.slice(0, 3)) {
       const s = this.#postState(id);
       if (s.state === "none") continue;
-      post = { id, url: postUrl(id), at: postTime(id, nowMs), handle: s.state === "ok" ? s.handle : null, text: s.state === "ok" ? s.text : null, state: s.state, coins: k };
+      const at = postTime(id, nowMs);
+      // `lead`: how long before the wake-up's start the post was made (negative: after it). What coincided, not a cause.
+      post = { id, url: postUrl(id), at, handle: s.state === "ok" ? s.handle : null, text: s.state === "ok" ? s.text : null, state: s.state, coins: k, lead: at == null ? null : w.startedAt - at };
       break;
     }
     const coins = [];
-    for (const x of cands.slice(0, COINS_MAX)) { coins.push(this.#coin(x.c, { buyers5m: x.buyers, w, at: w.startedAt, groups, postId: x.postId, px })); yield; }
+    let dust = 0, more = 0, looked = 0, i = 0;
+    for (; i < cands.length; i++) {
+      const x = cands[i];
+      if (coins.length >= COINS_MAX || x.buyers < 1 || looked >= FAMILY_SCAN) break; // ranked by buyers: the rest have none
+      looked++;
+      const row = this.#coin(x.c, { snap, tf, w, groups, postId: x.postId, px });
+      yield;
+      if (isDust(row)) { dust++; continue; }
+      // Kept and in a listed family: only now may it queue holder reads (lib/holders.mjs reads ~10-15 coins a minute,
+      // and the 38 families built past the list would take most of that from the rows people see).
+      row.safety = listed ? this.model.coinRows.safetyOf(x.c) : null;
+      coins.push(row);
+    }
+    for (; i < cands.length; i++) if (cands[i].traded) more++;
     const spark = new Array(SPARK_BUCKETS);
-    for (let i = 0; i < SPARK_BUCKETS; i++) { const j = L - SPARK_BUCKETS + 1 + i, s = ((j % SPARK_BUCKETS) + SPARK_BUCKETS) % SPARK_BUCKETS; spark[i] = P.sparkK[s] === j ? P.spark[s] : 0; }
+    for (let j = 0; j < SPARK_BUCKETS; j++) { const k = L - SPARK_BUCKETS + 1 + j, s = ((k % SPARK_BUCKETS) + SPARK_BUCKETS) % SPARK_BUCKETS; spark[j] = P.sparkK[s] === k ? P.spark[s] : 0; }
     return {
       parent: this.#parentRef(P.mint), startedAt: w.startedAt, state: this.#live(w, L) ? "live" : "cooling",
       // Fired after the latest complete bucket ended (no bucket since its start is complete yet): the firing window's ratio.
-      ratio: r1(fresh || (L + 1) * BUCKET_S <= w.startedAt ? w.ratio : 0), peakRatio: r1(w.peak), buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0, spark, baseline: r1(P.lastBase),
-      coinsTrading: last ? last.size : 0, post, coins, more, hidden,
+      ratio: r1(fresh || (L + 1) * BUCKET_S <= w.startedAt ? w.ratio : 0), peakRatio: r1(w.peak), buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0,
+      spark, sparkFrom: (L - SPARK_BUCKETS + 1) * BUCKET_S, baseline: r1(P.lastBase),
+      coinsTrading: last ? last.size : 0, post, coins, more, hidden, dust,
     };
   }
 
-  /** The list, in steps: live wake-ups first, newest start first, then cooling ones. */
-  *#buildGen(groupsBy) {
+  /** The list over timeframe `tf`, in steps: live wake-ups first, newest start first, then cooling ones. */
+  *#buildGen(groupsBy, snap, tf) {
     const nowMs = this.now(), nowS = Math.floor(nowMs / 1000);
     this.tick(nowS);
-    const Lg = this.#complete(nowS);
-    const act = [];
-    for (const P of this.waking) { const L = Math.max(Lg, P.lastK); act.push({ P, L, live: this.#live(P.wake, L) }); }
-    act.sort((a, b) => (b.live - a.live) || b.P.wake.startedAt - a.P.wake.startedAt || byMint(a.P.mint, b.P.mint));
+    const act = this.#order(nowS);
     const built = new Map(), families = [], px = new Map();
     let live = 0;
     for (const a of act.slice(0, WAKES_MAX)) {
       yield;
-      const f = yield* this.#familyGen(a.P, a.L, nowMs, groupsBy.get(a.P.mint) ?? null, px);
+      // Families past LIST_MAX are built only for /api/discover/:mint; their coins queue no holder reads here.
+      const f = yield* this.#familyGen(a.P, a.L, nowMs, groupsBy.get(a.P.mint) ?? null, px, snap, tf, families.length < LIST_MAX);
       built.set(a.P.mint, f); families.push(f);
       if (f.state === "live") live++;
     }
     this.stats.live = live; this.stats.cooling = families.length - live;
-    return { at: nowMs, built, body: { asOf: nowS, bucketS: BUCKET_S, families: families.slice(0, LIST_MAX) } };
+    return { at: nowMs, built, body: { asOf: nowS, bucketS: BUCKET_S, tf, families: families.slice(0, LIST_MAX) } };
   }
 
   /**
@@ -696,54 +794,66 @@ export class Wakeups {
     return out;
   }
 
-  /** The body of GET /api/discover (README §API): cached WAKE_TTL_MS, one build shared by the askers that come together. */
-  async serve() {
+  /** The body of GET /api/discover?tf= (README §API): cached WAKE_TTL_MS per timeframe, one build shared by the askers that come together. */
+  async serve(tf = TF_DEFAULT) {
     this.stats.served++;
-    const hit = this.hit;
+    const hit = this.hits.get(tf);
     if (hit && this.now() - hit.at < WAKE_TTL_MS) return hit.body;
-    if (!this.job) {
-      this.job = this.#groups().then((g) => runSliced(this.#buildGen(g))).then((run) => {
+    let job = this.jobs.get(tf);
+    if (!job) {
+      job = Promise.all([this.#groups(), this.model.coinRows.snap()]).then(([g, snap]) => runSliced(this.#buildGen(g, snap, tf))).then((run) => {
         this.stats.builds++; this.stats.lastBuildMs = r2(run.cpuMs);
         if (run.maxSliceMs > this.stats.maxSliceMs) this.stats.maxSliceMs = r2(run.maxSliceMs);
-        this.hit = run.value; this.built = run.value.built;
+        this.hits.set(tf, run.value);
         return run.value.body;
-      }).finally(() => { this.job = null; });
+      }).finally(() => this.jobs.delete(tf));
+      this.jobs.set(tf, job);
     }
-    return this.job;
+    return job;
   }
+  /** Drops the cached bodies and the coin-row snapshot (tests; a body is otherwise served WAKE_TTL_MS). */
+  forget() { this.hits.clear(); this.quiet.clear(); this.model.coinRows.hit = null; this.model.coinRows.trend.clear(); }
 
   /**
-   * The body of GET /api/discover/:mint: the family object when `mint` is waking, else the quiet shape (README §API);
+   * The body of GET /api/discover/:mint?tf=: the family object when `mint` is waking, else the quiet shape (README §API);
    * null for SOL and for a mint that is neither a tracked coin nor a parent.
    */
-  async serveOne(mint) {
+  async serveOne(mint, tf = TF_DEFAULT) {
     const model = this.model;
     if (typeof mint !== "string" || mint === SOL_MINT) return null;
     if (!model.get(mint)?.tracked && !model.children?.get(mint)?.size) return null;
-    await this.serve();
-    const f = this.built.get(mint);
-    if (f) return f;
-    const hit = this.quiet.get(mint);
+    await this.serve(tf);
+    const f = this.hits.get(tf)?.built.get(mint);
+    // A family built past the list has no safety yet: filled on a copy now that someone opened it (the build stays as built).
+    if (f) return f.coins.some((r) => r.safety == null) ? { ...f, coins: f.coins.map((r) => (r.safety == null ? { ...r, safety: this.#safety(r.mint) } : r)) } : f;
+    const key = `${tf}\n${mint}`;
+    const hit = this.quiet.get(key);
     if (hit && this.now() - hit.at < WAKE_TTL_MS) return hit.body;
-    let job = this.quietJobs.get(mint);
+    let job = this.quietJobs.get(key);
     if (!job) {
-      job = runSliced(this.#quietGen(mint)).then((run) => {
+      job = model.coinRows.snap().then((snap) => runSliced(this.#quietGen(mint, snap, tf))).then((run) => {
         this.stats.quietBuilt++;
-        this.quiet.delete(mint); this.quiet.set(mint, run.value);
+        this.quiet.delete(key); this.quiet.set(key, run.value);
         while (this.quiet.size > QUIET_CACHE) this.quiet.delete(this.quiet.keys().next().value);
         return run.value.body;
-      }).finally(() => this.quietJobs.delete(mint));
-      this.quietJobs.set(mint, job);
+      }).finally(() => this.quietJobs.delete(key));
+      this.quietJobs.set(key, job);
     }
     return job;
   }
 
+  #safety(mint) {
+    const c = this.model.coins.get(mint);
+    return c ? this.model.coinRows.safetyOf(c) : { devPct: null, top10Pct: null, sniperPct: null, state: "unknown" };
+  }
+
   /**
    * The quiet answer, in steps: the 3 children most wallets bought ($1+) in the last 3 complete buckets, never one with
-   * no such buyer (a coin only sold is not moving). A yield every 256 entries merged and every 16 coins examined, at
-   * most QUIET_SCAN examined: a coin's first creator check may read sqlite, and many left out would be one long step.
+   * no such buyer (a coin only sold is not moving) and never dust (counted in `dust`). A yield every 256 entries merged
+   * and every 16 coins examined, at most QUIET_SCAN examined: a coin's first creator check may read sqlite, and many
+   * left out would be one long step.
    */
-  *#quietGen(mint) {
+  *#quietGen(mint, snap, tf) {
     const nowMs = this.now(), nowS = Math.floor(nowMs / 1000);
     this.tick(nowS);
     const P = this.parents.get(mint), L = Math.max(this.#complete(nowS), P?.lastK ?? -1), fresh = !!P && P.lastK === L;
@@ -764,21 +874,25 @@ export class Wakeups {
     yield;
     const ranked = [...per].sort((a, b) => b[1].set.size - a[1].set.size || b[1].trades - a[1].trades || byMint(a[0], b[0]));
     const coins = [], px = new Map();
-    let seen = 0;
+    let seen = 0, dust = 0;
     for (const [m, u] of ranked) {
       if (coins.length >= QUIET_COINS || u.set.size === 0 || seen >= QUIET_SCAN) break; // ranked by buyers: the rest have none
       if ((++seen & 15) === 0) yield;
       const c = this.model.coins.get(m);
       if (!c || !c.tracked || this.deadWhy(c, nowMs)) continue;
-      coins.push({ ...this.#coin(c, { buyers5m: last?.get(m)?.buyers.size ?? 0, w: null, at: nowS, px }), buyers15m: u.set.size });
+      const row = this.model.coinRows.row(c, snap, tf, { at: nowS, px, safety: false });
       yield;
+      if (isDust(row)) { dust++; continue; }
+      row.safety = this.model.coinRows.safetyOf(c);
+      row.copyOf = null; row.buyers15m = u.set.size;
+      coins.push(row);
     }
     return {
       at: nowMs,
       body: {
         parent: this.#parentRef(mint), startedAt: null, state: "quiet", ratio: null, peakRatio: null,
-        buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0, spark: null, baseline: null,
-        coinsTrading: last ? last.size : 0, post: null, coins, more: 0, hidden: 0,
+        buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0, spark: null, sparkFrom: null, baseline: null,
+        coinsTrading: last ? last.size : 0, post: null, coins, more: 0, hidden: 0, dust,
       },
     };
   }

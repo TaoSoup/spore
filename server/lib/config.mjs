@@ -115,6 +115,10 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     perMin: num("XPOST_PER_MIN", 20, { min: 1, max: 120 }),
     daily: num("XPOST_DAILY", 3_000, { min: 0, integer: true }),
   };
+  // Holder facts of the Discover rows (dev and top-10 shares, lib/holders.mjs): off by default. On the free RPC its
+  // getTokenLargestAccounts calls were rate limited for minutes (Nov 20) and compete with the indexer for the same
+  // endpoint, so rows show the sniper share (from our own trades) only. HOLDERS=1 turns the reads on.
+  const holders = bool("HOLDERS", false);
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
@@ -213,5 +217,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders };
 }

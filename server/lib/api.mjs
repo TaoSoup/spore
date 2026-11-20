@@ -17,6 +17,7 @@ import { JUPITER_PROGRAM, SOL_MINT, JupiterError } from "./jupiter.mjs";
 import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLIT_BPS } from "./pricing.mjs";
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
 import { Wakeups } from "./wakeups.mjs";
+import { CoinRows, parseTf } from "./coinrows.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
 import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
@@ -283,7 +284,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, narrative = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, narrative = null, holders = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -348,6 +349,11 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // them. They read the model and stored rows only (no chain, no third party): no switch, no per-IP allowance.
   const wake = model.wakeups ?? new Wakeups({ model, now, log });
   wake.attach({ hub: wake.hub ?? hub ?? null, narrative: wake.narrative ?? narrOf });
+  // Coin rows (lib/coinrows.mjs): the rows every Discover list shows, over a chosen timeframe, and GET /api/trending.
+  // Their holder facts come from lib/holders.mjs when the server runs it (chain reads on their own capped lane);
+  // without it a row's `safety.state` is "unknown".
+  const rows = model.coinRows ?? (model.coinRows = new CoinRows({ model, now, log }));
+  if (holders) rows.attach({ holders });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -390,7 +396,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot() };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot() };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -645,15 +651,28 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // poll from its cache and refreshes behind it, so the page would always show the previous poll's list, and the first
   // minutes of a wake-up are the ones that matter.
   const WAKE_CACHE = { cacheControl: "public, max-age=5" };
-  app.get("/api/discover", wrap(async (req, res) => sendCachedJson(req, res, await wake.serve(), WAKE_CACHE)));
+  // `?tf=1m|5m|30m|1h` (default 5m): the timeframe of the coin rows' numbers; 400 for any other value.
+  const tfOf = (req, res) => { const tf = parseTf(req.query.tf); if (!tf) res.status(400).json({ error: "tf must be 1m, 5m, 30m or 1h" }); return tf; };
+  app.get("/api/discover", wrap(async (req, res) => {
+    const tf = tfOf(req, res);
+    if (tf) sendCachedJson(req, res, await wake.serve(tf), WAKE_CACHE);
+  }));
   // One parent: its family when it is waking, else "quiet" with the children most wallets bought in the last 15 min
   // (the map panel's "Moving now"). 404 for SOL and for a mint that is neither a tracked coin nor a parent.
   app.get("/api/discover/:mint", wrap(async (req, res) => {
     const { mint } = req.params;
     if (!isMint(mint)) return res.status(400).json({ error: "invalid mint" });
-    const body = await wake.serveOne(mint);
+    const tf = tfOf(req, res);
+    if (!tf) return;
+    const body = await wake.serveOne(mint, tf);
     if (!body) return res.status(404).json({ error: "unknown mint" });
     sendCachedJson(req, res, body, WAKE_CACHE);
+  }));
+  // Coins ranked by distinct $1+ buyers over the timeframe (README §API): a backtest found "people still buying right
+  // now" the one fact that marked moves that kept going. One sliced build per timeframe held 5 s, header the same.
+  app.get("/api/trending", wrap(async (req, res) => {
+    const tf = tfOf(req, res);
+    if (tf) sendCachedJson(req, res, await rows.trending(tf), WAKE_CACHE);
   }));
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search

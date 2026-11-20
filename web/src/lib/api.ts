@@ -259,12 +259,27 @@ export type WakeParent = { mint: string; name: string | null; symbol: string | n
 /// The X post linked by the most children that traded since the start (>= 2 of them). `at`: the post's time; `coins`:
 /// how many of those children link it; `handle` / `text` / `state` as in a narrative event (the server's post fetcher).
 /// The web never follows `url`: it rebuilds the link from the id (lib/narrative.ts safePostUrl).
-export type WakePost = { id: string; url: string; at: number | null; handle: string | null; text: string | null; state: NarrativeState; coins: number };
+/// `lead`: startedAt - at in seconds (positive: posted before buying jumped), null when `at` is unknown; `text` is the
+/// stored text, up to 600 characters.
+export type WakePost = { id: string; url: string; at: number | null; handle: string | null; text: string | null; state: NarrativeState; coins: number; lead?: number | null };
 /// A child moving now. `existing`: created before startedAt - 30 min (or with no known creation time); `sinceStart`:
 /// last price / price at startedAt, null for a new coin (its first trade would count its own launch buy) or when
 /// unknown; `copyOf`: for a new coin linking a post, how many earlier children of the parent link the same one (5: the
 /// 6th copy); `buyers15m`: only in a quiet answer, the distinct $1+ buyers over the last 3 complete buckets.
-export type WakeCoin = { mint: string; name: string | null; symbol: string | null; image: string | null; createdAt: number | null; existing: boolean; mcapUsd: number | null; sinceStart: number | null; buyers5m: number; buyers15m?: number; copyOf: number | null };
+/// The coin row shared by a family's coins, /api/trending and the quiet /api/discover/:mint answer. `tf`: the chosen
+/// timeframe (`p0` the USD price at its start, `chg` percent priceUsd vs p0, `buyers` distinct $1+ buyers); `liqUsd`: the
+/// curve or pool's quote side in USD; `spark`: the USD close of each 2-minute step over the last hour, oldest first,
+/// null before the first trade; `safety`: measured shares of supply (1 dp), "pending" until the chain was read.
+export type Tf = "1m" | "5m" | "30m" | "1h";
+export type CoinTf = { p0: number | null; chg: number | null; volUsd: number; buys: number; sells: number; buyers: number };
+export type CoinSpark = { from: number; step: number; p: (number | null)[] };
+export type CoinSafety = { devPct: number | null; top10Pct: number | null; sniperPct: number | null; state: "ok" | "pending" | "unknown" };
+export type WakeCoin = {
+  mint: string; name: string | null; symbol: string | null; image: string | null; createdAt: number | null; existing: boolean; mcapUsd: number | null;
+  priceUsd?: number | null; sinceStart: number | null; buyers5m: number; buyers15m?: number; copyOf?: number | null;
+  tf?: CoinTf; liqUsd?: number | null; spark?: CoinSpark; safety?: CoinSafety;
+};
+export type CoinRow = WakeCoin;
 export type WakeState = "live" | "cooling";
 /// One family waking up. `ratio`: the latest complete bucket's buyers / `baseline` (the current trailing-24 h mean per
 /// bucket, floored), 0 when the parent had no trade in that bucket; `spark`: distinct buyers per bucket for the last 2 h, OLDEST first (24 points, the last is the latest
@@ -274,13 +289,22 @@ export type WakeFamily = {
   parent: WakeParent; startedAt: number; state: WakeState; ratio: number; peakRatio: number;
   buyers5m: number; trades5m: number; spark: number[]; baseline: number; coinsTrading: number;
   post: WakePost | null; coins: WakeCoin[]; more: number; hidden: number;
+  /// `sparkFrom`: the start of the first spark bucket (unix s); `dust`: children trading now under a $1,000 market cap, left out.
+  sparkFrom?: number; dust?: number;
 };
-export type Discover = { asOf: number; bucketS: number; families: WakeFamily[] };
+/// Every listed coin has a buyer in the last 5 min and a market cap of $1,000 or more (or unknown).
+export type Discover = { asOf: number; bucketS: number; tf?: Tf; families: WakeFamily[] };
+/// `GET /api/trending`: up to 50 coins by distinct $1+ buyers over the timeframe, then volume. `parent`: null for a root;
+/// `family`: whether that parent is listed on Discover now.
+export type TrendRow = CoinRow & { parent: { mint: string; symbol: string | null; image: string | null } | null; family: WakeState | null };
+export type Trending = { asOf: number; tf: Tf; rows: TrendRow[] };
 /// `GET /api/discover/:mint`: the family when it is listed, else "quiet" with the top 3 children by buyers in the last
 /// 15 min (`sinceStart` null) and the other figures null or 0. 404 for a mint the server does not know.
 export type DiscoverQuiet = {
   parent: WakeParent; state: "quiet"; startedAt: null; ratio: null; peakRatio: null; buyers5m: number; trades5m: number;
   spark: number[] | null; baseline: number | null; coinsTrading: number; post: null; coins: WakeCoin[]; more: number; hidden: number;
+  /// `dust`: children bought in the last 15 min under a $1,000 market cap, left out.
+  sparkFrom?: null; dust?: number;
 };
 export type DiscoverOne = WakeFamily | DiscoverQuiet;
 /// SSE `wake`: a wake-up started (published once, when its first bucket fires).
@@ -428,9 +452,12 @@ export const api = {
   /// without the route; the UI then shows nothing.
   narrative: (mint: string) => request<Narrative>(`/narrative/${encodeURIComponent(mint)}`),
   /// The families buying far above their normal level (see `Discover`); the server caches it 5 s.
-  discover: () => request<Discover>("/discover"),
+  /// `tf` sets the timeframe of each coin row's numbers (the server's default is 5m and is left out of the URL).
+  discover: (tf?: Tf) => request<Discover>(`/discover${qs({ tf })}`),
   /// One parent's wake-up, or its quiet "moving now" coins (see `DiscoverOne`); 404 for an unknown mint.
-  discoverOf: (mint: string) => request<DiscoverOne>(`/discover/${encodeURIComponent(mint)}`),
+  discoverOf: (mint: string, tf?: Tf) => request<DiscoverOne>(`/discover/${encodeURIComponent(mint)}${qs({ tf })}`),
+  /// The coins most wallets bought over the timeframe (see `Trending`); the server caches it 5 s.
+  trending: (tf?: Tf) => request<Trending>(`/trending${qs({ tf })}`),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).

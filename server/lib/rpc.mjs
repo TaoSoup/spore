@@ -105,7 +105,7 @@ export async function readText(res, max) {
 }
 
 export class Rpc {
-  constructor({ url, rps = 6, concurrency = 4, timeoutMs = 30_000, log = console, fetchImpl = fetch, backoffMinMs = 1_000, backoffMaxMs = 30_000, apiRps = null, proxyRps = null, apiConcurrency = 2, proxyConcurrency = 2, pnlRps = null, pnlConcurrency = 2, fillRps = null, fillConcurrency = 2, user = null } = {}) {
+  constructor({ url, rps = 6, concurrency = 4, timeoutMs = 30_000, log = console, fetchImpl = fetch, backoffMinMs = 1_000, backoffMaxMs = 30_000, apiRps = null, proxyRps = null, apiConcurrency = 2, proxyConcurrency = 2, pnlRps = null, pnlConcurrency = 2, fillRps = null, fillConcurrency = 2, holdersRps = null, user = null } = {}) {
     if (!url) throw new Error("RPC url required");
     this.url = url; this.log = log; this.gpaV2 = false; this.timeoutMs = timeoutMs; this.fetch = fetchImpl;
     this.backoffMinMs = backoffMinMs; this.backoffMaxMs = backoffMaxMs;
@@ -122,6 +122,9 @@ export class Rpc {
       pnl: new Lane("pnl", { rps: pnlRps ?? Math.max(1, rps / 4), concurrency: pnlConcurrency }),
       // Trade gap fill (lib/trade-fill.mjs): RPC_URL only, never the metered user endpoint (#useUser serves api/proxy only).
       fill: new Lane("fill", { rps: fillRps ?? Math.max(1, rps / 4), concurrency: fillConcurrency }),
+      // Holder reads for the Discover rows (lib/holders.mjs, which also caps them at 30 calls a minute): RPC_URL only,
+      // never the metered user endpoint, whose daily credits are for visitors' own lookups. One call at a time.
+      holders: new Lane("holders", { rps: holdersRps ?? 1, concurrency: 1 }),
     };
     this.stats = { calls: 0, errors: 0, rateLimited: 0, lastError: null };
     this.id = 0;

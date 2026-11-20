@@ -22,6 +22,7 @@ import { Gecko } from "./lib/gecko.mjs";
 import { ChartHistory } from "./lib/chart-history.mjs";
 import { Narrative, flagText } from "./lib/narrative.mjs";
 import { XPosts } from "./lib/xposts.mjs";
+import { Holders } from "./lib/holders.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -115,10 +116,14 @@ const chartHistory = cfg.history.enabled
 const narrative = cfg.narrative.enabled
   ? new Narrative({ model, posts: cfg.narrative.posts ? new XPosts({ perMin: cfg.narrative.perMin, daily: cfg.narrative.daily, db, log, flag: (text) => flagText(text) }) : null, log })
   : null;
+// Holder facts of the Discover rows (dev and top-10 shares): read only for coins a list shows, one coin at a time, at
+// most 30 calls a minute, on the RPC's own "holders" lane (RPC_URL only, never the metered user endpoint), cached 5 min.
+// Off unless HOLDERS=1 (lib/config.mjs): without it the rows carry the sniper share only.
+const holders = cfg.holders ? new Holders({ model, rpc: rpc.lane("holders"), log }) : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative, holders,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -181,7 +186,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); model.wakeups.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); model.wakeups.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

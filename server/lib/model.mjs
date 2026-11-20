@@ -9,6 +9,7 @@ import { priceQuoteOf, chainPrices, progressOf, units, mcapCapOf, liqQuoteOf } f
 import { imageProxyUrl } from "./meta.mjs";
 import { Activity } from "./activity.mjs";
 import { Wakeups } from "./wakeups.mjs";
+import { CoinRows } from "./coinrows.mjs";
 import { drain, runSliced } from "./sliced.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -133,6 +134,9 @@ export class Model {
     // Wake-ups (lib/wakeups.mjs, GET /api/discover): per-parent buyers of existing children per 5 minutes, fed by the
     // same live trades and seeded from the same rows; the server attaches the SSE hub and the linked posts.
     this.wakeups = new Wakeups({ model: this, now: () => this.now(), log });
+    // Coin rows (lib/coinrows.mjs, the Discover rows and GET /api/trending): the last hour of trades in memory, fed by the
+    // same live trades and the seed's last hour; the server attaches the holder reads (lib/holders.mjs).
+    this.coinRows = new CoinRows({ model: this, now: () => this.now(), log });
     this.heatCache = null;
     this.touched = new Map();       // mint → last API access (ms); the refresh loop prioritises these
     this.updatedAt = nowS();
@@ -161,7 +165,7 @@ export class Model {
     // One read of the last 24 h feeds both the activity counters and the wake-up buckets (no event for history).
     let seeded = 0;
     this.wakeups.beginSeed();
-    for (const r of this.db.tradesWindow(Math.floor(this.now() / 1000) - this.activity.dayS)) { if (this.activity.record(r)) seeded++; this.wakeups.record(r); }
+    for (const r of this.db.tradesWindow(Math.floor(this.now() / 1000) - this.activity.dayS)) { if (this.activity.record(r)) seeded++; this.wakeups.record(r); this.coinRows.record(r, { seed: true }); }
     this.wakeups.endSeed();
     this.activity.seededMs = Math.round(performance.now() - t0);
     this.#bump();
@@ -428,7 +432,7 @@ export class Model {
    * is tracked: one Map lookup per trade otherwise. It is asked for a replayed trade too, since the wallet may have
    * become tracked between the two deliveries; its own primary key keeps the row single.
    */
-  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) { this.activity.record(t); this.wakeups.record(t); } this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
+  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) { this.activity.record(t); this.wakeups.record(t); this.coinRows.record(t); } this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
   /**
    * A trade read back from the chain (lib/trade-fill.mjs): stored, and kept for a tracked trader. Nothing else, for these reasons:
    * - Activity is not fed: its ring is time-ordered, and an hours-old row would stay counted about a day too long. The
@@ -438,8 +442,10 @@ export class Model {
    * - No #bump: nothing in memory changed (the trade readers, /api/trades and /api/candles, read the table).
    * - Never upsertCoin: the event's reserves are old.
    * - Never an SSE "trade" event: the print is not fresh.
+   * The coin rows (lib/coinrows.mjs) do take a row of their last hour: their numbers are counts over a window, and a
+   * filled row of that hour is a trade the window missed (an older one is ignored there).
    */
-  storeFilled(t) { const fresh = this.db.insertTrade(t); this.walletTrades?.onTrade(t); return fresh; }
+  storeFilled(t) { const fresh = this.db.insertTrade(t); if (fresh) this.coinRows.record(t); this.walletTrades?.onTrade(t); return fresh; }
   touch(mint) { this.touched.set(mint, Date.now()); }
 
   // ---------------------------------------------------------------- "ours" (DESIGN §11.1)
