@@ -25,7 +25,10 @@
 
 /* the bar: the two tabs on the left; the timeframe and the buy amount (P1 / P2 / P3) on the right */
 .dsc-bar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 20px; min-width: 0; border-bottom: 1px solid var(--line-soft); }
-.dsc-tabs { display: inline-flex; gap: 18px; }
+.dsc-bar-l { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
+/* "Order paused while you're here" / "Reconnecting": one line, cut when the bar is tight, so it never moves the list */
+.dsc-status { flex: 0 1 auto; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-tabs { flex: none; display: inline-flex; gap: 18px; }
 .dsc-tabs button { margin-bottom: -1px; padding: 6px 0 9px; border: 0; border-bottom: 2px solid transparent; background: none; font-size: var(--fs-base); font-weight: 500; color: var(--muted); cursor: pointer; }
 .dsc-tabs button:hover { color: var(--ink-2); }
 .dsc-tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
@@ -38,6 +41,17 @@
 .dsc-amt { font-family: var(--mono); font-size: var(--fs-xs); font-weight: 500; color: var(--ink-2); white-space: nowrap; }
 .dsc-slots .dsc-link { font-size: var(--fs-xs); }
 .dsc-panel { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+/* a wake-up that started while the order is held: a pill in the 24 px gap between the bar and the list. The wrapper
+   has no height and the pill sits above it, so showing it moves nothing under the pointer and covers no card; sticky
+   (8 px under the header), so it is seen when the list is scrolled */
+.dsc-new { position: sticky; top: calc(var(--nav-h, 0px) + 32px); z-index: 3; height: 0; overflow: visible; }
+/* centred by its margins (left: 50% would cap a shrinking pill at half the width). The names are the part that is cut;
+   "· Show" keeps its width, or two long tickers on a phone cut the only sign that the pill can be pressed */
+.dsc-new-pill { position: absolute; top: -24px; left: 0; right: 0; width: fit-content; max-width: 100%; margin: 0 auto; display: flex; align-items: baseline; gap: 4px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-1); box-shadow: 0 4px 16px rgba(0,0,0,.35); font-size: var(--fs-xs); line-height: 18px; color: var(--ink); white-space: nowrap; overflow: hidden; cursor: pointer; }
+.dsc-new-names { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dsc-new-show { flex: none; }
+.dsc-new-pill u { text-underline-offset: 3px; color: var(--ink-2); }
+.dsc-new-pill:hover u, .dsc-new-pill:focus-visible u { color: var(--ink); }
 
 .dsc-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 0; padding: 0; list-style: none; }
 .dsc-list.stale, .dsc-trend.stale { opacity: .6; transition: opacity var(--dur-2); }
@@ -63,8 +77,11 @@
 .dsc-pill.st-cooling { color: var(--warn); background: var(--warn-soft); }
 .dsc-pill.st-left i { display: none; }
 .dsc-line { margin: 0; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the counted facts under it (coins carrying the buying, USD bought / sold): muted, the same ink whatever the numbers */
+.dsc-facts { margin: 0; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* the family chart: buyers per 5 min over 2 h, the band at the normal level, and its two marks */
+.dsc-fchart-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
 .dsc-fchart { position: relative; min-width: 0; height: 74px; padding-bottom: 16px; }
 .dsc-fchart svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .dsc-spark-band { fill: var(--line-soft); }
@@ -78,6 +95,12 @@
 .dsc-mark.post::before { border-left: 1px dashed var(--ink-2); opacity: .6; }
 .dsc-mark.post i { position: absolute; top: -4px; left: 50%; transform: translateX(-50%); display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink-2); }
 .dsc-mark.post i svg { width: 9px; height: 9px; }
+/* what the two marks are, for a screen without hover (shown under the coarse-pointer and narrow rules below) */
+.dsc-legend { display: none; flex-wrap: wrap; gap: 2px 14px; margin: 0; font-size: var(--fs-2xs); line-height: 14px; color: var(--muted); }
+.dsc-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.dsc-legend .start i { width: 0; height: 10px; border-left: 1px solid var(--good); }
+.dsc-card.st-cooling .dsc-legend .start i { border-left-color: var(--warn); }
+.dsc-legend svg { width: 9px; height: 9px; }
 .dsc-axis { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; font-size: var(--fs-2xs); line-height: 14px; color: var(--muted); pointer-events: none; }
 
 /* the linked post as a block: who and when, the text (3 lines until "Show more"), the link out */
@@ -94,17 +117,24 @@
 .dsc-postb-act { display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .dsc-postb-act .dsc-link { font-size: var(--fs-xs); }
 
-/* the coin rows: a header line and one row a coin. Coin, Last hour, Mcap, Liquidity, Volume, Txns, Buyers, Buy.
+/* the coin rows: a header line and one row a coin. Coin, Last hour, Buyers, Mcap, Liquidity, Volume, Txns, Buy.
+   Buyers comes first of the numbers, in the brighter ink: it is what the lists are ranked by.
    The five numbers sit in .dsc-nums, a plain run of grid cells on a wide list and their own line in a narrow one. */
 .dsc-coins { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; container: dsc-rows / inline-size; }
 .dsc-coins ul { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr); }
-.dsc-cols, .dsc-coin { display: grid; grid-template-columns: minmax(0, 1fr) 84px 92px 80px 84px 72px 64px 124px; align-items: center; gap: 0 12px; min-width: 0; }
+.dsc-cols, .dsc-coin { display: grid; grid-template-columns: minmax(0, 1fr) 84px 84px 92px 80px 84px 84px 124px; align-items: center; gap: 0 12px; min-width: 0; }
 .dsc-cols { padding: 0 0 4px; font-size: var(--fs-2xs); color: var(--muted); border-bottom: 1px solid var(--line-soft); }
-.dsc-cols span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dsc-cols span:nth-child(n+3) { text-align: right; }
+.dsc-cols > * { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsc-cols > :nth-child(n+3) { text-align: right; }
+/* a header cell that sorts (Trending): the look of its neighbours, brighter when chosen */
+.dsc-sortb { padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+.dsc-sortb:hover, .dsc-sortb.on { color: var(--ink); }
 .dsc-coin { padding: 8px 0; border-bottom: 1px solid var(--line-soft); transition: opacity var(--dur-2); }
 .dsc-coin:last-child { border-bottom: 0; }
 .dsc-coin.left { opacity: .55; }
+/* a copy opened from a "+N same ticker" group, in place under the row it was folded under */
+.dsc-coin.copy { background: rgba(255,255,255,.02); }
+.dsc-rank { flex: none; width: 18px; text-align: right; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); font-variant-numeric: tabular-nums; }
 .dsc-coin-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; min-width: 0; }
 .dsc-coin-name { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink); }
 .dsc-coin-name:hover b, .dsc-coin-name:focus-visible b { color: var(--accent); }
@@ -117,10 +147,21 @@
 .dsc-coin-top b { flex: none; max-width: 100%; text-transform: none; font-family: var(--mono); font-size: var(--fs-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color var(--dur-2); }
 .dsc-tag { flex: 0 1 auto; min-width: 0; padding: 0 5px; border: 1px solid var(--line-soft); border-radius: 4px; font-size: var(--fs-2xs); font-style: normal; line-height: 15px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-tag.new { border-style: dashed; }
+/* the start of the mint on a repeated ticker: part of the identity, so it keeps its width like the ticker */
+.dsc-mintp { flex: none; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
+/* the tag and the age are written twice: in the name line (.in, shown here) and at the start of the tags line (.out,
+   shown only in a phone-width list, where the name line has about 95 px and cut the age to nothing). Both wrappers
+   are display: contents, so their children lay out as if they were not wrapped */
+.dsc-meta.in, .dsc-coin-tags { display: contents; }
+.dsc-meta.out { display: none; }
+/* the name, when it differs from the ticker: the first thing to give way in a tight cell */
+.dsc-coin-nm { flex: 0 1000 auto; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-age { flex: 0 100 auto; min-width: 0; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); overflow: hidden; white-space: nowrap; }
 .dsc-copy { font-size: var(--fs-2xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* the tags and chips under the name line up with the ticker (logo 24 + gap 8) */
 .dsc-ptags, .dsc-safety { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; padding-left: 32px; }
+/* with a rank before the logo (18 + gap 8) */
+.dsc-coin.ranked .dsc-ptags, .dsc-coin.ranked .dsc-safety { padding-left: 58px; }
 .dsc-ptag { min-width: 0; max-width: 100%; font-size: var(--fs-2xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 2px; }
 .dsc-ptag:hover, .dsc-ptag:focus-visible { color: var(--ink); }
 /* a chip is never wider than the cell: in a tight cell the chips wrap, and one longer than a line is cut, never drawn
@@ -128,6 +169,9 @@
 .dsc-chip { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; border: 1px solid var(--line-soft); border-radius: 4px; font-family: var(--mono); font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; }
 .dsc-chip.amber { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: var(--warn-soft); }
 .dsc-chip.pending { opacity: .7; }
+/* "+2 same ticker": a chip that opens the copies in place */
+.dsc-group { background: none; cursor: pointer; }
+.dsc-group:hover, .dsc-group:focus-visible, .dsc-group[aria-expanded="true"] { color: var(--ink); border-color: var(--line); }
 /* the price over the last hour */
 .dsc-chart { display: block; min-width: 0; }
 .dsc-cspark { display: block; width: 100%; height: 24px; overflow: visible; }
@@ -140,6 +184,11 @@
 .dsc-sub2 { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-2xs); color: var(--muted); }
 .dsc-sub2.up, .dsc-sub2 .up { color: var(--good); }
 .dsc-sub2.down, .dsc-sub2 .down { color: var(--bad); }
+.dsc-num.lead .dsc-v { color: var(--ink); font-weight: 500; }
+/* buys and sells side by side when they fit; two lines when not (never cut) */
+.dsc-bs { display: flex; flex-wrap: wrap; justify-content: flex-end; column-gap: 6px; }
+/* a note on a market cap far above its liquidity: neutral ink, the dotted line says there is more on hover */
+.dsc-thin { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 /* a cell's label: on its own line in a narrow list; on a wide one the header line shows it, and the label stays for
    screen readers only (the header is aria-hidden), so "Mcap $12.3K" is read, not a bare figure */
 .dsc-k { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -163,38 +212,64 @@
 .dsc-skel .sk { flex: none; }
 
 /* a narrow list (a phone, or a narrow window): each coin on two lines, the name, the chart and Buy, then the five
-   numbers with their labels. The wide row's fixed tracks take 684 px, so under 900 px the name cell fell under ~200 px
-   and its ticker was cut to nothing */
-@container dsc-rows (max-width: 900px) {
-  .dsc-cols { display: block; }
-  .dsc-cols span:not(:first-child) { display: none; }
+   numbers with their labels. The wide row's fixed tracks take 716 px, so under 940 px the name cell fell under ~220 px
+   and its ticker was cut to nothing. The header keeps its first name and, on Trending, the three sort buttons */
+@container dsc-rows (max-width: 940px) {
+  .dsc-cols { display: flex; align-items: baseline; gap: 4px 14px; }
+  .dsc-cols > span:first-child { flex: 1; }
+  .dsc-cols > span:not(:first-child) { display: none; }
+  .dsc-cols > .dsc-sortb { flex: none; text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
   .dsc-coin { grid-template-columns: minmax(0, 1fr) 60px auto; grid-template-areas: "main chart act" "nums nums nums"; gap: 8px 10px; }
   .dsc-coin-main { grid-area: main; }
   .dsc-chart { grid-area: chart; }
   .dsc-act { grid-area: act; }
-  .dsc-nums { grid-area: nums; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; min-width: 0; }
+  /* Buyers ("96 not sold") and Txns ("B 80  S 40") carry a second figure, so they get the wider tracks */
+  .dsc-nums { grid-area: nums; display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr)) minmax(0, 1.5fr); gap: 6px; min-width: 0; align-items: start; }
   .dsc-num { justify-items: start; font-size: var(--fs-2xs); }
+  .dsc-bs { justify-content: flex-start; }
   .dsc-k { position: static; width: auto; height: auto; margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; clip: auto; display: block; font-family: var(--sans); color: var(--muted); }
   /* a blocked coin's reason is long nowrap text: on its own third line, so the auto column stays the Buy's width */
   .dsc-act.blocked { grid-area: auto; grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; }
   .dsc-act.blocked .dsc-why { text-align: left; }
-  .dsc-ptags, .dsc-safety { padding-left: 0; }
+  .dsc-ptags, .dsc-safety, .dsc-coin.ranked .dsc-ptags, .dsc-coin.ranked .dsc-safety { padding-left: 0; }
 }
-/* a phone-width list: Buy on its own line under the numbers, so the name line gets the width Buy took (at 375 px the
-   ticker was cut to "$W…") */
+/* a phone-width list: three lines a coin. Line 1: rank, logo, ticker, the chart and Buy (Buy on its own line made a
+   row about 170 px tall at 375 px). Line 2, the full width of the row: the tag, the age, the parent tags and the
+   safety chips as ONE wrapping run (as separate boxes beside the chart each wrapped on its own, 4 lines above the
+   numbers, and the age was cut to nothing). Line 3: the five numbers; a second figure wraps under the first, it is
+   never cut ("1,096 not sold", "+3.4%" over "thin": a phone has no hover to read a cut note). Tighter padding, gaps
+   and line height, and a wider Buyers track ("96 not sold" on one line), keep a plain row near 110 px at 375 px */
 @container dsc-rows (max-width: 460px) {
-  .dsc-coin { grid-template-columns: minmax(0, 1fr) 60px; grid-template-areas: "main chart" "nums nums" "act act"; }
+  .dsc-coin { grid-template-columns: minmax(0, 1fr) 44px auto; grid-template-areas: "main chart act" "tags tags tags" "nums nums nums"; gap: 4px 8px; padding: 6px 0; }
+  .dsc-nums { grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(0, 1fr)) minmax(0, 1.6fr); gap: 4px; }
+  .dsc-num { gap: 0; line-height: 14px; }
+  .dsc-coin-main { display: contents; }
+  .dsc-coin-name { grid-area: main; }
+  .dsc-coin-tags { grid-area: tags; display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; min-width: 0; }
+  .dsc-ptags, .dsc-safety, .dsc-meta.out { display: contents; }
+  .dsc-meta.in { display: none; }
+  .dsc-coin-tags .dsc-tag, .dsc-coin-tags .dsc-age { flex: none; }
+  .dsc-sub2 { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  .dsc-mc { display: flex; flex-wrap: wrap; column-gap: 4px; }
+  .dsc-mc .dsc-dot { display: none; }
+  /* the numbers are line 3 here, so a blocked coin's reason goes on a fourth */
+  .dsc-act.blocked { grid-row: 4; }
+  .dsc-buy { padding: 0 8px; }
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .dsc-legend { display: flex; }
 }
 @media (pointer: coarse) {
-  .dsc-link, .dsc-ptag { position: relative; }
-  .dsc-link::after, .dsc-ptag::after { content: ""; position: absolute; inset: -10px -6px; }
+  .dsc-link, .dsc-ptag, .dsc-sortb, .dsc-group { position: relative; }
+  .dsc-sortb, .dsc-group { overflow: visible; }
+  .dsc-link::after, .dsc-ptag::after, .dsc-sortb::after, .dsc-group::after { content: ""; position: absolute; inset: -10px -6px; }
   .dsc-seg button { height: 32px; min-width: 40px; }
 }
 /* phone: a smaller card and the measured line wraps (cut at 375 px it lost "N coins trading") */
 @media (max-width: 640px) {
   .dsc-card { padding: 12px; }
   .dsc-trend { padding: 8px 12px 4px; }
-  .dsc-line { white-space: normal; overflow: visible; }
+  .dsc-line, .dsc-facts { white-space: normal; overflow: visible; }
   .dsc-bar { align-items: stretch; }
   .dsc-ctl { width: 100%; justify-content: space-between; }
   .dsc-fchart { height: 62px; }

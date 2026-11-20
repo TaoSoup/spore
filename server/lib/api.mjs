@@ -646,7 +646,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     sendCachedJson(req, res, body, body.pending ? { cacheControl: "no-store" } : idle ? { maxAge: 5, swr: 5 } : { maxAge: 30 });
   }));
 
-  // The families waking up (README §API). One sliced build shared by every asker and held 5 s (lib/wakeups.mjs); the
+  // The families waking up (README §API). One sliced build per coin-row snapshot shared by every asker, at most 5 s old (lib/wakeups.mjs); the
   // header says the same 5 s. No stale-while-revalidate (sendCachedJson would add 20 s): with it a browser answers each
   // poll from its cache and refreshes behind it, so the page would always show the previous poll's list, and the first
   // minutes of a wake-up are the ones that matter.
@@ -668,8 +668,9 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     if (!body) return res.status(404).json({ error: "unknown mint" });
     sendCachedJson(req, res, body, WAKE_CACHE);
   }));
-  // Coins ranked by distinct $1+ buyers over the timeframe (README §API): a backtest found "people still buying right
-  // now" the one fact that marked moves that kept going. One sliced build per timeframe held 5 s, header the same.
+  // Coins ranked by the buyers ($1+) over the timeframe who have not sold since (README §API): a backtest found "people
+  // still buying right now" the one fact that marked moves that kept going. One sliced build per timeframe per
+  // snapshot, at most 5 s old, header the same.
   app.get("/api/trending", wrap(async (req, res) => {
     const tf = tfOf(req, res);
     if (tf) sendCachedJson(req, res, await rows.trending(tf), WAKE_CACHE);

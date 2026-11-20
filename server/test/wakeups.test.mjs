@@ -3,17 +3,21 @@
 // the 3 h alert gap and the silent relisting), the trailing 5-minute window (a fire mid-bucket across a bucket edge,
 // none over 301 s, the window's own bucket out of the baseline, expiry and the 30-minute line on the tick, one alert
 // per episode, startedAt the fire time, the window's coins since the start, the cap, a buy that left let go), the boot
-// seed (no event, the 3 h rule kept, a wake-up the live tick started found again, a steadily busy family not listed), filled trades, live/cooling/dropped timing (current baseline, 2 h
-// live, 6 h cap), the creator facts and the recorded launch flow, the post and copyOf, sinceStart and mcapUsd, the list
+// seed (no event, the 3 h rule kept, a wake-up the live tick started found again, a steadily busy family not listed), filled trades, live/cooling/dropped timing (current baseline, live
+// while 3x however old, dropped 1 h after it was last hot, 6 h cap), the creator facts and the recorded launch flow, the post and copyOf, sinceStart and mcapUsd, the list
 // order and its caps, the quiet answer (no coin nobody bought), one SSE event per wake-up, GET /api/discover(/:mint),
-// and the per-trade cost of 50 000-trade bursts. A fake clock and sqlite in memory. No network.
+// the per-trade cost of 50 000-trade bursts, and the measured cases of the Nov 20 2026 review: a busy launch held back
+// from the 30-minute line to 2 h, the always-busy gate (a silent start that leaves the 3 h lock, its catch-up alert),
+// the body on one basis (trailing headline, sparkEx, breadth, dollars bought and sold), the post choice (the years-old
+// post included), one cache level, and cold creator facts on a slow database staying in slices. A fake clock and
+// sqlite in memory. No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { Wakeups, BUCKET_S, BASE_BUCKETS, REFIRE_S, DROP_S, GRACE_S, LIST_MAX, COINS_MAX, WAKE_TTL_MS, SET_MAX, MIN_SEEN, FACT_UNKNOWN_MS, DEAD_SOLD_S, QUIET_SCAN, ROLL_S, ROLL_MAX, EXISTING_S } from "../lib/wakeups.mjs";
+import { Wakeups, BUCKET_S, BASE_BUCKETS, REFIRE_S, DROP_S, GRACE_S, LIST_MAX, COINS_MAX, WAKE_TTL_MS, SET_MAX, MIN_SEEN, FACT_UNKNOWN_MS, DEAD_SOLD_S, QUIET_SCAN, ROLL_S, ROLL_MAX, EXISTING_S, HELD_UNTIL_S } from "../lib/wakeups.mjs";
 import { Narrative, postUrl, postTime } from "../lib/narrative.mjs";
 import { createApp } from "../lib/api.mjs";
 import { EventHub } from "../lib/events.mjs";
@@ -74,6 +78,8 @@ function three(opts) {
   w.E = [0, 1, 2].map((i) => w.coin(mintN(100 + i), `E${i}`));
   return w;
 }
+/** The keys of a family object (README §API), in order; a quiet answer has the same. */
+const FAMILY_KEYS = ["parent", "startedAt", "state", "ratio", "peakRatio", "buyers5m", "trades5m", "spark", "sparkFrom", "baseline", "coinsTrading", "post", "coins", "more", "hidden", "dust", "sparkEx", "buyersEx5m", "bought5mUsd", "sold5mUsd", "coins5", "topShare", "topMint", "topSymbol", "silent", "high24"];
 const closeAt = (k) => (k + 1) * B + GRACE_S; // the tick that closes bucket k
 const F = (k) => k * B + 49; // where a burst in bucket k fires: its 50th buyer (the trailing window, not the bucket end)
 const OPTS = { platformWallet: PLATFORM, splitBps: [5000, 0, 0, 5000], mode: "all", log: quiet };
@@ -227,9 +233,12 @@ test("a firing window keeps the wake-up going; after it was dropped one lists th
   // [alerts (startedAt), the wake-up listed (startedAt)]
   const run = (ks) => { const w = three(); for (const k of ks) w.burst(k, 50, w.E, { tag: `k${k}-` }); w.wk.tick(closeAt(ks.at(-1))); const r = [w.wakes().map((e) => e[1].startedAt), [...w.wk.waking].map((P) => P.wake.startedAt)]; w.close(); return r; };
   const T1 = F(K0);
-  assert.deepEqual(run([K0, K0 + 1, K0 + 12, K0 + 30]), [[T1], [T1]], "firing windows inside the wake-up: one");
-  // dropped 2 h after it was last hot (the end of bucket K0, which met the rule): a burst firing 10 500 s after the
-  // alert is listed without one, 10 800 s after with one
+  assert.deepEqual(run([K0, K0 + 1, K0 + 12, K0 + 23]), [[T1], [T1]], "firing windows inside the wake-up (each under 1 h after the last hot bucket): one");
+  // dropped 1 h after it was last hot (the end of bucket K0, which met the rule): a window firing 3 349 s after that
+  // end keeps the wake-up, one 3 949 s after it starts a new one (inside 3 h of the alert: listed, no alert)
+  assert.deepEqual(run([K0, K0 + 12]), [[T1], [T1]], "under 1 h after the last hot bucket: the same wake-up");
+  assert.deepEqual(run([K0, K0 + 14]), [[T1], [F(K0 + 14)]], "over 1 h: dropped, listed again without an alert");
+  // a burst firing 10 500 s after the alert is listed without one, 10 800 s after with one
   assert.deepEqual(run([K0, K0 + 35]), [[T1], [F(K0 + 35)]]);
   assert.deepEqual(run([K0, K0 + 36]), [[T1, F(K0 + 36)], [F(K0 + 36)]]);
   assert.equal(F(K0 + 36) - T1, REFIRE_S);
@@ -244,7 +253,7 @@ test("bursts at 0, +2.5 h and +5 h: listed after each one, alerted at 0 and +5 h
   w.close();
 });
 
-test("a family that stays busy for 20 h: judged against its current baseline, live 2 h at most, dropped 6 h after its start, never woken by its new normal", async () => {
+test("a family that stays busy for 20 h: judged against its current baseline, live while it is 3x that (past 2 h too), dropped 6 h after its start, never woken by its new normal", async () => {
   const w = three();
   const seen = [];
   for (let j = 0; j < 240; j++) {
@@ -252,35 +261,36 @@ test("a family that stays busy for 20 h: judged against its current baseline, li
     for (let i = 0; i < 60; i++) w.wk.record({ mint: w.E[i % 3], time: k * B + i, isBuy: true, valueUsd: 5, user: `u${i}` });
     if ([12, 36, 71, 72, 239].includes(j)) seen.push([j, ...(await w.list(closeAt(k))).families.map((f) => [f.state, f.ratio, f.baseline])]);
   }
-  // at +12 the 12 buckets of 60 before are a mean of 2.5 (over 288): 24x; at +36 still firing (60 >= 5 x 7.5) but over 2 h old
-  assert.deepEqual(seen, [[12, ["live", 24, 2.5]], [36, ["cooling", 8, 7.5]], [71, ["cooling", 4.1, 14.8]], [72], [239]]);
+  // The headline is the trailing window at the list's time (the bucket's end: its first second has just left, 59
+  // buyers). At +12 the 12 buckets of 60 before are a mean of 2.5 (over 288): 23.6x. At +36 it is 3 h old and still at
+  // 7.9x: live (it read "cooling" from 2 h on, whatever the ratio). At +71, 5 h 55 min old and 4x: live; then the 6 h cap.
+  assert.deepEqual(seen, [[12, ["live", 23.6, 2.5]], [36, ["live", 7.9, 7.5]], [71, ["live", 4, 14.8]], [72], [239]]);
   assert.equal(w.wakes().length, 1);
   w.close();
 });
 
-test("live, cooling and dropped: live while the latest complete bucket is 3x the baseline, listed until 2 h after the last such bucket", async () => {
+test("live, cooling and dropped: live while the latest complete bucket is 3x the baseline, listed until 1 h after the last such bucket; the headline is the trailing window", async () => {
   const w = three();
   const at = async (s) => (await w.list(s)).families.map((f) => [f.state, f.ratio, f.buyers5m]);
   w.burst(K0, 50, w.E);
-  assert.deepEqual(await at(K0 * B + 60), [["live", 50, 0]], "listed when it fires, mid-bucket: the firing window's ratio, no complete bucket's buyers yet");
-  assert.deepEqual(await at((K0 + 1) * B + 1), [["live", 50, 0]], "the bucket is not complete within the grace (5 s)");
-  assert.deepEqual(await at(closeAt(K0)), [["live", 50, 50]]);
+  assert.deepEqual(await at(K0 * B + 60), [["live", 50, 50]], "listed when it fires, mid-bucket: the window's ratio and buyers");
+  assert.deepEqual(await at((K0 + 1) * B + 1), [["live", 50, 50]], "the bucket is not complete within the grace (5 s)");
+  assert.deepEqual(await at(closeAt(K0)), [["live", 49, 49]], "the buy of the bucket's first second has left the 5 minutes");
   w.burst(K0 + 1, 3, w.E, { tag: "v" }); // 3x the floored baseline (0 → 1)
-  assert.deepEqual(await at(closeAt(K0 + 1)), [["live", 3, 3]], "3 buyers: still 3x");
+  assert.deepEqual(await at(closeAt(K0 + 1)), [["live", 2, 2]], "the bucket had 3 buyers, still 3x: live (the label goes by complete buckets; the headline by the 5 minutes to now, 2 buyers)");
   w.burst(K0 + 2, 2, w.E, { tag: "z" });
-  assert.deepEqual(await at(closeAt(K0 + 2)), [["cooling", 2, 2]], "2 buyers: cooling");
-  assert.deepEqual(await at(closeAt(K0 + 3)), [["cooling", 0, 0]], "a bucket without a trade reads 0");
+  assert.deepEqual(await at(closeAt(K0 + 2)), [["cooling", 1, 1]], "the bucket had 2 buyers: cooling");
+  assert.deepEqual(await at(closeAt(K0 + 3)), [["cooling", 0, 0]], "nobody in the 5 minutes: 0");
   const hot = (K0 + 2) * B; // the end of the last bucket at 3x
+  assert.equal(DROP_S, 3600);
   assert.deepEqual(await at(hot + DROP_S - 1), [["cooling", 0, 0]]);
-  assert.deepEqual(await at(hot + DROP_S), [], "2 h after it: dropped");
+  assert.deepEqual(await at(hot + DROP_S), [], "1 h after it: dropped");
   assert.deepEqual([w.wk.waking.size, w.wakes().length], [0, 1]);
-  // a wake-up the tick never dropped is not revived by a later bucket of the parent (2 h past its last hot bucket)
-  const v = three();
-  v.burst(K0, 50, v.E);
-  v.wk.tick(closeAt(K0));
-  v.burst(K0 + 30, 3, v.E); v.burst(K0 + 31, 1, v.E);
-  assert.equal(v.wk.waking.size, 0);
-  v.close(); w.close();
+  // a wake-up the tick never dropped is not revived by a later bucket of the parent: one that starts 1 h past its last
+  // hot bucket (the end of K0) finds it over; one that starts 55 min past it keeps it hot
+  const run = (k) => { const v = three(); v.burst(K0, 50, v.E); v.wk.tick(closeAt(K0)); v.burst(k, 3, v.E); v.burst(k + 1, 1, v.E); const n = v.wk.waking.size; v.close(); return n; };
+  assert.deepEqual([run(K0 + 13), run(K0 + 12)], [0, 1]);
+  w.close();
 });
 
 test("the boot seed: the last 24 h is counted with no event; a wake-up found in it is listed and the 3 h rule holds", async () => {
@@ -305,7 +315,7 @@ test("the boot seed: the last 24 h is counted with no event; a wake-up found in 
   assert.deepEqual([events.length, again.wakeups.snapshot().started], [0, 0]);
   clock.t = closeAt(K0 + 6) * 1000;
   again.wakeups.forget();
-  assert.deepEqual((await again.wakeups.serve()).families.map((f) => [f.startedAt, f.state, f.buyers5m]), [[F(K0), "live", 50]]);
+  assert.deepEqual((await again.wakeups.serve()).families.map((f) => [f.startedAt, f.state, f.buyers5m]), [[F(K0), "live", 49]], "the trailing 5 minutes at the list's time");
   w.close();
 });
 
@@ -384,7 +394,8 @@ test("one SSE `wake` event per wake-up, on the real hub", () => {
   for (const k of [K0, K0 + 1, K0 + 2]) w.burst(k, 60, w.E, { tag: `k${k}-` });
   w.wk.tick(closeAt(K0 + 2));
   const wakes = got.filter((e) => e[0] === "wake");
-  assert.deepEqual(wakes, [["wake", { parent: { mint: PAR, symbol: "PAR", name: "PAR coin" }, startedAt: F(K0), ratio: 50, buyers5m: 50 }]], "as of the firing window: 50 buyers over a floor of 1");
+  // the firing window's breadth: 17 / 17 / 16 distinct buyers on E0-E2, so 3 coins with 5+ and 34 % on the most bought
+  assert.deepEqual(wakes, [["wake", { parent: { mint: PAR, symbol: "PAR", name: "PAR coin" }, startedAt: F(K0), alertedAt: F(K0), ratio: 50, buyers5m: 50, coins5: 3, topShare: 0.34, topSymbol: "E0", high24: 0 }]], "as of the firing window: 50 buyers over a floor of 1");
   assert.equal(w.wk.snapshot().events, 1);
   hub.close(); w.close();
 });
@@ -407,7 +418,7 @@ test("the family body: its numbers, the spark, coins by buyers then volume (at m
   assert.deepEqual(Object.keys(body), ["asOf", "bucketS", "tf", "families"]);
   assert.deepEqual([body.asOf, body.bucketS, body.tf], [closeAt(K0 + 1), 300, "5m"]);
   const [f] = body.families;
-  assert.deepEqual(Object.keys(f), ["parent", "startedAt", "state", "ratio", "peakRatio", "buyers5m", "trades5m", "spark", "sparkFrom", "baseline", "coinsTrading", "post", "coins", "more", "hidden", "dust"]);
+  assert.deepEqual(Object.keys(f), FAMILY_KEYS);
   assert.deepEqual([f.sparkFrom, f.dust], [(K0 + 1 - 23) * B, 0], "the first of the 24 buckets, the last being K0 + 1");
   const img = (s) => `/api/img?u=${encodeURIComponent(`https://ipfs.io/ipfs/img-${s}`)}`;
   assert.deepEqual(f.parent, { mint: PAR, name: "PAR coin", symbol: "PAR", image: img("PAR"), isCoin: true });
@@ -418,7 +429,7 @@ test("the family body: its numbers, the spark, coins by buyers then volume (at m
   assert.deepEqual(f.coins.map((c) => c.symbol), ["E0", "E1", "NEWC", "E7", "E6", "E5"], "buyers, then volume since the start (E0's 60/3 count in it)");
   assert.deepEqual(f.coins.map((c) => c.buyers5m), [6, 3, 2, 1, 1, 1]);
   const e0 = f.coins[0], nc = f.coins[2];
-  assert.deepEqual(Object.keys(e0), ["mint", "name", "symbol", "image", "createdAt", "existing", "mcapUsd", "priceUsd", "sinceStart", "buyers5m", "tf", "liqUsd", "spark", "safety", "copyOf"]);
+  assert.deepEqual(Object.keys(e0), ["mint", "name", "symbol", "image", "createdAt", "existing", "mcapUsd", "priceUsd", "sinceStart", "buyers5m", "tf", "liqUsd", "spark", "safety", "firstSeenAt", "graduated", "thin", "copyOf"]);
   assert.deepEqual([e0.tf.buyers, e0.tf.buys, e0.tf.sells], [6, 6, 0], "the 5m timeframe: the trailing 5 minutes");
   assert.deepEqual(e0.safety, { devPct: null, top10Pct: null, sniperPct: null, state: "unknown" }, "no holder reads in this world, no launcher");
   assert.deepEqual([e0.existing, e0.createdAt, nc.existing, nc.createdAt, e0.copyOf, nc.copyOf], [true, OLD, false, NOW_S + 60, null, null], "no post: no copyOf");
@@ -525,7 +536,7 @@ test("the post: the one most children traded since the start link (2+), its text
   for (const m of [n0, n1, y1, y2, z1]) w.trade(m, `t${m.slice(0, 4)}`, (K0 + 1) * B + 30); // inside the trailing 5 min of the lists below
   // no narrative: the post is listed as a link, "idle"; no copyOf
   let [f] = (await w.list(closeAt(K0 + 1))).families;
-  assert.deepEqual(f.post, { id: X, url: postUrl(X), at: NOW_S - HOUR, handle: null, text: null, state: "idle", coins: 5, lead: F(K0) - (NOW_S - HOUR) }, "lead: posted 3 649 s before the start");
+  assert.deepEqual(f.post, { id: X, url: postUrl(X), at: NOW_S - HOUR, handle: null, text: null, state: "idle", coins: 5, newCoins: 2, lead: F(K0) - (NOW_S - HOUR) }, "lead: posted 3 649 s before the start; N0 and N1 were launched since the start minus 30 min");
   assert.equal(postTime(X, NOW_S * 1000), NOW_S - HOUR);
   assert.ok(f.coins.every((c) => c.copyOf === null));
   // with the linked posts and a fetcher that knows X is gone and Y's text
@@ -534,7 +545,7 @@ test("the post: the one most children traded since the start link (2+), its text
   const posts = { peek: (id) => records.get(id) ?? null, canQueue: (id) => (records.has(id) ? "cached" : "ok"), want: (id) => { asked.push(id); return "ok"; }, state: () => "wait", snapshot: () => ({}), start() {}, stop() {} };
   w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
   [f] = (await w.list(closeAt(K0 + 1) + 10)).families;
-  assert.deepEqual(f.post, { id: Y, url: postUrl(Y), at: NOW_S - 2 * HOUR, handle: "real", text: "the post", state: "ok", coins: 2, lead: F(K0) - (NOW_S - 2 * HOUR) }, "X is passed over, Z has one coin");
+  assert.deepEqual(f.post, { id: Y, url: postUrl(Y), at: NOW_S - 2 * HOUR, handle: "real", text: "the post", state: "ok", coins: 2, newCoins: 0, lead: F(K0) - (NOW_S - 2 * HOUR) }, "X is passed over, Z has one coin");
   const by = Object.fromEntries(f.coins.map((c) => [c.symbol, c]));
   assert.deepEqual([by.N1.existing, by.N1.copyOf, by.N0.copyOf, by.Y1.copyOf, by.Z1.copyOf], [false, 5, 4, null, null], "N1: E0-E2, QUIETX and N0 linked X before it; existing coins carry no copyOf");
   // a fetcher with nothing stored: the post's text is asked for, the state says "wait"
@@ -598,7 +609,8 @@ test("the quiet answer: the 3 children most wallets bought in the last 15 min (d
   assert.equal(w.wk.deadWhy(w.model.get(dead)), null);
   w.clock.t = closeAt(K0) * 1000;
   const body = await w.wk.serveOne(PAR);
-  assert.deepEqual(Object.keys(body), ["parent", "startedAt", "state", "ratio", "peakRatio", "buyers5m", "trades5m", "spark", "sparkFrom", "baseline", "coinsTrading", "post", "coins", "more", "hidden", "dust"]);
+  assert.deepEqual(Object.keys(body), FAMILY_KEYS);
+  assert.deepEqual([body.sparkEx, body.buyersEx5m, body.bought5mUsd, body.sold5mUsd, body.coins5, body.topShare, body.topMint, body.topSymbol, body.silent, body.high24], [null, 21, null, null, null, null, null, null, false, null], "a quiet parent: the wake-up measures are null");
   assert.deepEqual([body.state, body.startedAt, body.ratio, body.peakRatio, body.spark, body.sparkFrom, body.baseline, body.post, body.more, body.hidden, body.dust], ["quiet", null, null, null, null, null, null, null, 0, 0, 0]);
   assert.deepEqual([body.buyers5m, body.trades5m, body.coinsTrading], [5 + 6 + 1 + 9, 5 + 6 + 1 + 9, 4]);
   assert.deepEqual(body.coins.map((c) => [c.symbol, c.buyers15m, c.buyers5m, c.sinceStart, c.copyOf, c.existing]), [["Q0", 7, 1, null, null, true], ["Q1", 6, 0, null, null, true], ["Q2", 2, 0, null, null, true]], "buyers5m: the trailing 5 min (from K0 * B + 5 on): Q0's a6 only");
@@ -784,5 +796,258 @@ test("Wakeups on its own: no hub, no narrative, a model without trades", async (
   const wk = new Wakeups({ model: w.model, now: w.clock.now, log: quiet });
   assert.deepEqual(await wk.serve(), { asOf: NOW_S, bucketS: 300, tf: "5m", families: [] });
   wk.start(); wk.start(); wk.stop(); wk.stop();
+  w.close();
+});
+
+// ---------------------------------------------------------------- the Nov 20 2026 review: its measured cases
+
+test("a busy launch is not existing at 30 minutes: 20+ buyers in its minutes 15-30 hold it back until it is 2 h old; a quiet launch counts at 30 minutes as before", () => {
+  // The coin is 35 min old at t (its buys there wait for the line, 101 s later). `pre` wallets bought it at 18-25 min old.
+  const ca = K0 * B - 2000, t = K0 * B + 100, t1 = ca + 7000, t2 = ca + HELD_UNTIL_S + ROLL_S + 1;
+  const run = (pre) => {
+    const w = three();
+    const c = w.coin(mintN(111), "LAUNCH", { createdAt: ca });
+    for (let i = 0; i < pre; i++) w.trade(c, `p${i}`, K0 * B - 900 + i * 20); // over two buckets: neither holds 20
+    const wave = (s, tag) => { for (let i = 0; i < 20; i++) { w.trade(w.E[0], `${tag}a${i}`, s); w.trade(w.E[1], `${tag}b${i}`, s); } for (let i = 0; i < 10; i++) w.trade(c, `${tag}c${i}`, s); };
+    const out = [];
+    wave(t, "x"); w.wk.tick(ca + 2101 + GRACE_S); out.push(w.wakes().map((e) => e[1].startedAt));   // the 30-minute crossing
+    wave(t1, "y"); w.wk.tick(t1 + 250 + GRACE_S); out.push(w.wakes().map((e) => e[1].startedAt));    // 1 h 57 min old
+    wave(t2, "z"); out.push(w.wakes().map((e) => e[1].startedAt));                                   // 2 h 5 min 1 s old
+    out.push(w.wk.snapshot().heldBack);
+    w.close(); return out;
+  };
+  assert.deepEqual(run(19), [[ca + 2101], [ca + 2101], [ca + 2101], 0], "19 buyers before the line: existing from 30 minutes, the crossing fires (the later waves are inside 3 h of it)");
+  assert.deepEqual(run(20), [[], [], [t2], 1], "20: no wake-up at the crossing nor at 1 h 57 min (40 buyers over 2 coins without it); existing from 2 h, when a real burst fires");
+  assert.equal(t2 - ca, 7501);
+});
+
+test("a busy launch whose first buy past the 30-minute line comes late is still held back: its minutes 15-30 are counted as they come, not read from the last 15 minutes at that buy", () => {
+  // 20 wallets buy at 15-18 min of age, then nothing until the coin is 40 min old: the buckets of the last 15 minutes hold none of them
+  const ca = K0 * B - 2400, t = K0 * B;
+  const run = (pre, from = 901) => {
+    const w = three();
+    const c = w.coin(mintN(112), "LATE", { createdAt: ca });
+    for (let i = 0; i < pre; i++) w.trade(c, `p${i}`, ca + from + i * 10);
+    for (let i = 0; i < 20; i++) { w.trade(w.E[0], `a${i}`, t); w.trade(w.E[1], `b${i}`, t); }
+    for (let i = 0; i < 10; i++) w.trade(c, `c${i}`, t);
+    const out = [w.wakes().length, w.wk.snapshot().heldBack, w.wk.snapshot().heldCounting];
+    w.close(); return out;
+  };
+  assert.deepEqual(run(20), [0, 1, 0], "flagged at its 20th buyer (age 18 min): at 40 min it is not existing, and 40 buyers over 2 coins start nothing");
+  assert.deepEqual(run(19), [1, 0, 0], "19: existing at 40 min, the third coin and the 50th buyer; its count is let go at that buy");
+  assert.deepEqual(run(20, 700), [1, 0, 0], "buyers up to minute 15 do not count: 20 wallets at 11:40-14:50 flag nothing");
+});
+
+test("a card's counts on the headline's basis: rows + more + hidden + dust = coinsTrading (coins with a $1+ buy in the 5 minutes); a coin only sold is in none of them", async () => {
+  const w = world();
+  const E = Array.from({ length: 8 }, (_, i) => w.coin(mintN(300 + i), `E${i}`));
+  const S = Array.from({ length: 5 }, (_, i) => w.coin(mintN(320 + i), `S${i}`));
+  const L = mintN(9, 9);
+  w.coin(mintN(330), "DUP", { launcher: L, createdAt: OLD - 100 });
+  const re1 = w.coin(mintN(331), "DUP", { launcher: L }), re2 = w.coin(mintN(332), "DUP", { launcher: L }); // two relaunches: creator-fact coins
+  w.burst(K0, 64, E);
+  w.trade(re1, "r", K0 * B + 70);
+  for (const m of [...S, re2]) w.trade(m, "seller", K0 * B + 80, { isBuy: false, usd: 40 });
+  w.trade(S[0], "cheap", K0 * B + 81, { usd: 0.5 }); // a buy under $1 is no buyer
+  const [f] = (await w.list(K0 * B + 100)).families;
+  assert.deepEqual([f.coinsTrading, f.coins.length, f.more, f.hidden, f.dust], [9, COINS_MAX, 2, 1, 0], "8 coins and one relaunch were bought; the 5 only sold and the relaunch only sold are counted nowhere");
+  assert.equal(f.coinsTrading, f.coins.length + f.more + f.hidden + f.dust);
+  w.close();
+});
+
+test("health startedYoung goes by the most-bought EXISTING coin of the alert: a launch bought beside old coins does not count, a top existing coin under 2 h old does", () => {
+  // (a) old coins fire; a 10-minute-old launch has more buyers than any of them: the event names it, the counter ignores it
+  const w = three();
+  const launch = w.coin(mintN(113), "FRESH", { createdAt: K0 * B - 600 });
+  for (let i = 0; i < 30; i++) w.trade(launch, `n${i}`, K0 * B + 1);
+  w.burst(K0, 50, w.E, { tag: "x" });
+  assert.deepEqual(w.wakes().map((e) => [e[1].topSymbol, e[1].buyers5m]), [["FRESH", 80]], "the event's breadth is over every coin bought in the window");
+  assert.equal(w.wk.snapshot().startedYoung, 0);
+  w.close();
+  // (b) the most-bought existing coin is 1 h old
+  const v = three();
+  const young = v.coin(mintN(114), "HOUR", { createdAt: K0 * B - HOUR });
+  for (let i = 0; i < 30; i++) v.trade(young, `y${i}`, K0 * B + 1);
+  v.burst(K0, 20, v.E, { tag: "x" });
+  assert.deepEqual([v.wakes().map((e) => e[1].topSymbol), v.wk.snapshot().startedYoung], [["HOUR"], 1]);
+  v.close();
+});
+
+test("dollars sold in a card's first 5 minutes include a coin that was only sold just before the start (noted at the start, no vote, no row)", async () => {
+  for (const at of [K0 * B - 20, K0 * B + 10]) { // the sale in the bucket before the fire, and in the fire's own bucket
+    const w = three();
+    const sold = w.coin(mintN(115), "DUMPED", { post: link(idAt(F(K0) - 60)) });
+    w.trade(sold, "seller", at, { isBuy: false, usd: 2000 });
+    w.burst(K0, 60, w.E);
+    const P = w.wk.parents.get(PAR);
+    assert.deepEqual(P.wake.coins.get(sold), { trades: 0, usd: 0 }, "noted with nothing counted");
+    const [f] = (await w.list(K0 * B + 100)).families;
+    assert.deepEqual([f.bought5mUsd, f.sold5mUsd, f.coins.map((c) => c.symbol), f.coinsTrading, f.more, f.post], [300, 2000, ["E0", "E1", "E2"], 3, 0, null], `sale at ${at - K0 * B}`);
+    w.close();
+  }
+});
+
+/** PAR bought by 10 wallets per bucket for a day and by 100 in one bucket 100 back: a baseline of 10.3 (5x: 51.6), a 24 h high of 100. */
+function busyDay(w, upTo = K0 - 2) {
+  for (let k = K0 - BASE_BUCKETS - 1; k <= upTo; k++) w.burst(k, k === K0 - 100 ? 100 : 10, w.E, { tag: `h${k}-` });
+}
+
+test("an always-busy family under its own high of the day starts silently and does not use the 3 h lock; the alert comes once, when it reaches 0.8x that high", async () => {
+  const more = (w, k, from, to) => { for (let i = from; i < to; i++) w.trade(w.E[i % 3], `k${k}-${i}`, k * B + i); };
+  // (a) 52 buyers fire the rule (5x of 10.3) but are under 80: listed, no event; the 80th buyer sends it
+  const w = three();
+  busyDay(w);
+  const P = w.wk.parents.get(PAR), n0 = w.wakes().length, last0 = P.lastAlert;
+  assert.deepEqual([n0, last0], [1, (K0 - 100) * B + 49], "the bucket of 100 alerted in its day (50 against a high of 10)");
+  more(w, K0, 0, 52);
+  assert.deepEqual([P.wake.startedAt, P.wake.silent, P.wake.high24, w.wakes().length, P.lastAlert, w.wk.snapshot().silenced], [K0 * B + 51, true, 100, n0, last0, 1], "started, silent, the lock untouched");
+  let [f] = (await w.list(K0 * B + 60)).families;
+  assert.deepEqual([f.silent, f.high24, f.state, f.buyersEx5m], [true, 100, "live", 52]);
+  more(w, K0, 61, 88); // 27 more wallets: 79
+  assert.equal(w.wakes().length, n0, "79 of 80: still silent");
+  more(w, K0, 88, 89);
+  assert.deepEqual(w.wakes().slice(n0).map((e) => e[1]), [{ parent: { mint: PAR, symbol: "PAR", name: "PAR coin" }, startedAt: K0 * B + 51, alertedAt: K0 * B + 88, ratio: 7.8, buyers5m: 80, coins5: 3, topShare: 0.34, topSymbol: "E0", high24: 100 }], "the one alert, 37 s late: 80 buyers over a baseline of 10.3");
+  assert.deepEqual([P.wake.silent, P.lastAlert, w.wk.snapshot().caughtUp, w.wk.snapshot().lastCatchUpS], [false, K0 * B + 88, 1, 37]);
+  [f] = (await w.list(K0 * B + 100)).families;
+  assert.equal(f.silent, false);
+  // 100 min later (the wake-up dropped 1 h after its last hot bucket) the family reaches 90 again: inside 3 h of the
+  // alert, so it is listed again without one, as ever
+  for (let k = K0 + 1; k < K0 + 20; k++) w.burst(k, 10, w.E, { tag: `q${k}-` });
+  more(w, K0 + 20, 0, 90);
+  assert.deepEqual([w.wakes().length, P.wake.startedAt, P.wake.silent], [n0 + 1, (K0 + 20) * B + 52, false]);
+  w.close();
+  // (b) the same day, but the first burst stops at 52 (never alerted). 100 min later 90 buyers: the start is silent
+  // again and its 80th buyer alerts. Had the silent start taken the lock, nothing could alert before 3 h.
+  const v = three();
+  busyDay(v);
+  more(v, K0, 0, 52);
+  for (let k = K0 + 1; k < K0 + 20; k++) v.burst(k, 10, v.E, { tag: `q${k}-` });
+  assert.equal(v.wakes().length, 1);
+  more(v, K0 + 20, 0, 90);
+  assert.deepEqual(v.wakes().slice(1).map((e) => [e[1].startedAt, e[1].alertedAt, e[1].buyers5m]), [[(K0 + 20) * B + 52, (K0 + 20) * B + 79, 80]]);
+  assert.deepEqual([v.wk.snapshot().silenced, v.wk.snapshot().caughtUp], [2, 1]);
+  v.close();
+  // (c) a quiet family (baseline under 10) is never gated, whatever its high was
+  const q = three();
+  q.burst(K0 - 100, 300, q.E, { tag: "old" }); // a high of 300 yesterday: baseline 1.04
+  const n1 = q.wakes().length;
+  q.burst(K0, 50, q.E);
+  assert.deepEqual([q.wakes().length - n1, q.wk.snapshot().silenced, q.wakes().at(-1)[1].high24], [1, 0, 300]);
+  q.close();
+});
+
+test("the family body on one basis: the ratio, buyersEx5m and sparkEx count existing children against the baseline (spark and buyers5m every child); breadth from the rows' buyers; dollars bought and sold", async () => {
+  const w = three();
+  const fresh = w.coin(mintN(121), "NEWC", { createdAt: NOW_S - 600 });
+  for (let j = BASE_BUCKETS + 1; j >= 1; j--) for (let i = 0; i < 2; i++) w.trade(w.E[0], `h${j}-${i}`, (K0 - j) * B + 5 + i); // a baseline of 2
+  for (let i = 0; i < 40; i++) w.trade(w.E[0], `a${i}`, K0 * B + 10 + i);
+  for (let i = 0; i < 6; i++) w.trade(w.E[1], `b${i}`, K0 * B + 60 + i);
+  for (let i = 0; i < 4; i++) w.trade(w.E[2], `c${i}`, K0 * B + 70 + i); // the 50th existing buyer: fires
+  for (let i = 0; i < 30; i++) w.trade(fresh, `n${i}`, K0 * B + 80 + i, { usd: 10 });
+  w.trade(w.E[0], "a0", K0 * B + 120, { isBuy: false, usd: 30 });
+  w.trade(fresh, "n0", K0 * B + 121, { isBuy: false, usd: 99 });
+  let [f] = (await w.list(K0 * B + 200)).families;
+  assert.deepEqual([f.startedAt, f.ratio, f.baseline, f.buyersEx5m, f.buyers5m, f.coinsTrading], [K0 * B + 73, 25, 2, 50, 80, 4], "50 buyers of existing coins over a mean of 2; 30 more in the launch");
+  assert.equal(f.ratio, Math.round((f.buyersEx5m / Math.max(f.baseline, 1)) * 10) / 10, "the headline's own numbers give its ratio");
+  assert.deepEqual([f.coins5, f.topShare, f.topMint, f.topSymbol, f.coins[0].mint], [3, 0.5, w.E[0], "E0", w.E[0]], "E0 40, NEWC 30 and E1 6 have 5+ buyers (E2 has 4); 40 of the 80 buyers are on E0, the first row");
+  assert.deepEqual([f.bought5mUsd, f.sold5mUsd], [250, 30], "the existing children's 50 buys of $5 and one sale; the launch's dollars are not in it");
+  assert.deepEqual([f.silent, f.high24], [false, 2]);
+  // the chart once the bucket is complete: the line the ratio is about, and the all-children one beside it
+  [f] = (await w.list(closeAt(K0))).families;
+  assert.deepEqual([f.sparkEx.length, f.sparkEx.slice(-3), f.spark.slice(-3)], [24, [2, 2, 50], [2, 2, 80]]);
+  assert.equal(f.sparkEx.at(-1) / f.baseline, f.ratio, "last point over the band is the ratio (the window still holds the whole bucket)");
+  // 5 minutes on nobody is buying: the headline says so at once (it used to repeat the last bucket), and never reads above "down from"
+  [f] = (await w.list(K0 * B + 121 + 300)).families;
+  assert.deepEqual([f.ratio, f.buyersEx5m, f.buyers5m, f.coinsTrading, f.peakRatio, f.coins5, f.topShare, f.bought5mUsd, f.sold5mUsd], [0, 0, 0, 0, 25, 0, null, 0, 0]);
+  w.close();
+});
+
+test("the post shown: one made between 60 min before the start and 5 min after it first; an older one only inside 6 h or when 2+ coins launched since link it; else none", async () => {
+  const T = F(K0);
+  // `setup` returns the coins that trade after the start; the answer is the post as [id, coins, newCoins, lead]
+  const run = async (setup, at = closeAt(K0 + 1)) => {
+    const w = three();
+    let n = 0;
+    const add = (post, fresh = false) => w.coin(mintN(400 + n), `L${n++}`, { post: link(post), createdAt: fresh ? NOW_S - 600 : OLD });
+    const onE = (post) => { for (const m of w.E) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: null, twitter: link(post), telegram: null, website: null, fetchedAt: 1, ok: true }); };
+    const later = setup({ add, onE });
+    w.burst(K0, 50, w.E);
+    later.forEach((m, i) => w.trade(m, `t${i}`, K0 * B + 100 + i));
+    const [f] = (await w.list(at)).families, p = f.post;
+    w.close();
+    return p && [p.id, p.coins, p.newCoins, p.lead];
+  };
+  const YEARS = idAt(NOW_S - 914 * DAY, 1), MONTH = idAt(NOW_S - 30 * DAY, 2), RECENT = idAt(T - 240, 3);
+  assert.deepEqual(await run(({ add, onE }) => { onE(YEARS); return [add(RECENT, true), add(RECENT, true)]; }), [RECENT, 2, 2, 240],
+    "a post from 914 days back that 3 existing coins share, and one made 4 min before the start that 2 new coins link: the recent one");
+  assert.equal(await run(({ onE }) => { onE(YEARS); return []; }), null, "only the years-old post of existing coins: no post");
+  assert.deepEqual(await run(({ add }) => [0, 1, 2, 3, 4].map(() => add(MONTH, true))), [MONTH, 5, 5, T - (NOW_S - 30 * DAY)], "a 30-day-old post that 5 coins launched since are copying stays");
+  assert.equal(await run(({ add, onE }) => { onE(MONTH); return [add(MONTH, true)]; }), null, "4 coins link it but only one was launched since: not enough");
+  const H5 = idAt(T - 5 * HOUR, 4), H7 = idAt(T - 7 * HOUR, 5);
+  assert.deepEqual([await run(({ onE }) => { onE(H5); return []; }), await run(({ onE }) => { onE(H7); return []; })], [[H5, 3, 0, 5 * HOUR], null], "existing coins' post: shown when made inside the 6 h before the start");
+  // the original post stays as the card ages: 2 coins link one made 10 min before the start, 5 later copies link one made 40 min after it
+  const NEAR = idAt(T - 600, 6), LATE = idAt(T + 2400, 7), EDGE = idAt(T + 300, 8), PAST = idAt(T + 301, 9);
+  const copies = (add) => [0, 1, 2, 3, 4].map(() => add(LATE, true));
+  assert.deepEqual(await run(({ add }) => [add(NEAR), add(NEAR), ...copies(add)], closeAt(K0 + 9)), [NEAR, 2, 0, 600], "the one from before the start, though the later one has more links");
+  assert.deepEqual(await run(({ add }) => copies(add), closeAt(K0 + 9)), [LATE, 5, 5, -2400], "none around the start: the vote as before, and a post made after the start is said to be");
+  assert.deepEqual(await run(({ add }) => [add(EDGE), add(EDGE), ...copies(add)], closeAt(K0 + 9)), [EDGE, 2, 0, -300], "5 min after the start is still around it");
+  assert.deepEqual(await run(({ add }) => [add(PAST), add(PAST), ...copies(add)], closeAt(K0 + 9)), [LATE, 5, 5, -2400], "5 min 1 s is not: the vote");
+});
+
+test("one cache level: a body is built once per coin-row snapshot and never served past it; what an uncached request waited for is recorded", async () => {
+  const w = three();
+  w.burst(K0, 50, w.E);
+  const rows = w.model.coinRows, t0 = K0 * B + 60;
+  w.clock.t = t0 * 1000;
+  const ta = await rows.trending("5m");                      // the snapshot of t0
+  w.clock.t = (t0 + 4) * 1000;
+  const a = await w.wk.serve();                              // built from it, 4 s later
+  assert.deepEqual([a.asOf, await w.wk.serve(), await rows.trending("5m"), w.wk.snapshot().builds, rows.stats.snaps], [t0 + 4, a, ta, 1, 1]);
+  w.clock.t = (t0 + 5) * 1000;
+  const tb = await rows.trending("5m");                      // the snapshot is 5 s old: a new one
+  assert.deepEqual([tb !== ta, tb.asOf, rows.stats.snaps], [true, t0 + 5, 2]);
+  w.clock.t = (t0 + 6) * 1000;
+  const b = await w.wk.serve();
+  assert.deepEqual([b !== a, b.asOf, w.wk.snapshot().builds], [true, t0 + 6, 2], "the list built from the old snapshot is not served 2 s into the new one (it was, for its own 5 s)");
+  const one = await w.wk.serveOne(w.E[0]), again = await w.wk.serveOne(w.E[0]);
+  assert.deepEqual([one.state, one === again, w.wk.snapshot().quietBuilt], ["quiet", true, 1]);
+  w.clock.t = (t0 + 10) * 1000;
+  assert.notEqual(await w.wk.serveOne(w.E[0]), one);
+  const s = w.wk.snapshot();
+  for (const x of [s.lastWaitMs, rows.stats.lastTrendWaitMs]) assert.ok(x.total >= x.build && x.snap >= 0 && x.build >= 0);
+  assert.deepEqual([Object.keys(s.lastWaitMs), Object.keys(rows.stats.lastTrendWaitMs)], [["snap", "groups", "build", "total"], ["snap", "build", "total"]]);
+  assert.ok([s.lastQuietMs, s.quietMaxSliceMs, rows.stats.lastTrendMs, rows.stats.trendMaxSliceMs].every((x) => typeof x === "number"));
+  w.close();
+});
+
+test("cost: cold creator facts on a slow database stay in slices (trending, the list and a quiet answer step after every coin)", async (t) => {
+  const w = world();
+  const N = 60, READ_MS = 2;
+  // 60 dated children with a launcher each and no recorded launch: a coin's first creator check reads sqlite
+  const kids = Array.from({ length: N }, (_, i) => w.coin(mintN(3000 + i), `K${i}`, { launcher: mintN(i, 8) }));
+  const others = Array.from({ length: 40 }, (_, i) => w.coin(mintN(3100 + i), `Q${i}`, { parent: PAR2, launcher: mintN(100 + i, 8) })); // 40 buyers: PAR2 stays quiet
+  w.burst(K0, N, kids);
+  others.forEach((m, i) => w.trade(m, `o${i}`, K0 * B + 10));
+  const db = w.db, real = db.tradeFirstTime.bind(db);
+  let reads = 0;
+  db.tradeFirstTime = (m) => { reads++; const until = performance.now() + READ_MS; while (performance.now() < until); return real(m); };
+  w.clock.t = closeAt(K0) * 1000;
+  const cold = () => { w.wk.facts.clear(); w.wk.snipes.clear(); reads = 0; };
+  const body = await w.model.coinRows.trending("5m");
+  const tr = w.model.coinRows.stats, trendReads = reads;
+  assert.ok(body.rows.length === 50 && trendReads >= 50, `${trendReads} slow reads`);
+  cold();
+  const list = await w.wk.serve();
+  const s = w.wk.snapshot(), listReads = reads;
+  assert.ok(list.families.length === 1 && listReads >= N, `${listReads} slow reads`);
+  cold();
+  const quietBody = await w.wk.serveOne(PAR2);
+  const q = w.wk.snapshot();
+  assert.equal(quietBody.state, "quiet");
+  t.diagnostic(`cold facts at ${READ_MS} ms a read: trending ${tr.lastTrendMs} ms of CPU over ${trendReads} reads, longest slice ${tr.trendMaxSliceMs} ms; list ${s.lastBuildMs} ms over ${listReads} reads, longest slice ${s.maxSliceMs} ms; quiet ${q.lastQuietMs} ms, longest slice ${q.quietMaxSliceMs} ms`);
+  // 32 coins a step was 64 ms and more of reads in one slice here; a step per coin is the 8 ms budget plus one coin's reads
+  assert.ok(tr.lastTrendMs >= 50 * READ_MS && tr.trendMaxSliceMs < 40, `trending: longest slice ${tr.trendMaxSliceMs} ms`);
+  assert.ok(s.lastBuildMs >= N * READ_MS && s.maxSliceMs < 40, `list: longest slice ${s.maxSliceMs} ms`);
+  assert.ok(q.quietMaxSliceMs < 40, `quiet: longest slice ${q.quietMaxSliceMs} ms`);
   w.close();
 });

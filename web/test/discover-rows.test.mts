@@ -205,7 +205,7 @@ test("9. the family chart's marks and the folded cooling line", () => {
   assert.deepEqual(D.chartMarks({ ...f, sparkFrom: undefined }, 300), { start: null, post: null }, "an older server without sparkFrom");
   assert.equal(D.chartMarks({ ...f, startedAt: NOW - 60 }, 300, 600).start, Math.round(((598) / 600) * 1000) / 10, "the current bucket sits on the last point");
   const fam = { parent: { mint: "P", name: "Fiona", symbol: "FIONA", image: null, isCoin: true }, startedAt: NOW - 83 * 60, peakRatio: 19.2 } as WakeFamily;
-  assert.equal(D.coolingLine(fam, NOW), "$FIONA · cooling · started 1 h 23 min ago · down from 19x");
+  assert.equal(D.coolingLine(fam, NOW), "$FIONA · cooling · started 1 h 23 min ago · peak 19x");
   assert.match(D.familyChartLabel({ ...fam, spark: [1, 2], baseline: 1, post: post({ at: NOW - 26 * 60 }), sparkFrom: NOW - 24 * 300, startedAt: NOW - 20 * 60 } as WakeFamily & { sparkFrom: number }, 300, NOW),
     /normal is about 1\. Buying jumped here: the wake-up started 20 min ago\. The linked post was posted here, 26 min ago$/);
 });

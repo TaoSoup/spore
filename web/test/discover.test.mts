@@ -95,7 +95,7 @@ test("7. sparkGeom and its words: 24 points oldest first, the band at the normal
   assert.equal(q.last.y, q.bandY);
   assert.deepEqual(D.sparkGeom(null, null, 100, 20).values, new Array(24).fill(0));
   assert.deepEqual(D.sparkGeom([1.9, -4, "7", NaN], 0, 100, 20).values.slice(-4), [1, 0, 0, 0]);
-  assert.equal(D.sparkLabel(fam(P1)), "Buyers per 5 minutes over the last 2 hours: 170 now, at most 170, 4 two hours ago; normal is about 12");
+  assert.equal(D.sparkLabel(fam(P1)), "Buyers per 5 minutes over the last 2 hours: 170 in the last complete 5 min, at most 170, 4 two hours ago; normal is about 12");
   assert.match(D.sparkLabel(fam(P1, { baseline: 3.46 })), /normal is about 3.5$/);
 });
 

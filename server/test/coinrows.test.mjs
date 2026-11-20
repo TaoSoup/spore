@@ -2,15 +2,17 @@
 // chg (the last trade at or before the start, else sqlite, else the first in it), the 2-minute line (steps, carry,
 // nulls before the first trade, carry-in), the held hour (older seed rows ignored), the row filters of a family (no
 // coin nobody bought in the trailing 5 min, dust, creator facts), /api/trending (order, limits, exclusions, parent and
-// family tags), the sniper share from a recorded launch, holder facts in a row, GET /api/trending and ?tf=, and the cost
-// of one pass over 100 000 trades in slices. A fake clock and sqlite in memory. No network.
+// family tags), the sniper share from a recorded launch, holder facts in a row, GET /api/trending and ?tf=, the cost
+// of one pass over 100 000 trades in slices, and the Nov 20 2026 review's rules: holding (bought and not sold since)
+// and the rank by it, the 30m/1h enter-and-stay rule, the 1m floor of 5 buyers, firstSeenAt / graduated / thin.
+// A fake clock and sqlite in memory. No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { CoinRows, TF_S, SPARK_STEP, SPARK_N, HOLD_S, TREND_MAX, DUST_USD, parseTf, isDust } from "../lib/coinrows.mjs";
+import { CoinRows, TF_S, SPARK_STEP, SPARK_N, HOLD_S, TREND_MAX, DUST_USD, FLOOR_1M, ENTER_5M, STAY_MS, parseTf, isDust } from "../lib/coinrows.mjs";
 import { BUCKET_S, BASE_BUCKETS, GRACE_S, DEAD_SOLD_S, SNIPE_S } from "../lib/wakeups.mjs";
 import { Holders } from "../lib/holders.mjs";
 import { Db } from "../lib/db.mjs";
@@ -175,12 +177,19 @@ test("a family's coins: only coins bought ($1+) in the trailing 5 min, never dus
   w.wk.forget();
   w.clock.t = (K0 * B + 250 + 240) * 1000;
   const [g] = (await w.wk.serve("5m")).families;
-  assert.deepEqual([g.coins.map((c) => c.symbol), g.dust, g.more, g.hidden], [["E0", "E1"], 1, 1, 1], "SOLD's sale is a trade in the 5 min: counted in more");
+  assert.deepEqual([g.coins.map((c) => c.symbol), g.dust, g.more, g.hidden], [["E0", "E1"], 1, 0, 1], "SOLD was only sold in the 5 min: not in more, which counts coins bought, as the headline does");
+  assert.equal(g.coinsTrading, g.coins.length + g.more + g.hidden + g.dust);
   assert.deepEqual(g.coins[0].tf.buyers, 1);
+  // once nothing of the family traded in the 5 minutes, the relaunch is no longer counted as hidden (it was counted
+  // for as long as the wake-up lasted, beside two counts over 5 minutes)
+  w.wk.forget();
+  w.clock.t = (K0 * B + 250 + 300 + GRACE_S + 1) * 1000; // the trailing window is moved to 5 s ago: its buys leave up to 5 s after the rows'
+  const [h] = (await w.wk.serve("5m")).families;
+  assert.deepEqual([h.coins.length, h.hidden, h.more, h.coinsTrading], [0, 0, 0, 0]);
   w.close();
 });
 
-test("/api/trending: most distinct buyers over the timeframe, then volume, then the mint; at most 50; no coin nobody bought, no dust, no creator-fact coin; parent and family tags", async () => {
+test("/api/trending: most buyers who have not sold over the timeframe, then volume, then the mint; at most 50; no coin nobody bought, no dust, no creator-fact coin; parent and family tags", async () => {
   const w = world();
   const E = [0, 1, 2].map((i) => w.coin(mintN(150 + i), `E${i}`));
   const root = w.coin(mintN(160, 2), "ROOT", { parent: null, createdAt: OLD });
@@ -200,7 +209,8 @@ test("/api/trending: most distinct buyers over the timeframe, then volume, then 
   const asked = [];
   w.rows.attach({ holders: { get: (c) => { asked.push(c.mint); return { devPct: null, top10Pct: null, state: "pending" }; } } });
   const body = await w.rows.trending("5m");
-  assert.deepEqual(Object.keys(body), ["asOf", "tf", "rows"]);
+  assert.deepEqual(Object.keys(body), ["asOf", "tf", "floor", "floor5m", "candidates", "rows"]);
+  assert.deepEqual([body.floor, body.floor5m, body.candidates], [0, 0, 6], "5m: no floor; ROOT, E0-E2, the dust coin and the relaunch were bought");
   assert.deepEqual(asked, body.rows.map((r) => r.mint), "holder reads are asked for the listed rows only, in list order (not the dust row)");
   assert.equal(body.rows[0].safety.state, "pending");
   assert.deepEqual(body.rows.map((r) => r.symbol), ["ROOT", "E0", "E1", "E2"], "E0 and E1 have 17 buyers, E2 16");
@@ -208,7 +218,7 @@ test("/api/trending: most distinct buyers over the timeframe, then volume, then 
   assert.deepEqual([r0.parent, r0.family, r0.tf.buyers, r0.sinceStart], [null, null, 60, null], "a SOL root: no parent");
   assert.deepEqual(e0.parent, { mint: PAR, symbol: "PAR", image: `/api/img?u=${encodeURIComponent("https://ipfs.io/ipfs/img-PAR")}` });
   assert.deepEqual([e0.family, typeof e0.sinceStart], ["live", "number"], "its family is waking: tagged live, sinceStart measured");
-  assert.deepEqual(Object.keys(e0), ["mint", "name", "symbol", "image", "createdAt", "existing", "mcapUsd", "priceUsd", "sinceStart", "buyers5m", "tf", "liqUsd", "spark", "safety", "parent", "family"]);
+  assert.deepEqual(Object.keys(e0), ["mint", "name", "symbol", "image", "createdAt", "existing", "mcapUsd", "priceUsd", "sinceStart", "buyers5m", "tf", "liqUsd", "spark", "safety", "firstSeenAt", "graduated", "thin", "parent", "family"]);
   assert.equal(e0.liqUsd, 0, "no real quote on its curve: its 1e9 PAR of virtual quote is not liquidity");
   // the 1h list is its own build; cached 5 s per timeframe
   assert.deepEqual((await w.rows.trending("1h")).tf, "1h");
@@ -220,9 +230,10 @@ test("/api/trending: most distinct buyers over the timeframe, then volume, then 
   many.forEach((m, i) => w.trade(m, `m${i}`, K0 * B + 210, { usd: 1 + i }));
   w.wk.forget();
   w.clock.t = (K0 * B + 220) * 1000;
-  const big = await w.rows.trending("1m");
+  const big = await w.rows.trending("5m");
   assert.equal(big.rows.length, TREND_MAX);
-  assert.deepEqual(big.rows.slice(0, 2).map((r) => r.symbol), ["M59", "M58"], "1 buyer each: the larger volume first");
+  assert.deepEqual(big.rows.slice(0, 6).map((r) => r.symbol), ["ROOT", "E0", "E1", "E2", "M59", "M58"], "1 buyer each: the larger volume first");
+  assert.equal(big.candidates, 66, "every coin somebody bought, the ones not listed too");
   w.close();
 });
 
@@ -353,9 +364,117 @@ test("cost: one pass over 100 000 trades of the last hour runs in slices, record
   assert.ok(recMs / N < 0.02, `record: ${(recMs / N * 1000).toFixed(2)} µs per trade`);
   assert.ok(s.lastSnapMs < 2_000, `one pass: ${s.lastSnapMs} ms of CPU (wall ${wall.toFixed(0)} ms)`);
   assert.ok(s.maxSliceMs < 60, `longest slice ${s.maxSliceMs} ms`);
-  for (const A of snap.per.values()) for (const T of A.tf) assert.equal(T.set, null);
+  for (const A of snap.per.values()) for (const T of A.tf) { assert.equal(T.w, null); assert.ok(T.holding >= 0 && T.holding <= T.buyers); }
   t.diagnostic(`one pass over ${N} trades: ${s.lastSnapMs} ms CPU, longest slice ${s.maxSliceMs} ms, record ${(recMs / N * 1000).toFixed(2)} us/trade`);
   const T = snap.per.get(mints[1]).tf[3];
   assert.ok(T.buys > 0 && T.buyers > 0 && T.buyers <= T.buys);
+  w.close();
+});
+
+// ---------------------------------------------------------------- the Nov 20 2026 review: its measured cases
+
+test("holding: the wallets that bought ($1+) in the window and have not sold since their first buy in it; trending ranks by it, then volume, then the mint", async () => {
+  const w = world();
+  const flip = w.coin(mintN(500), "FLIP"), kept = w.coin(mintN(501), "KEPT"), tie = w.coin(mintN(502), "TIE");
+  w.trade(flip, "early", NOW - 1000);                                              // bought before the 5 minutes...
+  w.trade(flip, "s", NOW - 250, { isBuy: false });                                 // a sale before its first buy takes nothing away
+  for (let i = 0; i < 10; i++) w.trade(flip, `a${i}`, NOW - 200 + i);
+  for (let i = 0; i < 6; i++) w.trade(kept, `k${i}`, NOW - 200 + i);
+  for (let i = 0; i < 4; i++) w.trade(tie, `t${i}`, NOW - 200 + i);
+  for (let i = 0; i < 7; i++) w.trade(flip, `a${i}`, NOW - 100 + i, { isBuy: false, usd: 0.5 }); // any sale counts, a partial one under $1 too
+  w.trade(flip, "early", NOW - 90, { isBuy: false });                              // ...and sold inside them: no buyer of the 5 minutes
+  w.trade(flip, "a0", NOW - 50);                                                   // buying again after selling does not bring a wallet back
+  w.trade(flip, "s", NOW - 40);
+  const snap = w.snap();
+  const of = (m, tf) => { const t = w.rows.row(w.model.get(m), snap, tf).tf; return [t.buyers, t.holding]; };
+  assert.deepEqual([of(flip, "5m"), of(kept, "5m"), of(tie, "5m")], [[11, 4], [6, 6], [4, 4]], "FLIP: a7-a9 and s still hold");
+  assert.deepEqual([of(flip, "1h"), of(flip, "1m")], [[12, 4], [2, 2]], "over 1 h `early` is a buyer that sold; over 1m a0 and s bought and did not sell in it");
+  const body = await w.rows.trending("5m");
+  assert.deepEqual(body.rows.map((r) => [r.symbol, r.tf.buyers, r.tf.holding]), [["KEPT", 6, 6], ["FLIP", 11, 4], ["TIE", 4, 4]], "6 holding before 4; FLIP's larger volume before TIE; most buyers is not first");
+  w.close();
+});
+
+test("holding goes by the trades' own times: rows read back from the chain arrive late, and an older sale does not cancel a later buy (an older buy still counts a later sale)", () => {
+  const w = world();
+  const fill = (mint, user, time, isBuy) => w.model.storeFilled({ sig: `F${mint.slice(-4)}${user}${time}`, mint, idx: 0, slot: 1, time, isBuy, user, baseAmount: "1000", quoteAmount: "1", priceQuote: 1, priceUsd: 1e-5, valueUsd: 5 });
+  const a = w.coin(mintN(520), "LATE"), b = w.coin(mintN(521), "GAP"), c = w.coin(mintN(522), "TIE");
+  // LATE: six wallets bought (seen live); their sales of a minute BEFORE were missed and are filled in afterwards
+  for (let i = 0; i < 6; i++) w.trade(a, `h${i}`, NOW - 100 + i);
+  for (let i = 0; i < 6; i++) fill(a, `h${i}`, NOW - 160, false);
+  // GAP: the sales were seen live, the buys before them were missed: filled in, they are buyers that sold
+  for (let i = 0; i < 4; i++) w.trade(b, `g${i}`, NOW - 50, { isBuy: false });
+  for (let i = 0; i < 4; i++) fill(b, `g${i}`, NOW - 120, true);
+  fill(b, "g0", NOW - 200, true); fill(b, "keep", NOW - 30, true); // an even earlier buy changes nothing; a wallet that only bought holds
+  // TIE: a sale in the same second as the first buy counts as sold, whichever arrived first
+  w.trade(c, "t0", NOW - 20); w.trade(c, "t0", NOW - 20, { isBuy: false });
+  w.trade(c, "t1", NOW - 20, { isBuy: false }); w.trade(c, "t1", NOW - 20);
+  w.trade(c, "t2", NOW - 20);
+  const snap = w.snap();
+  const of = (m, tf = "5m") => { const t = w.rows.row(w.model.get(m), snap, tf).tf; return [t.buyers, t.holding, t.buys, t.sells]; };
+  assert.deepEqual([of(a), of(b), of(c)], [[6, 6, 6, 6], [5, 1, 6, 4], [3, 1, 3, 2]]);
+  assert.deepEqual(of(a, "1m"), [0, 0, 0, 0], "nothing in the last minute");
+  for (const A of snap.per.values()) for (const T of A.tf) assert.equal(T.w, null, "the wallet maps are let go");
+  w.close();
+});
+
+test("trending over 30m and 1h: a coin enters with 3+ buyers in the last 5 minutes and stays while it has 1+; 5m has no such rule", async () => {
+  const w = world();
+  const done = w.coin(mintN(510), "DONE"), on = w.coin(mintN(511), "ON"), two = w.coin(mintN(512), "TWO");
+  for (const m of [done, on, two]) for (let i = 0; i < 10; i++) w.trade(m, `x${i}`, NOW - 1200 + i); // a burst 20 min ago
+  for (const [u, s] of [["o1", -290], ["o2", -280], ["o3", -20]]) w.trade(on, u, NOW + s);
+  w.trade(two, "t1", NOW - 30); w.trade(two, "t2", NOW - 25);
+  const at = async (s, tf = "30m") => { w.clock.t = s * 1000; const b = await w.rows.trending(tf); return [b.rows.map((r) => r.symbol), b.candidates]; };
+  assert.deepEqual(await at(NOW), [["ON"], 1], "DONE has 10 buyers in the 30 min and none now; TWO has 2 in the 5 min");
+  const b = await w.rows.trending("30m");
+  assert.deepEqual([b.floor, b.floor5m, b.rows[0].tf.buyers, b.rows[0].buyers5m], [0, ENTER_5M, 13, 3]);
+  assert.deepEqual(await at(NOW, "1h"), [["ON"], 1]);
+  assert.deepEqual((await at(NOW, "5m"))[0], ["ON", "TWO"], "the 5m list is every coin bought in it");
+  assert.deepEqual(await at(NOW + 60), [["ON"], 1], "one buyer left in its 5 minutes: it stays (it was in the list a minute ago)");
+  assert.deepEqual(await at(NOW + 110), [["ON"], 1]);
+  assert.deepEqual(await at(NOW + 110 + STAY_MS / 1000 + 1), [[], 0], "the list was not asked for 2 minutes: nothing stays on a list nobody saw, and 1 buyer does not enter");
+  // TWO gets its third buyer: it enters; ON's last buyer has left its 5 minutes
+  w.trade(two, "t3", NOW + 240);
+  assert.deepEqual(await at(NOW + 250), [["TWO"], 1], "t1, t2 and t3 are inside the 5 minutes");
+  assert.deepEqual(await at(NOW + 300), [["TWO"], 1], "t3 alone: it stays");
+  assert.deepEqual(await at(NOW + 541), [[], 0], "no buyer in the 5 minutes: gone");
+  w.trade(two, "t4", NOW + 545);
+  assert.deepEqual(await at(NOW + 550), [[], 0], "and one buyer does not bring it back");
+  w.close();
+});
+
+test("trending over 1m: only coins with 5+ buyers in the last 60 s; the list may be short or empty", async () => {
+  const w = world();
+  const five = w.coin(mintN(520), "FIVE"), four = w.coin(mintN(521), "FOUR");
+  for (let i = 0; i < 3; i++) w.trade(four, `p${i}`, NOW - 100);
+  for (let i = 0; i < 5; i++) w.trade(five, `f${i}`, NOW - 30);
+  for (let i = 0; i < 4; i++) w.trade(four, `g${i}`, NOW - 30);
+  let b = await w.rows.trending("1m");
+  assert.deepEqual([b.floor, b.floor5m, b.candidates, b.rows.map((r) => [r.symbol, r.tf.buyers])], [FLOOR_1M, 0, 1, [["FIVE", 5]]], "4 buyers in the minute is under the floor");
+  b = await w.rows.trending("5m");
+  assert.deepEqual([b.floor, b.candidates, b.rows.map((r) => [r.symbol, r.tf.buyers])], [0, 2, [["FOUR", 7], ["FIVE", 5]]], "no floor on 5m");
+  w.clock.t = (NOW + 40) * 1000;
+  b = await w.rows.trending("1m");
+  assert.deepEqual([b.candidates, b.rows], [0, []], "nobody with 5 in the last minute: an empty list, not one padded with one-buyer rows");
+  w.close();
+});
+
+test("row facts: firstSeenAt for an undated coin (its first stored trade, remembered), graduated, thin only for a $1M+ cap on under 1 % real liquidity", () => {
+  const w = world();
+  const undated = w.coin(mintN(530), "NODATE", { createdAt: null }), dated = w.coin(mintN(531), "DATED");
+  w.stored(undated, NOW - 2400, 1e-5); w.trade(undated, "u", NOW - 10); w.trade(dated, "u", NOW - 10);
+  let r = w.row(undated);
+  assert.deepEqual([r.createdAt, r.firstSeenAt, r.existing, w.row(dated).firstSeenAt], [null, NOW - 2400, true, null], "seen for 40 min at least; a dated coin has its age");
+  // the trim deletes its oldest rows: the time first read stays (a later one would make "seen 40m+" shrink)
+  w.db.db.prepare("DELETE FROM trades WHERE mint = ? AND time < ?").run(undated, NOW - 100);
+  assert.deepEqual([w.row(undated).firstSeenAt, w.rows.stats.firstReads], [NOW - 2400, 1]);
+  const never = w.coin(mintN(532), "NOTRADE", { createdAt: null });
+  assert.equal(w.row(never).firstSeenAt, null, "no stored trade: unknown");
+  const grad = w.coin(mintN(533, 2), "GRAD", { parent: null, extra: { migrated: true, poolQuote: "2000000000", realQuoteReserves: "0" } });
+  assert.deepEqual([w.row(grad).graduated, w.row(dated).graduated], [true, false]);
+  // caps of $2M (virtual quote 2e17) and $10K (1e15); real quote of $0 / $19 999 / $20 000
+  const big = (i, real) => w.coin(mintN(540 + i), `BIG${i}`, { vq: "200000000000000000", extra: { realQuoteReserves: real } });
+  const rows = [big(0, "0"), big(1, "1999900000000000"), big(2, "2000000000000000"), dated].map((m) => w.row(m));
+  assert.deepEqual(rows.map((x) => [x.mcapUsd, x.liqUsd, x.thin]), [[2_000_000, 0, true], [2_000_000, 19_999, true], [2_000_000, 20_000, false], [10_000, 0, false]],
+    "over 100x: thin; exactly 100x is not; a $10K child sold back to its start has no real reserves either and is not flagged");
   w.close();
 });

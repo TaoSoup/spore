@@ -261,7 +261,9 @@ export type WakeParent = { mint: string; name: string | null; symbol: string | n
 /// The web never follows `url`: it rebuilds the link from the id (lib/narrative.ts safePostUrl).
 /// `lead`: startedAt - at in seconds (positive: posted before buying jumped), null when `at` is unknown; `text` is the
 /// stored text, up to 600 characters.
-export type WakePost = { id: string; url: string; at: number | null; handle: string | null; text: string | null; state: NarrativeState; coins: number; lead?: number | null };
+export type WakePost = { id: string; url: string; at: number | null; handle: string | null; text: string | null; state: NarrativeState; coins: number; lead?: number | null;
+  /// `newCoins`: how many of the linking coins were launched since 30 min before the start (a newer server).
+  newCoins?: number };
 /// A child moving now. `existing`: created before startedAt - 30 min (or with no known creation time); `sinceStart`:
 /// last price / price at startedAt, null for a new coin (its first trade would count its own launch buy) or when
 /// unknown; `copyOf`: for a new coin linking a post, how many earlier children of the parent link the same one (5: the
@@ -271,18 +273,26 @@ export type WakePost = { id: string; url: string; at: number | null; handle: str
 /// curve or pool's quote side in USD; `spark`: the USD close of each 2-minute step over the last hour, oldest first,
 /// null before the first trade; `safety`: measured shares of supply (1 dp), "pending" until the chain was read.
 export type Tf = "1m" | "5m" | "30m" | "1h";
-export type CoinTf = { p0: number | null; chg: number | null; volUsd: number; buys: number; sells: number; buyers: number };
+/// `holding` (a newer server): the window's buyers with no sell of the coin after their first buy in it.
+export type CoinTf = { p0: number | null; chg: number | null; volUsd: number; buys: number; sells: number; buyers: number; holding?: number };
 export type CoinSpark = { from: number; step: number; p: (number | null)[] };
 export type CoinSafety = { devPct: number | null; top10Pct: number | null; sniperPct: number | null; state: "ok" | "pending" | "unknown" };
 export type WakeCoin = {
   mint: string; name: string | null; symbol: string | null; image: string | null; createdAt: number | null; existing: boolean; mcapUsd: number | null;
   priceUsd?: number | null; sinceStart: number | null; buyers5m: number; buyers15m?: number; copyOf?: number | null;
   tf?: CoinTf; liqUsd?: number | null; spark?: CoinSpark; safety?: CoinSafety;
+  /// From a newer server, all optional. `firstSeenAt`: the first stored trade of a coin whose launch was not seen
+  /// (only when createdAt is null); `graduated`: trades on a pool, off the bonding curve; `thin`: a market cap of
+  /// $1M or more that is over 100 times the liquidity.
+  firstSeenAt?: number | null; graduated?: boolean; thin?: boolean;
 };
 export type CoinRow = WakeCoin;
 export type WakeState = "live" | "cooling";
-/// One family waking up. `ratio`: the latest complete bucket's buyers / `baseline` (the current trailing-24 h mean per
-/// bucket, floored), 0 when the parent had no trade in that bucket; `spark`: distinct buyers per bucket for the last 2 h, OLDEST first (24 points, the last is the latest
+/// One family waking up. On a newer server the headline is the trailing 5 minutes at build time, one basis: `ratio` =
+/// `buyersEx5m` / max(`baseline`, 1) (buyers of existing coins over the trailing-24 h mean per bucket), `buyers5m`
+/// every coin's buyers, `coinsTrading` the coins with a $1+ buy; `trades5m` is still the last complete bucket's. An
+/// older server measured them all on the latest complete bucket. `state`: "live" while a complete bucket is at 3x or
+/// more (or it fired since), else "cooling", so a cooling family's `ratio` can be over 3. `spark`: distinct buyers per bucket for the last 2 h, OLDEST first (24 points, the last is the latest
 /// complete bucket); `coins`: at most 6, most buyers first; `more`: other children that traded in the last 5 min;
 /// `hidden`: children that traded since the start left out by the creator checks (sold out early, mass or repeat launch).
 export type WakeFamily = {
@@ -291,13 +301,23 @@ export type WakeFamily = {
   post: WakePost | null; coins: WakeCoin[]; more: number; hidden: number;
   /// `sparkFrom`: the start of the first spark bucket (unix s); `dust`: children trading now under a $1,000 market cap, left out.
   sparkFrom?: number; dust?: number;
+  /// From a newer server, all optional. `sparkEx` / `buyersEx5m`: `spark` / `buyers5m` counting existing coins only,
+  /// the same population as `ratio` and `baseline`, not the same moment (the last point is the last complete bucket, `ratio` the 5 minutes to now); `bought5mUsd` / `sold5mUsd`:
+  /// USD bought and sold in existing coins over the trailing 5 min (new launches left out); `coins5`: coins with 5+ distinct buyers in the measured window;
+  /// `topShare`: the most-bought coin's share of that window's buyers (0-1), `topMint` / `topSymbol` that coin; `silent`:
+  /// the wake-up started without an alert (a family that is busy most of the time; false again once its alert is sent).
+  /// `high24`: the parent's highest existing-buyer bucket in the 24 h before the start (not shown).
+  sparkEx?: number[]; buyersEx5m?: number; bought5mUsd?: number; sold5mUsd?: number; coins5?: number; topShare?: number | null; topMint?: string | null; topSymbol?: string | null; silent?: boolean; high24?: number | null;
 };
 /// Every listed coin has a buyer in the last 5 min and a market cap of $1,000 or more (or unknown).
 export type Discover = { asOf: number; bucketS: number; tf?: Tf; families: WakeFamily[] };
-/// `GET /api/trending`: up to 50 coins by distinct $1+ buyers over the timeframe, then volume. `parent`: null for a root;
-/// `family`: whether that parent is listed on Discover now.
+/// `GET /api/trending`: up to 50 coins by distinct $1+ buyers over the timeframe, then volume (a newer server: by the
+/// buyers who have not sold, `tf.holding`). `parent`: null for a root; `family`: whether that parent is listed on
+/// Discover now. `floor`: the buyers a coin needs over this timeframe to be listed (5 on 1m, else 0); `floor5m`: the
+/// buyers in the last 5 min it needs to enter (3 on 30m and 1h, else 0; not worded on the page); `candidates`: the
+/// coins that met them, before the creator checks, dust and the cap of 50, so it can be above `rows.length`.
 export type TrendRow = CoinRow & { parent: { mint: string; symbol: string | null; image: string | null } | null; family: WakeState | null };
-export type Trending = { asOf: number; tf: Tf; rows: TrendRow[] };
+export type Trending = { asOf: number; tf: Tf; rows: TrendRow[]; floor?: number; floor5m?: number; candidates?: number };
 /// `GET /api/discover/:mint`: the family when it is listed, else "quiet" with the top 3 children by buyers in the last
 /// 15 min (`sinceStart` null) and the other figures null or 0. 404 for a mint the server does not know.
 export type DiscoverQuiet = {
@@ -305,10 +325,16 @@ export type DiscoverQuiet = {
   spark: number[] | null; baseline: number | null; coinsTrading: number; post: null; coins: WakeCoin[]; more: number; hidden: number;
   /// `dust`: children bought in the last 15 min under a $1,000 market cap, left out.
   sparkFrom?: null; dust?: number;
+  /// A newer server sends the family's newer keys here too, null where a quiet parent has no measure (`buyersEx5m`
+  /// is the last complete bucket's). Declared so a read of the union stays typed; none is shown for a quiet parent.
+  sparkEx?: null; buyersEx5m?: number; bought5mUsd?: null; sold5mUsd?: null; coins5?: null; topShare?: null; topMint?: null; topSymbol?: null; silent?: false; high24?: null;
 };
 export type DiscoverOne = WakeFamily | DiscoverQuiet;
-/// SSE `wake`: a wake-up started (published once, when its first bucket fires).
-export type WakeEvent = { parent: { mint: string; symbol: string | null; name: string | null }; startedAt: number; ratio: number; buyers5m: number };
+/// SSE `wake`: a wake-up's alert, published once. A newer server adds `alertedAt`: when the alert was sent, which is
+/// `startedAt` except for a family that started without one (busy most of the time) and reached its mark later;
+/// `ratio` and `buyers5m` are then as of `alertedAt`. `coins5` / `topShare` / `topSymbol` / `high24` as on a family.
+export type WakeEvent = { parent: { mint: string; symbol: string | null; name: string | null }; startedAt: number; ratio: number; buyers5m: number;
+  alertedAt?: number; coins5?: number; topShare?: number | null; topSymbol?: string | null; high24?: number | null };
 export type RootSort = "locked" | "children" | "new" | "volume";
 /// `GET /api/jup/build`: Jupiter's Swap API v2 /build answer, relayed as is (https://developers.jup.ag/docs/api-reference/swap/build.md).
 /// Amounts are base units as strings. Each instruction is { programId, accounts, data (base64) }.

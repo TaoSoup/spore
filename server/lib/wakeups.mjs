@@ -27,16 +27,73 @@
 // of the grid's 123 alerts were matched. Kept: each is a window that met the rule, and making it hold until the next
 // tick would match the grid only by delaying every alert.
 //
+// A busy launch does not become "existing" at 30 minutes. A coin's buyers are ignored for its first 30 minutes, then
+// all counted at once, so a launch that was already heavily bought made its family jump to "Nx its normal" the second
+// it turned 30 minutes old although nothing had changed: 22 of 117 wake-ups (Nov 15-19 2026) fired within 2 minutes of
+// such a crossing, the family's buyers were flat against 10 minutes earlier (median 1.10x; 6.66x for the others), and
+// the lead coin was down 30 %+ an hour later in 76 % of them (50 % for the others). So a coin with HELD_BUYERS or more
+// distinct $1+ buyers in its minutes 15-30 (age over HELD_FROM_S, up to the 30-minute line) counts as existing only
+// from HELD_UNTIL_S (2 h) of age, in the window and in the buckets alike; it is still listed on cards and in trending.
+// The buyers are counted as they come, per coin, in a set that stops at 20 (the flag is then set and kept until the coin
+// is 2 h old) and is dropped at the coin's first buy past the line. The flag used to be decided at that first buy from
+// the parent's last 15 minutes of buckets: when the buy came a few minutes late the busy minutes had left that view
+// (927 coins flagged where this measure has 1,044; one start in 3.7 days counted such a coin). The cost, stated: a real
+// burst on a coin 30 min to 2 h old that was already busy starts no wake-up (about 3 cases in 3.7 days, alerts 16 to
+// 131 minutes later), 6 of 106 starts in the replay still came within 2 minutes of a 30-minute crossing, and the step can reappear at the 2 h line.
+// Coins with no known creation time count as existing at once and pass both lines (not covered here). The 30-minute
+// line itself is not free either: 43 of 120 wake-ups had 10+ minutes of buying before them that it hid; without it the
+// rule gave 2.4x the wake-ups at a third of the hit rate, and at 2 h it lost 45 of 120 and delayed 15 by a median of
+// 33 minutes. The 50-buyer floor was re-tested too (20 / 30 / 40: 67 / 34 / 11 extra alerts that never reached 50
+// within 3 h, 1 family each with a coin holding 1.5x; the head start at 20 is a median 0 s, p90 23 minutes), and so
+// was the order (newest first, by ratio and by buyers were within noise). Left as they are.
+//
 // A firing window keeps the parent's wake-up going (hotAt = the fire time). A parent without one starts one at the fire
 // time, with an alert only when its last alert is 3 h or more behind (else it is listed again, silently). Its first
-// coins "since start" are the children bought in the firing window. SOL is no parent here (its children are every root
+// coins "since start" are the children bought in the firing window.
+//
+// Always-busy families start silently. For a parent with a baseline of BUSY_BASE (10) or more buyers per bucket the
+// 24 h mean includes its quiet hours, so 5x the mean is reached several times a day (35 of 115 alerts came from 9 such
+// families, firing at a median 0.62x of their own busiest bucket of the day). Such a start alerts only when its
+// existing-buyer count is at least HIGH_SHARE (0.8) of the parent's highest existing-buyer bucket of the last 24 h
+// (`high24`, read from the baseline ring at the fire, the window's own bucket left out). Otherwise the wake-up is
+// listed with `silent: true` and the 3 h lock is NOT used; the alert is sent later, once, the first time a firing
+// window or a closed bucket of that wake-up reaches the same mark (in the replay 6 of 28 silenced starts went on to
+// the day's high within 2-16 minutes). This is noise control, not a quality filter: the busy alerts it keeps did no
+// better than the ones it holds back. The replay measured the gate at 1.0x the high (87 + 6 alerts instead of 115);
+// 0.8x softens the cliff and was not re-measured. SOL is no parent here (its children are every root
 // coin). The clock-aligned 5-minute buckets stay for everything else: the baseline ring, the spark, the ratio shown, and
 // the live/cooling/drop rules; a closing bucket no longer starts a wake-up, but one that meets the rule (or 3x, below)
 // still counts as hot.
 //
 // A wake-up is "live" while its latest complete bucket is >= 3x the CURRENT trailing mean (or it fired since that bucket
-// ended), and for at most 2 h after its start; then "cooling". It is dropped 2 h after it was last hot or 6 h after its
-// start, whichever comes first. Judged against the mean frozen at the start, a family that grew stayed "live" for a day.
+// ended); then "cooling". It is dropped 1 h after it was last hot or 6 h after its start, whichever comes first. Judged
+// against the mean frozen at the start, a family that grew stayed "live" for a day. Live used to end 2 h after the
+// start and the drop came 2 h after the last hot bucket: replayed over Nov 15-19 2026 the page then showed 3.89 cooling
+// cards per view (0.35 of them at 3x or more, like a family at 21x labelled cooling for its age) and 47 % of a card's
+// listed time came after its last hot bucket. With these two changes: 1.99 cooling cards, none at 3x+, live cards 1.09
+// to 1.40. The cost: the page is empty 4.6 % of the time (1.1 % before), about one more alert a day, and a family that
+// leaves and comes back is listed again silently. A floor of 15 buyers on "hot" was tested and left out: it took the
+// label from the quiet families whose wake-ups did best.
+//
+// What a family body says is measured on one basis. The headline (`ratio`, `buyersEx5m`, `buyers5m`, `coinsTrading`,
+// `baseline`) is read from the trailing window at build time, as the rule reads it, so it moves with the coin rows
+// under it (frozen per closed bucket it was off by 2x or more in a fifth of 10 s samples). The chart line `sparkEx` is
+// existing-child buyers per closed bucket, the same population as the baseline band and the ratio (`spark`, every
+// child's buyers, is kept: new launches piling into a family are worth seeing, but drawn against the band they read as
+// a multiple the ratio never said). `coins5` and `topShare` say how many coins carry the buying, per build, from the
+// same 5-minute buyers the rows show: the 3-coin condition is nominal (in 75 of 113 wake-ups one coin had 70 %+ of
+// the buyers), and a label frozen at the start was wrong on a quarter of cards 15 minutes later. They describe; a
+// family-wide wake-up is not ranked above a one-coin one. `bought5mUsd` / `sold5mUsd` are the dollars bought and sold
+// on the existing children in the trailing 5 minutes: the median firing window has 80 cents sold per dollar bought.
+// A fact per build, not a gate and not a tag: silencing on it was tested and had no dose-response.
+//
+// The post a body shows: among the posts 2+ of its coins link, first one made between POST_BEFORE_S before the start
+// and POST_AFTER_S after it (most links, then newest); at the start 83 % of shown posts were such a post, but by 2 h
+// later copies' posts and old posts with more links had displaced two thirds of them. Otherwise the vote as before
+// (most links, then newest), where a post made more than POST_OLD_S before the start (or with no readable time)
+// qualifies only when POST_NEW_COINS or more of the coins linking it were launched since the start minus 30 min: old
+// coins sharing a years-old post is not what coincided, an old post that new coins are copying may be. No post
+// qualifies: `post` is null.
 //
 // Cost (the server has a history of event-loop freezes): record() is O(1) amortized per trade. The buckets: a few
 // Map/Set operations on the trade's parent, no scan, allocations only for a coin's first trade in a bucket (its stats)
@@ -47,9 +104,12 @@
 // (the mean before the window is the running 288-bucket sum, less the bucket the window starts in, plus the one that
 // left: O(1)). A buy of a child 30-35 min old waits in its coin's pending list and is counted once when the coin crosses
 // the line (a walk over the seconds since the parent's last judgement, at most 300, only while such a coin is pending).
-// Starting a wake-up copies the window's coin counts once. The seed's tick costs O(near) per 2 s of seed time (a
+// Starting a wake-up copies the window's coin counts once, reads the 289-slot ring once for the 24 h high, and, when it
+// alerts, walks the window's buys once for the event's breadth (at most ROLL_MAX); it also notes, with nothing counted,
+// the coins of the two buckets the window overlaps (O(coins traded in them), once). The busy-launch count is one Set
+// add per $1+ buy of a coin 15-30 minutes old, until its set holds 20. The seed's tick costs O(near) per 2 s of seed time (a
 // synthetic 2M-row day: 675 ms of seed with it, 682 without). The bodies are built on request in slices (lib/sliced.mjs),
-// cached WAKE_TTL_MS.
+// once per coin-row snapshot and served while that snapshot is current (at most WAKE_TTL_MS).
 //
 // Memory bound: distinct wallets are exact Sets/Maps keyed by the trades' own `user` strings (no copies): per parent one
 // Map for its open bucket (cleared on close), per coin one Set per bucket kept for the last QUIET_BUCKETS closed buckets
@@ -58,7 +118,9 @@
 // health `capped` says when). Each parent with a trade in the last 24 h holds 2 x 289 + 6 x 24 bytes of rings. The
 // trailing window holds one small object per $1+ buy of the last 300 s (plus one per wallet and per coin in it), at most
 // ROLL_MAX per parent: past that the oldest buy leaves early (the window is then shorter than 300 s for that parent, which
-// can only lower its counts; health `rollCapped` counts them). A buy that leaves is let go at once: its slot in the queue
+// can only lower its counts; health `rollCapped` counts them). The busy-launch count: one Set of under 20 wallets per
+// coin bought ($1+) at 15-30 minutes of age, let go at 20, at its first buy past 30 minutes or by the 10-minute prune,
+// at most HELD_MAX coins; the flags: one number per busy launch until it is 2 h 5 min old, at most HELD_MAX. A buy that leaves is let go at once: its slot in the queue
 // is nulled (fewer than max(64, held) + 1 8-byte null slots wait per parent until the head is dropped), and a pending
 // coin's list is cut once under half of it is still pending (at most twice its buys in the window). A parent whose window
 // emptied holds none of it. While seeding, `near` holds the parents whose window may meet the rule without a buy.
@@ -86,22 +148,33 @@ import { SOL_MINT } from "./jupiter.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { postOf, postTime, postUrl } from "./narrative.mjs";
 import { runSliced } from "./sliced.mjs";
-import { TF_DEFAULT, isDust } from "./coinrows.mjs";
+import { performance } from "node:perf_hooks";
+import { TF_DEFAULT, SNAP_TTL_MS, isDust } from "./coinrows.mjs";
+import { MIN_USD, EXISTING_S, r1, r2, byMint } from "./rowshared.mjs";
 
 /** Bucket width (s), buckets in the 24 h baseline, buckets in the 2 h spark. */
 export const BUCKET_S = 300, BASE_BUCKETS = 288, SPARK_BUCKETS = 24;
 /** The WAKE rule: existing-child buyers, distinct existing coins, times the baseline; the quiet gap before a new wake-up (s); a child is existing when launched this long before the window (s); a buy counts from this value (USD). */
-export const WAKE_BUYERS = 50, WAKE_COINS = 3, WAKE_RATIO = 5, REFIRE_S = 3 * 3600, EXISTING_S = 1800, MIN_USD = 1;
+export const WAKE_BUYERS = 50, WAKE_COINS = 3, WAKE_RATIO = 5, REFIRE_S = 3 * 3600;
+export { EXISTING_S, MIN_USD };
+/** A launch with this many distinct $1+ buyers between HELD_FROM_S of age (s) and the 30-minute line is existing only from HELD_UNTIL_S of age (s); flags, and coins being counted, kept at most. */
+export const HELD_BUYERS = 20, HELD_FROM_S = 900, HELD_UNTIL_S = 2 * 3600, HELD_MAX = 20_000;
+/** A parent with this baseline (buyers per bucket) or more alerts only when the firing count is this share of its highest existing-buyer bucket of the last 24 h; else it starts silently and alerts once it gets there. */
+export const BUSY_BASE = 10, HIGH_SHARE = 0.8;
+/** `coins5` counts coins with this many distinct buyers in the trailing 5 minutes. */
+export const BREADTH_BUYERS = 5;
+/** The post shown: first one made at most POST_BEFORE_S before the start or POST_AFTER_S after it; one made more than POST_OLD_S before it needs POST_NEW_COINS coins launched since linking it. */
+export const POST_BEFORE_S = 3600, POST_AFTER_S = 300, POST_OLD_S = 6 * 3600, POST_NEW_COINS = 2;
 /** Buckets of history (observed, ended at or before the window start) the rule needs before it may fire: 6 h. */
 export const MIN_SEEN = 72;
-/** "live" while the latest complete bucket is this many times the current baseline and the wake-up is under LIVE_MAX_S old; dropped DROP_S after it was last hot (such a bucket, or a firing window) or WAKE_MAX_S after its start, whichever comes first. */
-export const LIVE_RATIO = 3, LIVE_MAX_S = 2 * 3600, DROP_S = 2 * 3600, WAKE_MAX_S = 6 * 3600;
+/** "live" while the latest complete bucket is this many times the current baseline (or a window fired since); dropped DROP_S after it was last hot (such a bucket, or a firing window) or WAKE_MAX_S after its start, whichever comes first. */
+export const LIVE_RATIO = 3, DROP_S = 3600, WAKE_MAX_S = 6 * 3600;
 /** A baseline under this many buyers per bucket reads as this many in a ratio (a family nobody bought yesterday would read thousands of times its normal). */
 export const BASE_FLOOR = 1;
 /** Families listed, coins per family, coins in a quiet answer and the buckets they are ranked over (15 min). */
 export const LIST_MAX = 12, COINS_MAX = 6, QUIET_COINS = 3, QUIET_BUCKETS = 3;
-/** A body is served this long. */
-export const WAKE_TTL_MS = 5_000;
+/** A body is served as long as the coin-row snapshot it was built from is current: one cache level, never older than this. */
+export const WAKE_TTL_MS = SNAP_TTL_MS;
 /** Distinct wallets one parent or coin bucket holds at most. */
 export const SET_MAX = 20_000;
 /** The trailing window the rule is judged on (s), and the $1+ buys one parent's window holds at most (past it the oldest leaves early). */
@@ -125,9 +198,6 @@ const U16 = 0xffff;
 /** The baseline ring keeps one bucket more than the 288 it sums, so the mean before a window that starts inside the newest closed bucket is still O(1). */
 const RING = BASE_BUCKETS + 1;
 
-const r1 = (x) => Math.round(x * 10) / 10;
-const r2 = (x) => Math.round(x * 100) / 100;
-const byMint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const normSym = (s) => (typeof s === "string" ? s.trim().toLowerCase() : "");
 
 function parentState(mint) {
@@ -140,7 +210,7 @@ function parentState(mint) {
     lastK: -1, lastEx: 0, lastAll: 0, lastTrades: 0,
     hist: [], // the coin maps of the last QUIET_BUCKETS closed buckets, newest first: { k, coins }
     lastBase: 0, // the trailing mean the last closed bucket was judged against
-    lastAlert: -Infinity, wake: null, // the start of the last wake-up that alerted (or would have, in the seed)
+    lastAlert: -Infinity, wake: null, // when the last alert was sent (or would have been, in the seed): a wake-up's start, or a silent one's catch-up
     rt: -Infinity, roll: null, // the trailing window's clock (never goes back: a late print counts as of it) and its state (null when empty)
   };
 }
@@ -169,16 +239,24 @@ export class Wakeups {
     // held back by the ratio, the history or an open bucket), and the block time the seed's own tick last ran at.
     this.near = new Set(); this.seedT = -Infinity;
     this.seeding = false; this.prunedAt = 0;
+    this.held = new Map();    // busy launch mint → the creation time the existing tests use for it (its own + HELD_UNTIL_S - EXISTING_S), until it is 2 h 5 min old
+    this.early = new Map();   // coin mint → { at: its creation time, u: Set of its $1+ buyers in its minutes 15-30 }, while under HELD_BUYERS
     this.firstK = null;       // the bucket of the first trade seen (any coin): where the observed history starts
     this.launch = new Map();  // coin mint → { at, first, key, bought, sold }: launch windows still open, about in creation order
     this.facts = new Map();   // coin mint → { why, unknown, until (ms) }, oldest first
     this.creatorIdx = new Map(); // creator key → { size, times, firsts }, oldest first
     this.snipes = new Map();  // coin mint → { pct, until (ms) }: sniper shares, oldest first
-    this.hits = new Map(); this.jobs = new Map(); // per timeframe: the last list build ({ at, built: every family it built by parent, body }), the build under way
+    this.hits = new Map(); this.jobs = new Map(); // per timeframe: the last list build ({ at, snap, built: every family it built by parent, body }), the build under way
     this.quiet = new Map(); this.quietJobs = new Map(); // keyed tf + newline + mint
     this.listed = new Set(); this.listedAt = null; // the parents the list shows (at most LIST_MAX), as of second listedAt: familyState
     this.timer = null;
-    this.stats = { trades: 0, seedRows: 0, seedMs: null, closes: 0, started: 0, seededWakes: 0, events: 0, capped: 0, builds: 0, lastBuildMs: null, maxSliceMs: 0, served: 0, quietBuilt: 0, factQueries: 0, factsUnknown: 0, launchSaved: 0, launchSkipped: 0, launchDropped: 0, relisted: 0, rollCapped: 0, live: 0, cooling: 0 };
+    this.stats = { trades: 0, seedRows: 0, seedMs: null, closes: 0, started: 0, seededWakes: 0, events: 0, capped: 0, builds: 0, lastBuildMs: null, maxSliceMs: 0, served: 0, quietBuilt: 0, factQueries: 0, factsUnknown: 0, launchSaved: 0, launchSkipped: 0, launchDropped: 0, relisted: 0, rollCapped: 0, live: 0, cooling: 0,
+      // heldBack: launches flagged busy (20 buyers in their minutes 15-30); startedYoung: alerts whose most-bought EXISTING
+      // coin (the coins the rule counted, not a launch bought beside them) was under 2 h old (36 % before the flag, 14 %
+      // expected; counted over every coin it read 44 %); silenced / caughtUp: starts the always-busy gate held back, and those that
+      // alerted later (lastCatchUpS: how long after the start); lastQuietMs / quietMaxSliceMs: a quiet answer's CPU and
+      // longest slice; lastWaitMs: what the last uncached list request waited for, wall clock ({ snap, groups, build, total }).
+      heldBack: 0, startedYoung: 0, silenced: 0, caughtUp: 0, lastCatchUpS: null, lastQuietMs: null, quietMaxSliceMs: 0, lastWaitMs: null };
   }
   attach({ hub, narrative } = {}) { if (hub !== undefined) this.hub = hub; if (narrative !== undefined) this.narrative = narrative; return this; }
   /** Closes due buckets and expires and judges the trailing windows every TICK_MS. */
@@ -188,7 +266,7 @@ export class Wakeups {
     let held = 0, buys = 0;
     for (const P of this.open) held += P.buyers.size;
     for (const P of this.rolling) buys += P.roll.a.length - P.roll.h;
-    return { parents: this.parents.size, open: this.open.size, waking: this.waking.size, walletsOpen: held, rolling: this.rolling.size, rollHeld: buys, facts: this.facts.size, launching: this.launch.size, seenBuckets: this.firstK == null ? 0 : Math.max(0, Math.floor(this.#nowS() / BUCKET_S) - this.firstK), ...this.stats };
+    return { parents: this.parents.size, open: this.open.size, waking: this.waking.size, walletsOpen: held, rolling: this.rolling.size, rollHeld: buys, heldFlags: this.held.size, heldCounting: this.early.size, facts: this.facts.size, launching: this.launch.size, seenBuckets: this.firstK == null ? 0 : Math.max(0, Math.floor(this.#nowS() / BUCKET_S) - this.firstK), ...this.stats };
   }
 
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -258,8 +336,11 @@ export class Wakeups {
     if (!s) P.coins.set(c.mint, s = { buyers: new Set(), trades: 0, usd: 0 });
     s.trades++; s.usd += x;
     const buy = t.isBuy && x >= MIN_USD && typeof t.user === "string";
+    let born = null;
     if (buy) {
-      const existing = c.createdAt == null || c.createdAt < k * BUCKET_S - EXISTING_S;
+      if (c.createdAt != null && time > c.createdAt + HELD_FROM_S && time <= c.createdAt + EXISTING_S) this.#early(c, t.user);
+      born = this.#born(c, time > P.rt ? time : P.rt);
+      const existing = born == null || born < k * BUCKET_S - EXISTING_S;
       const had = P.buyers.get(t.user) ?? 0, bits = had | 1 | (existing ? 2 : 0);
       if (bits !== had) {
         if (!had && P.buyers.size >= SET_MAX) this.stats.capped++;
@@ -271,19 +352,50 @@ export class Wakeups {
     const w = P.wake;
     if (w) { let e = w.coins.get(c.mint); if (!e) w.coins.set(c.mint, e = { trades: 0, usd: 0 }); e.trades++; e.usd += x; }
     // After the wake-up's coins: a wake-up this buy starts takes its coins from the window, this buy included.
-    if (buy) this.#roll(P, c, t.user, x, time);
+    if (buy) this.#roll(P, c, born, t.user, x, time);
+  }
+
+  /**
+   * One $1+ buy of coin `c` in its minutes 15-30 (the trade's own time): its HELD_BUYERS-th distinct wallet there flags
+   * it as a busy launch (the head of the file). O(1): one Set add; the set is let go at 20.
+   */
+  #early(c, user) {
+    const H = this.held, E = this.early, m = c.mint;
+    if (H.has(m)) return;
+    let s = E.get(m);
+    if (!s) { E.set(m, s = { at: c.createdAt, u: new Set() }); if (E.size > HELD_MAX) E.delete(E.keys().next().value); }
+    s.u.add(user);
+    if (s.u.size < HELD_BUYERS) return;
+    E.delete(m);
+    H.set(m, c.createdAt + HELD_UNTIL_S - EXISTING_S); this.stats.heldBack++;
+    if (H.size > HELD_MAX) H.delete(H.keys().next().value);
+  }
+
+  /**
+   * The creation time the existing tests use for coin `c` at second `t` (null: none known, existing at once). Its own,
+   * except for a busy launch (#early), which reads as launched HELD_UNTIL_S - EXISTING_S later. O(1): a number compare
+   * for a coin under 30 min or over 2 h 5 min old, one Map read between (and the coin's count of its minutes 15-30 is
+   * let go: it stayed under 20).
+   */
+  #born(c, t) {
+    const ca = c.createdAt;
+    if (ca == null) return null;
+    const age = t - ca;
+    if (age <= EXISTING_S || age > HELD_UNTIL_S + ROLL_S) return ca;
+    if (this.early.size) this.early.delete(c.mint);
+    return this.held.get(c.mint) ?? ca;
   }
 
   // ---------------------------------------------------------------- the trailing window
-  /** One $1+ buy into the parent's trailing window, then the rule. */
-  #roll(P, c, user, usd, time) {
+  /** One $1+ buy into the parent's trailing window, then the rule. `ca`: the coin's creation time as the existing tests read it (#born). */
+  #roll(P, c, ca, user, usd, time) {
     const t = time > P.rt ? time : P.rt;
     P.rt = t;
     let R = P.roll;
     if (!R) { P.roll = R = rollState(t); this.rolling.add(P); }
     else this.#advance(R, t);
     if (R.a.length - R.h >= ROLL_MAX) { const e = R.a[R.h]; R.a[R.h++] = null; this.#leave(R, e); this.stats.rollCapped++; }
-    const m = c.mint, ca = c.createdAt;
+    const m = c.mint;
     // existing: launched before the window start minus 30 min; pending: crosses that line before this buy leaves the window
     const st = ca == null || ca < t - ROLL_S - EXISTING_S ? 2 : ca < t - EXISTING_S ? 1 : 0;
     const e = { t, u: user, m, usd, st };
@@ -369,22 +481,100 @@ export class Wakeups {
     const may = R.exN >= WAKE_BUYERS && R.exC >= WAKE_COINS;
     if (this.seeding) { if (may || R.pend.size) this.near.add(P); else this.near.delete(P); }
     if (!may || this.firstK == null) return;
-    const j = Math.floor(t / BUCKET_S) - 1, seen = j - this.firstK;
+    const j = Math.floor(t / BUCKET_S) - 1;
+    if (j - this.firstK < MIN_SEEN) return;
     // A bucket inside the baseline still open (a late print reopened one behind the window): the tick closes it and judges again.
-    if (seen < MIN_SEEN || (P.k >= 0 && P.k < j) || P.upTo > j) return;
-    if (P.upTo < j - 1) this.#fillTo(P, j - 1);
-    const sum = P.upTo === j ? P.exSum - P.ex[j % RING] + P.ex[(j - BASE_BUCKETS) % RING] : P.exSum;
-    const base = sum / Math.min(BASE_BUCKETS, seen);
-    if (R.exN < WAKE_RATIO * base) return;
+    const base = this.#baseAt(P, j);
+    if (base == null || R.exN < WAKE_RATIO * base) return;
     let w = P.wake;
-    // A wake-up past its time (2 h after it was last hot, 6 h after its start) is over even when no tick dropped it yet.
+    // A wake-up past its time (1 h after it was last hot, 6 h after its start) is over even when no tick dropped it yet.
     if (w && this.#over(w, t)) { P.wake = w = null; this.waking.delete(P); }
-    if (w) { if (t > w.hotAt) w.hotAt = t; return; }
+    if (w) {
+      if (t > w.hotAt) w.hotAt = t;
+      // A silent start that has now reached the mark it was held back for: its one alert, late.
+      if (w.silent && R.exN >= HIGH_SHARE * w.high24) this.#catchUp(P, t, R.exN / Math.max(base, BASE_FLOOR), R.allN, () => this.#windowBreadth(R));
+      return;
+    }
     // Without one it starts one, which alerts only 3 h after the last alert: a family bursting every 2-3 h is listed
     // after each burst (it used to be swallowed while the 3 h lock moved on).
-    const alert = t - P.lastAlert >= REFIRE_S;
-    if (alert) P.lastAlert = t; else this.stats.relisted++;
-    this.#start(P, R, t, base, alert);
+    const high24 = this.#high24(P, j);
+    let alert = t - P.lastAlert >= REFIRE_S, silent = false;
+    if (!alert) this.stats.relisted++;
+    // An always-busy family under its own high of the day: listed, no alert, and the 3 h lock is left for the catch-up.
+    else if (base >= BUSY_BASE && R.exN < HIGH_SHARE * high24) { alert = false; silent = true; this.stats.silenced++; }
+    else P.lastAlert = t;
+    this.#start(P, R, t, base, alert, silent, high24);
+  }
+
+  /**
+   * The parent's mean existing-child buyers per bucket over the buckets that ended at or before the start of the window
+   * whose first bucket is `j` (the observed ones, at most 288; 0 when none), or null while it cannot be read: a bucket
+   * inside it is still open, or one past `j` has closed. O(1) amortized (the head of the file).
+   */
+  #baseAt(P, j) {
+    if ((P.k >= 0 && P.k < j) || P.upTo > j) return null;
+    if (P.upTo < j - 1) this.#fillTo(P, j - 1);
+    const sum = P.upTo === j ? P.exSum - P.ex[j % RING] + P.ex[(j - BASE_BUCKETS) % RING] : P.exSum;
+    const cover = Math.min(BASE_BUCKETS, j - this.firstK);
+    return cover > 0 ? sum / cover : 0;
+  }
+
+  /** The parent's highest existing-buyer bucket of the last 24 h, bucket `j` (the one the window starts in) left out. 289 slots, read at a start only (after #baseAt filled the ring). */
+  #high24(P, j) {
+    const ex = P.ex, skip = P.upTo === j ? j % RING : -1;
+    let hi = 0;
+    for (let i = 0; i < RING; i++) if (i !== skip && ex[i] > hi) hi = ex[i];
+    return hi;
+  }
+
+  /**
+   * How many coins carry the buying: `per` yields [mint, distinct buyers]; `total` the distinct buyers over all of them.
+   * Among equals the first one yielded is the top coin (a body yields in its list's order, so that is its first row).
+   * `isEx` (an alert's): whether a coin counted as existing; `exTop` is then the most-bought of those, for health only.
+   */
+  #breadthOf(per, total, isEx = null) {
+    let coins5 = 0, top = 0, topMint = null, exN = 0, exTop = null;
+    for (const [m, n] of per) {
+      if (n >= BREADTH_BUYERS) coins5++;
+      if (n > top) { top = n; topMint = m; }
+      if (n > exN && isEx?.(m)) { exN = n; exTop = m; }
+    }
+    return { coins5, topShare: top > 0 ? r2(Math.min(1, top / Math.max(total, top))) : null, topMint, exTop };
+  }
+  /**
+   * The firing window's breadth: distinct buyers per coin from its buys (its per-coin counts are buys, not wallets), over
+   * every coin bought in it, a launch too (as `buyers5m` and a body's breadth are). One walk, at most ROLL_MAX, only
+   * when an event is sent.
+   */
+  #windowBreadth(R) {
+    const per = new Map();
+    for (let i = R.h; i < R.a.length; i++) { const e = R.a[i]; let s = per.get(e.m); if (!s) per.set(e.m, s = new Set()); s.add(e.u); }
+    return this.#breadthOf((function* () { for (const [m, s] of per) yield [m, s.size]; })(), R.allN, (m) => R.c.get(m).ex > 0);
+  }
+
+  /** The `wake` event, as of second `at` (a wake-up's start, or a silent one's catch-up). */
+  #emit(P, at, ratio, buyers5m, breadth) {
+    const w = P.wake;
+    this.stats.started++;
+    const b = breadth();
+    // On the coins the rule fired on: the event's own top coin may be a launch under 30 minutes old the rule ignores.
+    const top = b.exTop ? this.model.coins.get(b.exTop) : null;
+    if (top?.createdAt != null && at - top.createdAt < HELD_UNTIL_S) this.stats.startedYoung++;
+    if (!this.hub) return;
+    const { name, symbol } = this.model.nameOf(P.mint);
+    try {
+      this.hub.emit("wake", { parent: { mint: P.mint, symbol, name }, startedAt: w.startedAt, alertedAt: at, ratio: r1(ratio), buyers5m, coins5: b.coins5, topShare: b.topShare, topSymbol: b.topMint ? this.model.nameOf(b.topMint).symbol ?? null : null, high24: w.high24 });
+      this.stats.events++;
+    } catch (e) { this.log.warn?.(`wakeups: event: ${e?.message ?? e}`); }
+  }
+
+  /** A silent wake-up reached the mark: the alert it did not send at its start, and the 3 h lock from now. */
+  #catchUp(P, at, ratio, buyers5m, breadth) {
+    const w = P.wake;
+    w.silent = false; P.lastAlert = at;
+    if (this.seeding) { this.stats.seededWakes++; return; }
+    this.stats.caughtUp++; this.stats.lastCatchUpS = at - w.startedAt;
+    this.#emit(P, at, ratio, buyers5m, breadth);
   }
 
   /** The tick's part for one parent with a window: moves it to `tr` (never back) and judges it; an emptied one is let go. */
@@ -454,7 +644,7 @@ export class Wakeups {
     P.hist.unshift({ k, coins: P.coins });
     if (P.hist.length > QUIET_BUCKETS) P.hist.length = QUIET_BUCKETS;
     this.holding.add(P);
-    // A wake-up past its time (2 h after its last hot bucket, 6 h after its start) is over even when no tick dropped it yet.
+    // A wake-up past its time (1 h after its last hot bucket, 6 h after its start) is over even when no tick dropped it yet.
     if (P.wake && this.#over(P.wake, k * BUCKET_S)) { P.wake = null; this.waking.delete(P); }
     const w = P.wake;
     if (w) {
@@ -463,30 +653,40 @@ export class Wakeups {
       // A bucket that meets the WAKE rule or is 3x keeps it hot (never back past a later firing window).
       const fires = seen >= MIN_SEEN && exN >= WAKE_BUYERS && P.exCoins.size >= WAKE_COINS && exN >= WAKE_RATIO * base;
       if ((fires || exN >= LIVE_RATIO * b) && T > w.hotAt) w.hotAt = T;
+      // A silent start whose bucket reached the mark (its windows may each have stayed under it).
+      if (w.silent && exN >= HIGH_SHARE * w.high24) {
+        const coins = P.coins, exCoins = P.exCoins;
+        this.#catchUp(P, T, ratio, allN, () => this.#breadthOf((function* () { for (const [m, s] of coins) yield [m, s.buyers.size]; })(), allN, (m) => exCoins.has(m)));
+      }
     }
     P.k = -1; P.buyers.clear(); P.exN = 0; P.allN = 0; P.trades = 0; P.exCoins.clear(); P.coins = new Map();
     this.open.delete(P);
   }
 
-  /** Whether a wake-up is over at unix s `s`: 2 h after it was last hot or 6 h after its start. */
+  /** Whether a wake-up is over at unix s `s`: 1 h after it was last hot or 6 h after its start. */
   #over(w, s) { return s - w.hotAt >= DROP_S || s - w.startedAt >= WAKE_MAX_S; }
-  /** Live: hot in the latest complete bucket `L` or since it ended, and under 2 h old at its end. */
-  #live(w, L) { const end = (L + 1) * BUCKET_S; return w.hotAt >= end && end - w.startedAt < LIVE_MAX_S; }
+  /** Live: hot in the latest complete bucket `L` or since it ended, however long ago it started (a family at 21x was labelled cooling because it was 2 h 24 min old). */
+  #live(w, L) { return w.hotAt >= (L + 1) * BUCKET_S; }
 
-  /** A wake-up starts at T (the fire time); the children bought ($1+) in the firing window are its first "since start" (O(coins in it), once). `alert`: send `wake`. */
-  #start(P, R, T, base, alert) {
+  /**
+   * A wake-up starts at T (the fire time); the children bought ($1+) in the firing window are its first "since start"
+   * (O(coins in it), once). The other coins traded in the two buckets the window overlaps (only sold, or bought for
+   * under $1) are noted with nothing counted: a body sums its dollars over the wake-up's coins, and without them the
+   * dollars sold in its first 5 minutes left out a coin sold just before the start until it traded again (up to 42 % of
+   * the firing window's sold dollars; the card read "more bought than sold" in 2 of 107 starts where the reverse was
+   * true). `alert`: send `wake`; `silent`: held back by the always-busy gate until it reaches HIGH_SHARE of `high24`.
+   */
+  #start(P, R, T, base, alert, silent, high24) {
     const coins = new Map();
     for (const [m, s] of R.c) coins.set(m, { trades: s.n, usd: s.usd });
-    const ratio = R.exN / Math.max(base, BASE_FLOOR), allN = R.allN;
-    P.wake = { startedAt: T, ratio, peak: ratio, hotAt: T, coins, prices: new Map() };
+    const k0 = Math.floor(T / BUCKET_S) - 1, note = (map) => { for (const m of map.keys()) if (!coins.has(m)) coins.set(m, { trades: 0, usd: 0 }); };
+    if (P.k >= k0) note(P.coins);
+    for (const h of P.hist) { if (h.k < k0) break; note(h.coins); }
+    const ratio = R.exN / Math.max(base, BASE_FLOOR);
+    P.wake = { startedAt: T, ratio, peak: ratio, hotAt: T, coins, prices: new Map(), silent, high24 };
     this.waking.add(P);
     if (this.seeding) { if (alert) this.stats.seededWakes++; return; }
-    if (!alert) return;
-    this.stats.started++;
-    if (!this.hub) return;
-    const { name, symbol } = this.model.nameOf(P.mint);
-    try { this.hub.emit("wake", { parent: { mint: P.mint, symbol, name }, startedAt: T, ratio: r1(ratio), buyers5m: allN }); this.stats.events++; }
-    catch (e) { this.log.warn?.(`wakeups: event: ${e?.message ?? e}`); }
+    if (alert) this.#emit(P, T, ratio, R.allN, () => this.#windowBreadth(R));
   }
 
   /**
@@ -506,6 +706,10 @@ export class Wakeups {
     if (!this.seeding && nowS - this.prunedAt >= PRUNE_EVERY_S) {
       this.prunedAt = nowS;
       for (const [m, P] of this.parents) if (P.k < 0 && !P.wake && !P.roll && P.lastK < cur - BASE_BUCKETS && nowS - P.lastAlert >= REFIRE_S) this.parents.delete(m);
+      // A flag is read only while its coin is under 2 h 5 min old (the stored time is that less 30 min and 5 min); a
+      // count nobody added to past the 30-minute line is done. Both walks are over at most HELD_MAX entries, every 10 min.
+      for (const [m, v] of this.held) if (nowS - v > EXISTING_S + ROLL_S) this.held.delete(m);
+      for (const [m, s] of this.early) if (nowS - s.at > EXISTING_S + ROLL_S) this.early.delete(m);
     }
   }
 
@@ -698,39 +902,68 @@ export class Wakeups {
   }
 
   /**
-   * One family of the list, in steps (a yield every 32 coins: a coin's first creator check may read sqlite). Its coins:
+   * The post a family shows (the head of the file), or null. `posts`: id → { n, fresh }, the coins traded since the
+   * start that link it and how many of those were launched since the start minus 30 min. Posts made around the start
+   * first, then the vote among those that qualify; one X does not show is passed over (three are tried at most).
+   */
+  #pickPost(posts, w, nowMs) {
+    const T = w.startedAt, near = [], rest = [];
+    for (const [id, v] of posts) {
+      if (v.n < 2) continue;
+      const at = postTime(id, nowMs), p = { id, at, n: v.n, fresh: v.fresh };
+      if (at != null && at >= T - POST_BEFORE_S && at <= T + POST_AFTER_S) near.push(p);
+      // Old coins sharing an old post is not what coincided with this; an old post new coins are copying may be.
+      else if ((at != null && at >= T - POST_OLD_S) || v.fresh >= POST_NEW_COINS) rest.push(p);
+    }
+    const vote = (x, y) => y.n - x.n || (y.at ?? 0) - (x.at ?? 0) || byMint(x.id, y.id);
+    near.sort(vote); rest.sort(vote);
+    for (const p of [...near, ...rest].slice(0, 3)) {
+      const s = this.#postState(p.id);
+      if (s.state === "none") continue;
+      // `lead`: how long before the wake-up's start the post was made (negative: after it). What coincided, not a cause.
+      return { id: p.id, url: postUrl(p.id), at: p.at, handle: s.state === "ok" ? s.handle : null, text: s.state === "ok" ? s.text : null, state: s.state, coins: p.n, newCoins: p.fresh, lead: p.at == null ? null : T - p.at };
+    }
+    return null;
+  }
+
+  /**
+   * One family of the list, in steps (a yield after every coin: a coin's first creator check may read sqlite, and the
+   * shared scheduler keeps stepping one job until its 8 ms are spent, so the yields cost nothing). Its coins:
    * the children traded since the start that somebody bought ($1+) in the trailing 5 minutes (`buyers5m` from the
-   * snapshot), most such buyers first, then USD volume since the start, then the mint; creator-fact coins left out and
-   * counted in `hidden`, dust (a known market cap under $1,000) left out and counted in `dust` (among the FAMILY_SCAN
-   * looked at), at most COINS_MAX listed; `more` the others not listed with a trade in the trailing 5 minutes.
+   * snapshot), most such buyers first, then USD volume since the start, then the mint; creator-fact coins left out
+   * (counted in `hidden`), dust (a known market cap under $1,000) left out and counted in `dust` (among the
+   * FAMILY_SCAN looked at), at most COINS_MAX listed, the rest counted in `more`. All four count coins with a $1+ buy
+   * in the trailing 5 minutes, the basis of the headline's `coinsTrading`, so rows + more + hidden + dust is that
+   * number (the snapshot and the window are read up to 5 s apart). They used to count any trade, a sale too: a card
+   * read "3 coins trading" over 3 rows and "5 more trading" (more coins traded than were bought in 282 of 321 samples).
+   * The headline is read from the trailing window last, with no yield after it, so its numbers belong to one moment.
    */
   *#familyGen(P, L, nowMs, groups, px, snap, tf, listed) {
-    const model = this.model, w = P.wake, fresh = P.lastK === L, last = fresh ? P.hist[0]?.coins ?? null : null;
+    const model = this.model, w = P.wake, fresh = P.lastK === L;
     const cands = [], posts = new Map();
-    let hidden = 0, n = 0;
+    // "existing" as the rule's window reads it as of the snapshot, a busy launch's hold included
+    const line = snap.nowS - ROLL_S - EXISTING_S, since = w.startedAt - EXISTING_S;
+    let hidden = 0, bought = 0, sold = 0;
     for (const [m, e] of w.coins) {
-      if ((++n & 31) === 0) yield;
+      yield;
       const c = model.coins.get(m);
       if (!c || !c.tracked) continue;
-      const postId = postOf(model.metaFor(c));
-      if (postId) posts.set(postId, (posts.get(postId) ?? 0) + 1);
-      if (this.deadWhy(c, nowMs)) { hidden++; continue; }
-      const T = snap.per.get(m)?.tf[1];
-      cands.push({ c, buyers: T ? T.buyers : 0, usd: e.usd, traded: !!T && T.buys + T.sells > 0, postId });
+      // a coin only noted at the start (#start) has not traded since: no vote
+      const postId = e.trades > 0 ? postOf(model.metaFor(c)) : null;
+      if (postId) {
+        let v = posts.get(postId);
+        if (!v) posts.set(postId, v = { n: 0, fresh: 0 });
+        v.n++; if (c.createdAt != null && c.createdAt >= since) v.fresh++;
+      }
+      const T = snap.per.get(m)?.tf[1], buyers = T ? T.buyers : 0;
+      // Dollars are a fact of the family whoever launched the coin: a creator-fact coin's count too.
+      if (T) { const born = c.createdAt == null ? null : this.held.get(m) ?? c.createdAt; if (born == null || born < line) { bought += T.bv; sold += T.v - T.bv; } }
+      if (this.deadWhy(c, nowMs)) { if (buyers) hidden++; continue; }
+      cands.push({ c, buyers, usd: e.usd, postId });
     }
     cands.sort((x, y) => y.buyers - x.buyers || y.usd - x.usd || byMint(x.c.mint, y.c.mint));
     yield;
-    // The post most children traded since the start link (two or more); one X does not show is passed over.
-    const ranked = [...posts].filter(([, k]) => k >= 2).sort((x, y) => y[1] - x[1] || (postTime(y[0], nowMs) ?? 0) - (postTime(x[0], nowMs) ?? 0) || byMint(x[0], y[0]));
-    let post = null;
-    for (const [id, k] of ranked.slice(0, 3)) {
-      const s = this.#postState(id);
-      if (s.state === "none") continue;
-      const at = postTime(id, nowMs);
-      // `lead`: how long before the wake-up's start the post was made (negative: after it). What coincided, not a cause.
-      post = { id, url: postUrl(id), at, handle: s.state === "ok" ? s.handle : null, text: s.state === "ok" ? s.text : null, state: s.state, coins: k, lead: at == null ? null : w.startedAt - at };
-      break;
-    }
+    const post = this.#pickPost(posts, w, nowMs);
     const coins = [];
     let dust = 0, more = 0, looked = 0, i = 0;
     for (; i < cands.length; i++) {
@@ -745,15 +978,34 @@ export class Wakeups {
       row.safety = listed ? this.model.coinRows.safetyOf(x.c) : null;
       coins.push(row);
     }
-    for (; i < cands.length; i++) if (cands[i].traded) more++;
-    const spark = new Array(SPARK_BUCKETS);
-    for (let j = 0; j < SPARK_BUCKETS; j++) { const k = L - SPARK_BUCKETS + 1 + j, s = ((k % SPARK_BUCKETS) + SPARK_BUCKETS) % SPARK_BUCKETS; spark[j] = P.sparkK[s] === k ? P.spark[s] : 0; }
+    for (; i < cands.length && cands[i].buyers >= 1; i++) more++; // ranked by buyers: the rest have none
+    // From here on no yield: the trailing window as it is now (the tick moved it at the start of the build, and it
+    // goes on taking buys between steps), and the closed buckets.
+    const spark = new Array(SPARK_BUCKETS), sparkEx = new Array(SPARK_BUCKETS);
+    for (let j = 0; j < SPARK_BUCKETS; j++) {
+      const k = L - SPARK_BUCKETS + 1 + j, s = ((k % SPARK_BUCKETS) + SPARK_BUCKETS) % SPARK_BUCKETS;
+      spark[j] = P.sparkK[s] === k ? P.spark[s] : 0;
+      // the baseline ring holds the closed buckets up to `upTo` (a later one is not written yet: nobody traded in it)
+      sparkEx[j] = k >= 0 && k <= P.upTo && k > P.upTo - RING ? P.ex[k % RING] : 0;
+    }
+    const R = P.roll, nowS = Math.floor(nowMs / 1000), tw = Math.max(P.rt, nowS - GRACE_S);
+    // The mean as the rule reads it for the window ending now; the last closed bucket's when it cannot be read.
+    const base = (this.firstK == null ? null : this.#baseAt(P, Math.floor(tw / BUCKET_S) - 1)) ?? P.lastBase;
+    const exN = R ? R.exN : 0, allN = R ? R.allN : 0, ratio = exN / Math.max(base, BASE_FLOOR);
+    // so the headline never reads above "down from"
+    if (ratio > w.peak) w.peak = ratio;
+    // Breadth from the buyers the rows show (creator-fact coins are in neither); `cands` is in the list's own order,
+    // so the most-bought coin is the first row unless that one is dust.
+    const b = this.#breadthOf((function* () { for (const x of cands) { if (x.buyers < 1) break; yield [x.c.mint, x.buyers]; } })(), allN);
     return {
       parent: this.#parentRef(P.mint), startedAt: w.startedAt, state: this.#live(w, L) ? "live" : "cooling",
-      // Fired after the latest complete bucket ended (no bucket since its start is complete yet): the firing window's ratio.
-      ratio: r1(fresh || (L + 1) * BUCKET_S <= w.startedAt ? w.ratio : 0), peakRatio: r1(w.peak), buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0,
-      spark, sparkFrom: (L - SPARK_BUCKETS + 1) * BUCKET_S, baseline: r1(P.lastBase),
-      coinsTrading: last ? last.size : 0, post, coins, more, hidden, dust,
+      ratio: r1(ratio), peakRatio: r1(w.peak), buyers5m: allN, trades5m: fresh ? P.lastTrades : 0,
+      spark, sparkFrom: (L - SPARK_BUCKETS + 1) * BUCKET_S, baseline: r1(base),
+      // coins with a $1+ buy in the trailing 5 minutes (the window holds buys only)
+      coinsTrading: R ? R.c.size : 0, post, coins, more, hidden, dust,
+      sparkEx, buyersEx5m: exN, bought5mUsd: r2(bought), sold5mUsd: r2(sold),
+      coins5: b.coins5, topShare: b.topShare, topMint: b.topMint, topSymbol: b.topMint ? model.nameOf(b.topMint).symbol ?? null : null,
+      silent: !!w.silent, high24: w.high24 ?? null,
     };
   }
 
@@ -772,7 +1024,7 @@ export class Wakeups {
       if (f.state === "live") live++;
     }
     this.stats.live = live; this.stats.cooling = families.length - live;
-    return { at: nowMs, built, body: { asOf: nowS, bucketS: BUCKET_S, tf, families: families.slice(0, LIST_MAX) } };
+    return { at: nowMs, snap, built, body: { asOf: nowS, bucketS: BUCKET_S, tf, families: families.slice(0, LIST_MAX) } };
   }
 
   /**
@@ -794,14 +1046,23 @@ export class Wakeups {
     return out;
   }
 
-  /** The body of GET /api/discover?tf= (README §API): cached WAKE_TTL_MS per timeframe, one build shared by the askers that come together. */
+  /**
+   * The body of GET /api/discover?tf= (README §API): built once per coin-row snapshot per timeframe and served while
+   * that snapshot is current (at most WAKE_TTL_MS), one build shared by the askers that come together.
+   */
   async serve(tf = TF_DEFAULT) {
     this.stats.served++;
-    const hit = this.hits.get(tf);
-    if (hit && this.now() - hit.at < WAKE_TTL_MS) return hit.body;
+    const rows = this.model.coinRows, hit = this.hits.get(tf);
+    if (hit && hit.snap === rows.current()) return hit.body;
     let job = this.jobs.get(tf);
     if (!job) {
-      job = Promise.all([this.#groups(), this.model.coinRows.snap()]).then(([g, snap]) => runSliced(this.#buildGen(g, snap, tf))).then((run) => {
+      // Where an uncached request's wait goes (wall clock): the snapshot, the narrative's groups, the build itself.
+      const t0 = performance.now(), wait = { snap: 0, groups: 0, build: 0, total: 0 };
+      const timed = (key, p) => p.then((v) => { wait[key] = r2(performance.now() - t0); return v; });
+      let t1 = t0;
+      job = Promise.all([timed("groups", this.#groups()), timed("snap", rows.snap())]).then(([g, snap]) => { t1 = performance.now(); return runSliced(this.#buildGen(g, snap, tf)); }).then((run) => {
+        const t2 = performance.now();
+        wait.build = r2(t2 - t1); wait.total = r2(t2 - t0); this.stats.lastWaitMs = wait;
         this.stats.builds++; this.stats.lastBuildMs = r2(run.cpuMs);
         if (run.maxSliceMs > this.stats.maxSliceMs) this.stats.maxSliceMs = r2(run.maxSliceMs);
         this.hits.set(tf, run.value);
@@ -811,7 +1072,7 @@ export class Wakeups {
     }
     return job;
   }
-  /** Drops the cached bodies and the coin-row snapshot (tests; a body is otherwise served WAKE_TTL_MS). */
+  /** Drops the cached bodies and the coin-row snapshot (tests; a body is otherwise served while its snapshot is current). */
   forget() { this.hits.clear(); this.quiet.clear(); this.model.coinRows.hit = null; this.model.coinRows.trend.clear(); }
 
   /**
@@ -828,11 +1089,12 @@ export class Wakeups {
     if (f) return f.coins.some((r) => r.safety == null) ? { ...f, coins: f.coins.map((r) => (r.safety == null ? { ...r, safety: this.#safety(r.mint) } : r)) } : f;
     const key = `${tf}\n${mint}`;
     const hit = this.quiet.get(key);
-    if (hit && this.now() - hit.at < WAKE_TTL_MS) return hit.body;
+    if (hit && hit.snap === model.coinRows.current()) return hit.body;
     let job = this.quietJobs.get(key);
     if (!job) {
       job = model.coinRows.snap().then((snap) => runSliced(this.#quietGen(mint, snap, tf))).then((run) => {
-        this.stats.quietBuilt++;
+        this.stats.quietBuilt++; this.stats.lastQuietMs = r2(run.cpuMs);
+        if (run.maxSliceMs > this.stats.quietMaxSliceMs) this.stats.quietMaxSliceMs = r2(run.maxSliceMs);
         this.quiet.delete(key); this.quiet.set(key, run.value);
         while (this.quiet.size > QUIET_CACHE) this.quiet.delete(this.quiet.keys().next().value);
         return run.value.body;
@@ -850,7 +1112,7 @@ export class Wakeups {
   /**
    * The quiet answer, in steps: the 3 children most wallets bought ($1+) in the last 3 complete buckets, never one with
    * no such buyer (a coin only sold is not moving) and never dust (counted in `dust`). A yield every 256 entries merged
-   * and every 16 coins examined, at most QUIET_SCAN examined: a coin's first creator check may read sqlite, and many
+   * and after every coin examined, at most QUIET_SCAN examined: a coin's first creator check may read sqlite, and many
    * left out would be one long step.
    */
   *#quietGen(mint, snap, tf) {
@@ -877,7 +1139,8 @@ export class Wakeups {
     let seen = 0, dust = 0;
     for (const [m, u] of ranked) {
       if (coins.length >= QUIET_COINS || u.set.size === 0 || seen >= QUIET_SCAN) break; // ranked by buyers: the rest have none
-      if ((++seen & 15) === 0) yield;
+      seen++;
+      yield;
       const c = this.model.coins.get(m);
       if (!c || !c.tracked || this.deadWhy(c, nowMs)) continue;
       const row = this.model.coinRows.row(c, snap, tf, { at: nowS, px, safety: false });
@@ -887,12 +1150,15 @@ export class Wakeups {
       row.copyOf = null; row.buyers15m = u.set.size;
       coins.push(row);
     }
+    // The family keys a quiet parent has no measure for are null (README §API); its buyers are the last closed bucket's.
     return {
-      at: nowMs,
+      at: nowMs, snap,
       body: {
         parent: this.#parentRef(mint), startedAt: null, state: "quiet", ratio: null, peakRatio: null,
         buyers5m: fresh ? P.lastAll : 0, trades5m: fresh ? P.lastTrades : 0, spark: null, sparkFrom: null, baseline: null,
         coinsTrading: last ? last.size : 0, post: null, coins, more: 0, hidden: 0, dust,
+        sparkEx: null, buyersEx5m: fresh ? P.lastEx : 0, bought5mUsd: null, sold5mUsd: null,
+        coins5: null, topShare: null, topMint: null, topSymbol: null, silent: false, high24: null,
       },
     };
   }
