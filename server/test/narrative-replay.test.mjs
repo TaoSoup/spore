@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReplay, parseArgs } from "../scripts/narrative-replay.mjs";
+import { runReplay, parseArgs, alsoList, ALSO_MAX } from "../scripts/narrative-replay.mjs";
 import { Db } from "../lib/db.mjs";
 import { BATCH } from "../lib/narrtags.mjs";
 
@@ -161,5 +161,121 @@ test("--max-usd holds for the whole run: across a UTC midnight, and with a reque
     const refusing = async () => ({ messages: { create: async () => { k++; return { stop_reason: "refusal", content: [], usage: { input_tokens: 500, output_tokens: 0 } }; } } });
     const x = await runReplay({ db: file, keyFile: "k", out: join(dir, "o3"), hours: 24, maxCoins: 1500, maxUsd: 0.5, perMin: 1e6 }, { clientFactory: refusing, print() {}, now, sleep });
     assert.deepEqual([x.stopped, k, x.coinsRead, x.coinsLeftOut <= 2], ["refusal", 8, 0, true]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a replay runs the same guards as the server: boilerplate is stripped, a coin with no text is stored as none, a retitle is applied once, and the counters are reported", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spore-replay-"));
+  try {
+    const file = fixture(dir);
+    // coin 9 (an "ai" coin) has launcher boilerplate for a description and no website
+    const raw = new Db(file);
+    raw.db.prepare("UPDATE meta SET description = 'Deployed using rapidlaunch.io', website = NULL WHERE uri = 'uri:M009'").run();
+    // coin 11 (an "ai" coin) has no text either and is priced in USDC, which is not a coin of the index: no pairing, no way round the guard
+    raw.db.prepare("UPDATE meta SET description = 'Launched on bags.fm/abc 🚀', website = NULL WHERE uri = 'uri:M011'").run();
+    raw.db.prepare("UPDATE coins SET quote_mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' WHERE mint = 'M011'").run();
+    raw.close();
+    const lines = [], reqs = [];
+    const clientFactory = async () => ({ messages: { create: async (req) => {
+      reqs.push(req);
+      const coins = sentCoins(req);
+      const known = req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0];
+      return { stop_reason: "end_turn", usage: { input_tokens: 3000, output_tokens: 400 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => {
+        const dog = !!c.description?.includes("dog"), id = Number((known.match(dog ? /^(\d+) \| animals/m : /^(\d+) \| ai/m) ?? [])[1] ?? 0);
+        // every later answer suggests a title: a wider one for the dogs (words of the old title only), one about something else for the ai coins
+        return id ? { n: c.n, kind: "existing", id, title: "", theme: "other", retitle: dog ? "Dog Hats" : "free hat parade" } : { n: c.n, kind: "new", id: 0, title: dog ? "Dog in a Hat" : "AI Bubble Popping", theme: dog ? "animals" : "ai", retitle: "" };
+      }) }) }] };
+    } } });
+    const r = await runReplay({ db: file, keyFile: join(dir, "never-read.key"), out: join(dir, "out"), hours: 24, maxCoins: 1500, maxUsd: 0.5, minBuyers: 5, perMin: 1e6 }, { clientFactory, print: (l) => lines.push(l) });
+    const nine = sentCoins(reqs[0]).find((c) => c.symbol === "T9");
+    assert.deepEqual(nine, { n: nine.n, name: "Coin 9", symbol: "T9", no_text: true });
+    const eleven = sentCoins(reqs[0]).find((c) => c.symbol === "T11");
+    assert.deepEqual(eleven, { n: eleven.n, name: "Coin 11", symbol: "T11", no_text: true });
+    assert.deepEqual([r.coinsPicked, r.requests, r.forcedNone, r.retitled, r.retitleRefused, r.none, r.noneCoins.map((c) => c.symbol)], [24, 2, 2, 1, 1, 2, ["T9", "T11"]]);
+    assert.deepEqual(r.groups.map((g) => [g.title, g.theme]).sort(), [["ai bubble popping", "ai"], ["dog hats", "animals"]]);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "out", "replay.json"), "utf8")).forcedNone, 2);
+    const out = lines.join("\n");
+    assert.ok(out.includes("guards: 2 coins with no text stored as none") && out.includes("wider titles: 1 applied, 1 refused"), out);
+    assert.doesNotMatch(out, /recommend|likely to rise|\bearly\b|\bsignal\b|\balpha\b/i);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--until and --also on the command line: a time in unix seconds; up to 50 mints, comma-separated, each once; bad values are said plainly", () => {
+  const base = ["--db", "d", "--out", "o", "--dry-run"];
+  assert.deepEqual([parseArgs([...base, "--until", String(NOW)]).until, parseArgs([...base, `--until=${NOW}`]).until, parseArgs(base).until, parseArgs(base).also], [NOW, NOW, undefined, undefined]);
+  assert.deepEqual(parseArgs([...base, "--also", "M003, OLD,,M003", "--also=M004"]).also, ["M003", "OLD", "M004"]);
+  for (const bad of ["x", "0", "-5", "12.5", String(NOW * 1000)]) assert.throws(() => parseArgs([...base, "--until", bad]), /--until must be a time in unix seconds/, bad);
+  assert.throws(() => parseArgs([...base, "--until"]), /--until needs a value/);
+  assert.throws(() => parseArgs([...base, "--also", "M003,not a mint!"]), /--also takes mint addresses separated by commas/);
+  assert.equal(ALSO_MAX, 50);
+  assert.equal(alsoList(Array.from({ length: 50 }, (_, i) => `A${i}`)).length, 50);
+  assert.throws(() => parseArgs([...base, "--also", Array.from({ length: 51 }, (_, i) => `A${i}`).join(",")]), /--also takes at most 50 coins/);
+});
+
+test("--until ends the window at that time instead of at the newest coin, so a later, larger file gives the same coins (dry run; the file is not written)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spore-replay-"));
+  try {
+    const file = fixture(dir), before = sha(file), lines = [];
+    // 10 minutes before the newest coin: coins 0..19 are created by then, of which 10..19 have the buyers
+    const r = await runReplay({ db: file, out: join(dir, "o1"), dryRun: true, hours: 24, until: NOW - 600 }, { print: (l) => lines.push(l) });
+    assert.deepEqual([r.windowEnd, r.until, r.coinsCreated, r.coinsEligible, r.coinsPicked, r.coinsRead, r.noneCoins.map((c) => c.mint)], [NOW - 600, NOW - 600, 19, 10, 10, 10, Array.from({ length: 10 }, (_, i) => `M0${10 + i}`)]);
+    assert.ok(lines[0].includes(`before ${new Date((NOW - 600) * 1000).toISOString()} (--until)`), lines[0]);
+    // the window is --hours before --until: 5 minutes of it hold coins 15..19
+    const short = await runReplay({ db: file, out: join(dir, "o2"), dryRun: true, hours: 5 / 60, until: NOW - 600 }, { print() {} });
+    assert.deepEqual(short.noneCoins.map((c) => c.mint), ["M015", "M016", "M017", "M018", "M019"]);
+    // without it the window ends at the newest coin, as before
+    const plain = await runReplay({ db: file, out: join(dir, "o3"), dryRun: true, hours: 24 }, { print() {} });
+    assert.deepEqual([plain.windowEnd, plain.until, plain.coinsPicked], [NOW, null, 20]);
+    await assert.rejects(runReplay({ db: file, out: join(dir, "o4"), dryRun: true, until: 12.5 }, { print() {} }), /--until must be a time in unix seconds/);
+    assert.equal(sha(file), before);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--also coins are read after the window's coins whatever their age or buyers, a missing one is reported and skipped, the report says where each landed, and they count toward --max-usd", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spore-replay-"));
+  try {
+    const file = fixture(dir), before = sha(file), lines = [], reqs = [];
+    let inTokens = 3000;
+    const clientFactory = async () => ({ messages: { create: async (req) => {
+      reqs.push(req);
+      const known = req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0];
+      return { stop_reason: "end_turn", usage: { input_tokens: inTokens, output_tokens: 400 }, content: [{ type: "text", text: JSON.stringify({ coins: sentCoins(req).map((c) => {
+        if (!c.description) return { n: c.n, kind: "none", id: 0, title: "", theme: "other", retitle: "" };
+        const dog = c.description.includes("dog"), id = Number((known.match(dog ? /^(\d+) \| animals/m : /^(\d+) \| ai/m) ?? [])[1] ?? 0);
+        return id ? { n: c.n, kind: "existing", id, title: "", theme: "other", retitle: "" } : { n: c.n, kind: "new", id: 0, title: dog ? "Dog in a Hat" : "AI Bubble Popping", theme: dog ? "animals" : "ai", retitle: "" };
+      }) }) }] };
+    } } });
+    // OLD: ten days old (no metadata: "none"); M003: in the window but under the buyers bar; M007: untracked; M025: one of the window's own coins; NOPE: not in the file
+    const r = await runReplay({ db: file, keyFile: join(dir, "never-read.key"), out: join(dir, "out"), hours: 24, maxCoins: 12, maxUsd: 0.5, perMin: 1e6, also: "OLD,M003,NOPE,M025,M007,M003" }, { clientFactory, print: (l) => lines.push(l) });
+    assert.deepEqual([r.coinsEligible, r.coinsPicked, r.coinsRead, r.alsoRead, r.requests, r.stopped], [20, 12, 12, 3, 2, null]);
+    assert.deepEqual(sentCoins(reqs[0]).map((c) => c.symbol), Array.from({ length: 12 }, (_, i) => `T${18 + i}`), "the window's coins first, alone");
+    assert.deepEqual(sentCoins(reqs[1]).map((c) => c.symbol), ["OLD", "T3", "T7"], "then the --also coins, in the order given, each once");
+    assert.equal(reqs[1].messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | dog in a hat\n2 | ai | ai bubble popping", "they see the narratives the window made");
+    assert.deepEqual(r.also, [
+      { mint: "OLD", name: "Old", symbol: "OLD", found: true, inWindow: false, read: true, title: null, theme: null },
+      { mint: "M003", name: "Coin 3", symbol: "T3", found: true, inWindow: false, read: true, title: "ai bubble popping", theme: "ai" },
+      { mint: "NOPE", name: null, symbol: null, found: false, inWindow: false, read: false, title: null, theme: null },
+      { mint: "M025", name: "Coin 25", symbol: "T25", found: true, inWindow: true, read: true, title: "ai bubble popping", theme: "ai" },
+      { mint: "M007", name: "Coin 7", symbol: "T7", found: true, inWindow: false, read: true, title: "ai bubble popping", theme: "ai" },
+    ]);
+    // the window's own figures are what they are without --also; the groups show the extra coins, marked
+    assert.deepEqual([r.tagged, r.none, r.taggedShare, r.noneCoins.length], [12, 0, 1, 0]);
+    const ai = r.groups.find((g) => g.title === "ai bubble popping");
+    assert.deepEqual(ai.coins.filter((c) => c.also).map((c) => c.mint), ["M003", "M007"]);
+    assert.ok(Math.abs(r.usdPerCoin - r.usd / 15) < 1e-12, "the cost a coin counts every coin read");
+    const out = lines.join("\n");
+    for (const needle of ["reading the newest 12 and then 3 of the 5 --also coins", "coins read: 12 of 12 (and 3 --also coins after them)", "also: Old ($OLD) -> none", "also: Coin 3 ($T3) -> ai bubble popping", "also: NOPE is not in the file (skipped)", "also: Coin 25 ($T25) -> ai bubble popping (one of the window's coins: read in its place there)", "also: Coin 7 ($T7) -> ai bubble popping"]) assert.ok(out.includes(needle), `${needle} in:\n${out}`);
+    assert.doesNotMatch(out, /recommend|likely to rise|\bearly\b|\bsignal\b|\balpha\b/i);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "out", "replay.json"), "utf8")).also.length, 5);
+    assert.equal(sha(file), before, "the database file is byte for byte what it was");
+    // toward --max-usd: a request now costs $0.001; with $0.0012 the window's request fits and the --also coins' does not
+    inTokens = 8000;
+    const capped = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 12, maxUsd: 0.0012, perMin: 1e6, also: ["OLD", "M003"] }, { clientFactory, print: (l) => lines.push(l) });
+    assert.deepEqual([capped.stopped, capped.coinsRead, capped.alsoRead, capped.also.map((a) => a.read)], ["capped", 12, 0, [false, false]]);
+    assert.ok(lines.join("\n").includes("also: Old ($OLD) -> not read"));
+    // a dry run with --until and --also together: nothing sent, every coin "none"
+    const dry = await runReplay({ db: file, out: join(dir, "o3"), dryRun: true, hours: 24, until: NOW - 600, also: "M029,OLD" }, { print() {} });
+    assert.deepEqual([dry.coinsRead, dry.alsoRead, dry.also.map((a) => [a.mint, a.inWindow, a.read, a.title])], [10, 2, [["M029", false, true, null], ["OLD", false, true, null]]]);
+    await assert.rejects(runReplay({ db: file, out: join(dir, "o4"), dryRun: true, also: Array.from({ length: 51 }, (_, i) => `A${i}`) }, { print() {} }), /--also takes at most 50 coins/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

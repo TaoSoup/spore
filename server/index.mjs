@@ -23,7 +23,7 @@ import { ChartHistory } from "./lib/chart-history.mjs";
 import { Narrative, flagText } from "./lib/narrative.mjs";
 import { XPosts } from "./lib/xposts.mjs";
 import { Holders } from "./lib/holders.mjs";
-import { NarrTags } from "./lib/narrtags.mjs";
+import { NarrTags, applyTagRules } from "./lib/narrtags.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -124,6 +124,8 @@ const holders = cfg.holders ? new Holders({ model, rpc: rpc.lane("holders"), log
 // Narrative tags (lib/narrtags.mjs): only with NARRATIVES=on. A language model files coins with enough buyers under
 // short story titles for the Discover story cards; its own key file, a hard daily spend cap kept in sqlite. Without
 // the switch nothing is constructed: no client, no timer, and /api/stories answers as before.
+// Answers made under older tagging rules are deleted once (a few thousand rows at most), with the tagger on or off.
+applyTagRules(db, log);
 const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, posts: narrative?.posts ?? null, log }) : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,

@@ -133,7 +133,7 @@ CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
-  created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, retitled INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS narratives_key ON narratives(key);
 CREATE INDEX IF NOT EXISTS narratives_seen ON narratives(last_seen_at);
@@ -239,11 +239,15 @@ export class Db {
     // answered "none"), when, by which model, how many times the coin was asked about (`asks`) and whether its linked
     // post's text was part of the last ask (`had_post`) and whether that ask carried neither a description nor a post
     // (`bare`, added later: 0 in older rows); and per UTC day ('YYYY-MM-DD') the tokens, USD and requests
-    // spent, which is what the daily cap goes by across restarts.
+    // spent, which is what the daily cap goes by across restarts. `narratives.retitled` (1 = its title was widened once,
+    // which is the only time it may be: lib/narrtags.mjs TagEngine #retitle) came later: added when absent, 0 in older
+    // rows. The version of the tagging rules the stored answers were made under is the kv row 'narr_rules_version'
+    // (narrRulesReset below; not a schema version: the tables stay, their rows go).
     if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped")) this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
+    if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -354,6 +358,11 @@ export class Db {
       narrAdd: p("INSERT INTO narratives (title, theme, key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)"),
       narrTouch: p("UPDATE narratives SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at < ?1"),
       narrCount: p("SELECT COUNT(*) AS n FROM narratives"),
+      narrRetitled: p("SELECT retitled FROM narratives WHERE id = ?"),
+      narrRetitle: p("UPDATE narratives SET title = ?, key = ?, retitled = 1 WHERE id = ? AND retitled = 0"),
+      narrTagged: p("SELECT COUNT(*) AS n FROM coin_tags WHERE narrative_id = ?"),
+      narrWipe: p("DELETE FROM narratives"),
+      tagWipe: p("DELETE FROM coin_tags"),
       tagGet: p("SELECT mint, narrative_id, tagged_at, model, asks, had_post, bare FROM coin_tags WHERE mint = ?"),
       tagSet: p(`INSERT OR REPLACE INTO coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare)
         VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare)`),
@@ -635,6 +644,26 @@ export class Db {
   narrAdd({ title, theme, key, at }) { return Number(this.q.narrAdd.run(title, theme, key, at, at).lastInsertRowid); }
   narrTouch(id, at) { this.q.narrTouch.run(at, id); }
   narrCount() { return this.q.narrCount.get().n; }
+  /** Whether narrative `id` had its one retitle. */
+  narrRetitled(id) { return !!this.q.narrRetitled.get(id)?.retitled; }
+  /** Gives narrative `id` a new title and key, once in its life (the theme stays); false when it was retitled before or is not there. */
+  narrRetitle(id, title, key) { return Number(this.q.narrRetitle.run(title, key, id).changes) > 0; }
+  /** Coins stored under narrative `id` (the coin_tags_narrative index). */
+  narrTagged(id) { return this.q.narrTagged.get(id).n; }
+  /**
+   * The tagging rules changed (lib/narrtags.mjs applyTagRules): when the version stored under `key` is below `version`
+   * (no row = 1), every row of `coin_tags` and `narratives` is deleted and `version` stored, in one transaction;
+   * `narrative_spend` is not touched. `{ reset, from, tags, narratives }`: whether it ran, the version before, the rows deleted.
+   */
+  narrRulesReset(key, version) {
+    const from = Number(this.kvGet(key, 1)) || 1;
+    if (from >= version) return { reset: false, from, tags: 0, narratives: 0 };
+    return this.transaction(() => {
+      const tags = Number(this.q.tagWipe.run().changes), narratives = Number(this.q.narrWipe.run().changes);
+      this.kvSet(key, version);
+      return { reset: true, from, tags, narratives };
+    });
+  }
   tagGet(mint) { const r = this.q.tagGet.get(mint); return r ? { mint: r.mint, narrativeId: r.narrative_id == null ? null : Number(r.narrative_id), at: r.tagged_at, model: r.model, asks: r.asks, hadPost: !!r.had_post, bare: !!r.bare } : null; }
   tagSet(t) { this.q.tagSet.run({ mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: t.hadPost ? 1 : 0, bare: t.bare ? 1 : 0 }); }
   /** `{ tagged, none }`: coins under a narrative, and coins the model answered "none" for. */

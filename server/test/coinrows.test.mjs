@@ -570,6 +570,8 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   // three SOL roots with 12, 11 and 10 buyers, one with 3 (under the floor), one untracked with 20
   const A = w.coin(mintN(300), "NEEDLE", { parent: null, createdAt: T0 - 600 }), C = w.coin(mintN(301), "SWAN", { parent: null }), D = w.coin(mintN(302), "OTHER", { parent: null });
   const FEW = w.coin(mintN(303), "FEW", { parent: null }), UN = w.coin(mintN(304), "UNTRK", { parent: null, tracked: false });
+  // the two coins the fake model files have text of their own: a coin with a name only would be stored as "none" (the empty-coin guard)
+  for (const m of [A, C]) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: "the ai bubble is about to pop", twitter: null, telegram: null, website: null, fetchedAt: 1, ok: true });
   for (const [m, n] of [[A, 12], [C, 11], [D, 10], [FEW, 3], [UN, 20]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
   const calls = [];
   const client = async () => ({ messages: { create: async (req) => {

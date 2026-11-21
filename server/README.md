@@ -415,17 +415,68 @@ the site depends on it, and nothing here says anything about a coin's price.
 - **What the model reads**, per coin, each field cleaned (no control characters, no angle brackets) and capped: name,
   ticker, description, the host and path words of its website, its X handle or search words, the handle and text of
   the X post it links when that is stored (`x_posts`, never a flagged one), the name and ticker of the coin it is priced
-  in and that coin's narrative. No image, no URL, and nothing is fetched for it.
+  in and that coin's narrative (only when that is itself a coin of the index: USDC or another plain quote asset is no
+  pairing). No image, no URL, and nothing is fetched for it. Launcher boilerplate is taken out of
+  the description first: "Deployed using ...", "Created on ...", "Launched on ..." and the like, followed by a launcher
+  from an explicit list (its site, with or without `https://`, a path, an emoji after it; or its name, with or without
+  `@`), ending the phrase. Any other site or name stays ("Powered by x.ai", "made by @someone"), and a launcher whose
+  name is also a common word (bonk, bags, bloom, jupiter ...) counts only after "launched/created/deployed on/using/via".
+  A description that is only boilerplate, or boilerplate plus a filler word ("Token deployed using ..."), is empty, and
+  a coin left with nothing but its name and ticker (a handle, a community link or a launcher page is not text) is
+  marked `no_text`. The list was not checked against how often each form occurs in stored descriptions.
+- **When coins share a narrative.** A coin joins an existing narrative only when its own text points at the same
+  specific story: the same event, post, person, product or running joke. Sharing a broad subject (a cat, a game, a
+  politician, "ai") or a theme is not enough; different words for the same story still belong together. The coin it is
+  priced in is not the coin's own text: it counts only together with it. A coin whose text names no subject (no text at all, or
+  a description that is only a slogan, its own name or a chain or community phrase), priced in another coin or not,
+  joins a listed narrative, or a new story that another coin of the same request starts from its own description, site
+  or post, when its name or ticker carries that story's distinctive word (bubble or pop for "ai
+  bubble popping", bigfoot for "trump files on bigfoot"), word forms and derivatives included ("popped", "Bubble Inu");
+  a kind of thing or a name many stories share (cat, dog, inu, ai, coin, meme, trump, elon, crash, game) is never
+  distinctive, and a name or ticker whose word plainly means something else (for example a known character or person of
+  that name) does not join. Any other such coin gets "none" unless its name is itself widely known; a name that is only
+  a shared word (Trump, Elon, Cat, AI) is "none", and such coins never start a story among themselves. When the model
+  is unsure whether a coin's text points at the same story it answers "none" (a wrong grouping is worse than no
+  grouping); for a coin whose text names no subject, a name or ticker that carries a story's distinctive word is not
+  treated as a guess. When a description or post says what the coin is about, that decides, not the name. New titles name the story at the level a
+  reader would search for it ("gta 6"), not one coin's angle on it.
 - **The request**: batches of 20 coins, at most 6 requests a minute, one at a time, through the official
   `@anthropic-ai/sdk` (pinned). Each carries the fixed instructions and themes (a cacheable system block), the 150 most
   recently used narratives (id, theme, title) and the coins as JSON. The answer is forced into a JSON schema; per coin
-  an existing narrative's id, a new title and theme, or "none". No thinking is requested; the output allowance grows
-  with the batch.
+  an existing narrative's id (optionally with a wider title for it, see below), a new title and theme, or "none". No
+  thinking is requested; the output allowance grows with the batch (64 tokens plus 56 a coin).
 - **The server decides, not the model**: an id that was not offered is rejected, a theme outside the list becomes
   `other`, a title is cleaned (lower case, letters and digits only, 2-5 words, at most 40 characters; URLs, handles and
   emoji go; a blocked word makes it no title) and merged into an existing narrative that says the same words (case,
   punctuation, plurals, articles), an answer for a coin that was not asked about is ignored, and a reply that is not the
-  expected JSON drops the whole batch. Coins of a failed batch are asked again in smaller batches (20, 5, 1). A coin
+  expected JSON drops the whole batch. **The empty-coin guard**: a coin with no description (after the boilerplate is
+  out, or one made only of the coin's own name, ticker and filler words: "Bubble Inu on Solana"), no website words and
+  no post text, whether it is priced in another coin or not, is stored under a narrative
+  only when that narrative's title names it by its name or ticker: a shared word that can carry a subject (3+ letters
+  and not filler, a number of 2+ digits, or a two-letter word that is not a function word), a 4+ letter word inside a
+  run-together name when the rest of the name is only filler or kind words, digits or a plural s ("fiona" in
+  "BabyFiona"; not "last" in "Blast" or "bubble" in "Bubblegum"), or the title written without spaces ("gta 6" for "GTA6"). Whole words
+  are compared without a few common English endings (`stemWord`: -s, the e of -es, -ed and -ing with a doubled
+  consonant undone, so "Pop Inu" and "popped" fit "ai bubble popping" and "Foxes" fits "fox"; nothing where the base
+  word is unsure, so "Pope" and "hoped" do not; a short list of words that only look like a form stays whole, so
+  "wicked" is not "wick" and "herring" is not "her"; and a short word inside another, "cat" in "Catalyst", never
+  did). A kind word (cat, dog, ai, trump, elon, crash, game, and common animal kinds such as hippo or frog) or a common
+  English word (a short list: last, first, big, file, man, king ...) shared with a title that also has a distinctive
+  word does not count, as filler (inu, coin, meme, the ...) never does: a coin named "AI", "Trumpcoin", "Hippo" or
+  "Last Chance" with no text does not pass for "ai bubble popping", "trump files on bigfoot", "fiona the hippo" or
+  "the last penny", and a bare "Elon" does not pass for "elon musk". The guard is the outer bound; inside it the model
+  decides (a name whose word means something else, or a lone kind word against a title with nothing else, is the
+  model's call). Not matched: -es after a single s ("Buses" for "bus"). Otherwise it
+  is stored as "none" (`/api/health` `forcedNone`). Abbreviations (NVDA for nvidia) and names in another script than
+  the title are not matched, so such a coin with no text stays "none". **The one-time retitle**: an "existing" answer
+  may suggest a wider title for its narrative (a story named after its first coin's angle). It is applied at most once
+  in a narrative's life (`narratives.retitled`), only when at least 2 coins of that batch were filed under it (or 1
+  plus at least 2 filed before), after the same cleaning as any title, only when it drops words of the old title and
+  adds none ("gta 6" for "gta 6 birdwatching feature"; one word that can carry a subject must be left), and only when
+  it is not the title of another narrative (then it is ignored; narratives are never merged this way). So no reply can
+  bring a new word onto a card; the price is that a widening which needs a new word is refused, and the title then
+  stays narrow. The theme never changes. `/api/health` counts `retitled` and `retitleRefused` (a suggestion that only
+  repeats the listed title is not counted). Coins of a failed batch are asked again in smaller batches (20, 5, 1). A coin
   that fails alone, while other requests have been answered since it first failed, is stored as given up and not
   asked again for a day. Replies that keep being unusable (refused, cut off at `max_tokens`, not JSON) are not a
   coin's doing: after three in a row the tagger pauses like after a failed request (30 s, doubling to 15 min), logs
@@ -441,23 +492,37 @@ the site depends on it, and nothing here says anything about a coin's price.
   A failing provider only leaves coins untagged.
 - **Themes** (fixed in code): ai, animals, politics, celebrity, market crash, tech & products, gaming, sports,
   culture & memes, finance & stocks, crypto native, world events, other.
-- **Tables**: `narratives (id, title, theme, key, created_at, last_seen_at)` (`key`: the title folded for the
-  near-duplicate check, unique), `coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare)` (`narrative_id`
+- **Rules version.** The rules above have a version (`RULES_VERSION` in lib/narrtags.mjs, now 2; stored in sqlite as
+  the `kv` row `narr_rules_version`). At startup, with the tagger on or off, a database whose stored version is behind
+  (none stored = 1) has every row of `coin_tags` and `narratives` deleted once, so no answer made under older rules
+  is shown; `narrative_spend` is kept (the day's cap survives), one log line gives the counts, and the coins are read
+  again under the new rules as they come up. The next start does nothing.
+- **Tables**: `narratives (id, title, theme, key, created_at, last_seen_at, retitled)` (`key`: the title folded for the
+  near-duplicate check, unique; `retitled` 1 = its title was widened once), `coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare)` (`narrative_id`
   NULL = "none"; `bare` 1 = the ask carried neither a description nor a post; `model` `gave-up` for a coin that failed
   alone, which counts for a day), `narrative_spend (day, in_tokens,
   out_tokens, usd, requests)` (`day` a UTC date).
 - **Replay tool** (the owner's measurement, by hand; it opens the database read-only and stores nothing but its report):
 
-      node scripts/narrative-replay.mjs --db <DATA_DIR>/spore.sqlite --key-file <path> --out <dir> [--model claude-haiku-5-5] [--hours 24] [--max-coins 1500] [--max-usd 0.50] [--dry-run]
+      node scripts/narrative-replay.mjs --db <DATA_DIR>/spore.sqlite --key-file <path> --out <dir> [--model claude-haiku-5-5] [--hours 24] [--max-coins 1500] [--max-usd 0.50] [--until <unix seconds>] [--also <mint[,mint...]>] [--dry-run]
 
-  It takes the coins created in the last `--hours` (before the newest coin in the file) that reached the buyers bar, the
-  newest `--max-coins` of them in creation order, runs them through the same tagging code with the narratives kept in
+  It takes the coins created in the last `--hours` (before the newest coin in the file, or before `--until`) that reached the buyers bar, the
+  newest `--max-coins` of them in creation order, runs them through the same tagging code (the same instructions, boilerplate stripping, empty-coin guard
+  and one-time retitle) with the narratives kept in
   memory, writes `<out>/replay.json` and prints: coins read, requests, tokens, cost, the projected cost a day at that
-  rate, the share tagged and "none", the number of narratives, the 25 largest with up to 12 coin names each, and 20
+  rate, the share tagged and "none", the number of narratives, the coins the empty-coin guard stored as "none" and the
+  wider titles applied and refused, the 25 largest with up to 12 coin names each, and 20
   random narratives with one coin. `--max-usd` is a hard stop for the whole run, also across a UTC midnight, and a
   request that got no answer (a timeout) stays counted at its worst case. Eight unusable replies in a row end the
   run. `--dry-run` sends nothing (every coin reads "none";
-  token figures are rough estimates). Also `--min-buyers`, `--per-min` (default 20), `--in-usd-per-m` /
+  token figures are rough estimates). `--until <unix seconds>` ends the window at that time instead of at the newest
+  coin in the file, so runs over a file that keeps growing read the same coins and can be compared. `--also
+  <mint[,mint...]>` (at most 50, may be given more than once) names extra coins that are read after the window's
+  coins, in batches of their own, whatever their creation time or buyers, as a coin that shows up on the page later
+  would be; one that is not in the file is reported and skipped, one that is among the window's coins is not read
+  twice. The report lists where each landed (`also: <name> ($SYM) -> <title or none>`, "not read" when the run
+  stopped first; `also` in replay.json). They cost like any coin and count toward `--max-usd`; the tagged and "none"
+  counts and shares stay those of the window's coins, and the groups list an extra coin with `also: true`. Also `--min-buyers`, `--per-min` (default 20), `--in-usd-per-m` /
   `--out-usd-per-m`. The key is never printed.
 
 ## Storage
