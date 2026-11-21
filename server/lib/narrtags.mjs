@@ -608,12 +608,13 @@ export class NarrTags {
   // ---------------------------------------------------------------- the queue
   /**
    * A coin seen with `buyers` distinct buyers within the hour (lib/coinrows.mjs; `hot`: it is on the stories page).
-   * O(1) and memory only: it joins the line when it has the buyers and no answer in memory; whether sqlite has one is
+   * O(1) and memory only: it joins the line when it has the buyers (a page coin: always) and no answer in memory; whether sqlite has one is
    * read when its turn comes. A coin answered "none" without its post's text is looked at again every RECHECK_MS.
    * At most HOT_MAX page coins wait: the one waiting longest then joins the other coins (or is dropped when those are full).
    */
   offer(mint, buyers, { hot = false } = {}) {
-    if (!this.on || this.stopped || typeof mint !== "string" || !(buyers >= this.minBuyers)) return;
+    if (!this.on || this.stopped || typeof mint !== "string") return;
+    if (!hot && !(buyers >= this.minBuyers)) return; // a coin shown on the stories page is read whatever its buyers: a quiet older coin of a story belongs on its card
     const r = this.cache.get(mint);
     if (r) {
       if (this.#settled(r)) return;

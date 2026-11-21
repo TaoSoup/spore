@@ -692,3 +692,14 @@ test("page coins waiting are capped and stay current: past HOT_MAX the oldest jo
   assert.deepEqual([t.hot.size, t.hotSeen.size, HOT_STALE_MS < 3_600_000], [0, 0, true], "coins nobody offered again are no longer page coins");
   t.stop(); db.close();
 });
+
+test("narrtags: a page coin is read whatever its buyers; an off-page coin still needs the floor", async () => {
+  const model = fakeModel();
+  model.add("quietpage", { name: "The Needle", symbol: "NEEDLE", description: "pop" }); model.add("quietoff", { name: "Other", symbol: "OTHER", description: "x" });
+  const client = fakeClient((req) => reply(sentCoins(req).map((c) => none(c.n))));
+  const { t } = tagger({ model, client });
+  t.offer("quietoff", 2); t.offer("quietpage", 2, { hot: true }); t.offer("quietpage", 0, { hot: true });
+  assert.equal(t.pending(), 1);
+  await t.pump();
+  assert.deepEqual(sentCoins(client.calls[0].req).map((c) => c.symbol), ["NEEDLE"]);
+});

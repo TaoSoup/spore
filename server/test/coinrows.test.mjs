@@ -575,17 +575,17 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   const client = async () => ({ messages: { create: async (req) => {
     const coins = JSON.parse(req.messages[0].content.split("<coins>\n")[1].split("\n</coins>")[0]);
     calls.push(coins.map((c) => c.symbol));
-    return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => (c.symbol === "OTHER" ? { n: c.n, kind: "none", id: 0, title: "", theme: "other" } : { n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" })) }) }] };
+    return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => (c.symbol === "OTHER" || c.symbol === "FEW" ? { n: c.n, kind: "none", id: 0, title: "", theme: "other" } : { n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" })) }) }] };
   } } });
   const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, log: quiet });
   w.rows.attach({ narr });
   w.clock.t = (T0 + 100) * 1000;
   let b = await w.rows.stories("5m");
-  // nothing is tagged yet: the body is the untagged one, and says the tagger is on with the page's three coins waiting
-  assert.deepEqual([b.tagging, b.themes, b.cards.length, b.loose.map((r) => r.symbol).sort()], [{ on: true, tagged: 0, pending: 3, capped: false }, [], 0, ["FEW", "NEEDLE", "OTHER", "SWAN"]]);
+  // nothing is tagged yet: the body is the untagged one, and says the tagger is on with the page's four coins waiting (a page coin is offered whatever its buyers)
+  assert.deepEqual([b.tagging, b.themes, b.cards.length, b.loose.map((r) => r.symbol).sort()], [{ on: true, tagged: 0, pending: 4, capped: false }, [], 0, ["FEW", "NEEDLE", "OTHER", "SWAN"]]);
   assert.equal(await w.rows.stories("5m"), b, "served while the snapshot is current: a request does not rebuild");
   await narr.pump();
-  assert.deepEqual(calls.map((c) => [...c].sort()), [["NEEDLE", "OTHER", "SWAN"]], "one request; the coin under the floor and the untracked one were never offered");
+  assert.deepEqual(calls.map((c) => [...c].sort()), [["FEW", "NEEDLE", "OTHER", "SWAN"]], "one request; the page coin under the floor is read too, the untracked one was never offered");
   // the next refresh (a new snapshot) shows the tags
   w.clock.t += 5_000;
   b = await w.rows.stories("5m");
@@ -601,7 +601,7 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   const app = await serveApp(w, { narrTags: narr });
   try {
     const h = (await app.get("/api/health")).body.narrTags;
-    assert.deepEqual([h.on, h.tagged, h.none, h.narratives, h.pending, h.requestsToday, h.capped, h.lastError], [true, 2, 1, 1, 0, 1, false, null]);
+    assert.deepEqual([h.on, h.tagged, h.none, h.narratives, h.pending, h.requestsToday, h.capped, h.lastError], [true, 2, 2, 1, 0, 1, false, null]);
   } finally { await app.close(); }
   narr.stop(); w.close();
 });
