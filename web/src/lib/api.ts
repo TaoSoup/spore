@@ -318,6 +318,37 @@ export type Discover = { asOf: number; bucketS: number; tf?: Tf; families: WakeF
 /// coins that met them, before the creator checks, dust and the cap of 50, so it can be above `rows.length`.
 export type TrendRow = CoinRow & { parent: { mint: string; symbol: string | null; image: string | null } | null; family: WakeState | null };
 export type Trending = { asOf: number; tf: Tf; rows: TrendRow[]; floor?: number; floor5m?: number; candidates?: number };
+/// `GET /api/stories`: the trending candidates grouped by what is behind the buying. A coin is in at most one place: a
+/// card of the X post it links (`kind` "post", across parents; `family` set when a waking family chose that post), a card
+/// of its waking family (`kind` "family"), `loose` (no story found), or `dust` (left out: `reason` "paper", a market cap
+/// over 100 times the liquidity, or "tiny", under $5 volume a buyer). Coins with the same ticker and image are folded
+/// under the one with the most liquidity (`copies`; none of them is called the original). `post.at` and
+/// `family.startedAt` are unix seconds; the web rebuilds the post link from the id (lib/narrative.ts safePostUrl).
+/// A card's `buyers5m` and `coinsN` count its coins and their copies; `hidden.dust` counts every dust coin (at most 30
+/// are sent), `hidden.cards` the cards past the 20 sent, `hidden.loose` the coins of no card past the 30 loose rows sent.
+export type StoryCopy = { mint: string; createdAt: number | null; firstSeenAt: number | null; liqUsd: number | null; buyers5m: number };
+/// Narrative tags (a newer server with NARRATIVES=on): a language model reads each coin's public text and names the story it
+/// belongs to. `title` is model-written, untrusted text (shown as plain text only); `theme` is one of the server's fixed
+/// lower-case themes. Context only. A row anywhere may carry its `narrative`; a row of a "narrative" card carries
+/// `isNew` (created within the last 60 min; an unknown launch time counts as older).
+export type NarrativeRef = { id: number; title: string; theme: string };
+export type StoryRow = TrendRow & { copies?: StoryCopy[]; narrative?: NarrativeRef | null; isNew?: boolean };
+export type DustReason = "paper" | "tiny";
+export type DustRow = StoryRow & { reason: DustReason };
+export type StoryPost = { id: string; handle: string | null; text: string | null; at: number | null; url: string };
+export type StoryFamily = { mint: string; symbol: string | null; image: string | null; startedAt: number | null };
+/// `kind` "narrative" (key "n:<id>"): the coins that share one narrative, two or more of them; `narrative.newCoins1h`
+/// counts every tagged coin of it created in the last 60 min, `post` is the usable post of its most-bought coin that has
+/// one, `family` is null, `newN` / `olderN` split its coins by `isNew`. A "post" or "family" card carries `narrative`
+/// (without the count) when all its coins share one.
+export type StoryCard = {
+  kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
+  narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
+};
+/// `tagging.on` false (or absent, an older server): no narrative anywhere. `capped`: the daily spend cap was reached.
+export type StoryTagging = { on: boolean; tagged?: number; pending?: number; capped?: boolean };
+export type StoryTheme = { theme: string; cards: number };
+export type Stories = { asOf: number; tf: Tf; cards: StoryCard[]; loose: StoryRow[]; dust: DustRow[]; hidden: { dust: number; cards?: number; loose?: number }; floor?: number; floor5m?: number; candidates?: number; tagging?: StoryTagging; themes?: StoryTheme[] };
 /// `GET /api/discover/:mint`: the family when it is listed, else "quiet" with the top 3 children by buyers in the last
 /// 15 min (`sinceStart` null) and the other figures null or 0. 404 for a mint the server does not know.
 export type DiscoverQuiet = {
@@ -484,6 +515,8 @@ export const api = {
   discoverOf: (mint: string, tf?: Tf) => request<DiscoverOne>(`/discover/${encodeURIComponent(mint)}${qs({ tf })}`),
   /// The coins most wallets bought over the timeframe (see `Trending`); the server caches it 5 s.
   trending: (tf?: Tf) => request<Trending>(`/trending${qs({ tf })}`),
+  /// The same coins grouped by story (see `Stories`); the server caches it 5 s.
+  stories: (tf?: Tf) => request<Stories>(`/stories${qs({ tf })}`),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).

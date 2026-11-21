@@ -139,3 +139,29 @@ test("RPC_USER_URL: a metered RPC for the request-driven lanes only, paced for H
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("narrative tags config: off by default with its own names; the key only from a readable file, never from the environment and never echoed", () => {
+  const dir = tmp();
+  try {
+    const base = { DATA_DIR: join(dir, "data"), META_DIR: join(dir, "meta") };
+    assert.deepEqual(loadConfig(base, { here: dir }).narrTags, { on: false, keyFile: null, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10, inUsdPerM: null, outUsdPerM: null });
+    // the agents' LLM_* settings are another feature: they neither switch this on nor give it a key
+    writeFileSync(join(dir, "llm.key"), "agents-key-value");
+    assert.equal(loadConfig({ ...base, LLM_URL: "https://llm.example/v1/chat/completions", LLM_KEY_FILE: join(dir, "llm.key"), LLM_MODEL: "m" }, { here: dir }).narrTags.on, false);
+    writeFileSync(join(dir, "narr.key"), "sk-ant-narr-secret-value");
+    const c = loadConfig({ ...base, NARRATIVES: "on", NARRATIVE_KEY_FILE: join(dir, "narr.key"), NARRATIVE_MODEL: "some-model", NARRATIVE_DAILY_USD: "0.25", NARRATIVE_MIN_BUYERS: "25", NARRATIVE_IN_USD_PER_M: "1", NARRATIVE_OUT_USD_PER_M: "5" }, { here: dir });
+    assert.deepEqual(c.narrTags, { on: true, keyFile: join(dir, "narr.key"), model: "some-model", dailyUsd: 0.25, minBuyers: 25, inUsdPerM: 1, outUsdPerM: 5 });
+    assert.ok(!JSON.stringify(c).includes("sk-ant-narr-secret-value"), "the config holds the path, never the key");
+    // on without a key file is not an error: the tagger then stays off and says so (lib/narrtags.mjs)
+    assert.deepEqual([loadConfig({ ...base, NARRATIVES: "on" }, { here: dir }).narrTags.on, loadConfig({ ...base, NARRATIVES: "on" }, { here: dir }).narrTags.keyFile], [true, null]);
+    // extra request headers from the environment: refused with the tagger on (the value is not echoed), ignored with it off
+    assert.throws(() => loadConfig({ ...base, NARRATIVES: "on", ANTHROPIC_CUSTOM_HEADERS: "x-secret-hdr: v-123" }, { here: dir }), (e) => /ANTHROPIC_CUSTOM_HEADERS is set in the environment/.test(e.message) && !e.message.includes("v-123"));
+    assert.equal(loadConfig({ ...base, ANTHROPIC_CUSTOM_HEADERS: "x-secret-hdr: v-123" }, { here: dir }).narrTags.on, false);
+    assert.equal(loadConfig({ ...base, NARRATIVES: "on", ANTHROPIC_BASE_URL: "http://127.0.0.1:9", ANTHROPIC_LOG: "debug" }, { here: dir }).narrTags.on, true, "the host and the logging are fixed in code");
+    assert.throws(() => loadConfig({ ...base, NARRATIVES: "yes", NARRATIVE_KEY_FILE: join(dir, "missing.key"), NARRATIVE_KEY: "sk-ant-in-env-9876", NARRATIVE_DAILY_USD: "-1", NARRATIVE_MIN_BUYERS: "0", NARRATIVE_IN_USD_PER_M: "1" }, { here: dir }), (e) => {
+      for (const needle of ['NARRATIVES="yes" must be one of off, on', "NARRATIVE_KEY_FILE", "is not a readable file (ENOENT)", "NARRATIVE_KEY is not read from the environment", 'NARRATIVE_DAILY_USD="-1" must be a number ≥ 0', 'NARRATIVE_MIN_BUYERS="0" must be an integer ≥ 1', "NARRATIVE_IN_USD_PER_M and NARRATIVE_OUT_USD_PER_M must be set together"]) assert.ok(e.message.includes(needle), `${needle} in:\n${e.message}`);
+      assert.ok(!e.message.includes("sk-ant-in-env-9876"), "a key in the environment is never echoed");
+      return true;
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

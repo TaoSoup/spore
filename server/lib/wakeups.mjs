@@ -1073,7 +1073,21 @@ export class Wakeups {
     return job;
   }
   /** Drops the cached bodies and the coin-row snapshot (tests; a body is otherwise served while its snapshot is current). */
-  forget() { this.hits.clear(); this.quiet.clear(); this.model.coinRows.hit = null; this.model.coinRows.trend.clear(); }
+  forget() { this.hits.clear(); this.quiet.clear(); this.model.coinRows.hit = null; this.model.coinRows.trend.clear(); this.model.coinRows.story?.clear(); }
+
+  /**
+   * The families a story card may name (GET /api/stories, lib/coinrows.mjs): parent mint → `{ mint, symbol, image,
+   * startedAt, postId }` for every wake-up that is live and not silent, from the list's own build over `tf` (every
+   * family it built, also past the 12 listed). `postId`: the post that family's card shows, or null.
+   */
+  async storyWakes(tf = TF_DEFAULT) {
+    await this.serve(tf);
+    const out = new Map();
+    for (const [mint, f] of this.hits.get(tf)?.built ?? []) {
+      if (f.state === "live" && !f.silent) out.set(mint, { mint, symbol: f.parent?.symbol ?? null, image: f.parent?.image ?? null, startedAt: f.startedAt, postId: f.post?.id ?? null });
+    }
+    return out;
+  }
 
   /**
    * The body of GET /api/discover/:mint?tf=: the family object when `mint` is waking, else the quiet shape (README §API);

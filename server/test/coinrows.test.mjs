@@ -15,6 +15,8 @@ import { performance } from "node:perf_hooks";
 import { CoinRows, TF_S, SPARK_STEP, SPARK_N, HOLD_S, TREND_MAX, DUST_USD, FLOOR_1M, ENTER_5M, STAY_MS, parseTf, isDust } from "../lib/coinrows.mjs";
 import { BUCKET_S, BASE_BUCKETS, GRACE_S, DEAD_SOLD_S, SNIPE_S } from "../lib/wakeups.mjs";
 import { Holders } from "../lib/holders.mjs";
+import { Narrative, postUrl } from "../lib/narrative.mjs";
+import { NarrTags } from "../lib/narrtags.mjs";
 import { Db } from "../lib/db.mjs";
 import { Model } from "../lib/model.mjs";
 import { createApp } from "../lib/api.mjs";
@@ -312,11 +314,11 @@ test("holder facts in a row: pending until read, then the measured shares (lib/h
   holders.stop(); w.close();
 });
 
-async function serveApp(w) {
+async function serveApp(w, more = {}) {
   const dir = mkdtempSync(join(tmpdir(), "spore-rows-api-"));
   const hub = new EventHub({ heartbeatMs: 60_000 });
   const app = createApp({ model: w.model, indexer: { fetchCoin: async () => null, snapshot: () => ({ phase: "test" }) }, rpc: { call: async () => { throw new Error("no chain in this test"); } }, hub, images: new ImageCache(dir), meta: null,
-    platformWallet: PLATFORM, splitBps: [5000, 2500, 1000, 1500], distDir: null, log: quiet, now: w.clock.now });
+    platformWallet: PLATFORM, splitBps: [5000, 2500, 1000, 1500], distDir: null, log: quiet, now: w.clock.now, ...more });
   const server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
@@ -477,4 +479,129 @@ test("row facts: firstSeenAt for an undated coin (its first stored trade, rememb
   assert.deepEqual(rows.map((x) => [x.mcapUsd, x.liqUsd, x.thin]), [[2_000_000, 0, true], [2_000_000, 19_999, true], [2_000_000, 20_000, false], [10_000, 0, false]],
     "over 100x: thin; exactly 100x is not; a $10K child sold back to its start has no real reserves either and is not flagged");
   w.close();
+});
+
+test("GET /api/stories: the trending rows as cards (a waking family, a post coins link across parents), the loose rows, bot dust apart; trending and discover unchanged beside it", async () => {
+  const w = world();
+  const idAt = (s, n = 0) => String(((BigInt(s * 1000) - 1288834974657n) << 22n) + BigInt(n));
+  const links = (mint, id) => w.model.setMeta(`https://ipfs.io/ipfs/${mint}`, { image: `https://ipfs.io/ipfs/img-${mint.slice(0, 4)}`, description: null, twitter: `https://x.com/anyone/status/${id}`, telegram: null, website: null, fetchedAt: 1, ok: true });
+  const T0 = K0 * B, X = idAt(T0 - 600, 1), BAD = idAt(T0 - 500, 2), UNSEEN = idAt(T0 - 400, 3);
+  // PAR wakes: 50 wallets on its three old children
+  const E = [0, 1, 2].map((i) => w.coin(mintN(190 + i), `E${i}`));
+  for (let i = 0; i < 50; i++) w.trade(E[i % 3], `w${i}`, T0 + i);
+  // two SOL roots and a coin under another parent link post X; one links a flagged post, one a post nothing is stored of
+  const Q = w.coin(mintN(2, 1), "QPAR", { parent: null, createdAt: OLD - DAY });
+  const R = [w.coin(mintN(200), "R0", { parent: null }), w.coin(mintN(201), "R1", { parent: null }), w.coin(mintN(202), "R2", { parent: Q })];
+  for (const m of R) links(m, X);
+  const F = w.coin(mintN(203), "FLAG", { parent: null }), U = w.coin(mintN(204), "UNSEEN", { parent: null });
+  links(F, BAD); links(U, UNSEEN);
+  const L = w.coin(mintN(205), "LOOSE", { parent: null }), TINY = w.coin(mintN(206), "TINY", { parent: null });
+  for (let i = 0; i < 4; i++) w.trade(R[0], `r0${i}`, T0 + 60 + i, { usd: 20 });
+  for (let i = 0; i < 2; i++) w.trade(R[1], `r1${i}`, T0 + 60 + i, { usd: 20 });
+  w.trade(R[2], "r2", T0 + 61, { usd: 20 });
+  for (const m of [F, U, L]) w.trade(m, `o${m.slice(0, 4)}`, T0 + 62, { usd: 30 });
+  for (let i = 0; i < 3; i++) w.trade(TINY, `t${i}`, T0 + 63, { usd: 2 });
+  const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }], [BAD, { id: BAD, state: "ok", handle: "rude", text: "", flagged: true }]]);
+  const asked = [];
+  const posts = { peek: (id) => records.get(id) ?? null, canQueue: (id) => (records.has(id) ? "cached" : "ok"), want: (id, o) => { asked.push([id, o?.low]); return "ok"; }, state: () => "wait", snapshot: () => ({}), start() {}, stop() {} };
+  w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
+  w.clock.t = (T0 + 100) * 1000;
+  const app = await serveApp(w);
+  try {
+    const s = await app.get("/api/stories");
+    assert.deepEqual([s.status, s.headers.get("cache-control"), Object.keys(s.body)], [200, "public, max-age=5", ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes"]]);
+    const b = s.body;
+    // no narrative tagger runs here: the body says so and nothing else changes
+    assert.deepEqual([b.tagging, b.themes], [{ on: false, tagged: 0, pending: 0, capped: false }, []]);
+    assert.ok(!JSON.stringify(b).includes('"narrative"') && !JSON.stringify(b).includes('"isNew"'));
+    assert.deepEqual((await app.get("/api/health")).body.narrTags, { on: false });
+    assert.deepEqual([b.asOf, b.tf, b.floor, b.floor5m, b.candidates, b.hidden], [T0 + 100, "5m", 0, 0, 10, { dust: 1, cards: 0, loose: 0 }]);
+    assert.deepEqual(b.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, c.coins.map((r) => r.symbol)]), [
+      ["family", PAR, 50, 3, ["E0", "E1", "E2"]],
+      ["post", X, 7, 3, ["R0", "R1", "R2"]],
+    ]);
+    const [fam, post] = b.cards;
+    assert.deepEqual([fam.post, fam.family.mint, fam.family.symbol, typeof fam.family.image, fam.family.startedAt >= T0 && fam.family.startedAt <= T0 + 100], [null, PAR, "PAR", "string", true]);
+    assert.deepEqual([post.post, post.family], [{ id: X, handle: "poster", text: "big news", at: T0 - 600, url: postUrl(X) }, null]);
+    assert.deepEqual(b.loose.map((r) => r.symbol).sort(), ["FLAG", "LOOSE", "UNSEEN"], "a flagged post and one nothing is stored of make no card");
+    assert.deepEqual(b.dust.map((r) => [r.symbol, r.reason, r.safety.state]), [["TINY", "tiny", "unknown"]]);
+    assert.ok(asked.some(([id, low]) => id === UNSEEN && low === true), "the unstored post's text is asked for at low priority");
+    // every row is a trending row: the same fields, the safety facts filled
+    const t = (await app.get("/api/trending")).body;
+    const all = [...b.cards.flatMap((c) => c.coins), ...b.loose, ...b.dust];
+    assert.deepEqual(all.map((r) => r.mint).sort(), t.rows.map((r) => r.mint).sort(), "under 50 candidates: the very coins trending lists, each once");
+    const tr = t.rows.find((r) => r.mint === R[2]), sr = post.coins[2];
+    assert.deepEqual(sr, tr);
+    assert.deepEqual([sr.parent.mint, sr.safety.state, Object.keys(b.dust[0]).filter((k) => !(k in tr))], [Q, "unknown", ["reason"]]);
+    // the other timeframes and the 400; discover still lists the family
+    assert.deepEqual([(await app.get("/api/stories?tf=1h")).body.tf, (await app.get("/api/stories?tf=1h")).body.floor5m, (await app.get("/api/stories?tf=2m")).status], ["1h", ENTER_5M, 400]);
+    assert.deepEqual((await app.get("/api/discover")).body.families.map((f) => f.parent.mint), [PAR]);
+    assert.equal((await app.get("/api/health")).body.coinRows.storiesBuilt, 2);
+  } finally { await app.close(); }
+  w.close();
+});
+
+test("stories: a waking family whose chosen post may be shown joins that post's card; the 1 h list keeps its own stay set, apart from trending's", async () => {
+  const w = world();
+  const idAt = (s, n = 0) => String(((BigInt(s * 1000) - 1288834974657n) << 22n) + BigInt(n));
+  const T0 = K0 * B, X = idAt(T0 - 600, 1);
+  const E = [0, 1, 2].map((i) => w.coin(mintN(190 + i), `E${i}`));
+  for (const m of E.slice(0, 2)) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: null, twitter: `https://x.com/a/status/${X}`, telegram: null, website: null, fetchedAt: 1, ok: true });
+  for (let i = 0; i < 51; i++) w.trade(E[i % 3], `w${i}`, T0 + i);
+  const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }]]);
+  const posts = { peek: (id) => records.get(id) ?? null, canQueue: () => "cached", want: () => "cached", state: () => "idle", snapshot: () => ({}), start() {}, stop() {} };
+  w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
+  w.clock.t = (T0 + 100) * 1000;
+  let b = await w.rows.stories("1h");
+  assert.deepEqual(b.cards.map((c) => [c.kind, c.key, c.post.handle, c.family.mint, c.buyers5m, c.coinsN]), [["post", X, "poster", PAR, 51, 3]], "E2 links nothing: it comes with its family");
+  assert.deepEqual([[...w.rows.listed.keys()], w.rows.listed.get("story:1h").set.size], [["story:1h"], 3], "trending's own stay set is not written");
+  assert.equal(await w.rows.stories("1h"), b, "served while the snapshot is current");
+  // the post gets flagged: the family keeps a card, without the post
+  records.get(X).flagged = true; records.get(X).text = "";
+  w.wk.forget();
+  b = await w.rows.stories("1h");
+  assert.deepEqual(b.cards.map((c) => [c.kind, c.key, c.post, c.coinsN]), [["family", PAR, null, 3]]);
+  w.close();
+});
+
+test("stories with narrative tags: the snapshot offers coins with 10+ buyers, the page's coins go first, a new tag shows in the next build, and the body carries tagging, themes and narrative cards", async () => {
+  const w = world();
+  const T0 = K0 * B;
+  // three SOL roots with 12, 11 and 10 buyers, one with 3 (under the floor), one untracked with 20
+  const A = w.coin(mintN(300), "NEEDLE", { parent: null, createdAt: T0 - 600 }), C = w.coin(mintN(301), "SWAN", { parent: null }), D = w.coin(mintN(302), "OTHER", { parent: null });
+  const FEW = w.coin(mintN(303), "FEW", { parent: null }), UN = w.coin(mintN(304), "UNTRK", { parent: null, tracked: false });
+  for (const [m, n] of [[A, 12], [C, 11], [D, 10], [FEW, 3], [UN, 20]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
+  const calls = [];
+  const client = async () => ({ messages: { create: async (req) => {
+    const coins = JSON.parse(req.messages[0].content.split("<coins>\n")[1].split("\n</coins>")[0]);
+    calls.push(coins.map((c) => c.symbol));
+    return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => (c.symbol === "OTHER" ? { n: c.n, kind: "none", id: 0, title: "", theme: "other" } : { n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" })) }) }] };
+  } } });
+  const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, log: quiet });
+  w.rows.attach({ narr });
+  w.clock.t = (T0 + 100) * 1000;
+  let b = await w.rows.stories("5m");
+  // nothing is tagged yet: the body is the untagged one, and says the tagger is on with the page's three coins waiting
+  assert.deepEqual([b.tagging, b.themes, b.cards.length, b.loose.map((r) => r.symbol).sort()], [{ on: true, tagged: 0, pending: 3, capped: false }, [], 0, ["FEW", "NEEDLE", "OTHER", "SWAN"]]);
+  assert.equal(await w.rows.stories("5m"), b, "served while the snapshot is current: a request does not rebuild");
+  await narr.pump();
+  assert.deepEqual(calls.map((c) => [...c].sort()), [["NEEDLE", "OTHER", "SWAN"]], "one request; the coin under the floor and the untracked one were never offered");
+  // the next refresh (a new snapshot) shows the tags
+  w.clock.t += 5_000;
+  b = await w.rows.stories("5m");
+  assert.deepEqual(b.tagging, { on: true, tagged: 2, pending: 0, capped: false });
+  assert.deepEqual(b.themes, [{ theme: "ai", cards: 1 }]);
+  assert.deepEqual(b.cards.map((c) => [c.kind, c.key, c.narrative, c.post, c.family, c.buyers5m, c.coinsN, c.newN, c.olderN, c.coins.map((r) => [r.symbol, r.isNew, r.narrative.id, r.safety.state])]), [
+    ["narrative", "n:1", { id: 1, title: "ai bubble popping", theme: "ai", newCoins1h: 1 }, null, null, 23, 2, 1, 1, [["NEEDLE", true, 1, "unknown"], ["SWAN", false, 1, "unknown"]]],
+  ]);
+  assert.deepEqual(b.loose.map((r) => [r.symbol, "narrative" in r]).sort(), [["FEW", false], ["OTHER", false]]);
+  // trending is untouched by tags
+  assert.ok(!JSON.stringify(await w.rows.trending("5m")).includes("narrative"));
+  // health names the tagger where the other subsystems report, without anything secret
+  const app = await serveApp(w, { narrTags: narr });
+  try {
+    const h = (await app.get("/api/health")).body.narrTags;
+    assert.deepEqual([h.on, h.tagged, h.none, h.narratives, h.pending, h.requestsToday, h.capped, h.lastError], [true, 2, 1, 1, 0, 1, false, null]);
+  } finally { await app.close(); }
+  narr.stop(); w.close();
 });

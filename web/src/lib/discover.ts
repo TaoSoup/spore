@@ -3,7 +3,7 @@
 // (GET /api/discover, `Discover` in lib/api.ts; SSE `wake`), as words, a sparkline and an order. Pure: no DOM, no
 // network, no storage (test/discover.test.mts). Every line says what is measured ("buying 14x its normal", "170 buyers
 // in 5 min"), never why, never what a coin will do, and a linked post is only what coincided.
-import type { CoinRow, CoinSafety, DiscoverOne, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
+import type { CoinRow, CoinSafety, DiscoverOne, DustReason, NarrativeRef, Stories, StoryCard, StoryCopy, StoryRow, StoryTheme, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
 import { compact, count, plural, short, usd } from "./format";
 import { postHandle, postText, safePostUrl } from "./narrative";
 import { PRESET_COUNT } from "./trade-settings";
@@ -242,6 +242,12 @@ function keepShown(f: WakeFamily, r: FamilyRow): FamilyRow {
   return { ...f, coins, state: r.state, fold: r.fold ?? foldable(r), post: r.post ? f.post ?? r.post : null, more: foot ? f.more : r.more, hidden: foot ? f.hidden : r.hidden, dust: foot ? f.dust : r.dust };
 }
 export const LEFT_PILL = "No longer listed";
+/// A story row or card kept in place while the page is in use although the read lists its coins somewhere else now
+/// (a coin joined a story card, or a card was regrouped): still listed, so it is not called dropped.
+export const MOVED_PILL = "Moved to another card";
+export const MOVED_TITLE = "This coin is now listed on another card or list; this row goes once the page is idle";
+export const REGROUPED_PILL = "Regrouped";
+export const REGROUPED_TITLE = "The coins of this card are now listed on other cards; this card goes once the page is idle";
 
 /// While the list is in use a new family is added at the end and a card that turned live keeps its cooling shape, so
 /// a wake-up could start unseen under a resting pointer. `heldNews` is what the pill above the list names: families
@@ -758,6 +764,342 @@ export const GROUP_TITLE = "Other coins with this ticker under the same parent, 
 /// The small tags of a trending row: "under $FIONA" (its parent) and the family's state when it is on Discover.
 export const parentTag = (r: Pick<TrendRow, "parent">): string | null => (r.parent && typeof r.parent.mint === "string" ? `under ${r.parent.symbol ? `$${r.parent.symbol}` : short(r.parent.mint)}` : null);
 export const familyPill = (r: Pick<TrendRow, "family">): string | null => (r.family === "live" ? "waking up" : r.family === "cooling" ? "cooling" : null);
+
+// ---- stories (GET /api/stories): the page's one view, grouped by the post or the family behind the buying
+
+/// A coin row of the page (`left`: the server stopped listing it here while the page was in use; dimmed, gone once idle.
+/// `moved`, on a `left` row or card: the read still lists the coin, or every coin of the card, somewhere else).
+/// `size`: the size pill the row is under, set from the market cap of the read that put it on screen and kept while
+/// the page is in use. A live trade moves the market cap shown, never the pill: a coin crossing $100K under a resting
+/// pointer would take its row out and move every Buy under it.
+export type StoryShown = StoryRow & Live & { left?: boolean; moved?: boolean; reason?: DustReason; size?: Exclude<SizeKey, "all"> | null };
+export type StoryCardShown = Omit<StoryCard, "coins"> & { coins: StoryShown[]; left?: boolean; moved?: boolean };
+/// What the page holds between reads. `hiddenDust`: every dust coin the server counted (`dust` lists at most 30).
+/// `hiddenLoose`: the coins of no card past the loose rows sent.
+/// `tagging`: the server tags narratives (`tagging.on`); `themes`: the themes of its narrative cards, most cards first
+/// (while the page is in use: in the order shown, a theme the read no longer has kept with its last count).
+export type StoriesView = { cards: StoryCardShown[]; loose: StoryShown[]; dust: StoryShown[]; hiddenDust: number; hiddenCards: number; hiddenLoose: number; tagging: boolean; themes: StoryTheme[] };
+
+/// The size pills, by market cap: small under $100K, mid $100K to $5M, large over $5M. A coin without a known market
+/// cap is only under "All".
+export type SizeKey = "all" | "small" | "mid" | "large";
+export const SIZE_KEY = "spore:dsc-size";
+export const SMALL_MAX_USD = 100_000;
+export const LARGE_MIN_USD = 5_000_000;
+export const SIZES: readonly { key: SizeKey; text: string; title: string }[] = [
+  { key: "all", text: "All", title: "Coins of every market cap" },
+  { key: "small", text: "Small", title: "Market cap under $100K" },
+  { key: "mid", text: "Mid", title: "Market cap $100K to $5M" },
+  { key: "large", text: "Large", title: "Market cap over $5M" },
+];
+export const parseSize = (raw: unknown): SizeKey => (raw === "small" || raw === "mid" || raw === "large" ? raw : "all");
+export function sizeOf(mcapUsd: number | null | undefined): Exclude<SizeKey, "all"> | null {
+  if (!finite(mcapUsd) || mcapUsd < 0) return null;
+  return mcapUsd < SMALL_MAX_USD ? "small" : mcapUsd <= LARGE_MIN_USD ? "mid" : "large";
+}
+/// A row of the view is under the pill it was read into (`size`); anything else is sized by its market cap.
+export const inSize = (r: { mcapUsd?: number | null; size?: Exclude<SizeKey, "all"> | null }, size: SizeKey): boolean =>
+  size === "all" || (r.size !== undefined ? r.size : sizeOf(r.mcapUsd)) === size;
+
+/// The copies folded under a row (same ticker and image; the row shown has the most liquidity). A broken entry is dropped.
+export const copiesOf = (r: { copies?: unknown } | null | undefined): StoryCopy[] =>
+  (r && Array.isArray(r.copies) ? (r.copies as StoryCopy[]).filter((c) => c && typeof c.mint === "string") : []);
+/// A card's two numbers from the rows it shows: buyers in 5 min and coins, each counting a row and its copies. A row
+/// the server stopped listing (kept dimmed while the page is in use) is not counted.
+export function cardTotals(coins: readonly (Pick<StoryShown, "buyers5m" | "left"> & { copies?: unknown })[]): { buyers5m: number; coinsN: number } {
+  let buyers5m = 0, coinsN = 0;
+  for (const c of coins) {
+    if (!c || c.left) continue;
+    buyers5m += whole(c.buyers5m); coinsN += 1;
+    for (const k of copiesOf(c)) { buyers5m += whole(k.buyers5m); coinsN += 1; }
+  }
+  return { buyers5m, coinsN };
+}
+/// The view under a size pill: each list keeps the rows of that size (a folded copy has no market cap of its own and
+/// goes with the row it is under), a card left without a coin is gone, and a card's two numbers count what it still
+/// shows. The order is the one received: a card does not move when the pill changes its numbers. A row's size is the
+/// one of its read (see StoryShown `size`), so a live trade never adds or removes a row or a card.
+/// `dustN`: "N hidden as bot dust". Under "All" the server's count of every dust coin; under a size only the dust
+/// rows received can be told apart, so it counts those.
+export type StoriesShown = { cards: StoryCardShown[]; loose: StoryShown[]; dust: StoryShown[]; dustN: number; total: number };
+/// `theme` (a theme pill, "all" for none) combines with the size: only the cards whose narrative has that theme, and
+/// the loose and dust rows tagged with it. A card is of its own narrative's theme, whatever its coins carry.
+export function filterStories(v: StoriesView, size: SizeKey, theme: string = ALL_THEMES): StoriesShown {
+  const any = theme === ALL_THEMES, unfiltered = size === "all" && any, cards: StoryCardShown[] = [];
+  const rowOk = (r: StoryShown) => inSize(r, size) && (any || themeOf(r.narrative) === theme);
+  for (const c of v.cards) {
+    if (!any && themeOf(c.narrative) !== theme) continue;
+    const coins = size === "all" ? c.coins : c.coins.filter((r) => inSize(r, size));
+    if (!coins.length) continue;
+    // a card kept after the server dropped it shows its last numbers
+    cards.push(c.left ? { ...c, coins } : { ...c, coins, ...cardTotals(coins) });
+  }
+  const loose = unfiltered ? v.loose : v.loose.filter(rowOk);
+  const dust = unfiltered ? v.dust : v.dust.filter(rowOk);
+  return { cards, loose, dust, dustN: unfiltered ? Math.max(whole(v.hiddenDust), dust.length) : dust.length, total: cards.length + loose.length };
+}
+
+// ---- narrative tags (a server with NARRATIVES=on): stories named by a language model from each coin's public text.
+// Context only: a title says what the coins are about, never what they will do.
+
+/// The theme pills' "no filter" key and where the choice is kept.
+export const ALL_THEMES = "all";
+export const THEME_KEY = "spore:dsc-theme";
+/// Model-written text made plain: control, zero-width and direction-override characters dropped, blank runs cut to one space.
+function plainText(raw: string): string {
+  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g, " ").replace(/\s+/g, " ").trim();
+}
+/// A theme as a key: trimmed, lower case; null for anything that is not a short piece of text (or is the "all" key).
+const themeKey = (raw: unknown): string | null => {
+  if (typeof raw !== "string") return null;
+  const t = plainText(raw).toLowerCase();
+  return t && t.length <= 40 && t !== ALL_THEMES ? t : null;
+};
+export const themeOf = (n: { theme?: unknown } | null | undefined): string | null => (n && typeof n === "object" ? themeKey(n.theme) : null);
+/// The stored pill: a theme key, else "all". Whether that theme is on the page now is `activeTheme`'s question.
+export const parseTheme = (raw: unknown): string => themeKey(raw) ?? ALL_THEMES;
+/// A theme as words: "ai" reads "AI", anything else takes a capital first letter ("Market crash", "Tech & products").
+const THEME_WORDS: Record<string, string> = { ai: "AI" };
+export function themeLabel(theme: unknown): string {
+  const t = themeKey(theme);
+  return t ? THEME_WORDS[t] ?? t[0].toUpperCase() + t.slice(1) : "";
+}
+/// A story's title as shown: made plain, cut to TITLE_MAX characters, and title-cased ("trump tariff panic" reads
+/// "Trump Tariff Panic"). A word that already has a capital is left as written ("AI", "iPhone"), and the short joining
+/// words stay small after the first. "Untitled story" when nothing is left. The page renders it as a text node.
+export const TITLE_MAX = 60;
+const SMALL_WORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "vs", "with"]);
+export function narrativeTitle(raw: unknown): string {
+  const t = typeof raw === "string" ? plainText(raw) : "";
+  if (!t) return "Untitled story";
+  const cut = t.length > TITLE_MAX ? `${t.slice(0, TITLE_MAX - 1).trimEnd()}…` : t;
+  return cut.split(" ").map((w, i) => (w !== w.toLowerCase() || (i > 0 && SMALL_WORDS.has(w)) ? w : w.replace(/\p{Ll}/u, (ch) => ch.toUpperCase()))).join(" ");
+}
+/// A usable narrative of a row or card: a number id and a title; null otherwise.
+export function narrativeOf(x: { narrative?: unknown } | null | undefined): NarrativeRef | null {
+  const n = x && typeof x === "object" ? (x.narrative as Partial<NarrativeRef> | null | undefined) : null;
+  return n && typeof n === "object" && finite(n.id) && typeof n.title === "string" ? { id: n.id, title: n.title, theme: typeof n.theme === "string" ? n.theme : "" } : null;
+}
+/// Whether the page shows anything of the narratives: the server tags them and at least one narrative card is listed.
+/// Without that the page is the one without tagging: no theme pills, no theme on a card, no tag on a loose row, no note.
+export const narrativesOn = (v: Pick<StoriesView, "tagging" | "cards"> | null | undefined): boolean => !!v && v.tagging === true && v.cards.some((c) => c.kind === "narrative");
+/// The theme pills: "All themes", then every theme with a narrative card (the server's list, a broken or repeated
+/// entry dropped; counted from the cards on screen when the server sent no list) and every theme of `keep` (the pills
+/// this page has shown before and the reader's stored choice: a pill does not vanish, and the choice stays in force,
+/// when its last card drops out). The order is fixed, by name with "other" last, never by the counts: a pill does not
+/// change places between reads. The count is in the title only.
+export type ThemePill = { key: string; text: string; title: string };
+const byThemeName = (a: string, b: string): number => (a === "other" ? 1 : 0) - (b === "other" ? 1 : 0) || (a < b ? -1 : a > b ? 1 : 0);
+export function themePills(v: Pick<StoriesView, "themes" | "cards">, keep: Iterable<string> = []): ThemePill[] {
+  const n = new Map<string, number>();
+  for (const t of Array.isArray(v.themes) ? v.themes : []) { const k = themeOf(t); if (k && !n.has(k) && whole(t.cards) > 0) n.set(k, whole(t.cards)); }
+  if (!n.size) for (const c of v.cards) { const k = c.kind === "narrative" && !c.left ? themeOf(c.narrative) : null; if (k) n.set(k, (n.get(k) ?? 0) + 1); }
+  for (const raw of keep) { const k = themeKey(raw); if (k && !n.has(k)) n.set(k, 0); }
+  if (!n.size) return [];
+  const keys = [...n.keys()].sort(byThemeName);
+  return [{ key: ALL_THEMES, text: "All themes", title: "Stories of every theme" }, ...keys.map((k) => ({ key: k, text: themeLabel(k), title: `Only stories tagged ${themeLabel(k)}: ${n.get(k) ? `${count(n.get(k) ?? 0)} now` : "none right now"}` }))];
+}
+/// The theme in force: the stored one while it has a pill, else "all" (an unknown theme filters nothing).
+export const activeTheme = (stored: string, pills: readonly ThemePill[]): string => (stored !== ALL_THEMES && pills.some((p) => p.key === stored) ? stored : ALL_THEMES);
+/// A narrative card's coins in two runs, each in the order received: created in the last hour (`isNew`), and older.
+export function splitNew<R extends { isNew?: boolean }>(coins: readonly R[]): { fresh: R[]; older: R[] } {
+  const fresh: R[] = [], older: R[] = [];
+  for (const c of coins) (c && c.isNew === true ? fresh : older).push(c);
+  return { fresh, older };
+}
+export const NEW_LABEL = "New this hour";
+export const OLDER_LABEL = "Older coins in this story";
+/// A narrative card's head: the title, its theme as words ("" when unknown), the second number (`newCoins`: coins of
+/// the story created in the last 60 min, as the server counted them over every tagged coin) and, when the card has a
+/// post, one quiet line "@handle · 6 min ago" with the post's address rebuilt from its id (null for a bad id).
+export type NarrativeHead = { title: string; theme: string; newCoins: number; post: { text: string; href: string | null } | null };
+export function narrativeHead(c: Pick<StoryCard, "narrative" | "post">, nowS: number): NarrativeHead {
+  const n = c.narrative;
+  let post: NarrativeHead["post"] = null;
+  if (c.post && typeof c.post === "object") {
+    const h = postHandle({ state: "ok" as const, handle: c.post.handle });
+    post = { text: [h ? `@${h}` : "Linked post", relTime(c.post.at, nowS)].filter(Boolean).join(" · "), href: safePostUrl(c.post.id) };
+  }
+  return { title: narrativeTitle(n?.title), theme: themeLabel(n?.theme), newCoins: whole(n?.newCoins1h), post };
+}
+export const NEW_COINS_TITLE = "Coins tagged with this story that were created in the last 60 minutes";
+/// Added to the page's note while narratives are shown.
+export const MODEL_NOTE = "Stories are grouped by a language model reading each coin's public text. It can be wrong.";
+export const TAG_NOTE = "The story a language model read in this coin's public text. It can be wrong.";
+/// The empty line under a filter names the filters that are on.
+export function emptyFiltered(size: SizeKey, theme: string = ALL_THEMES): string {
+  return theme !== ALL_THEMES ? `No ${themeLabel(theme)} story${size !== "all" ? " of this size" : ""} is being bought right now.` : "No coin of this size is being bought right now.";
+}
+
+/// How long ago, for a post that can be minutes or years old: "just now", "6 min ago", "5 h ago", "3 d ago", then the
+/// date ("Nov 12", "May 2024"). "" when the time is not known (a post id from before X's timed ids).
+export function relTime(at: number | null | undefined, nowS: number): string {
+  if (!finite(at)) return "";
+  const m = Math.floor(Math.max(0, nowS - at) / 60);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  return d < 30 ? `${d} d ago` : postDate(at, nowS);
+}
+/// The two letters in a post card's circle, from the handle: the first letters of its first two words ("elon_musk",
+/// "ElonMusk": "EM"), else its first two characters ("poster": "PO"); "?" without a handle. Upper case.
+export function initials(handle: string | null | undefined): string {
+  const h = typeof handle === "string" ? handle.replace(/^@/, "").trim() : "";
+  const words = h.split(/[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
+  if (!words.length) return "?";
+  return (words.length > 1 ? words[0][0] + words[1][0] : words[0].slice(0, 2)).toUpperCase();
+}
+const famLabel = (f: { symbol?: string | null; mint: string }): string => (f.symbol ? `$${f.symbol}` : short(f.mint));
+/// A card's head. Post card: who "@handle", when "6 min ago", `tail` "$SYM family waking" when a waking family chose
+/// the same post, `text` the post's words on one line ("" for a media-only post) and `href` the post on x.com (rebuilt
+/// from the id). Family card: who "$SYM family", when "waking up · 12 min" (since its start). `line` is the whole first
+/// line. Only who posted, when, and what is waking: a post is what the coins link, never the reason.
+export type StoryHead = { kind: "post" | "family"; who: string; when: string; tail: string | null; line: string; text: string; href: string | null; initials: string | null };
+export function storyHead(c: Pick<StoryCard, "kind" | "post" | "family">, nowS: number): StoryHead {
+  const f = c.family && typeof c.family.mint === "string" ? c.family : null;
+  if (c.post) {
+    const p = { state: "ok" as const, handle: c.post.handle, text: c.post.text };
+    const h = postHandle(p);
+    const who = h ? `@${h}` : "Linked post", when = relTime(c.post.at, nowS), tail = f ? `${famLabel(f)} family waking` : null;
+    return { kind: "post", who, when, tail, line: [who, when, tail].filter(Boolean).join(" · "), text: postText(p), href: safePostUrl(c.post.id), initials: initials(h) };
+  }
+  const who = f ? `${famLabel(f)} family` : "Family";
+  const when = f && finite(f.startedAt) ? `waking up · ${durText(nowS - f.startedAt)}` : "waking up";
+  return { kind: "family", who, when, tail: null, line: `${who} · ${when}`, text: "", href: null, initials: null };
+}
+/// How many chips a card shows before "+N more".
+export const CHIPS_MAX = 3;
+/// "×3 copies" on a row with two others folded under it: three coins that look the same, none named as the first.
+export const copiesMark = (r: { copies?: unknown } | null | undefined): string | null => { const n = copiesOf(r).length; return n > 0 ? `×${count(n + 1)} copies` : null; };
+export const COPIES_TITLE = "Coins with the same ticker and image, folded into one row. The row shown is the one with the most liquidity; nothing here says which came first.";
+/// A coin chip: "$SYM 96 buyers · $41K +38%" (buyers over 5 min, as the card's number; the market cap and its change
+/// over the chosen timeframe), then "×3 copies" on a folded one.
+export type StoryChip = { sym: string; buyers: string; mcap: string; chg: { text: string; tone: Tone } | null; copies: string | null; text: string };
+export function storyChip(r: Pick<StoryShown, "mint" | "symbol" | "buyers5m" | "mcapUsd" | "tf"> & { copies?: unknown }): StoryChip {
+  const s = r.symbol ? `$${r.symbol}` : short(r.mint), buyers = plural(whole(r.buyers5m), "buyer"), mcap = finite(r.mcapUsd) ? usd(r.mcapUsd) : "";
+  const chg = mcap && finite(r.tf?.chg) ? chgText(r.tf?.chg) : null, copies = copiesMark(r);
+  return { sym: s, buyers, mcap, chg, copies, text: `${s} ${buyers}${mcap ? ` · ${mcap}${chg ? ` ${chg.text}` : ""}` : ""}${copies ? ` · ${copies}` : ""}` };
+}
+export const moreChips = (n: number): string | null => (whole(n) > 0 ? `+${count(whole(n))} more` : null);
+/// A folded copy as one line under its row: when it launched (or was first seen trading), its liquidity, its buyers.
+export function copyFacts(c: StoryCopy, nowS: number): string {
+  const seen = finite(c.createdAt) && c.createdAt > 0 ? `launched ${relTime(c.createdAt, nowS)}` : finite(c.firstSeenAt) && c.firstSeenAt > 0 ? `first seen ${relTime(c.firstSeenAt, nowS)}` : "";
+  return [seen, finite(c.liqUsd) ? `${usd(c.liqUsd)} liquidity` : "", `${plural(whole(c.buyers5m), "buyer")} in 5 min`].filter(Boolean).join(" · ");
+}
+/// The words around the lists.
+export const STORIES_SUB = "What is being bought now, grouped by the post or family behind it";
+/// `more`: the coins of no card the server did not send: "No story found · 30 of 125 coins". `nar` (narratives are
+/// shown): a row here can carry a story's title (a story with one coin on the page gets no card), so the heading says
+/// what the list is, "Not in a story card · 12 coins".
+export const looseTitle = (n: number, more = 0, nar = false): string => {
+  const lead = nar ? "Not in a story card" : "No story found";
+  return whole(more) > 0 ? `${lead} · ${count(whole(n))} of ${plural(whole(n) + whole(more), "coin")}` : `${lead} · ${plural(whole(n), "coin")}`;
+};
+/// Under a size pill the coins not sent cannot be told apart by size: one line says how many there are.
+export const looseMore = (more: number): string | null => (whole(more) > 0 ? `${plural(whole(more), "more coin")} of any size ${whole(more) === 1 ? "is" : "are"} not shown.` : null);
+export const LOOSE_TITLE = "Coins being bought that link no stored post and whose family is not waking up";
+export const LOOSE_TITLE_NAR = "Coins being bought that are on no story card: no story shared with another listed coin, no stored post, and a family that is not waking up";
+export const dustLine = (n: number): string => `${count(whole(n))} hidden as bot dust`;
+export const DUST_NOTE = "Left out of the lists above: a market cap over 100 times the liquidity, or under $5 bought per buyer.";
+export const DUST_CHIP: Record<DustReason, { text: string; title: string }> = {
+  paper: { text: "Paper cap", title: "Market cap over 100 times the liquidity" },
+  tiny: { text: "Tiny buys", title: "Under $5 of volume per buyer over the chosen timeframe" },
+};
+export const dustChip = (reason: unknown): { text: string; title: string } | null => (reason === "paper" || reason === "tiny" ? DUST_CHIP[reason] : null);
+
+/// The rows of a read, each under the size pill of its market cap in that read.
+const cleanRows = (rows: unknown, seen: Set<string>): StoryShown[] => {
+  const out: StoryShown[] = [];
+  for (const r of Array.isArray(rows) ? (rows as StoryShown[]) : []) if (r && typeof r.mint === "string" && !seen.has(r.mint)) { seen.add(r.mint); out.push({ ...r, size: sizeOf(r.mcapUsd) }); }
+  return out;
+};
+/// Held rows: the ones on screen keep their places and their size pill with the fresh numbers, a new one goes last,
+/// and one the server dropped stays, marked `left`.
+function holdRows(fresh: StoryShown[], shown: readonly StoryShown[]): StoryShown[] {
+  const by = new Map(fresh.map((r) => [r.mint, r] as const)), kept = new Set<string>(), out: StoryShown[] = [];
+  for (const r of shown) {
+    if (kept.has(r.mint)) continue;
+    kept.add(r.mint);
+    const f = by.get(r.mint);
+    if (!f) { out.push(r.left ? r : { ...r, left: true }); continue; }
+    // a held row also stays in its run of a narrative card (new this hour / older): turning an hour old must not move it
+    const keepSize = r.size !== undefined && r.size !== f.size, keepNew = r.isNew !== undefined && r.isNew !== f.isNew;
+    out.push(keepSize || keepNew ? { ...f, size: keepSize ? r.size : f.size, isNew: keepNew ? r.isNew : f.isNew } : f);
+  }
+  for (const [m, r] of by) if (!kept.has(m)) out.push(r);
+  return out;
+}
+/// A held `left` row says whether its coin is still listed somewhere in the read (`listed`): `moved` then, and plain
+/// `left` again when the coin later drops out altogether. Checked on every read.
+const markMoved = (rows: StoryShown[], listed: ReadonlySet<string>): StoryShown[] =>
+  rows.map((r) => (r.left && (r.moved === true) !== listed.has(r.mint) ? { ...r, moved: listed.has(r.mint) } : r));
+/// Held themes: the ones shown keep their order (fresh counts; the last count for one the read no longer has), a new one goes last.
+function holdThemes(fresh: StoryTheme[], shown: readonly StoryTheme[]): StoryTheme[] {
+  const by = new Map(fresh.map((t) => [themeOf(t), t] as const)), kept = new Set<string | null>(), out: StoryTheme[] = [];
+  for (const t of shown) { const k = themeOf(t); if (kept.has(k)) continue; kept.add(k); out.push(by.get(k) ?? t); }
+  for (const [k, t] of by) if (!kept.has(k)) out.push(t);
+  return out;
+}
+/// A card's identity over reads.
+export const cardKey = (c: Pick<StoryCard, "kind" | "key">): string => `${c.kind}:${c.key}`;
+/// The view after a read. Idle (`hold` false): the server's cards and lists as sent (a broken or repeated card or row
+/// is dropped; a coin shows once). In use (`hold`: a mouse over the lists, a tap in the last few seconds, keyboard
+/// focus): nothing on screen moves. Cards keep their order and their coins' order with fresh numbers, a new card or
+/// row goes last, and one the server dropped stays with its last numbers, marked `left`, until the page is idle
+/// (`moved` too when its coin is still listed elsewhere: it joined a story card, say). The themes are held the same way.
+export function storiesView(fresh: Partial<Stories> | null | undefined, shown: StoriesView | null, hold = false): StoriesView {
+  const seen = new Set<string>(), keys = new Set<string>(), cards: StoryCardShown[] = [];
+  for (const c of fresh && Array.isArray(fresh.cards) ? fresh.cards : []) {
+    if (!c || typeof c.key !== "string" || (c.kind !== "post" && c.kind !== "family" && c.kind !== "narrative") || keys.has(cardKey(c))) continue;
+    // a narrative card is nothing without its narrative
+    if (c.kind === "narrative" && !narrativeOf(c)) continue;
+    const coins = cleanRows(c.coins, seen);
+    if (!coins.length) continue;
+    keys.add(cardKey(c));
+    cards.push({ ...c, post: c.post ?? null, family: c.family ?? null, coins });
+  }
+  const loose = cleanRows(fresh?.loose, seen), dust = cleanRows(fresh?.dust, seen);
+  const themes = (fresh && Array.isArray(fresh.themes) ? fresh.themes : []).filter((t) => t && typeof t.theme === "string");
+  const next: StoriesView = { cards, loose, dust, hiddenDust: whole(fresh?.hidden?.dust), hiddenCards: whole(fresh?.hidden?.cards), hiddenLoose: whole(fresh?.hidden?.loose), tagging: fresh?.tagging?.on === true, themes };
+  if (!hold || !shown) return next;
+  const by = new Map(cards.map((c) => [cardKey(c), c] as const)), kept = new Set<string>(), held: StoryCardShown[] = [];
+  for (const c of shown.cards) {
+    const k = cardKey(c);
+    if (kept.has(k)) continue;
+    kept.add(k);
+    const f = by.get(k);
+    if (f) { held.push({ ...f, coins: markMoved(holdRows(f.coins, c.coins), seen) }); continue; }
+    // a card the read no longer has: regrouped when every coin of it is listed elsewhere now
+    const moved = c.coins.length > 0 && c.coins.every((r) => seen.has(r.mint));
+    held.push(c.left && (c.moved === true) === moved ? c : { ...c, left: true, moved });
+  }
+  for (const [k, c] of by) if (!kept.has(k)) held.push(c);
+  return { ...next, themes: holdThemes(themes, shown.themes), cards: held, loose: markMoved(holdRows(loose, shown.loose), seen), dust: markMoved(holdRows(dust, shown.dust), seen) };
+}
+/// Live trades over the whole view; the same object when none applied.
+export function liveStories(v: StoriesView, by: Map<string, LiveTrade[]>): StoriesView {
+  const cards = liveFamilies(v.cards, by), loose = liveRows(v.loose, by), dust = liveRows(v.dust, by);
+  return cards === v.cards && loose === v.loose && dust === v.dust ? v : { ...v, cards, loose, dust };
+}
+/// A read applied over live prices (see carryLive): a coin keeps its live price wherever the read put it.
+export function carryLiveStories(fresh: StoriesView, shown: StoriesView | null, readAt: number, windowMs = LIVE_CARRY_MS): StoriesView {
+  if (!shown) return fresh;
+  const all = [...shown.cards.flatMap((c) => c.coins), ...shown.loose, ...shown.dust];
+  if (!all.some((c) => c && finite(c.liveAt))) return fresh;
+  return { ...fresh, cards: fresh.cards.map((c) => ({ ...c, coins: carryLive(c.coins, all, readAt, windowMs) })), loose: carryLive(fresh.loose, all, readAt, windowMs), dust: carryLive(fresh.dust, all, readAt, windowMs) };
+}
+/// The mints whose trades the page follows: every coin of the cards (their chips show a market cap) and the loose
+/// list, and the dust rows only while they are shown.
+export function storyMints(v: StoriesView | null, withDust = false): Set<string> {
+  const s = new Set<string>();
+  if (!v) return s;
+  for (const c of v.cards) for (const r of c.coins) s.add(r.mint);
+  for (const r of v.loose) s.add(r.mint);
+  if (withDust) for (const r of v.dust) s.add(r.mint);
+  return s;
+}
 
 // ---- alerts
 

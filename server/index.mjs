@@ -23,6 +23,7 @@ import { ChartHistory } from "./lib/chart-history.mjs";
 import { Narrative, flagText } from "./lib/narrative.mjs";
 import { XPosts } from "./lib/xposts.mjs";
 import { Holders } from "./lib/holders.mjs";
+import { NarrTags } from "./lib/narrtags.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -120,10 +121,14 @@ const narrative = cfg.narrative.enabled
 // most 30 calls a minute, on the RPC's own "holders" lane (RPC_URL only, never the metered user endpoint), cached 5 min.
 // Off unless HOLDERS=1 (lib/config.mjs): without it the rows carry the sniper share only.
 const holders = cfg.holders ? new Holders({ model, rpc: rpc.lane("holders"), log }) : null;
+// Narrative tags (lib/narrtags.mjs): only with NARRATIVES=on. A language model files coins with enough buyers under
+// short story titles for the Discover story cards; its own key file, a hard daily spend cap kept in sqlite. Without
+// the switch nothing is constructed: no client, no timer, and /api/stories answers as before.
+const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, posts: narrative?.posts ?? null, log }) : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative, holders,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative, holders, narrTags,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -162,6 +167,7 @@ pnl.start();
 tradeFill.start();
 chartHistory?.start();
 narrative?.start();
+narrTags?.start();
 // Wake-ups (GET /api/discover, SSE `wake`): the model feeds them per trade and seeded them at load; createApp gave them
 // the hub and the linked posts. The tick closes 5-minute buckets on time when a family's next trade is late.
 model.wakeups.attach({ hub, narrative }).start();
@@ -186,7 +192,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); model.wakeups.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); model.wakeups.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

@@ -47,6 +47,8 @@ import { MIN_USD, EXISTING_S, r1, r2, byMint } from "./rowshared.mjs";
 import { units } from "./pricing.mjs";
 import { SOL_MINT } from "./jupiter.mjs";
 import { imageProxyUrl } from "./meta.mjs";
+import { postOf } from "./narrative.mjs";
+import { groupStories } from "./stories.mjs";
 
 /** The timeframes a list can be asked over (s), in the order the snapshot keeps them. */
 export const TF_S = Object.freeze({ "1m": 60, "5m": 300, "30m": 1800, "1h": 3600 });
@@ -63,6 +65,8 @@ export { MIN_USD };
 export const DUST_USD = 1_000;
 /** Trending: rows at most, and candidates looked at most (most buyers first: a coin's first creator check may read sqlite). */
 export const TREND_MAX = 50, TREND_SCAN = 400;
+/** Stories (GET /api/stories): candidate rows grouped at most (the trending rules and rank, a wider cut: dust and copies fold away afterwards). */
+export const STORY_ROWS = 150;
 /** Trending over 1m lists only coins with this many distinct $1+ buyers in the last 60 s. */
 export const FLOOR_1M = 5;
 /** Trending over 30m and 1h: a coin enters with this many buyers in the last 5 minutes and stays while it has STAY_5M; "stays" means it was in the list built at most STAY_MS before. */
@@ -101,17 +105,19 @@ export function parseTf(v) {
 export class CoinRows {
   /** `model`: the index (read only; its `wakeups` for creator facts, sniper shares and family states); `holders`: lib/holders.mjs (optional). */
   constructor({ model, holders = null, now = Date.now, log = console } = {}) {
-    this.model = model; this.holders = holders; this.now = now; this.log = log;
+    this.model = model; this.holders = holders; this.now = now; this.log = log; this.narr = null;
     this.a = []; this.h = 0; // held trades from `h` on, in arrival order: { m, t, b, u, v, p }
     this.hit = null; this.job = null;          // the latest snapshot and the build under way
     this.trend = new Map(); this.trendJobs = new Map(); // tf → { at, snap, body }, tf → its build
-    this.listed = new Map();  // tf (30m, 1h) → { at, set }: the mints its last list showed (the stay rule)
+    this.story = new Map(); this.storyJobs = new Map(); // the same for the stories body
+    this.listed = new Map();  // tf (30m, 1h), and "story:" + tf → { at, set }: the mints that list last showed (the stay rule)
     this.firstSeen = new Map(); // undated coin mint → its first stored trade's time (null when none), oldest first
     // lastTrendMs / trendMaxSliceMs: a trending build's CPU and its longest share of one event-loop turn; lastTrendWaitMs:
     // what the last uncached request waited for, wall clock ({ snap, build, total }). Health had no figure for trending.
-    this.stats = { trades: 0, seedRows: 0, capped: 0, snaps: 0, lastSnapMs: null, maxSliceMs: 0, snapCoins: 0, trendBuilt: 0, lastTrendMs: null, trendMaxSliceMs: 0, lastTrendWaitMs: null, served: 0, dbReads: 0, firstReads: 0 };
+    this.stats = { trades: 0, seedRows: 0, capped: 0, snaps: 0, lastSnapMs: null, maxSliceMs: 0, snapCoins: 0, trendBuilt: 0, lastTrendMs: null, trendMaxSliceMs: 0, lastTrendWaitMs: null, storiesBuilt: 0, lastStoriesMs: null, storiesMaxSliceMs: 0, served: 0, dbReads: 0, firstReads: 0 };
   }
-  attach({ holders } = {}) { if (holders !== undefined) this.holders = holders; return this; }
+  /** `narr`: the narrative tagger (lib/narrtags.mjs) or null: the stories body then has narrative cards and the snapshot offers it the coins with buyers. */
+  attach({ holders, narr } = {}) { if (holders !== undefined) this.holders = holders; if (narr !== undefined) this.narr = narr; return this; }
   snapshot() { return { held: this.a.length - this.h, ...this.stats, holders: this.holders?.snapshot?.() ?? null }; }
 
   // ---------------------------------------------------------------- the feed
@@ -199,10 +205,14 @@ export class CoinRows {
       const j = Math.min(SPARK_N - 1, Math.floor((t - from) / SPARK_STEP));
       if (t >= A.st[j]) { A.st[j] = t; A.sp[j] = p; }
     }
+    // The narrative tagger hears of every tracked coin with enough distinct buyers in the held hour (a check in memory
+    // per coin, O(1) each: lib/narrtags.mjs offer). No stored trade is read for it.
+    const nt = this.narr?.on ? this.narr : null, need = nt?.minBuyers ?? Infinity, coins = this.model.coins;
     let n = 0;
-    for (const A of per.values()) {
+    for (const [m, A] of per) {
       if ((++n & 1023) === 0) yield;
       for (const T of A.tf) T.w = null;
+      if (A.tf[NF - 1].buyers >= need && coins.get(m)?.tracked) nt.offer(m, A.tf[NF - 1].buyers);
     }
     this.stats.snapCoins = per.size;
     return { at, nowS, cuts, from, per, memo: new Map() };
@@ -320,10 +330,10 @@ export class CoinRows {
     return v;
   }
 
-  /** `{ devPct, top10Pct, sniperPct, state }`: holder facts from lib/holders.mjs (state theirs; "unknown" without one), the sniper share from the recorded launch (lib/wakeups.mjs). */
-  safetyOf(c) {
+  /** `{ devPct, top10Pct, sniperPct, state }`: holder facts from lib/holders.mjs (state theirs; "unknown" without one), the sniper share from the recorded launch (lib/wakeups.mjs). `holders` false asks for no holder facts (no chain read is queued): the sniper share only. */
+  safetyOf(c, { holders = true } = {}) {
     let h = null;
-    try { h = this.holders?.get(c) ?? null; } catch (e) { this.log.warn?.(`coinrows: holders ${c.mint}: ${e?.message ?? e}`); }
+    try { h = holders ? this.holders?.get(c) ?? null : null; } catch (e) { this.log.warn?.(`coinrows: holders ${c.mint}: ${e?.message ?? e}`); }
     let sniperPct = null;
     try { sniperPct = this.model.wakeups?.sniperOf?.(c) ?? null; } catch (e) { this.log.warn?.(`coinrows: sniper ${c.mint}: ${e?.message ?? e}`); }
     return { devPct: h?.devPct ?? null, top10Pct: h?.top10Pct ?? null, sniperPct, state: h?.state ?? "unknown" };
@@ -364,9 +374,21 @@ export class CoinRows {
    * shared scheduler keeps stepping one job until its 8 ms are spent, so the extra yields cost nothing.
    */
   *#trendGen(snap, tf) {
+    const p = yield* this.#pickGen(snap, tf, { max: TREND_MAX, listKey: tf, safety: true });
+    // `floor`: the buyers a coin needs over this timeframe to be listed (0: none); `floor5m`: the buyers in the last 5
+    // minutes it needs to enter (0: none); `candidates`: the tracked coins that met them, before creator facts, dust and the cap.
+    return { at: p.at, snap, body: { asOf: snap.nowS, tf, floor: p.floor, floor5m: p.floor5m, candidates: p.candidates, rows: p.rows } };
+  }
+
+  /**
+   * The rows of a list over `tf` by the trending rules, at most `max`, in rank order: `{ at, floor, floor5m,
+   * candidates, rows }`. `listKey`: where this list keeps the mints it showed for the stay rule (each list its own, so
+   * one never keeps a coin in the other); `safety` false leaves every row's `safety` null for the caller to fill.
+   */
+  *#pickGen(snap, tf, { max, listKey, safety }) {
     const model = this.model, wk = model.wakeups, k = TF_KEYS.indexOf(tf), at = this.now();
     const floor = tf === "1m" ? FLOOR_1M : 0, gate = TF_S[tf] > TF_S[TF_DEFAULT];
-    const last = gate ? this.listed.get(tf) : null, stay = last && at - last.at <= STAY_MS ? last.set : null;
+    const last = gate ? this.listed.get(listKey) : null, stay = last && at - last.at <= STAY_MS ? last.set : null;
     const cands = [];
     let n = 0;
     for (const [m, A] of snap.per) {
@@ -382,24 +404,107 @@ export class CoinRows {
     const rows = [], px = new Map();
     let seen = 0;
     for (const x of cands) {
-      if (rows.length >= TREND_MAX || seen >= TREND_SCAN) break;
+      if (rows.length >= max || seen >= TREND_SCAN) break;
       seen++;
       yield;
       const c = model.coins.get(x.m);
       if (!c || !c.tracked || wk?.deadWhy(c, at)) continue;
       const row = this.row(c, snap, tf, { sinceStart: wk?.sinceStartOf?.(c) ?? null, px, safety: false });
       if (isDust(row)) continue;
-      row.safety = this.safetyOf(c);
+      if (safety) row.safety = this.safetyOf(c);
       const q = c.quoteMint;
       row.parent = q && q !== SOL_MINT ? this.#parentRef(q) : null;
       row.family = q && q !== SOL_MINT ? wk?.familyState?.(q) ?? null : null;
       rows.push(row);
     }
-    if (gate) this.listed.set(tf, { at, set: new Set(rows.map((r) => r.mint)) });
-    // `floor`: the buyers a coin needs over this timeframe to be listed (0: none); `floor5m`: the buyers in the last 5
-    // minutes it needs to enter (0: none); `candidates`: the tracked coins that met them, before creator facts, dust and the cap.
-    return { at, snap, body: { asOf: snap.nowS, tf, floor, floor5m: gate ? ENTER_5M : 0, candidates: cands.length, rows } };
+    if (gate) this.listed.set(listKey, { at, set: new Set(rows.map((r) => r.mint)) });
+    return { at, floor, floor5m: gate ? ENTER_5M : 0, candidates: cands.length, rows };
   }
   // Not the cards' parent ref (lib/wakeups.mjs: name and isCoin too): a trending row only draws the parent's ticker and logo.
   #parentRef(mint) { return { mint, symbol: this.model.nameOf(mint).symbol, image: imageProxyUrl(this.model.imageOfMint(mint)) }; }
+
+  // ---------------------------------------------------------------- stories
+  /**
+   * The body of GET /api/stories?tf= (README §API): the trending rows (same rules and rank, up to STORY_ROWS) grouped
+   * by lib/stories.mjs into cards (an X post coins link, a family waking up), the loose rows of no card, and the bot
+   * dust apart. Built once per snapshot and served while that snapshot is current, like trending. The waking families
+   * come from the wake-up list's own build over the same timeframe (lib/wakeups.mjs storyWakes).
+   */
+  async stories(tf) {
+    this.stats.served++;
+    const hit = this.story.get(tf);
+    if (hit && hit.snap === this.current()) return hit.body;
+    let job = this.storyJobs.get(tf);
+    if (!job) {
+      const wk = this.model.wakeups;
+      const wakes = wk?.storyWakes ? wk.storyWakes(tf).catch((e) => { this.log.warn?.(`coinrows: story wake-ups: ${e?.message ?? e}`); return new Map(); }) : new Map();
+      job = Promise.all([this.snap(), wakes]).then(([snap, w]) => runSliced(this.#storyGen(snap, tf, w))).then((run) => {
+        this.stats.storiesBuilt++; this.stats.lastStoriesMs = r2(run.cpuMs);
+        if (run.maxSliceMs > this.stats.storiesMaxSliceMs) this.stats.storiesMaxSliceMs = r2(run.maxSliceMs);
+        this.story.set(tf, run.value);
+        return run.value.body;
+      }).finally(() => this.storyJobs.delete(tf));
+      this.storyJobs.set(tf, job);
+    }
+    return job;
+  }
+
+  /**
+   * `{ handle, text }` of post `id` when both are stored and may be shown, else null (not fetched yet, gone, refused,
+   * flagged). Asking queues the text's fetch at low priority (lib/xposts.mjs: such asks stop at half its line and half
+   * its day), so a post nobody opened a coin page for still gets its card a little later.
+   */
+  #storyPost(id) {
+    const n = this.model.wakeups?.narrative;
+    if (!n?.postState) return null;
+    try {
+      const s = n.postState(id, { low: true });
+      if (s.state !== "ok" || !s.handle || n.posts?.peek?.(id)?.flagged) return null;
+      return { handle: s.handle, text: s.text ?? "" };
+    } catch (e) { this.log.warn?.(`coinrows: post ${id}: ${e?.message ?? e}`); return null; }
+  }
+
+  /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
+  *#storyGen(snap, tf, wakes) {
+    const model = this.model;
+    const p = yield* this.#pickGen(snap, tf, { max: STORY_ROWS, listKey: `story:${tf}`, safety: false });
+    const ids = new Map();
+    let n = 0;
+    for (const r of p.rows) {
+      if ((++n & 31) === 0) yield;
+      const c = model.coins.get(r.mint);
+      let id = null;
+      try { id = c ? postOf(model.metaFor(c)) : null; } catch { id = null; }
+      if (id) ids.set(r.mint, id);
+    }
+    yield;
+    // Narrative tags (lib/narrtags.mjs), when the server runs them: the page's coins go to the head of the tagger's
+    // line, and each row's stored tag is read (memory, else one indexed read the first time: a yield every 32).
+    const nt = this.narr?.on ? this.narr : null, tags = new Map();
+    if (nt) {
+      n = 0;
+      for (const r of p.rows) {
+        if ((++n & 31) === 0) yield;
+        try {
+          nt.offer(r.mint, snap.per.get(r.mint)?.tf[NF - 1].buyers ?? 0, { hot: true });
+          const t = nt.tagOf(r.mint);
+          if (t) tags.set(r.mint, t);
+        } catch (e) { this.log.warn?.(`coinrows: narrative tag ${r.mint}: ${e?.code ?? e?.name ?? "error"}`); }
+      }
+      yield;
+    }
+    const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id), wakes, nowMs: p.at,
+      tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined });
+    let tagging = { on: false, tagged: 0, pending: 0, capped: false };
+    try { if (nt) tagging = nt.pageStats(); } catch { /* reads as off */ }
+    yield;
+    // Only rows the body lists may queue holder reads, the cards' first; a dust row asks for none.
+    const fill = (r, holders) => { const c = model.coins.get(r.mint); r.safety = c ? this.safetyOf(c, { holders }) : { devPct: null, top10Pct: null, sniperPct: null, state: "unknown" }; };
+    for (const card of g.cards) { yield; for (const r of card.coins) fill(r, true); }
+    yield;
+    for (const r of g.loose) fill(r, true);
+    yield;
+    for (const r of g.dust) fill(r, false);
+    return { at: p.at, snap, body: { asOf: snap.nowS, tf, floor: p.floor, floor5m: p.floor5m, candidates: p.candidates, cards: g.cards, loose: g.loose, dust: g.dust, hidden: g.hidden, tagging, themes: g.themes } };
+  }
 }

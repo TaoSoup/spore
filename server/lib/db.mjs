@@ -131,6 +131,21 @@ CREATE TABLE IF NOT EXISTS x_posts (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS narratives (
+  id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
+  created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS narratives_key ON narratives(key);
+CREATE INDEX IF NOT EXISTS narratives_seen ON narratives(last_seen_at);
+CREATE TABLE IF NOT EXISTS coin_tags (
+  mint TEXT PRIMARY KEY, narrative_id INTEGER, tagged_at INTEGER NOT NULL, model TEXT,
+  asks INTEGER NOT NULL DEFAULT 1, had_post INTEGER NOT NULL DEFAULT 0, bare INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS coin_tags_narrative ON coin_tags(narrative_id);
+CREATE TABLE IF NOT EXISTS narrative_spend (
+  day TEXT PRIMARY KEY, in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0,
+  usd REAL NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -218,9 +233,17 @@ export class Db {
     // per-mint trim of `trades` deletes a busy coin's launch rows within a day. One row per tracked child, like `coins`.
     // `launch_flow.sniped` (the base units non-creator wallets bought in the launch slot or the first 3 s, the Discover
     // row's sniper share) came later: null in rows written before it, which then read as unknown.
+    // `narratives`, `coin_tags` and `narrative_spend` (the narrative tags, lib/narrtags.mjs) are new tables only too:
+    // a narrative's title and theme with `key` (its title folded for the near-duplicate check, unique) and the unix s it
+    // was made and last given to a coin; per coin the narrative a language model put it under (`narrative_id` NULL = it
+    // answered "none"), when, by which model, how many times the coin was asked about (`asks`) and whether its linked
+    // post's text was part of the last ask (`had_post`) and whether that ask carried neither a description nor a post
+    // (`bare`, added later: 0 in older rows); and per UTC day ('YYYY-MM-DD') the tokens, USD and requests
+    // spent, which is what the daily cap goes by across restarts.
     if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped")) this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
+    if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -324,6 +347,21 @@ export class Db {
       xpostPruneOld: p("DELETE FROM x_posts WHERE asked_at < ?"),
       xpostPruneOver: p("DELETE FROM x_posts WHERE id IN (SELECT id FROM x_posts ORDER BY asked_at ASC, id ASC LIMIT ?)"),
       xpostCount: p("SELECT COUNT(*) AS n FROM x_posts"),
+      // The narrative tags (lib/narrtags.mjs).
+      narrRecent: p("SELECT id, title, theme FROM narratives ORDER BY last_seen_at DESC, id DESC LIMIT ?"),
+      narrGet: p("SELECT id, title, theme FROM narratives WHERE id = ?"),
+      narrByKey: p("SELECT id, title, theme FROM narratives WHERE key = ?"),
+      narrAdd: p("INSERT INTO narratives (title, theme, key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)"),
+      narrTouch: p("UPDATE narratives SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at < ?1"),
+      narrCount: p("SELECT COUNT(*) AS n FROM narratives"),
+      tagGet: p("SELECT mint, narrative_id, tagged_at, model, asks, had_post, bare FROM coin_tags WHERE mint = ?"),
+      tagSet: p(`INSERT OR REPLACE INTO coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare)
+        VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare)`),
+      tagCounts: p("SELECT COUNT(narrative_id) AS tagged, COUNT(*) AS n FROM coin_tags"),
+      tagRecentCreated: p("SELECT c.mint AS mint, t.narrative_id AS id, c.created_at AS created_at FROM coins c JOIN coin_tags t ON t.mint = c.mint WHERE c.created_at > ? AND t.narrative_id IS NOT NULL"),
+      spendGet: p("SELECT in_tokens, out_tokens, usd, requests FROM narrative_spend WHERE day = ?"),
+      spendAdd: p(`INSERT INTO narrative_spend (day, in_tokens, out_tokens, usd, requests) VALUES (:day, :inTokens, :outTokens, :usd, :requests)
+        ON CONFLICT(day) DO UPDATE SET in_tokens = in_tokens + :inTokens, out_tokens = out_tokens + :outTokens, usd = MAX(0, usd + :usd), requests = requests + :requests`),
       // Deep rows (data longer than ?1 bytes: grown backward by older pages) asked before ?3, or past the ?2 most recently asked.
       // octet_length reads a value's size from the record header; length() of TEXT loads (and counts) the whole value, which
       // read every row's data on each hourly prune.
@@ -589,6 +627,22 @@ export class Db {
   /** Drops the rows not asked for since `beforeS`, then the least recently asked past `maxRows`; returns how many went. */
   xpostPrune(beforeS, maxRows) { return this.transaction(() => { let n = Number(this.q.xpostPruneOld.run(beforeS).changes); const over = this.q.xpostCount.get().n - maxRows; if (over > 0) n += Number(this.q.xpostPruneOver.run(over).changes); return n; }); }
   xpostCount() { return this.q.xpostCount.get().n; }
+
+  // ---- the narrative tags (lib/narrtags.mjs): the store its tagger reads and writes; times in unix s
+  narrRecent(limit = 150) { return this.q.narrRecent.all(limit).map((r) => ({ id: Number(r.id), title: r.title, theme: r.theme })); }
+  narrGet(id) { const r = this.q.narrGet.get(id); return r ? { id: Number(r.id), title: r.title, theme: r.theme } : null; }
+  narrByKey(key) { const r = this.q.narrByKey.get(key); return r ? { id: Number(r.id), title: r.title, theme: r.theme } : null; }
+  narrAdd({ title, theme, key, at }) { return Number(this.q.narrAdd.run(title, theme, key, at, at).lastInsertRowid); }
+  narrTouch(id, at) { this.q.narrTouch.run(at, id); }
+  narrCount() { return this.q.narrCount.get().n; }
+  tagGet(mint) { const r = this.q.tagGet.get(mint); return r ? { mint: r.mint, narrativeId: r.narrative_id == null ? null : Number(r.narrative_id), at: r.tagged_at, model: r.model, asks: r.asks, hadPost: !!r.had_post, bare: !!r.bare } : null; }
+  tagSet(t) { this.q.tagSet.run({ mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: t.hadPost ? 1 : 0, bare: t.bare ? 1 : 0 }); }
+  /** `{ tagged, none }`: coins under a narrative, and coins the model answered "none" for. */
+  tagCounts() { const r = this.q.tagCounts.get(); return { tagged: r.tagged, none: r.n - r.tagged }; }
+  /** The tagged coins created after `sinceS`, `[{ mint, id, createdAt }]` (the coins_created index: a boot read of the last hour). */
+  tagRecentCreated(sinceS) { return this.q.tagRecentCreated.all(sinceS).map((r) => ({ mint: r.mint, id: Number(r.id), createdAt: r.created_at })); }
+  spendGet(day) { const r = this.q.spendGet.get(day); return r ? { inTokens: r.in_tokens, outTokens: r.out_tokens, usd: r.usd, requests: r.requests } : { inTokens: 0, outTokens: 0, usd: 0, requests: 0 }; }
+  spendAdd(day, { inTokens = 0, outTokens = 0, usd = 0, requests = 0 } = {}) { this.q.spendAdd.run({ day, inTokens, outTokens, usd, requests }); }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
 
   // Partner API keys (lib/apikeys.mjs owns the logic; only the sha256 of a key is ever stored).

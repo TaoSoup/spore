@@ -10,3 +10,10 @@ export const r1 = (x) => Math.round(x * 10) / 10;
 export const r2 = (x) => Math.round(x * 100) / 100;
 /** Sort order of two mints (or any two strings): the last tie-break of every list, so equal rows never swap between builds. */
 export const byMint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The bot-dust floor of the story view (lib/stories.mjs, GET /api/stories). A coin is left out of the cards when its
+ * market cap is over PAPER_RATIO times its real liquidity (a cap nobody could sell into: "paper"), or when the
+ * timeframe's USD volume per distinct buyer is under TINY_USD (many wallets, a few cents each: "tiny").
+ */
+export const PAPER_RATIO = 100, TINY_USD = 5;

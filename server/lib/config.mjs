@@ -119,6 +119,28 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // getTokenLargestAccounts calls were rate limited for minutes (Nov 20) and compete with the indexer for the same
   // endpoint, so rows show the sniper share (from our own trades) only. HOLDERS=1 turns the reads on.
   const holders = bool("HOLDERS", false);
+  // Narrative tags (lib/narrtags.mjs): a language model files coins under short story titles for the Discover story
+  // cards. Off by default. It runs only with NARRATIVES=on, a readable NARRATIVE_KEY_FILE and a model whose price is
+  // known (its own table, or both NARRATIVE_*_USD_PER_M); otherwise the server behaves as without it. The key itself
+  // is read only by lib/narrtags.mjs when it makes its client; here the file is checked, and no message carries it.
+  const narrKeyFile = get("NARRATIVE_KEY_FILE", "") || null;
+  if (narrKeyFile) { try { accessSync(narrKeyFile, FS.R_OK); } catch (e) { errors.push(`NARRATIVE_KEY_FILE=${JSON.stringify(narrKeyFile)} is not a readable file (${e.code ?? "error"})`); } }
+  if (env.NARRATIVE_KEY !== undefined && env.NARRATIVE_KEY !== "") errors.push("NARRATIVE_KEY is not read from the environment: put the key in a file and set NARRATIVE_KEY_FILE to its path");
+  const narrTags = {
+    on: oneOf("NARRATIVES", "off", ["off", "on"]) === "on",
+    keyFile: narrKeyFile,
+    model: get("NARRATIVE_MODEL", "claude-haiku-5-5"),
+    dailyUsd: num("NARRATIVE_DAILY_USD", 1, { min: 0, max: 1_000 }),
+    minBuyers: num("NARRATIVE_MIN_BUYERS", 10, { min: 1, max: 100_000, integer: true }),
+    // The price of a model lib/narrtags.mjs has no price for (USD per million tokens; both or neither).
+    inUsdPerM: get("NARRATIVE_IN_USD_PER_M", "") ? num("NARRATIVE_IN_USD_PER_M", 0, { min: 0, max: 10_000 }) : null,
+    outUsdPerM: get("NARRATIVE_OUT_USD_PER_M", "") ? num("NARRATIVE_OUT_USD_PER_M", 0, { min: 0, max: 10_000 }) : null,
+  };
+  if ((narrTags.inUsdPerM == null) !== (narrTags.outUsdPerM == null)) errors.push("NARRATIVE_IN_USD_PER_M and NARRATIVE_OUT_USD_PER_M must be set together");
+  // The Anthropic SDK adds the headers of ANTHROPIC_CUSTOM_HEADERS to every request and no option turns that off, so
+  // the tagger does not run beside it. (ANTHROPIC_BASE_URL and ANTHROPIC_LOG need no check: lib/narrtags.mjs fixes the
+  // host and the logging in code.) The value is never echoed.
+  if (narrTags.on && env.ANTHROPIC_CUSTOM_HEADERS) errors.push("ANTHROPIC_CUSTOM_HEADERS is set in the environment: unset it to run with NARRATIVES=on (its headers would go out with every narrative request)");
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
@@ -217,5 +239,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
 }
