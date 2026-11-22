@@ -583,11 +583,11 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   w.rows.attach({ narr });
   w.clock.t = (T0 + 100) * 1000;
   let b = await w.rows.stories("5m");
-  // nothing is tagged yet: the body is the untagged one, and says the tagger is on with the page's four coins waiting (a page coin is offered whatever its buyers)
-  assert.deepEqual([b.tagging, b.themes, b.cards.length, b.loose.map((r) => r.symbol).sort()], [{ on: true, tagged: 0, pending: 4, capped: false }, [], 0, ["FEW", "NEEDLE", "OTHER", "SWAN"]]);
+  // nothing is tagged yet: the body is the untagged one, and says the tagger is on with the page's three coins waiting (FEW, on the page with 3 buyers, is under PAGE_MIN_BUYERS)
+  assert.deepEqual([b.tagging, b.themes, b.cards.length, b.loose.map((r) => r.symbol).sort()], [{ on: true, tagged: 0, pending: 3, capped: false }, [], 0, ["FEW", "NEEDLE", "OTHER", "SWAN"]]);
   assert.equal(await w.rows.stories("5m"), b, "served while the snapshot is current: a request does not rebuild");
   await narr.pump();
-  assert.deepEqual(calls.map((c) => [...c].sort()), [["FEW", "NEEDLE", "OTHER", "SWAN"]], "one request; the page coin under the floor is read too, the untracked one was never offered");
+  assert.deepEqual(calls.map((c) => [...c].sort()), [["NEEDLE", "OTHER", "SWAN"]], "one request; the page coin under PAGE_MIN_BUYERS and the untracked one were never offered");
   // the next refresh (a new snapshot) shows the tags
   w.clock.t += 5_000;
   b = await w.rows.stories("5m");
@@ -603,7 +603,7 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   const app = await serveApp(w, { narrTags: narr });
   try {
     const h = (await app.get("/api/health")).body.narrTags;
-    assert.deepEqual([h.on, h.tagged, h.none, h.narratives, h.pending, h.requestsToday, h.capped, h.lastError], [true, 2, 2, 1, 0, 1, false, null]);
+    assert.deepEqual([h.on, h.tagged, h.none, h.narratives, h.pending, h.requestsToday, h.capped, h.lastError], [true, 2, 1, 1, 0, 1, false, null]);
   } finally { await app.close(); }
   narr.stop(); w.close();
 });

@@ -73,6 +73,8 @@ export const BAD_RUN_PAUSE = 3;
 export const API_BASE_URL = "https://api.anthropic.com";
 /** Narratives listed in a request (the most recently used). */
 export const NARR_ACTIVE = 150;
+/** Buyers within the held hour a coin on the stories page needs before it is read (coins off the page need NARRATIVE_MIN_BUYERS). */
+export const PAGE_MIN_BUYERS = 5;
 /** How long the cached snapshot of the story list is kept before it is renewed (stories made since go uncached after it). */
 export const SNAP_MS = 15 * 60_000;
 /** Requests a minute at most, and the wait for one answer. */
@@ -864,7 +866,9 @@ export class NarrTags {
    */
   offer(mint, buyers, { hot = false } = {}) {
     if (!this.on || this.stopped || typeof mint !== "string") return;
-    if (!hot && !(buyers >= this.minBuyers)) return; // a coin shown on the stories page is read whatever its buyers: a quiet older coin of a story belongs on its card
+    // A coin off the page needs NARRATIVE_MIN_BUYERS; a coin on the stories page only PAGE_MIN_BUYERS, so a quieter older
+    // coin of a story is still read. Reading every page coin whatever its buyers cost about $9 a day on Sonnet 5.5 (Nov 22).
+    if (!(buyers >= (hot ? PAGE_MIN_BUYERS : this.minBuyers))) return;
     const r = this.cache.get(mint);
     if (r) {
       if (this.#settled(r)) return;

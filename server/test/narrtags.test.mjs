@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NarrTags, TagEngine, MemoryTagStore, THEMES, PRICES, DEFAULT_MODEL, BATCH, MAX_ATTEMPTS, GAVE_UP, GAVE_UP_S, BAD_RUN_PAUSE, HOT_MAX, HOT_STALE_MS, MAX_WAITING, API_BASE_URL, PER_MIN, PAUSE_MS, PAUSE_MAX_MS, PAUSE_CONFIG_MS, OUT_BASE, OUT_PER_COIN, CAPS, TITLE_MAX, NEW_S, RECHECK_MS, META_WAIT_MS, FILL_WAIT_MS,
-  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA, userText } from "../lib/narrtags.mjs";
+  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA, userText, PAGE_MIN_BUYERS } from "../lib/narrtags.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
 import { fakeClock, T0 } from "./helpers/chain.mjs";
@@ -696,13 +696,14 @@ test("page coins waiting are capped and stay current: past HOT_MAX the oldest jo
   t.stop(); db.close();
 });
 
-test("narrtags: a page coin is read whatever its buyers; an off-page coin still needs the floor", async () => {
+test("narrtags: a page coin needs only PAGE_MIN_BUYERS; an off-page coin still needs the floor", async () => {
   const model = fakeModel();
   model.add("quietpage", { name: "The Needle", symbol: "NEEDLE", description: "pop" }); model.add("quietoff", { name: "Other", symbol: "OTHER", description: "x" });
   const client = fakeClient((req) => reply(sentCoins(req).map((c) => none(c.n))));
   const { t } = tagger({ model, client });
-  t.offer("quietoff", 2); t.offer("quietpage", 2, { hot: true }); t.offer("quietpage", 0, { hot: true });
-  assert.equal(t.pending(), 1);
+  model.add("deadpage", { name: "Dead", symbol: "DEAD", description: "y" });
+  t.offer("quietoff", 5); t.offer("deadpage", PAGE_MIN_BUYERS - 1, { hot: true }); t.offer("quietpage", PAGE_MIN_BUYERS, { hot: true });
+  assert.equal(t.pending(), 1, "a page coin with PAGE_MIN_BUYERS waits; one with fewer, and an off-page coin under the floor, do not");
   await t.pump();
   assert.deepEqual(sentCoins(client.calls[0].req).map((c) => c.symbol), ["NEEDLE"]);
 });
