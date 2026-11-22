@@ -2,15 +2,15 @@
 // and how to buy within three seconds, and see the chart without scrolling: one compact coin bar
 // (identity, price and change with its basis, market cap, 24h volume, locked by children, the
 // copyable CA and the links), the chart sized to the window under it, and the trade widget beside it
-// on desktop (behind a sticky Buy / Sell bar on phones). With instant trades on (Trade settings) and
-// a wallet that can sign, the user's presets trade at once: a row of them above the widget on
-// desktop, a popover from the bar's Buy / Sell on phones (components/useInstantTrade.ts, as on the
-// Portfolio page and the map). Under the chart the Activity card (trades, children, family tree),
-// then the posts the coin or its children link (components/coin/CoinNarrative.tsx), creator fees, the agent and the
-// folded details; under the trade widget "Your position" (what the header's
-// wallet holds of the coin and its P&L, components/coin/YourPosition.tsx; under the chart on phones), then a calm info card
-// (what the coin is, its family, status, dominance) answers the second question: what this coin is
-// in its tree.
+// on desktop (behind a sticky Buy / Sell bar on phones). The trade is ONE card (components/coin/TradeCard.tsx): the
+// user's presets as large buttons that trade on one click, a custom amount, and a status line; on phones the bar's
+// Buy / Sell open the same presets in a popover (components/useInstantTrade.ts, as on the Portfolio page and the map).
+// A check that does not pass opens the full ticket as a dialog, prefilled. Under the chart the Activity card (trades,
+// children, family tree), then the posts the coin or its children link (components/coin/CoinNarrative.tsx), creator
+// fees, the agent and the folded details. The side column: the trade card, "Your position" when the wallet holds the
+// coin (components/coin/YourPosition.tsx; under the chart on phones), "Launch a child" (components/coin/LaunchChild.tsx,
+// which the bar's "Launch under" button scrolls to; after the info card on phones), then a calm info card (what the
+// coin is, its family, status, dominance) answers the second question: what this coin is in its tree.
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type RefObject, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link, useParams } from "react-router-dom";
@@ -23,19 +23,23 @@ import { age, amount, count, pctCurve, plural, price, short, sol, tokens, usd, u
 import type { Side } from "../lib/pump";
 import type { InstantSpec } from "../lib/instant-trade";
 import { presetChoices } from "../lib/instant-outcome";
+import { tradeIntentKey, type TradeSource } from "../lib/pending-intent";
+import { openTradingWallet, useInstantSol } from "../lib/trader";
 import { blockText, hardBlock, useTradeRoute, type TradeBlock } from "../lib/trade-route";
 import { motionPaused } from "../components/SporeCanvas";
 import ChainBreadcrumb from "../components/ChainBreadcrumb";
 import PriceChart from "../components/PriceChart";
-import TradeWidget, { type TradeWidgetProps } from "../components/TradeWidget";
+import TradeWidget from "../components/TradeWidget";
 import TradePresets from "../components/TradePresets";
 import { useInstantTrade } from "../components/useInstantTrade";
-import InstantRow from "../components/coin/InstantRow";
+import TradeCard, { type TradeCardView } from "../components/coin/TradeCard";
+import LaunchChild, { type LaunchChildHandle } from "../components/coin/LaunchChild";
+import { useUnlockContinuation } from "../components/useUnlockContinuation";
 import FeeSplitAction from "../components/FeeSplitAction";
 import ClaimFees from "../components/ClaimFees";
 import CoinAgentCard from "../components/agents/CoinAgentCard";
 import DominanceLine from "../components/DominanceLine";
-import LaunchButton from "../components/LaunchButton";
+import LaunchButton, { Sprout, launchBlock } from "../components/LaunchButton";
 import Search from "../components/Search";
 import Term from "../components/Term";
 import { Delta } from "../components/Stat";
@@ -100,12 +104,11 @@ export default function CoinPage() {
   const activityRef = useRef<HTMLDivElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (!narrow) setSheet(null); }, [narrow]);
 
   // Instant trades (components/useInstantTrade.ts, as on the Portfolio page and the map): one at a time, the wallet
-  // step first, the toasts. The page shows the Trade-with switch in its widget, so that choice signs ("chosen") and is
-  // never changed here. A check that does not pass hands the trade to the ticket with the amount filled in: the widget
-  // on the page (desktop, remounted with it) or the sheet (phones). A coin found not tradable here says why where the
+  // step first, the toasts. The Trade-with choice (Trade settings) signs ("chosen") and is never changed here. A check
+  // that does not pass hands the trade to the ticket with the amount filled in: a dialog over the page on desktop, the
+  // sheet on phones (TradeSheet, the same ticket). A coin found not tradable here says why where the
   // buttons are (a gap in the index is said once in a toast and the buttons stay, so the next press checks again).
   // One trade at a time with the widget too: it tells the page while it sends (`ticketBusy`: no preset meanwhile), and
   // it sends nothing while an instant trade runs (`hold`). Each widget reports for itself (`reportTicketBusy`, one owner
@@ -118,7 +121,6 @@ export default function CoinPage() {
   mintNow.current = mint;
   const narrowNow = useRef(narrow);
   narrowNow.current = narrow;
-  const [prefill, setPrefill] = useState<{ n: number; mint: string; side: Side; amount: string } | null>(null);
   const [instantBlock, setInstantBlock] = useState<{ mint: string; short: string; body: string } | null>(null);
   const busyOwners = useRef(new Set<object>());
   const [ticketBusy, setTicketBusy] = useState(false);
@@ -130,12 +132,11 @@ export default function CoinPage() {
   const onInstantTicket = useCallback((t: { coin: CoinT; side: Side; amount: string }) => {
     // the page moved to another coin while the trade was checked: the toast said why, no ticket of another coin opens
     if (t.coin.mint !== mintNow.current) return;
-    if (editedInHold.current && (!narrowNow.current || sheetOpenNow.current)) {
+    if (editedInHold.current && sheetOpenNow.current) {
       toast.info("The ticket keeps what you entered in it while this was checked.");
       return;
     }
-    if (narrowNow.current) setSheet({ side: t.side, amount: t.amount, n: ++sheetN.current });
-    else setPrefill((p) => ({ n: (p?.n ?? 0) + 1, mint: t.coin.mint, side: t.side, amount: t.amount }));
+    setSheet({ side: t.side, amount: t.amount, n: ++sheetN.current });
   }, [toast]);
   const onInstantBlock = useCallback((block: TradeBlock, c: CoinT) => {
     const t = blockText(block, c);
@@ -146,34 +147,49 @@ export default function CoinPage() {
   // the widget shows it; the tape follows the stream.
   const instant = useInstantTrade({ onTicket: onInstantTicket, onBlocked: onInstantBlock }, { signer: "chosen" });
   const { run: instantRun, opening: instantOpening, busy: instantBusy } = instant;
-  useEffect(() => { setInstantBlock(null); setPrefill(null); }, [mint]);
+  useEffect(() => { setInstantBlock(null); }, [mint]);
   const runInstant = useCallback((spec: InstantSpec) => {
     if (!coin) return;
     if (busyOwners.current.size) { toast.info("A trade from the ticket is still in flight. Nothing else was sent."); return; }
     if (!instantBusy()) editedInHold.current = false;
     void instantRun(coin.mint, spec, sym(coin));
   }, [coin, instantRun, instantBusy, toast]);
-  // a change made in a ticket (its side, amount, settings) while an instant trade runs; the instant row is not the ticket
+  // a change made in a ticket (its side, amount, settings) while an instant trade runs; the trade card is not the ticket
   const markTicketEdit = useCallback((e: SyntheticEvent) => {
     if (!instantBusy()) return;
     const t = e.target;
-    if (t instanceof Element && t.closest(".coin-instant")) return;
+    if (t instanceof Element && t.closest(".coin-trade-card")) return;
     editedInHold.current = true;
   }, [instantBusy]);
-  // The ticket an instant trade fell back to (desktop): the widget is on screen, filled in; its amount field gets the
-  // focus as soon as it is there (the widget shows it once the route is known).
-  useEffect(() => {
-    if (!prefill) return;
-    sideRef.current?.scrollIntoView({ behavior: smooth(), block: "nearest" });
-    let frames = 0, raf = 0;
-    const focus = () => {
-      const el = amountRef.current;
-      if (el && !el.disabled) { el.focus({ preventScroll: true }); return; }
-      if (++frames < 180) raf = requestAnimationFrame(focus);
-    };
-    raf = requestAnimationFrame(focus);
-    return () => cancelAnimationFrame(raf);
-  }, [prefill]);
+  // A click on the trade card or a phone preset (components/coin/TradeCard.tsx). With a locked trading wallet it asks
+  // for the unlock and remembers the click: once unlocked, within 60 s, with the same coin, side, amount and terms,
+  // that one trade goes ahead through runInstant (every check, a fresh quote), never more than once
+  // (components/useUnlockContinuation.ts, lib/pending-intent.ts). Without any wallet it offers to set one up.
+  const [capSol] = useInstantSol();
+  const cardView = useRef<TradeCardView | null>(null);
+  type TradeClick = { spec: InstantSpec; source: TradeSource; side: Side; custom: string };
+  const keyOf = (c: TradeClick) => {
+    const v = narrowNow.current ? null : cardView.current;
+    const side = v?.side ?? c.side;
+    return tradeIntentKey({ side, source: c.source, presets: side === "buy" ? instant.settings.buyPresets : instant.settings.sellPresets, custom: v?.custom ?? c.custom, slippageBps: instant.settings.slippageBps, capSol });
+  };
+  const cont = useUnlockContinuation<TradeClick>("trade", mint, keyOf, (c) => runInstant(c.spec));
+  const tradeClick = (spec: InstantSpec, source: TradeSource, view: TradeCardView) => {
+    if (!coin) return;
+    const use = instant.signerUse();
+    if (use === "none") { openTradingWallet(); toast.info("Set up a trading wallet, or connect a wallet, to trade. Nothing was sent."); return; }
+    if (use === "unlock") {
+      if (busyOwners.current.size || instantBusy()) { toast.info("A trade is still in flight. Nothing else was sent."); return; }
+      const c: TradeClick = { spec, source, side: spec.side, custom: view.custom };
+      cont.remember(c, tradeIntentKey({ side: spec.side, source, presets: spec.side === "buy" ? instant.settings.buyPresets : instant.settings.sellPresets, custom: view.custom, slippageBps: instant.settings.slippageBps, capSol }));
+      instant.ready("Unlock your trading wallet: this trade goes ahead once it is unlocked (within a minute, if nothing changes).");
+      return;
+    }
+    runInstant(spec);
+  };
+  // the chart's empty-state Buy (desktop): the card's Buy side, its custom amount field focused
+  const [sideAsk, setSideAsk] = useState<{ side: Side; n: number } | null>(null);
+  const launchRef = useRef<LaunchChildHandle>(null);
   const [tab, setTab, presetTab] = useActivityTab("trades");
   // The default tab is decided once per coin, when its record is in; a shared #children link wins
   // and scrolls to the card.
@@ -190,9 +206,13 @@ export default function CoinPage() {
   useCoinLayout(pageRef, chartRef, !narrow && !!page.data);
   const onBuy = useCallback(() => {
     if (narrow) { openSheet("buy"); return; }
-    amountRef.current?.focus({ preventScroll: true });
-    amountRef.current?.scrollIntoView({ behavior: smooth(), block: "nearest" });
+    setSideAsk((a) => ({ side: "buy", n: (a?.n ?? 0) + 1 }));
+    requestAnimationFrame(() => {
+      amountRef.current?.focus({ preventScroll: true });
+      amountRef.current?.scrollIntoView({ behavior: smooth(), block: "nearest" });
+    });
   }, [narrow, openSheet]);
+  const onLaunch = useCallback(() => launchRef.current?.focus(), []);
 
   if (page.loading) return <div className="container coin-page"><CoinSkeleton priced /></div>;
   if (page.error && !page.data) {
@@ -209,13 +229,12 @@ export default function CoinPage() {
   const solo = agentCoin === null || agentCoin === undefined;
   const instantWhy = instantBlock && instantBlock.mint === coin.mint ? instantBlock : null;
   const blockedShort = tradeBlocked ? blockText(tradeBlocked, coin).short : instantWhy?.short ?? null;
-  // Instant trades: on with the setting and a wallet that can sign (without one, Buy / Sell open the ticket, which
-  // offers to connect). The desktop row waits for the route check (a blocked coin shows the widget's own notice).
+  // Instant trades: on with the setting. The phone bar opens its presets only with a wallet that can sign (without one,
+  // Buy / Sell open the ticket, which offers to connect); the desktop card says who signs and offers the setup.
   const instantOn = instant.settings.instant && instant.hasWallet;
   const presets = { buy: instant.settings.buyPresets, sell: instant.settings.sellPresets };
   const running = !!instantOpening || ticketBusy;
   const busySide = instantOpening && instantOpening.mint === coin.mint ? instantOpening.side : null;
-  const pf = prefill && prefill.mint === coin.mint ? prefill : null;
 
   return (
     <div ref={pageRef} className={`container coin-page ${narrow ? "has-bar" : ""}`}>
@@ -223,7 +242,7 @@ export default function CoinPage() {
       <TitleSync store={store} />
       <div className="coin-grid">
         <div className="coin-main">
-          <CoinBar coin={coin} store={store} daily={daily.data} maxDepth={maxDepth} />
+          <CoinBar coin={coin} store={store} daily={daily.data} maxDepth={maxDepth} onLaunch={onLaunch} />
           <div className="coin-chart" ref={chartRef}><PriceChart coin={coin} onBuy={tradeBlocked || instantWhy ? undefined : onBuy} live={store} aside={<LastTrade store={store} />} /></div>
           {/* phones: what the wallet holds of the coin, under the chart (the sticky bar has no room for it) */}
           {narrow && <YourPosition coin={coin} store={store} solUsd={solUsd} />}
@@ -232,6 +251,8 @@ export default function CoinPage() {
           </div>
           {/* phones: the info card follows the tabs (on desktop it sits under the trade card) */}
           {narrow && <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />}
+          {/* phones: the launch card after the info card (the bar's "Launch under" scrolls to it) */}
+          {narrow && <LaunchChild ref={launchRef} key={coin.mint} coin={coin} maxDepth={maxDepth} />}
           {/* the X posts this coin, or the coins under it, link (nothing for a coin without any); phones: after the info card */}
           <CoinNarrative key={coin.mint} coin={coin} />
           <div className={`coin-money ${solo ? "solo" : ""}`}>
@@ -244,26 +265,26 @@ export default function CoinPage() {
           <Reveal className="coin-details-wrap"><Details coin={coin} narrow={narrow} /></Reveal>
         </div>
         {!narrow && (
-          // Two landmarks side by side: the trade ("Buy or sell $X") and the info card ("About $X", its own section).
+          // Landmarks in a column: the trade ("Buy or sell $X"), the position, "Launch a child of $X", the info card.
           <div ref={sideRef} className="coin-side">
-            <aside className="coin-ticket" aria-label={`Buy or sell ${sym(coin)}`} onClickCapture={markTicketEdit} onChangeCapture={markTicketEdit}>
-              {instantOn && !tradeBlocked && (tradeRoute.data || tradeRoute.error) && (
-                <InstantRow label={sym(coin)} mint={coin.mint} presets={presets} running={running} busySide={busySide} blocked={instantWhy} onRun={runInstant} />
-              )}
-              {/* remounted with the amount when an instant trade handed the trade back to it */}
-              <PageTicket key={pf ? `ticket-${pf.n}` : "ticket"} coin={coin} solUsd={solUsd} amountRef={amountRef} current={store.coin} compact
-                initialSide={pf?.side} initialAmount={pf?.amount} report={reportTicketBusy} hold={!!instantOpening} />
+            <aside className="coin-ticket" aria-label={`Buy or sell ${sym(coin)}`}>
+              <TradeCard key={coin.mint} coin={coin} route={{ data: tradeRoute.data, error: tradeRoute.error }}
+                blocked={tradeBlocked ? { short: blockText(tradeBlocked, coin).short, body: blockText(tradeBlocked, coin).body } : instantWhy}
+                presets={presets} instantOn={instant.settings.instant} signer={instant.signerUse()} slippageBps={instant.settings.slippageBps}
+                running={running} busySide={busySide} onTrade={tradeClick} onTicket={(side, amount) => { editedInHold.current = false; setSheet({ side, amount, n: ++sheetN.current }); }}
+                viewRef={cardView} inputRef={amountRef} sideAsk={sideAsk} />
             </aside>
-            {/* under the trade card, never above it: the ticket's top does not move when the card appears */}
+            {/* under the trade card, never above it: the card's top does not move when the position appears */}
             <YourPosition coin={coin} store={store} solUsd={solUsd} />
+            <LaunchChild ref={launchRef} key={coin.mint} coin={coin} maxDepth={maxDepth} />
             <CoinInfo coin={coin} store={store} agentCoin={agentCoin} onChildren={openChildren} />
           </div>
         )}
       </div>
       {narrow && <PhoneBar store={store} daily={daily.data} onOpen={openSheet} blocked={blockedShort}
-        instant={{ on: instantOn, presets, ready: instant.ready, run: runInstant, running, busySide }} />}
-      {narrow && sheet && <TradeSheet key={sheet.n} coin={coin} store={store} side={sheet.side} amount={sheet.amount} solUsd={solUsd} onClose={() => setSheet(null)}
-        report={reportTicketBusy} onEdit={markTicketEdit} hold={!!instantOpening} />}
+        instant={{ on: instantOn, presets, run: (spec, index) => tradeClick(spec, { kind: "preset", index }, { side: spec.side, custom: "" }), running, busySide }} />}
+      {sheet && <TradeSheet key={sheet.n} coin={coin} store={store} side={sheet.side} amount={sheet.amount} solUsd={solUsd} onClose={() => setSheet(null)}
+        report={reportTicketBusy} onEdit={markTicketEdit} hold={!!instantOpening} centred={!narrow} />}
     </div>
   );
 }
@@ -299,7 +320,7 @@ function useCoinLayout(pageRef: RefObject<HTMLDivElement | null>, chartRef: RefO
 /// Launch. A narrow desktop column wraps it to a third line; phones stack it, the numbers as one sideways row. A coin
 /// priced in another token (a child's parent, a root's listed quote) gets one more tight row under the numbers: that
 /// token's price, change, 24 h line and market cap (ParentPrice), since the child's liquidity is that token.
-function CoinBar({ coin, store, daily, maxDepth }: { coin: CoinT; store: LiveCoin; daily: Candles | null; maxDepth: number | undefined }) {
+function CoinBar({ coin, store, daily, maxDepth, onLaunch }: { coin: CoinT; store: LiveCoin; daily: Candles | null; maxDepth: number | undefined; onLaunch: () => void }) {
   const toast = useToast();
   // The bar takes the coin's own colour: its logo's halo and the light behind the identity.
   const [tint, onLogo] = useTint(coin.image, coin.mint);
@@ -338,7 +359,10 @@ function CoinBar({ coin, store, daily, maxDepth }: { coin: CoinT; store: LiveCoi
         <BarNums store={store} daily={daily} />
         <div className="coin-actions">
           <ShareMenu coin={coin} current={store.coin} />
-          <LaunchButton coin={coin} maxDepth={maxDepth} variant="ghost" size="sm" label={`Launch under ${sym(coin)}`} />
+          {/* the launch card on this page ("Launch a child of $X"); a coin that cannot take a child keeps the disabled
+              button with its reason. The Launch page stays reachable from the card's "More options". */}
+          {launchBlock(coin, maxDepth) ? <LaunchButton coin={coin} maxDepth={maxDepth} variant="ghost" size="sm" label={`Launch under ${sym(coin)}`} />
+            : <button type="button" className="btn sm ghost launch-cta" title={`Launch a coin under ${sym(coin)}`} aria-controls="launch-child" onClick={onLaunch}><Sprout />Launch under {sym(coin)}</button>}
         </div>
       </div>
       {/* what the pool is paired with (a child's parent, a root's listed quote): its own tight row under the numbers */}
@@ -616,9 +640,10 @@ function TitleSync({ store }: { store: LiveCoin }) {
 /// The phone's sticky bar: price, change and market cap on the left, Buy and Sell on the right, and
 /// the curve's progress as a 2 px line along the top edge.
 /// `blocked`: why the coin cannot be traded here (lib/trade-route): the bar offers pump.fun instead of Buy and Sell.
-/// `instant`: with `on`, Buy / Sell open the user's presets under the button (TradePresets) after the wallet step
-/// (`ready`), a preset is the trade (`run`) and "Custom…" opens the sheet; off, they open the sheet as before. While a
-/// trade of the page runs (`running`) both buttons are off, the pressed side (`busySide`) with a spinner.
+/// `instant`: with `on`, Buy / Sell open the user's presets under the button (TradePresets, the same presets as the
+/// desktop trade card), a preset is the trade (`run`: the page's click, which asks for the unlock of a locked trading
+/// wallet and then goes ahead once) and "Custom…" opens the sheet; off, they open the sheet as before. While a trade of
+/// the page runs (`running`) both buttons are off, the pressed side (`busySide`) with a spinner.
 function PhoneBar({ store, daily, onOpen, blocked = null, instant }: { store: LiveCoin; daily: Candles | null; onOpen: (s: Side) => void; blocked?: string | null; instant: BarInstant }) {
   const coin = useLive(store, (s) => s.coin);
   const tick = useLive(store, (s) => s.tick);
@@ -631,9 +656,7 @@ function PhoneBar({ store, daily, onOpen, blocked = null, instant }: { store: Li
   const shown = off ? null : menu;
   const press = (side: Side) => {
     if (!instant.on) { onOpen(side); return; }
-    if (menu === side) { setMenu(null); return; }
-    // a locked trading wallet is asked to unlock, and nothing else happens
-    if (instant.ready()) setMenu(side);
+    setMenu(menu === side ? null : side);
   };
   const pop = (side: Side) => (instant.on ? { "aria-haspopup": "dialog" as const, "aria-expanded": shown === side } : {});
   const spin = (side: Side) => instant.busySide === side;
@@ -653,13 +676,13 @@ function PhoneBar({ store, daily, onOpen, blocked = null, instant }: { store: Li
           <button ref={sellRef} type="button" className={`btn violet${spin("sell") ? " is-busy" : ""}`} disabled={instant.running} aria-busy={spin("sell") || undefined} {...pop("sell")} onClick={() => press("sell")}>Sell</button></>}
       {shown && (
         <TradePresets side={shown} label={`${shown === "buy" ? "Buy" : "Sell"} ${sym(coin)}`} anchor={(shown === "buy" ? buyRef : sellRef).current}
-          presets={choices.map((c) => c.text)} onPick={(i) => { const c = choices[i]; if (c) instant.run(c.spec); }}
+          presets={choices.map((c) => c.text)} onPick={(i) => { const c = choices[i]; if (c) instant.run(c.spec, i); }}
           onCustom={() => onOpen(shown)} onClose={() => setMenu(null)} />
       )}
     </div>
   );
 }
-type BarInstant = { on: boolean; presets: { buy: readonly number[]; sell: readonly number[] }; ready: () => boolean; run: (spec: InstantSpec) => void; running: boolean; busySide: Side | null };
+type BarInstant = { on: boolean; presets: { buy: readonly number[]; sell: readonly number[] }; run: (spec: InstantSpec, index: number) => void; running: boolean; busySide: Side | null };
 
 /// One mounted ticket's own report of its trade in flight (`report` with this widget as the owner): the page counts
 /// owners, so a widget that mounts while another one that unmounted is still sending cannot clear that one's busy.
@@ -668,16 +691,13 @@ function useOwnBusy(report: ((owner: object, busy: boolean) => void) | undefined
   return useCallback((b: boolean) => report?.(owner.current, b), [report]);
 }
 
-/// The desktop trade card's widget, reporting its trade in flight for itself (useOwnBusy).
-function PageTicket({ report, ...props }: Omit<TradeWidgetProps, "onBusy"> & { report: (owner: object, busy: boolean) => void }) {
-  const onBusy = useOwnBusy(report);
-  return <TradeWidget {...props} onBusy={onBusy} />;
-}
 
-/// The phone trade sheet: a real modal (portal, focus trap, Escape, focus back to the bar).
+/// The trade ticket as a real modal (portal, focus trap, Escape, focus back to what opened it): the phone's bottom sheet,
+/// or on desktop (`centred`) a centred card like the map's quick trade, where an instant trade that did not pass hands
+/// the trade back, prefilled.
 /// `amount`: what its field opens with (an instant trade handed back to the ticket); `report` / `hold`: one trade at a
 /// time with the page's instant trades (TradeWidget, useOwnBusy); `onEdit`: a change made in it (click or input).
-function TradeSheet({ coin, store, side, amount, solUsd, onClose, report, onEdit, hold }: { coin: CoinT; store: LiveCoin; side: Side; amount?: string; solUsd: number | null; onClose: () => void; report?: (owner: object, busy: boolean) => void; onEdit?: (e: SyntheticEvent) => void; hold?: boolean }) {
+function TradeSheet({ coin, store, side, amount, solUsd, onClose, report, onEdit, hold, centred = false }: { coin: CoinT; store: LiveCoin; side: Side; amount?: string; solUsd: number | null; onClose: () => void; report?: (owner: object, busy: boolean) => void; onEdit?: (e: SyntheticEvent) => void; hold?: boolean; centred?: boolean }) {
   const amountRef = useRef<HTMLInputElement>(null);
   // A trade in flight keeps the sheet open (its progress, and no second trade started beside it).
   const busy = useRef(false);
@@ -688,8 +708,8 @@ function TradeSheet({ coin, store, side, amount, solUsd, onClose, report, onEdit
   const titleId = useId();
   useScrollLock(true);
   return createPortal(
-    <div className="trade-sheet-backdrop" onClick={close}>
-      <div ref={ref} className="trade-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()} onClickCapture={onEdit} onChangeCapture={onEdit}>
+    <div className={centred ? "quick-trade-backdrop" : "trade-sheet-backdrop"} onClick={close}>
+      <div ref={ref} className={centred ? "quick-trade" : "trade-sheet"} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()} onClickCapture={onEdit} onChangeCapture={onEdit}>
         <TradeWidget coin={coin} solUsd={solUsd} initialSide={side} initialAmount={amount} sheet onClose={close} amountRef={amountRef} titleId={titleId} current={store.coin} onBusy={onBusy} hold={hold} />
       </div>
     </div>,

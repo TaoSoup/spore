@@ -1,24 +1,23 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { PublicKey } from "@solana/web3.js";
-import { createPortal } from "react-dom";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { api, type Coin } from "../lib/api";
 import { useAsync, useDebounced, useMediaQuery, useSolBalance, useStats } from "../lib/hooks";
-import { QUOTE_PROBE, drySigner, finishFeeSplit, launchFeeOf, policyShares, runSpawn, spawnPlan, walletSigner, type SignConfirm, type Signer, type SpawnResult } from "../lib/flow";
+import { QUOTE_PROBE, drySigner, finishFeeSplit, launchFeeOf, policyShares, runSpawn, spawnPlan, walletSigner, type Signer, type SpawnResult } from "../lib/flow";
 import { AGENT_MODELS, AGENT_SEED_LAMPORTS, DEFAULT_AGENT_MODEL, PLATFORM_WALLET, ROOT_SPLIT, SPLIT_BPS, type AgentModelId } from "../lib/policy";
 import { openTradingWallet, useAccount } from "../lib/trader";
-import { useDialog } from "../lib/dialog";
 import { failedBeforeSigning, friendlyError, type Step } from "../lib/steps";
 import { chainFor } from "../lib/chain";
 import { estimateFirstBuy } from "../lib/pump";
-import { isHttpUrl, normaliseSocial, type PreparedImage } from "../lib/image";
+import { normaliseSocial, type PreparedImage } from "../lib/image";
+import { TICKER_RE, childCanBuy, launchErrors, sanitizeTicker, type LaunchField } from "../lib/launch-form";
 import { clearPending, loadPending, type PendingLaunch } from "../lib/launch-store";
 import { dryWallet, isDry } from "../lib/dry";
 import { CHILD_SPLIT_YOU, NON_CUSTODIAL, NO_LAUNCH_FEE, ROOT_SPLIT_YOU, SPORE_BUYBACK, TRUST_POINTS } from "../lib/copy";
 import { feeRole, type FeeRoleTone } from "../lib/fee-roles";
-import { compact, feeSol, lamportsToSol, parseAmount, short, sol, usd } from "../lib/format";
+import { compact, lamportsToSol, parseAmount, short, sol, usd } from "../lib/format";
 import Steps from "../components/Steps";
 import SplitPreview from "../components/SplitPreview";
 import CostBox, { EST_RENT_LAMPORTS, FEE_MARGIN_LAMPORTS, launchTotal, simulatedRent, type BuyEstimate } from "../components/CostBox";
@@ -30,18 +29,16 @@ import ResumeCard from "../components/launch/ResumeCard";
 import TreeChoice, { type Tree } from "../components/launch/TreeChoice";
 import AgentSetup from "../components/launch/AgentSetup";
 import LaunchBar from "../components/launch/LaunchBar";
+import { useLaunchAsk, type AskView } from "../components/launch/LaunchAsk";
 import Certificate from "../components/launch/Certificate";
 import { ProgressArc, RailGlyph, type GlyphState } from "../components/launch/art";
-import { Chip, DepthBadge, Logo, Skeleton, sym, useTint } from "../components/Bits";
+import { Chip, DepthBadge, Skeleton, sym, useTint } from "../components/Bits";
 import { useToast } from "../components/Toast";
 import "../components/launch.css";
 
 const SLIPPAGES = [100, 200, 300, 500];
 const QUICK_BUYS = ["0.1", "0.25", "0.5", "1"];
-const TICKER_RE = /^[A-Z0-9]{1,13}$/;
-/// How long the trading wallet's confirmation ignores its sign button after it appears (see `answerYes`).
-const ASK_ARM_MS = 600;
-type Field = "name" | "symbol" | "description" | "image" | "twitter" | "telegram" | "website" | "firstBuy" | "feeBps";
+type Field = LaunchField;
 /// Form order: the first invalid field in this order is where a blocked launch takes the visitor.
 const FIELD_ORDER: Field[] = ["name", "symbol", "description", "twitter", "telegram", "website", "image", "firstBuy", "feeBps"];
 const SOCIALS = ["twitter", "telegram", "website"] as const;
@@ -157,19 +154,9 @@ export default function Launch() {
   const show = (f: Field) => tried || touched.has(f);
   const buyLamports = useMemo(() => parseAmount(firstBuy, 9) ?? 0n, [firstBuy]);
   const feeValue = !isRoot && feeBps.trim() !== "" ? Number(feeBps) : undefined;
-  const socialBad = (kind: "twitter" | "telegram" | "website", v: string) => v.trim() !== "" && !isHttpUrl(normaliseSocial(kind, v));
-  // One sentence per field, shown inline once the field was touched (or a launch was attempted).
-  const errors: Partial<Record<Field, string>> = {
-    ...(!name.trim() ? { name: "Give the coin a name (1–32 characters)" } : name.trim().length > 32 ? { name: "At most 32 characters" } : {}),
-    ...(!symbol ? { symbol: "Pick a ticker: 1–13 letters or digits" } : !TICKER_RE.test(symbol) ? { symbol: "Letters and digits only, up to 13" } : {}),
-    ...(!image ? { image: "Add an image: the coin's face on every card" } : {}),
-    ...(description.length > 400 ? { description: "At most 400 characters" } : {}),
-    ...(socialBad("twitter", twitter) ? { twitter: "A profile link or handle, like @spore" } : {}),
-    ...(socialBad("telegram", telegram) ? { telegram: "A t.me link or handle" } : {}),
-    ...(socialBad("website", website) ? { website: "A full URL, like https://example.com" } : {}),
-    ...(firstBuy.trim() && buyLamports === 0n ? { firstBuy: "A SOL amount, or leave it empty" } : {}),
-    ...(feeValue !== undefined && (!Number.isInteger(feeValue) || feeValue < 0 || feeValue > 300) ? { feeBps: "0–300 bps, or leave it empty" } : {}),
-  };
+  // One sentence per field, shown inline once the field was touched (or a launch was attempted). The rules are shared
+  // with the coin page's "Launch a child" card (lib/launch-form.ts).
+  const errors: Partial<Record<Field, string>> = launchErrors({ name, symbol, hasImage: !!image, description, twitter, telegram, website, firstBuy, buyLamports, feeValue });
   const problems = FIELD_ORDER.filter((f) => errors[f]);
   const p = parentMint ? parent.data : null;
   // A child with no parent picked yet has no eligibility of its own (the loaded one is the SOL pool's).
@@ -182,7 +169,7 @@ export default function Launch() {
   try { launchFee = e ? launchFeeOf(e) : null; if (e && me) policyShares(me, e, null, "preview"); } catch (err) { policyProblem = err instanceof Error ? err.message : String(err); }
   const eligibleNow = !!(poolReady && e && e.ok && e.shares.length > 0 && creator) && !policyProblem && !agentPaused;
   // A first buy from SOL needs a SOL-rooted chain: always true for a root, true for a child of one.
-  const canBuy = !!(e?.ok && poolReady && (isRoot || (p!.depth === 0 ? p!.quoteMint === null : true)));
+  const canBuy = !!(e?.ok && poolReady && (isRoot || childCanBuy(p!)));
   const newDepth = isRoot ? 0 : p ? p.depth + 1 : (e?.depth ?? 1);
   const maxDepth = stats?.maxDepth ?? null;
   const feeLamports = launchFee?.lamports ?? 0n;
@@ -238,27 +225,8 @@ export default function Launch() {
   const planSteps: Step[] = spawnPlan({ prepareAgent: isRoot, agentModelLabel: isRoot ? modelLabel : null, launchFeeLamports: feeLamports, seedLamports, wantsBuy: canBuy && buyLamports > 0n, silent })
     .map(([key, label]) => ({ key, label, state: "todo", detail: PLAN_DETAIL[silent && key === "sign" ? "signSilent" : key] }));
 
-  // The trading wallet signs without a popup, so the page asks itself: after the simulation, with the exact cost, and
-  // before anything is signed (lib/flow.ts SignConfirm). The flow waits on this promise; closing the dialog answers no.
-  // What the dialog shows is captured when the flow starts (`AskView`), never read from the form or the URL afterwards:
-  // the transaction on the table was built from those values, and no wallet popup would contradict a changed page.
-  type AskView = { tag: string; image: string | null; payer: string; root: boolean; parentTag: string; feeLamports: bigint; seedLamports: bigint; split: string; slippage: number };
-  const [ask, setAsk] = useState<{ c: SignConfirm; v: AskView; done: (ok: boolean) => void } | null>(null);
-  const askRef = useRef(ask);
-  askRef.current = ask;
-  const answer = (ok: boolean) => { const a = askRef.current; if (!a) return; setAsk(null); a.done(ok); };
-  useEffect(() => () => { askRef.current?.done(false); }, []);
-  // The dialog opens seconds after the launch button was pressed, and its sign button is the whole consent (no wallet
-  // popup follows). So the focus lands on Cancel, never on the button that signs: a stray or repeated Enter or Space
-  // answers "no". And the sign button does nothing for a moment after the dialog appears (`ASK_ARM_MS`), so a click
-  // already on its way to the page under it cannot sign either.
-  const askCancel = useRef<HTMLButtonElement>(null);
-  const askAt = useRef(0);
-  const askDialog = useDialog<HTMLDivElement>(!!ask, () => answer(false), { initialFocus: askCancel });
-  const answerYes = () => { if (performance.now() - askAt.current < ASK_ARM_MS) return; answer(true); };
-  // One question at a time: a flow that asks while another question is open answers that one "no" first, so no flow
-  // is left waiting on a dialog that was replaced.
-  const confirmWith = (v: AskView) => (c: SignConfirm) => new Promise<boolean>((done) => { askRef.current?.done(false); askAt.current = performance.now(); setAsk({ c, v, done }); });
+  // The trading wallet signs without a popup, so the page asks itself before it signs (components/launch/LaunchAsk.tsx).
+  const { confirmWith, dialog: askDialog } = useLaunchAsk();
   const viewOf = (tag: string, img: string | null, payer: string): AskView => ({ tag, image: img, payer, root: isRoot, parentTag, feeLamports, seedLamports, split: segments.map((x) => `${x.label} ${x.bps / 100}%`).join(" · "), slippage });
 
   const report = (s: Step[]) => { lastSteps.current = s; setSteps(s); };
@@ -438,7 +406,7 @@ export default function Launch() {
                 <div className="step-head"><StepN n="02" done={step2} /><h2>Your coin</h2>{isRoot && <span className="step-status"><span className="label">with its own agent</span></span>}</div>
                 <div className="grid-2">
                   <label className={`field ${invalid("name")}`} data-field="name"><span>Name <small className="muted">{name.length}/32</small></span><input className="input" value={name} maxLength={32} onChange={(ev) => setName(ev.target.value)} onBlur={() => touch("name")} placeholder="Little Pepe" autoComplete="off" />{err("name")}</label>
-                  <label className={`field ${invalid("symbol")}`} data-field="symbol"><span>Ticker <small className="muted">letters and digits · shown as ${symbol || "TICKER"}</small></span><input className="input mono" value={symbol} onChange={(ev) => setSymbol(ev.target.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 13))} onBlur={() => touch("symbol")} placeholder="LILPEPE" autoComplete="off" spellCheck={false} />{err("symbol")}
+                  <label className={`field ${invalid("symbol")}`} data-field="symbol"><span>Ticker <small className="muted">letters and digits · shown as ${symbol || "TICKER"}</small></span><input className="input mono" value={symbol} onChange={(ev) => setSymbol(sanitizeTicker(ev.target.value))} onBlur={() => touch("symbol")} placeholder="LILPEPE" autoComplete="off" spellCheck={false} />{err("symbol")}
                   </label>
                 </div>
                 <label className={`field ${invalid("description")}`} data-field="description"><span>Description <small className={`muted ${description.length > 360 ? "warn" : ""}`}>{description.length}/400</small></span><textarea className="textarea" value={description} maxLength={400} onChange={(ev) => setDescription(ev.target.value)} onBlur={() => touch("description")} placeholder={isRoot ? "What is this coin about? Your agent reads this to theme the coins it launches." : p ? `Why ${sym(p)} deserves a child.` : "What is this coin about?"} />{err("description")}</label>
@@ -559,31 +527,7 @@ export default function Launch() {
       </div>
       {!result && <LaunchBar target={launchCard} image={image?.dataUrl ?? null} symbol={symbol} total={total} label={connected ? launchLabel : "Connect wallet"} disabled={connected ? launchDisabled : false} hidden={busy || !!result || !!error}
         onPress={() => { if (connected) press(); else scrollTo(launchCard.current); }} />}
-      {ask && createPortal(
-        <div className="confirm-backdrop" onClick={() => answer(false)}>
-          <div ref={askDialog} className="confirm" role="dialog" aria-modal="true" aria-labelledby="launch-confirm-title" onClick={(ev) => ev.stopPropagation()}>
-            <div className="confirm-head"><Logo src={ask.v.image} label={ask.v.tag.slice(1)} size={32} /><b id="launch-confirm-title">{ask.c.kind === "launch" ? "Launch" : "Lock the fee split of"} {ask.v.tag}</b><button type="button" className="sheet-close" aria-label="Cancel" onClick={() => answer(false)}>×</button></div>
-            <div className="confirm-rows">
-              <div><span>{ask.c.kind === "launch" ? "Creator, pays and signs" : "Pays and signs"}</span><b>Trading wallet · {short(ask.v.payer, 4)}</b></div>
-              {ask.c.kind === "launch" && <div><span>Tree</span><b>{ask.v.root ? "New tree · priced in SOL" : `Under ${ask.v.parentTag}`}</b></div>}
-              <div><span>{ask.c.kind === "launch" ? "The launch spends" : "This spends"}</span><b className="accent" title="Measured by simulating this exact transaction just now">{feeSol(ask.c.spent)}</b></div>
-              {ask.c.kind === "launch" && ask.v.feeLamports > 0n && <div><span>of which launch fee, to Spore</span><b>{sol(lamportsToSol(ask.v.feeLamports))}</b></div>}
-              {ask.c.kind === "launch" && ask.v.seedLamports > 0n && <div><span>of which gas for your coin's agent</span><b>{sol(lamportsToSol(ask.v.seedLamports))}</b></div>}
-              {ask.c.kind === "launch" && <div><span>Creator fees go to</span><b>{ask.v.split}</b></div>}
-              {ask.c.secondSplit && <div><span>Then, without asking again</span><b>the fee split, in a second transaction</b></div>}
-              {ask.c.firstBuyLamports > 0n && <div><span>Then, without asking again</span><b>first buy of {sol(lamportsToSol(ask.c.firstBuyLamports))}{ask.c.firstBuyMinOut !== null ? ` · for at least ≈ ${compact(Number(ask.c.firstBuyMinOut) / 1e6)} ${ask.v.tag} (the estimate less ${ask.v.slippage / 100}% slippage), or it is not bought` : ` · up to ${ask.v.slippage / 100}% slippage`}</b></div>}
-            </div>
-            <p className="hint">{ask.c.kind === "launch"
-              ? "Simulated on-chain just now. Your trading wallet signs as soon as you press the button; no wallet popup follows. The fee split is written with the coin and can never be changed."
-              : "Simulated on-chain just now. Your trading wallet signs as soon as you press the button; no wallet popup follows. The split is set once and can never be changed."}</p>
-            <div className="confirm-actions">
-              <button ref={askCancel} type="button" className="btn ghost" onClick={() => answer(false)}>Cancel</button>
-              <button type="button" className="btn accent" onClick={answerYes}>{ask.c.kind === "launch" ? `Launch ${ask.v.tag} now` : "Lock the fee split now"}</button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+      {askDialog}
     </>
   );
 }

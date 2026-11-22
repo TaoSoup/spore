@@ -4,15 +4,21 @@
 //
 // Stored in this browser under "spore:" keys (lib/trader.ts usePref):
 //   spore:instant-trades  "on" | "off"       default on
-//   spore:buy-presets     "0.1,0.5,1"        three SOL amounts
-//   spore:sell-presets    "25,50,100"        three whole percentages
+//   spore:buy-presets     "0.1,0.25,0.5,1"   three or four SOL amounts (four by default; a stored list of three stays three)
+//   spore:sell-presets    "25,50,75,100"     three or four whole percentages
 //   spore:slippage        basis points       the ticket's own setting (TradeWidget), shared with it; with nothing
 //                                            stored, instant trades use 5% and the ticket its own 1%
 //   spore:instant-sol     SOL                the "sign at once up to" cap (lib/trader.ts useInstantSol)
 
-export const PRESET_COUNT = 3;
-export const DEFAULT_BUY_PRESETS: readonly number[] = [0.1, 0.5, 1];
-export const DEFAULT_SELL_PRESETS: readonly number[] = [25, 50, 100];
+/// How many presets a list holds: four by default (the coin page's trade card shows four large buttons); a list of three
+/// stored before four were offered keeps its three. Any other length is not the user's list: the defaults apply.
+export const PRESET_COUNTS: readonly number[] = [3, 4];
+export const MAX_PRESET_COUNT = 4;
+export const DEFAULT_BUY_PRESETS: readonly number[] = [0.1, 0.25, 0.5, 1];
+export const DEFAULT_SELL_PRESETS: readonly number[] = [25, 50, 75, 100];
+/// The defaults a stored list of three falls back to slot by slot (the defaults of the three-preset days).
+export const DEFAULT_BUY_PRESETS_3: readonly number[] = [0.1, 0.5, 1];
+export const DEFAULT_SELL_PRESETS_3: readonly number[] = [25, 50, 100];
 /// A buy preset is more than 0 and at most this many SOL, with at most 4 decimals.
 export const MAX_BUY_PRESET_SOL = 100;
 /// The ticket's slippage (TradeWidget): its default and the range its own control allows, in basis points. A stored
@@ -41,17 +47,18 @@ export function parseSellPreset(text: string): number | null {
   const n = Number(t);
   return n >= 1 && n <= 100 ? n : null;
 }
-function parseList(raw: string | null | undefined, one: (s: string) => number | null, fallback: readonly number[]): number[] {
+function parseList(raw: string | null | undefined, one: (s: string) => number | null, fallback: readonly number[], fallback3: readonly number[]): number[] {
   if (typeof raw !== "string") return [...fallback];
   const parts = raw.split(",");
-  if (parts.length !== PRESET_COUNT) return [...fallback];
+  if (!PRESET_COUNTS.includes(parts.length)) return [...fallback];
+  const slots = parts.length === 3 ? fallback3 : fallback;
   // a slot that does not parse takes its default; the others stay as the user set them
-  return parts.map((p, i) => one(p) ?? fallback[i]);
+  return parts.map((p, i) => one(p) ?? slots[i]);
 }
-/// The stored buy presets (SOL), or the defaults: always three valid amounts.
-export const parseBuyPresets = (raw: string | null | undefined): number[] => parseList(raw, parseBuyPreset, DEFAULT_BUY_PRESETS);
-/// The stored sell presets (percent), or the defaults: always three whole percentages.
-export const parseSellPresets = (raw: string | null | undefined): number[] => parseList(raw, parseSellPreset, DEFAULT_SELL_PRESETS);
+/// The stored buy presets (SOL), or the defaults: always three or four valid amounts (four when nothing is stored).
+export const parseBuyPresets = (raw: string | null | undefined): number[] => parseList(raw, parseBuyPreset, DEFAULT_BUY_PRESETS, DEFAULT_BUY_PRESETS_3);
+/// The stored sell presets (percent), or the defaults: always three or four whole percentages.
+export const parseSellPresets = (raw: string | null | undefined): number[] => parseList(raw, parseSellPreset, DEFAULT_SELL_PRESETS, DEFAULT_SELL_PRESETS_3);
 export const formatPresets = (list: readonly number[]): string => list.join(",");
 /// Instant trades are on unless the user turned them off.
 export const parseInstantOn = (raw: string | null | undefined): boolean => raw !== "off";

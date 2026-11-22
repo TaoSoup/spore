@@ -51,9 +51,10 @@ export function useInstantTrade(cb: InstantCallbacks, opts?: { signer?: "portfol
   // an hour without use counts as locked a moment before the timer says so
   const signer = useCallback(() => instantSigner({ mode, trading: !!tw.address, unlocked: tw.status === "unlocked" && !!tradingSender(), tradeWith, walletConnected: walletReady }),
     [mode, tw.address, tw.status, tradeWith, walletReady]);
-  const ready = useCallback(() => {
+  // `note`: what the toast says while the unlock is asked (the coin page's card says its click goes ahead after it).
+  const ready = useCallback((note?: string) => {
     const s = signer();
-    if (s.use === "unlock") { lockIfIdle(); openTradingWallet("unlock"); toast.info("Unlock your trading wallet to trade."); return false; }
+    if (s.use === "unlock") { lockIfIdle(); openTradingWallet("unlock"); toast.info(note ?? "Unlock your trading wallet to trade."); return false; }
     if (s.setTrading) setTradeWith("trading");
     return true;
   }, [toast, signer, setTradeWith]);
@@ -97,5 +98,7 @@ export function useInstantTrade(cb: InstantCallbacks, opts?: { signer?: "portfol
   }, [connection, toast, ready, signer, begin, end, wallet.connected, wallet.publicKey, wallet.sendTransaction, slippageBps, instantSol]);
   // a wallet that could sign an instant trade: the trading wallet (it may need unlocking first) or a connected one
   const hasWallet = !!tw.address || (wallet.connected && !!wallet.publicKey);
-  return { run, ready, opening, busy, begin, end, alive, settings, hasWallet };
+  // which wallet a trade pressed now would use (lib/instant-outcome.ts instantSigner), for the page's status line
+  const signerUse = useCallback(() => signer().use, [signer]);
+  return { run, ready, opening, busy, begin, end, alive, settings, hasWallet, signerUse };
 }

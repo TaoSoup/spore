@@ -5,7 +5,8 @@ import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { ApiError, pumpUrl, solscanTx, type Coin, type CoinRef } from "../lib/api";
 import { routeLabels } from "../lib/chain";
 import { PriceMovedError, QUOTE_PROBE, withSlippage } from "../lib/flow";
-import { JupPriceMovedError, KNOWN_MINTS, SOL_MINT, jupPath } from "../lib/jup";
+import { JupPriceMovedError } from "../lib/jup";
+import { routeItems } from "../lib/route-line";
 import { quoteTrade, sendTrade, tradeErrorText, tradePriority, tradeVenues, type TradeQuote } from "../lib/trade-exec";
 import { refresh as refreshBalances, useBalances } from "../lib/balances";
 import { BUY_HEADROOM_LAMPORTS, sellAmountOf, tradeImpact } from "../lib/trade-settings";
@@ -363,20 +364,10 @@ export default function TradeWidget({ coin: base, solUsd, initialSide = "buy", i
   // The amount, its presets and the side stay put while a confirmation waits for its quote or a trade is in flight.
   const locked = busy || confirmWhenFresh;
 
-  // The route as chips: SOL → $ROOT → … → $COIN on a buy, the reverse on a sell.
-  const routeCoins = route.data ? [...route.data.coins].reverse() : [];
-  // On the Jupiter route: the mints its last quote passes (SOL → USDC → $HYPE → coin), or SOL → the asset → the coin
-  // before one; the asset is the coin's quote, named from the coin's record.
+  // The route as chips: SOL to $ROOT to ... to $COIN on a buy, the reverse on a sell; on the Jupiter route the mints its
+  // last quote passes, or SOL, the asset, the coin before one (lib/route-line.ts, shared with the coin page's card).
   const jupLegs = isJup && quote?.jup && quote.jup.side === side ? quote.jup.legs : null;
-  const jupMints = !isJup ? [] : jupLegs ? (side === "sell" ? jupPath(jupLegs).reverse() : jupPath(jupLegs)) : [SOL_MINT, ...(coin.quoteMint ? [coin.quoteMint] : []), coin.mint];
-  const mintLabel = (m: string) => (m === SOL_MINT ? "SOL" : m === coin.mint ? sym(coin) : m === coin.quoteMint ? assetLabel(coin.quoteSymbol) : KNOWN_MINTS[m] ?? `${m.slice(0, 4)}…`);
-  // SOL first, then the listed asset whose SOL pool the route starts in (when it does), the root, …, the coin.
-  const path: { key: string; label: string; image: string | null; symbol: string | null }[] = !route.data ? []
-    : isJup ? jupMints.map((m) => (m === SOL_MINT ? { key: "quote", label: "SOL", image: null, symbol: null } : { key: m, label: mintLabel(m), image: m === coin.mint ? coin.image : null, symbol: m === coin.mint ? coin.symbol : mintLabel(m).replace(/^\$/, "") }))
-    : [{ key: "quote", label: "SOL", image: null, symbol: null },
-      ...(asset ? [{ key: asset.mint, label: assetLabel(asset.symbol), image: null, symbol: asset.symbol }] : []),
-      ...routeCoins.map((c) => ({ key: c.mint, label: sym(c), image: c.image, symbol: c.symbol }))];
-  if (side === "sell") path.reverse();
+  const path = routeItems(route.data, coin, side, jupLegs);
   const parent = coin.ancestors[0] ?? null;
   // The first coin the route passes through on the way to this one: the parent, or the asset's pool for a root.
   const via = parent ? sym(parent) : asset ? assetLabel(asset.symbol) : null;

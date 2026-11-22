@@ -7,6 +7,7 @@
 .ts-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
 .ts-k { font-size: 13px; font-weight: 500; color: var(--ink-2); }
 .ts-three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: start; }
+.ts-three.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .ts-num { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
 .ts-in { position: relative; display: block; min-width: 0; }
 .ts-in .input { height: 40px; padding: 0 40px 0 10px; text-align: right; }

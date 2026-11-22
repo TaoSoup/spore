@@ -441,6 +441,8 @@ const qs = (o: Record<string, string | number | undefined | null>) => {
   return s ? `?${s}` : "";
 };
 
+/// `reason`: why a post not stored was not asked for ("busy", "budget", "limit", ...), when it was not.
+export type PostFill = { id: string; state: "ok" | "none" | "wait" | "idle"; handle: string | null; text: string | null; reason?: string };
 export const api = {
   stats: () => request<Stats>("/stats"),
   feed: (limit = 50, before?: number) => request<{ coins: Coin[] }>(`/feed${qs({ limit, before })}`),
@@ -509,6 +511,9 @@ export const api = {
   /// The posts linked by a family's coins, as a timeline (see `Narrative`). 404 for a mint that is not a subject, and on a server
   /// without the route; the UI then shows nothing.
   narrative: (mint: string) => request<Narrative>(`/narrative/${encodeURIComponent(mint)}`),
+  /// One X post by its link (server README §API GET /api/post-fill): its handle and text once stored, else "wait" (ask
+  /// again) or "idle"; 404 when the server does not fetch post texts. Only x.com / twitter.com status links are taken.
+  postFill: (url: string) => request<PostFill>(`/post-fill${qs({ url })}`),
   /// The families buying far above their normal level (see `Discover`); the server caches it 5 s.
   /// `tf` sets the timeframe of each coin row's numbers (the server's default is 5m and is left out of the URL).
   discover: (tf?: Tf) => request<Discover>(`/discover${qs({ tf })}`),

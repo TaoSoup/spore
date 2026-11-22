@@ -6,7 +6,7 @@
 import type { CoinRow, CoinSafety, DiscoverOne, DustReason, NarrativeRef, Stories, StoryCard, StoryCopy, StoryRow, StoryTheme, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
 import { compact, count, plural, short, usd } from "./format";
 import { postHandle, postText, safePostUrl } from "./narrative";
-import { PRESET_COUNT } from "./trade-settings";
+import { MAX_PRESET_COUNT } from "./trade-settings";
 
 /// How often the page reads the list while its tab is visible (the server caches it 5 s). A wake-up is measured per
 /// 5-minute bucket, so a read every 10 s shows a closed bucket within seconds of the server.
@@ -336,7 +336,7 @@ export function prefsUrl(loc: { pathname: string; search?: string | null; hash?:
 export function parseSlot(raw: unknown): number {
   if (typeof raw !== "string" || !/^\d$/.test(raw)) return 0;
   const n = Number(raw);
-  return n < PRESET_COUNT ? n : 0;
+  return n < MAX_PRESET_COUNT ? n : 0;
 }
 /// Storage is reached through a thunk: reading `localStorage` itself throws where site data is blocked.
 type Store = { getItem(k: string): string | null; setItem(k: string, v: string): void };

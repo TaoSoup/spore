@@ -18,7 +18,7 @@ import {
   AUTO_LOCK_MS, MIN_PASSWORD, buildTransfer, lockIfIdle, createTradingWallet, importTradingWallet, lockTradingWallet, markTradingWalletBackedUp,
   removeTradingWallet, revealTradingSecret, tradingSender, tradingWalletState, unlockTradingWallet, withdrawAllLamports, withdrawError, WrongPasswordError,
 } from "../lib/trading-wallet";
-import { OPEN_EVENT, openTradeSettings, useInstantSol, useTradeWith, useTradingWallet, type TradingWalletView } from "../lib/trader";
+import { CLOSED_EVENT, OPEN_EVENT, openTradeSettings, useInstantSol, useTradeWith, useTradingWallet, type TradingWalletView } from "../lib/trader";
 import { Ext } from "./Bits";
 import { useToast } from "./Toast";
 import "./coin.css";
@@ -53,7 +53,10 @@ export function TradingWalletHost() {
     window.addEventListener(OPEN_EVENT, on);
     return () => window.removeEventListener(OPEN_EVENT, on);
   }, []);
-  return view ? <TradingWalletPanel view={view} onClose={() => setView(null)} returnFocus={opener} /> : null;
+  // Closing tells the page whether the wallet ended up unlocked (lib/trader.ts CLOSED_EVENT): a click remembered for
+  // after an unlock (components/useUnlockContinuation.ts) is dropped when the panel closes without one.
+  const onClose = () => { setView(null); window.dispatchEvent(new CustomEvent(CLOSED_EVENT, { detail: { unlocked: tradingWalletState().status === "unlocked" } })); };
+  return view ? <TradingWalletPanel view={view} onClose={onClose} returnFocus={opener} /> : null;
 }
 
 function TradingWalletPanel({ view, onClose, returnFocus }: { view: TradingWalletView; onClose: () => void; returnFocus: { current: HTMLElement | null } }) {
@@ -65,8 +68,9 @@ function TradingWalletPanel({ view, onClose, returnFocus }: { view: TradingWalle
   const titleId = useId();
   useScrollLock(true);
   // Opened only to unlock (lib/trader.ts TradingWalletView): once the wallet is unlocked the panel has done its job. It
-  // closes at once, the focus goes back to where the user was (useDialog), and nothing else happens: the user presses
-  // their Buy, Sell, Launch or Claim again.
+  // closes at once and the focus goes back to where the user was (useDialog). Nothing is signed by the unlock itself;
+  // only the coin page's trade card and launch card continue the one click that asked for it (useUnlockContinuation),
+  // through every check of that click; elsewhere the user presses their Buy, Sell, Launch or Claim again.
   // A wallet removed and set up again inside this panel ("Forgot the password?") is a new wallet: the panel then stays
   // for its "Save your private key" step, as it does when it is opened for setup.
   const toast = useToast();

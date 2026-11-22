@@ -233,7 +233,7 @@ test("10. Trending: held like the families; the parent tag and the family pill",
 test("11. the stored timeframe, tab and buy slot: defaults, bad values and blocked storage", () => {
   assert.deepEqual(["1m", "5m", "30m", "1h", "15m", null, "", 5].map(D.parseTf), ["1m", "5m", "30m", "1h", "5m", "5m", "5m", "5m"]);
   assert.deepEqual(["trending", "waking", "x", null].map(D.parseTab), ["trending", "waking", "waking", "waking"]);
-  assert.deepEqual(["0", "1", "2", "3", "-1", "1.5", "", null, 2].map(D.parseSlot), [0, 1, 2, 0, 0, 0, 0, 0, 0]);
+  assert.deepEqual(["0", "1", "2", "3", "4", "-1", "1.5", "", null, 2].map(D.parseSlot), [0, 1, 2, 3, 0, 0, 0, 0, 0, 0]);
   const mem = new Map<string, string>();
   const store = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => { mem.set(k, v); } };
   assert.equal(D.readPref(() => store, D.TF_KEY, D.parseTf), "5m");

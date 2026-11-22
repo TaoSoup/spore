@@ -9,7 +9,8 @@ import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDialog } from "../lib/dialog";
 import { useScrollLock } from "../lib/hooks";
-import { SETTINGS_EVENT, useInstantSol, useTradeSettings, useTradingWallet } from "../lib/trader";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { SETTINGS_EVENT, useInstantSol, useTradeSettings, useTradeWith, useTradingWallet } from "../lib/trader";
 import { DEFAULT_SLIPPAGE_BPS, MAX_BUY_PRESET_SOL, MAX_CAP_SOL, MAX_INSTANT_IMPACT, MAX_SLIPPAGE_BPS, MIN_SETTINGS_SLIPPAGE_BPS, parseBuyPreset, parseCapSol, parseSellPreset, slippagePctToBps } from "../lib/trade-settings";
 import "./coin.css";
 import "./trade-settings.css";
@@ -70,6 +71,11 @@ function TradeSettingsDialog({ onClose, returnFocus }: { onClose: () => void; re
   const s = useTradeSettings();
   const [capSol, setCapSol] = useInstantSol();
   const tw = useTradingWallet();
+  // Which wallet signs a trade when both a trading wallet and an extension are there (lib/trader.ts useTrader): the
+  // coin page's trade card no longer shows this switch, so paying from the extension stays reachable here.
+  const [tradeWith, setTradeWith] = useTradeWith();
+  const wallet = useWallet();
+  const extName = wallet.connected ? wallet.wallet?.adapter.name ?? "Connected wallet" : null;
   const setAt = (list: number[], save: (l: number[]) => void, i: number) => (n: number) => save(list.map((x, j) => (j === i ? n : x)));
   const pctOf = (bps: number) => bps / 100;
   return createPortal(
@@ -90,16 +96,31 @@ function TradeSettingsDialog({ onClose, returnFocus }: { onClose: () => void; re
             : "Buy and Sell open the ticket, where you set the amount and confirm."}</small>
         </section>
 
+        {tw.status !== "none" && extName && (
+          <section className="ts-sec" aria-label="Trade with">
+            <div className="ts-row">
+              <span className="ts-k">Trade with</span>
+              <span className="seg" role="group" aria-label="Trade with">
+                <button type="button" aria-pressed={tradeWith === "trading"} onClick={() => setTradeWith("trading")}>Trading wallet</button>
+                <button type="button" aria-pressed={tradeWith === "wallet"} onClick={() => setTradeWith("wallet")}>{extName}</button>
+              </span>
+            </div>
+            <small className="muted">{tradeWith === "trading"
+              ? "Your trading wallet signs at once, with no popup."
+              : `${extName} signs: each trade opens its approval popup.`}</small>
+          </section>
+        )}
+
         <section className="ts-sec" aria-label="Buy presets">
           <span className="ts-k">Buy presets</span>
-          <div className="ts-three">
+          <div className={`ts-three ${s.buyPresets.length === 4 ? "four" : ""}`}>
             {s.buyPresets.map((v, i) => <NumField key={i} label={`Buy preset ${i + 1}, in SOL`} value={v} unit="SOL" parse={parseBuyPreset} onSave={setAt(s.buyPresets, s.setBuyPresets, i)} hint={`More than 0, at most ${MAX_BUY_PRESET_SOL} SOL, up to 4 decimals`} />)}
           </div>
         </section>
 
         <section className="ts-sec" aria-label="Sell presets">
           <span className="ts-k">Sell presets</span>
-          <div className="ts-three">
+          <div className={`ts-three ${s.sellPresets.length === 4 ? "four" : ""}`}>
             {s.sellPresets.map((v, i) => <NumField key={i} label={`Sell preset ${i + 1}, in percent of what you hold`} value={v} unit="%" parse={parseSellPreset} onSave={setAt(s.sellPresets, s.setSellPresets, i)} hint="A whole number from 1 to 100" />)}
           </div>
           <small className="muted">A share of what the wallet holds when you press it; 100% sells all of it.</small>

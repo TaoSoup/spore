@@ -775,3 +775,37 @@ test("config: NARRATIVE, NARRATIVE_POSTS, XPOST_PER_MIN, XPOST_DAILY and RATE_NA
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+
+// ---------------------------------------------------------------- GET /api/post-fill
+test("GET /api/post-fill: x.com / twitter.com status links only; wait, then the stored handle and text; never cached; RATE_POSTFILL (not RATE_NARRNEW) caps new fetches, at low priority; 404 without the fetcher", async () => {
+  const w = world();
+  const app = await serveApp(w, { rates: { postfill: { limit: 2, windowMs: 3_600_000 }, narrnew: { limit: 1, windowMs: 3_600_000 } } });
+  const q = (u) => app.get(`/api/post-fill?url=${encodeURIComponent(u)}`);
+  try {
+    for (const bad of ["", "https://example.com/a/status/1", "https://x.com.evil.example/a/status/1", "javascript:alert(1)", "https://x.com/a", `https://x.com/a/status/${A}`.padEnd(400, "x"), "https://t.co/abc"]) {
+      const r = await q(bad);
+      assert.equal(r.status, 400, bad.slice(0, 60));
+    }
+    assert.equal((await app.get("/api/post-fill")).status, 400, "no url");
+    const first = await q(`https://x.com/alice/status/${A}?s=20`);
+    assert.deepEqual([first.status, first.body, first.headers.get("cache-control")], [200, { id: A, state: "wait", handle: null, text: null }, "no-store"]);
+    await w.settle();
+    const done = await q(`https://twitter.com/bob/status/${A}`);
+    assert.deepEqual([done.status, done.body], [200, { id: A, state: "ok", handle: `h${A.slice(-4)}`, text: `text of ${A}` }]);
+    await q(link(B)); await w.settle();
+    const capped = await q(link(C));
+    assert.deepEqual([capped.status, capped.body.state, capped.body.reason], [200, "idle", "limit"], "this IP's fill allowance is spent: not fetched");
+    assert.deepEqual(w.calls, [A, B]);
+    // (two fills went through with RATE_NARRNEW at 1: the fill allowance is its own, /api/narrative's is untouched)
+    // low priority: from half the day's budget on, a fill is refused while a coin's linked post still queues
+    w.xposts.daily = 4; w.xposts.budget.used = 2;
+    const half = await q(link(D));
+    assert.deepEqual([half.body.state, half.body.reason], ["idle", "budget"]);
+    assert.equal(w.xposts.canQueue(D), "ok", "the first half of the day stays for the posts coins link");
+  } finally { await app.close(); }
+  const bare = await serveApp(w, { narrative: new Narrative({ model: w.model, posts: null, now: w.clock.now, log: quiet }) });
+  try {
+    assert.deepEqual([(await bare.get(`/api/post-fill?url=${encodeURIComponent(link(A))}`)).status], [404]);
+  } finally { await bare.close(); }
+  w.close();
+});

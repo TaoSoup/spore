@@ -106,10 +106,13 @@ export function useTrader() {
 /// Opens the trading-wallet panel (components/TradingWallet.tsx listens), on a given view.
 /// "default" and "deposit": the user asked for the panel itself (the wallet menu, the ticket's "Manage", a deposit
 /// link); it stays open after an unlock. "unlock": something needs the wallet unlocked (a trade, a launch, a claim, an
-/// Unlock button): the panel asks the password and closes by itself once the wallet is unlocked, and the user presses
-/// their button again; nothing is signed by the unlock. Asked while the wallet is already unlocked, "unlock" opens nothing.
+/// Unlock button): the panel asks the password and closes by itself once the wallet is unlocked. Nothing is signed by
+/// the unlock itself: the user presses their button again, except on the coin page's trade and launch cards, where the
+/// one click that asked for the unlock goes ahead once, within 60 s and unchanged (lib/pending-intent.ts). Asked while the wallet is already unlocked, "unlock" opens nothing.
 export type TradingWalletView = "default" | "deposit" | "unlock";
 export const OPEN_EVENT = "spore:trading-wallet-open";
+/// The panel closed; `detail.unlocked`: whether the wallet is unlocked as it closes (components/TradingWallet.tsx).
+export const CLOSED_EVENT = "spore:trading-wallet-closed";
 export const openTradingWallet = (view: TradingWalletView = "default") => window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: view }));
 
 // ---- the account wallet: one wallet per user, for launches, claims and fee splits

@@ -17,7 +17,7 @@ const { TOKEN_2022_ID, CU_PRICE_MICRO, swapFeeLamports, swapUnits } = await impo
 
 test("settings: defaults when nothing is stored, and instant trades are on unless turned off", () => {
   const d = S.parseTradeSettings({});
-  assert.deepEqual(d, { instant: true, buyPresets: [0.1, 0.5, 1], sellPresets: [25, 50, 100], slippageBps: 500, slippageStored: false });
+  assert.deepEqual(d, { instant: true, buyPresets: [0.1, 0.25, 0.5, 1], sellPresets: [25, 50, 75, 100], slippageBps: 500, slippageStored: false });
   // a stored slippage is the ticket's and the instant trade's alike
   assert.equal(S.parseTradeSettings({ slippage: "300" }).slippageBps, 300);
   assert.equal(S.parseTradeSettings({ slippage: "300" }).slippageStored, true);
@@ -27,7 +27,7 @@ test("settings: defaults when nothing is stored, and instant trades are on unles
   assert.equal(S.parseInstantOn("off"), false);
   // the defaults are copies: a caller that edits its list does not edit them
   d.buyPresets[0] = 9;
-  assert.deepEqual(S.parseBuyPresets(null), [0.1, 0.5, 1]);
+  assert.deepEqual(S.parseBuyPresets(null), [0.1, 0.25, 0.5, 1]);
 });
 
 test("buy presets: more than 0, at most 100 SOL, at most 4 decimals", () => {
@@ -43,9 +43,12 @@ test("buy presets: more than 0, at most 100 SOL, at most 4 decimals", () => {
   // a slot that is not valid takes its default; a list of another length is not the user's list
   assert.deepEqual(S.parseBuyPresets("0.2,500,5"), [0.2, 0.5, 5]);
   assert.deepEqual(S.parseBuyPresets("0.2,,x"), [0.2, 0.5, 1]);
-  assert.deepEqual(S.parseBuyPresets("1,2"), [0.1, 0.5, 1]);
-  assert.deepEqual(S.parseBuyPresets("1,2,3,4"), [0.1, 0.5, 1]);
-  assert.deepEqual(S.parseBuyPresets(""), [0.1, 0.5, 1]);
+  assert.deepEqual(S.parseBuyPresets("1,2"), [0.1, 0.25, 0.5, 1]);
+  // a stored list of four is the user's four; one of five is not a list
+  assert.deepEqual(S.parseBuyPresets("1,2,3,4"), [1, 2, 3, 4]);
+  assert.deepEqual(S.parseBuyPresets("1,x,3,4"), [1, 0.25, 3, 4], "a bad slot of four takes the four-slot default");
+  assert.deepEqual(S.parseBuyPresets("1,2,3,4,5"), [0.1, 0.25, 0.5, 1]);
+  assert.deepEqual(S.parseBuyPresets(""), [0.1, 0.25, 0.5, 1]);
 });
 
 test("sell presets: whole percentages from 1 to 100", () => {
@@ -54,8 +57,9 @@ test("sell presets: whole percentages from 1 to 100", () => {
   for (const bad of ["", "0", "101", "12.5", "-5", "50%", "abc", "1000"]) assert.equal(S.parseSellPreset(bad), null, bad);
   assert.deepEqual(S.parseSellPresets("10,33,75"), [10, 33, 75]);
   assert.deepEqual(S.parseSellPresets("10,150,75"), [10, 50, 75]);
-  assert.deepEqual(S.parseSellPresets("10,33"), [25, 50, 100]);
-  assert.deepEqual(S.parseSellPresets(undefined), [25, 50, 100]);
+  assert.deepEqual(S.parseSellPresets("10,33"), [25, 50, 75, 100]);
+  assert.deepEqual(S.parseSellPresets("10,33,60,100"), [10, 33, 60, 100]);
+  assert.deepEqual(S.parseSellPresets(undefined), [25, 50, 75, 100]);
 });
 
 test("slippage: the ticket's stored basis points, held to its range; percent text to basis points", () => {

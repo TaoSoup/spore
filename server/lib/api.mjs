@@ -31,6 +31,7 @@ import { AgentLedger } from "./agents-live/ledger.mjs";
 import { createBriefStore } from "./agents/brief.mjs";
 import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
+import { parsePost } from "./narrative.mjs";
 import { createPortfolio } from "./portfolio.mjs";
 import { PnlTracker, ACTIVITY_MAX, sinceOf } from "./pnl-tracker.mjs";
 import { buildCandles, buildCandlesKeyed, pageNext, HIST_BUCKETS } from "./candles.mjs";
@@ -648,6 +649,45 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     const idle = [...body.events, body.own, body.under?.event].some((p) => p?.state === "idle");
     sendCachedJson(req, res, body, body.pending ? { cacheControl: "no-store" } : idle ? { maxAge: 5, swr: 5 } : { maxAge: 30 });
   }));
+
+  /**
+   * One X post by its link, for the coin page's "Launch a child" fill (README §API): `?url=` must be an x.com /
+   * twitter.com status link (lib/narrative.mjs parsePost; only the id's digits go any further). It answers what the
+   * post-text fetcher (lib/xposts.mjs) has stored, and otherwise asks for the post at low priority on this IP's
+   * RATE_POSTFILL allowance and a server-wide POST_FILL_DAILY. Never cached: the client asks again while the state is "wait". 404 without the fetcher
+   * (NARRATIVE=0 or NARRATIVE_POSTS=0).
+   */
+  const POST_FILL_URL_MAX = 300;
+  const POST_FILL_DAILY = 200;
+  const postFill = new RateLimiter({ limit: limitOf("postfill").limit, windowMs: limitOf("postfill").windowMs, now });
+  const fillDay = { day: "", used: 0 };
+  app.get("/api/post-fill", (req, res) => {
+    const raw = req.query.url;
+    if (typeof raw !== "string" || !raw || raw.length > POST_FILL_URL_MAX) return res.status(400).json({ error: "url must be an x.com or twitter.com post link" });
+    const p = parsePost(raw);
+    if (!p) return res.status(400).json({ error: "url must be an x.com or twitter.com post link" });
+    const posts = narrOf?.posts ?? null;
+    if (!posts) return res.status(404).json({ error: "post fill is off" });
+    res.set("Cache-Control", "no-store");
+    const rec = posts.peek(p.id);
+    if (rec && (rec.state === "ok" || rec.state === "none")) {
+      const ok = rec.state === "ok";
+      return res.json({ id: p.id, state: rec.state, handle: ok ? rec.handle ?? null : null, text: ok ? (rec.flagged ? "" : rec.text ?? "") : null });
+    }
+    // A fill asks at low priority (never the first half of the fetcher's line or of its day, which the posts coins link
+    // keep), on its own per-IP allowance (RATE_POSTFILL, not /api/narrative's) and a server-wide POST_FILL_DAILY a UTC
+    // day. Refused: `reason` says why ("busy", "budget", "limit", ...) and the state is what is stored ("idle").
+    let reason = posts.canQueue(p.id, { low: true });
+    if (reason === "ok") {
+      const day = new Date(now()).toISOString().slice(0, 10);
+      if (fillDay.day !== day) { fillDay.day = day; fillDay.used = 0; }
+      if (fillDay.used >= POST_FILL_DAILY) reason = "budget";
+      else if (!postFill.check(req.ip ?? "?").ok) reason = "limit";
+      else { reason = posts.want(p.id, { low: true }); if (reason === "ok") fillDay.used++; }
+    }
+    const state = posts.state(p.id);
+    res.json({ id: p.id, state, handle: null, text: null, ...(state === "wait" || reason === "ok" || reason === "queued" ? {} : { reason }) });
+  });
 
   // The families waking up (README §API). One sliced build per coin-row snapshot shared by every asker, at most 5 s old (lib/wakeups.mjs); the
   // header says the same 5 s. No stale-while-revalidate (sendCachedJson would add 20 s): with it a browser answers each
