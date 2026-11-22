@@ -16,7 +16,7 @@ import { CoinRows, TF_S, SPARK_STEP, SPARK_N, HOLD_S, TREND_MAX, DUST_USD, FLOOR
 import { BUCKET_S, BASE_BUCKETS, GRACE_S, DEAD_SOLD_S, SNIPE_S } from "../lib/wakeups.mjs";
 import { Holders } from "../lib/holders.mjs";
 import { Narrative, postUrl } from "../lib/narrative.mjs";
-import { NarrTags } from "../lib/narrtags.mjs";
+import { NarrTags, userText } from "../lib/narrtags.mjs";
 import { Db } from "../lib/db.mjs";
 import { Model } from "../lib/model.mjs";
 import { createApp } from "../lib/api.mjs";
@@ -575,11 +575,11 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   for (const [m, n] of [[A, 12], [C, 11], [D, 10], [FEW, 3], [UN, 20]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
   const calls = [];
   const client = async () => ({ messages: { create: async (req) => {
-    const coins = JSON.parse(req.messages[0].content.split("<coins>\n")[1].split("\n</coins>")[0]);
+    const coins = JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
     calls.push(coins.map((c) => c.symbol));
     return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => (c.symbol === "OTHER" || c.symbol === "FEW" ? { n: c.n, kind: "none", id: 0, title: "", theme: "other" } : { n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" })) }) }] };
   } } });
-  const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, log: quiet });
+  const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, hotFillMs: 0, log: quiet });
   w.rows.attach({ narr });
   w.clock.t = (T0 + 100) * 1000;
   let b = await w.rows.stories("5m");

@@ -73,6 +73,8 @@ export const BAD_RUN_PAUSE = 3;
 export const API_BASE_URL = "https://api.anthropic.com";
 /** Narratives listed in a request (the most recently used). */
 export const NARR_ACTIVE = 150;
+/** How long the cached snapshot of the story list is kept before it is renewed (stories made since go uncached after it). */
+export const SNAP_MS = 15 * 60_000;
 /** Requests a minute at most, and the wait for one answer. */
 export const PER_MIN = 6, REQUEST_TIMEOUT_MS = 30_000;
 /** Output tokens allowed: a base plus this many per coin (an entry is about 30 tokens, 40 with a new title; the mostly empty `retitle` field adds about 5). */
@@ -87,7 +89,7 @@ export const TITLE_MAX = 40, TITLE_WORDS = 5;
 /** The model column of a coin given up on (it failed alone); after GAVE_UP_S (s) the row no longer counts and the coin may be asked again. */
 export const GAVE_UP = "gave-up", GAVE_UP_S = 86_400;
 /** NarrTags: coins waiting at most; how often it looks for work; how long a batch of non-page coins may wait to fill; how long a coin waits for its metadata. */
-export const MAX_WAITING = 2_000, TICK_MS = 5_000, FILL_WAIT_MS = 30_000, META_WAIT_MS = 120_000;
+export const MAX_WAITING = 2_000, TICK_MS = 5_000, FILL_WAIT_MS = 120_000, META_WAIT_MS = 120_000;
 /** NarrTags: page coins waiting at most (the oldest then joins the others); a page coin not offered again for this long joins the others too. */
 export const HOT_MAX = 600, HOT_STALE_MS = 300_000;
 /** NarrTags: how often the last hour's new coins are swept. */
@@ -383,10 +385,18 @@ export const REPLY_SCHEMA = Object.freeze({
  * the user turn, the answer forced into REPLY_SCHEMA. No thinking is asked for (a classification), and the output
  * allowance grows with the batch.
  */
-export function buildRequest({ model = DEFAULT_MODEL, coins, narratives = [] }) {
-  const list = [...narratives].sort((a, b) => a.id - b.id).map((n) => `${n.id} | ${n.theme} | ${cleanText(n.title, TITLE_MAX)}`);
+export function buildRequest({ model = DEFAULT_MODEL, coins, narratives = [], fresh = null }) {
+  // `fresh` given: `narratives` is the cached snapshot (its own block, marked for the prompt cache, the same bytes from
+  // request to request) and `fresh` the stories made or seen since, after it and uncached. Without it, one plain string.
+  const line = (n) => `${n.id} | ${n.theme} | ${cleanText(n.title, TITLE_MAX)}`;
+  const list = [...narratives].sort((a, b) => a.id - b.id).map(line);
+  const tail = fresh ? [...fresh].sort((a, b) => a.id - b.id).map(line) : [];
   const blocks = coins.map((d, i) => JSON.stringify(coinBlock(d, i + 1)));
-  const user = `<narratives>\n${list.length ? list.join("\n") : "(none yet)"}\n</narratives>\n<coins>\n[\n${blocks.join(",\n")}\n]\n</coins>\nLabel each of the ${coins.length} coins above.`;
+  const rest = `\n</narratives>\n<coins>\n[\n${blocks.join(",\n")}\n]\n</coins>\nLabel each of the ${coins.length} coins above.`;
+  const none = !list.length && !tail.length;
+  const user = fresh && list.length
+    ? [{ type: "text", text: `<narratives>\n${list.join("\n")}`, cache_control: { type: "ephemeral" } }, { type: "text", text: `${tail.length ? `\n${tail.join("\n")}` : ""}${rest}` }]
+    : `<narratives>\n${none ? "(none yet)" : [...list, ...tail].join("\n")}${rest}`;
   const req = {
     model,
     max_tokens: OUT_BASE + OUT_PER_COIN * coins.length,
@@ -404,10 +414,15 @@ export function buildRequest({ model = DEFAULT_MODEL, coins, narratives = [] }) 
 }
 
 /** A deliberately high guess of a request's input tokens: its UTF-8 bytes / 2.5, plus the schema. */
+/** The text of a message, whether its content is a string or text blocks. */
+export function userText(m) {
+  const c = m?.content;
+  return typeof c === "string" ? c : Array.isArray(c) ? c.map((b) => b?.text ?? "").join("") : "";
+}
 export function estimateInputTokens(req) {
   let bytes = Buffer.byteLength(JSON.stringify(req.output_config?.format?.schema ?? {}), "utf8");
   for (const b of req.system ?? []) bytes += Buffer.byteLength(b.text ?? "", "utf8");
-  for (const m of req.messages ?? []) bytes += Buffer.byteLength(typeof m.content === "string" ? m.content : JSON.stringify(m.content), "utf8");
+  for (const m of req.messages ?? []) bytes += Buffer.byteLength(userText(m), "utf8");
   return Math.ceil(bytes / 2.5) + 200;
 }
 
@@ -587,9 +602,13 @@ export class TagEngine {
       try { this.client = await this.clientFactory(); }
       catch (e) { this.stats.lastError = "no_client"; this.#pause(PAUSE_CONFIG_MS); this.log.warn?.(`narrtags: no model client (${e?.code ?? "error"}); nothing is tagged for ${PAUSE_CONFIG_MS / 60_000} min`); return { ok: false, why: "no_client" }; }
     }
-    let narratives;
-    try { narratives = this.store.narrRecent(NARR_ACTIVE); } catch { return { ok: false, why: "store" }; }
-    const req = buildRequest({ model: this.model, coins, narratives });
+    let narratives, fresh;
+    try {
+      const recent = this.store.narrRecent(NARR_ACTIVE), t = this.now();
+      if (!this.snap || t - this.snap.at >= SNAP_MS) this.snap = { at: t, list: recent, ids: new Set(recent.map((n) => n.id)) };
+      narratives = this.snap.list; fresh = recent.filter((n) => !this.snap.ids.has(n.id));
+    } catch { return { ok: false, why: "store" }; }
+    const req = buildRequest({ model: this.model, coins, narratives, fresh });
     const estIn = estimateInputTokens(req);
     if (estIn > MAX_INPUT_TOKENS) return { ok: false, why: "too_large" };
     // Worst case: every input token written to the cache at the write rate, and all of max_tokens used.
@@ -627,7 +646,7 @@ export class TagEngine {
     try { this.store.spendAdd(day, res?.usage ? { usd: real - worst, inTokens: inTok, outTokens: outTok } : {}); } catch { /* the reserve stays */ }
     this.stats.inTokens += inTok; this.stats.outTokens += outTok; this.stats.cacheReadTokens += Number(u.cache_read_input_tokens) || 0; this.stats.usd += res?.usage ? real : worst;
     const text = res?.stop_reason === "end_turn" && Array.isArray(res.content) ? res.content.find((b) => b?.type === "text")?.text : null;
-    const reply = typeof text === "string" ? readReply(text, { count: coins.length, offered: new Set(narratives.map((n) => n.id)) }) : { ok: false };
+    const reply = typeof text === "string" ? readReply(text, { count: coins.length, offered: new Set([...narratives, ...fresh].map((n) => n.id)) }) : { ok: false };
     if (!reply.ok) {
       const cls = res?.stop_reason === "refusal" ? "refusal" : res?.stop_reason === "max_tokens" ? "cut_off" : "malformed";
       this.stats.malformed++; this.stats.lastError = cls; this.badRun++;
@@ -642,7 +661,7 @@ export class TagEngine {
     this.backoffMs = 0; this.badRun = 0; this.stats.ok++;
     const done = new Map(), missed = [], retitled = [], nowS = Math.floor(this.now() / 1000);
     const count = { merged: 0, added: 0, forced: 0, retitled: 0, refused: 0 };
-    const titles = new Map(narratives.map((n) => [n.id, n.title]));
+    const titles = new Map([...narratives, ...fresh].map((n) => [n.id, n.title]));
     const write = () => {
       const filed = new Map(), wider = new Map(); // narrative id → coins of this batch filed under it; → the first wider title suggested for it
       coins.forEach((c, i) => {
@@ -674,7 +693,7 @@ export class TagEngine {
         this.store.tagSet({ mint: c.mint, narrativeId: id, at: nowS, model: this.model, asks: (c.asks ?? 0) + 1, hadPost: !!c.post?.text, bare: !c.post?.text && !descText(c.description) });
         done.set(c.mint, id);
       });
-      for (const [id, title] of wider) { if (this.#retitle(id, title, filed.get(id) ?? 0)) { count.retitled++; retitled.push(id); } else count.refused++; }
+      for (const [id, title] of wider) { if (this.#retitle(id, title, filed.get(id) ?? 0)) { count.retitled++; retitled.push(id); this.snap = null; } else count.refused++; }
     };
     try { if (typeof this.store.transaction === "function") this.store.transaction(write); else write(); }
     catch { this.stats.lastError = "store"; return { ok: false, why: "store" }; }
@@ -714,7 +733,8 @@ export class NarrTags {
    * readable key file (or a given clientFactory) and a known price; otherwise every method is a no-op, no client is
    * ever made and no timer runs.
    */
-  constructor({ model, db, cfg = {}, posts = null, clientFactory = null, now = Date.now, perMin = PER_MIN, log = console } = {}) {
+  constructor({ model, db, cfg = {}, posts = null, clientFactory = null, now = Date.now, perMin = PER_MIN, hotFillMs = FILL_WAIT_MS, log = console } = {}) {
+    this.hotFillMs = hotFillMs; // how long page coins may wait to fill a batch (tests of the older pacing pass 0)
     this.model = model; this.db = db; this.posts = posts; this.now = now; this.log = log;
     this.minBuyers = cfg.minBuyers ?? 10; this.modelId = cfg.model || DEFAULT_MODEL;
     this.hot = new Map(); this.wait = new Map(); // mint → when it was first offered (ms): the stories page's coins, the rest
@@ -956,10 +976,14 @@ export class NarrTags {
       while (!this.stopped) {
         const e = this.engine;
         if (e.capped() || e.pausedMs() > 0 || e.rateWaitMs() > 0) break;
-        if (!this.hot.size) {
-          if (!this.wait.size) break;
-          const oldest = this.wait.values().next().value;
-          if (this.wait.size < BATCH && this.now() - oldest < FILL_WAIT_MS) break;
+        // Page coins wait to fill a batch too: they arrive a few at a time, and a request of one or two coins pays for the
+        // whole instruction and story list (measured live on Sonnet: ~4,500 tokens in, under 100 out, per request).
+        // A batch goes when BATCH coins wait or the oldest has waited FILL_WAIT_MS; page coins still go first in it.
+        const waiting = this.hot.size + this.wait.size;
+        if (!waiting) break;
+        if (waiting < BATCH) {
+          const t = this.now(), oh = this.hot.size ? this.hot.values().next().value : Infinity, ow = this.wait.size ? this.wait.values().next().value : Infinity;
+          if (t - oh < this.hotFillMs && t - ow < FILL_WAIT_MS) break;
         }
         const batch = await this.#take();
         if (!batch.length) break;

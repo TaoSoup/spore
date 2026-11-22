@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReplay, parseArgs, alsoList, ALSO_MAX } from "../scripts/narrative-replay.mjs";
 import { Db } from "../lib/db.mjs";
-import { BATCH } from "../lib/narrtags.mjs";
+import { BATCH, userText } from "../lib/narrtags.mjs";
 
 const NOW = 1_770_000_000, KEY = "sk-ant-replay-SECRET-42";
 const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
@@ -41,7 +41,7 @@ function fixture(dir, n = 30) {
   db.close();
   return file;
 }
-const sentCoins = (req) => JSON.parse(req.messages[0].content.split("<coins>\n")[1].split("\n</coins>")[0]);
+const sentCoins = (req) => JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
 
 test("replay arguments: the documented options and defaults; a missing database, output or key is said plainly", () => {
   assert.deepEqual(parseArgs(["--db", "d.sqlite", "--key-file", "k", "--out", "o"]), { model: "claude-haiku-5-5", hours: 24, maxCoins: 1500, maxUsd: 0.5, minBuyers: 10, perMin: 20, dryRun: false, db: "d.sqlite", keyFile: "k", out: "o" });
@@ -80,7 +80,7 @@ test("a replay goes through the server's tagging path in creation order: narrati
     const clientFactory = async () => ({ messages: { create: async (req) => {
       reqs.push(req);
       const coins = sentCoins(req);
-      const known = req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0];
+      const known = userText(req.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0];
       return { stop_reason: "end_turn", usage: { input_tokens: 3000, output_tokens: 400 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => {
         if (c.symbol === "T29") return { n: c.n, kind: "none", id: 0, title: "", theme: "other" };
         const dog = c.description.includes("dog"), id = Number((known.match(dog ? /^(\d+) \| animals/m : /^(\d+) \| ai/m) ?? [])[1] ?? 0);
@@ -102,7 +102,7 @@ test("a replay goes through the server's tagging path in creation order: narrati
     // batches of 20 over a longer run: a later request lists the narratives made by an earlier one, and a coin's stored post is sent
     reqs.length = 0;
     const all = await runReplay({ db: file, keyFile: join(dir, "never-read.key"), out: join(dir, "out3"), hours: 24, maxCoins: 1500, maxUsd: 0.5, minBuyers: 5, perMin: 1e6 }, { clientFactory, print() {} });
-    assert.deepEqual([all.coinsPicked, all.requests, all.narratives, reqs[1].messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0]], [24, 2, 2, "1 | ai | ai bubble popping\n2 | animals | dog in a hat"]);
+    assert.deepEqual([all.coinsPicked, all.requests, all.narratives, userText(reqs[1].messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0]], [24, 2, 2, "1 | ai | ai bubble popping\n2 | animals | dog in a hat"]);
     assert.deepEqual(sentCoins(reqs[0]).find((c) => c.symbol === "T16").post, { by: "who", text: "the post behind coin 16" });
     assert.equal(sentCoins(reqs[0]).find((c) => c.symbol === "T20").pair_narrative, undefined, "its parent (coin 15) is in the same request: not tagged yet");
     assert.equal(sentCoins(reqs[1]).find((c) => c.symbol === "T28").pair_narrative, "dog in a hat", "the parent (coin 10) was tagged in the request before");
@@ -179,7 +179,7 @@ test("a replay runs the same guards as the server: boilerplate is stripped, a co
     const clientFactory = async () => ({ messages: { create: async (req) => {
       reqs.push(req);
       const coins = sentCoins(req);
-      const known = req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0];
+      const known = userText(req.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0];
       return { stop_reason: "end_turn", usage: { input_tokens: 3000, output_tokens: 400 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => {
         const dog = !!c.description?.includes("dog"), id = Number((known.match(dog ? /^(\d+) \| animals/m : /^(\d+) \| ai/m) ?? [])[1] ?? 0);
         // every later answer suggests a title: a wider one for the dogs (words of the old title only), one about something else for the ai coins
@@ -238,7 +238,7 @@ test("--also coins are read after the window's coins whatever their age or buyer
     let inTokens = 3000;
     const clientFactory = async () => ({ messages: { create: async (req) => {
       reqs.push(req);
-      const known = req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0];
+      const known = userText(req.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0];
       return { stop_reason: "end_turn", usage: { input_tokens: inTokens, output_tokens: 400 }, content: [{ type: "text", text: JSON.stringify({ coins: sentCoins(req).map((c) => {
         if (!c.description) return { n: c.n, kind: "none", id: 0, title: "", theme: "other", retitle: "" };
         const dog = c.description.includes("dog"), id = Number((known.match(dog ? /^(\d+) \| animals/m : /^(\d+) \| ai/m) ?? [])[1] ?? 0);
@@ -250,7 +250,7 @@ test("--also coins are read after the window's coins whatever their age or buyer
     assert.deepEqual([r.coinsEligible, r.coinsPicked, r.coinsRead, r.alsoRead, r.requests, r.stopped], [20, 12, 12, 3, 2, null]);
     assert.deepEqual(sentCoins(reqs[0]).map((c) => c.symbol), Array.from({ length: 12 }, (_, i) => `T${18 + i}`), "the window's coins first, alone");
     assert.deepEqual(sentCoins(reqs[1]).map((c) => c.symbol), ["OLD", "T3", "T7"], "then the --also coins, in the order given, each once");
-    assert.equal(reqs[1].messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | dog in a hat\n2 | ai | ai bubble popping", "they see the narratives the window made");
+    assert.equal(userText(reqs[1].messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | dog in a hat\n2 | ai | ai bubble popping", "they see the narratives the window made");
     assert.deepEqual(r.also, [
       { mint: "OLD", name: "Old", symbol: "OLD", found: true, inWindow: false, read: true, title: null, theme: null },
       { mint: "M003", name: "Coin 3", symbol: "T3", found: true, inWindow: false, read: true, title: "ai bubble popping", theme: "ai" },

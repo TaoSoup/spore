@@ -23,7 +23,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync, accessSync, constants as FS } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { TagEngine, MemoryTagStore, anthropicClientFactory, estimateInputTokens, priceOf, DEFAULT_MODEL, BATCH } from "../lib/narrtags.mjs";
+import { TagEngine, MemoryTagStore, anthropicClientFactory, estimateInputTokens, priceOf, DEFAULT_MODEL, BATCH, userText } from "../lib/narrtags.mjs";
 import { postOf } from "../lib/narrative.mjs";
 import { SOL_MINT } from "../lib/jupiter.mjs";
 
@@ -67,7 +67,7 @@ export function parseArgs(argv) {
 
 /** A client that asks nobody: every coin "none", with a rough token count as its usage. */
 const dryClientFactory = () => async () => ({ messages: { create: async (req) => {
-  const n = (req.messages[0].content.match(/^\{"n":/gm) ?? []).length;
+  const n = (userText(req.messages[0]).match(/^\{"n":/gm) ?? []).length;
   return { stop_reason: "end_turn", usage: { input_tokens: estimateInputTokens(req), output_tokens: 12 * n + 8 }, content: [{ type: "text", text: JSON.stringify({ coins: Array.from({ length: n }, (_, i) => ({ n: i + 1, kind: "none", id: 0, title: "", theme: "other", retitle: "" })) }) }] };
 } } });
 

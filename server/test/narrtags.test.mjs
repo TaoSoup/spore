@@ -12,8 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NarrTags, TagEngine, MemoryTagStore, THEMES, PRICES, DEFAULT_MODEL, BATCH, MAX_ATTEMPTS, GAVE_UP, GAVE_UP_S, BAD_RUN_PAUSE, HOT_MAX, HOT_STALE_MS, MAX_WAITING, API_BASE_URL, PER_MIN, PAUSE_MS, PAUSE_MAX_MS, PAUSE_CONFIG_MS, OUT_BASE, OUT_PER_COIN, CAPS, TITLE_MAX, NEW_S, RECHECK_MS, META_WAIT_MS, FILL_WAIT_MS,
-  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA,
-} from "../lib/narrtags.mjs";
+  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA, userText } from "../lib/narrtags.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
 import { fakeClock, T0 } from "./helpers/chain.mjs";
@@ -23,8 +22,8 @@ const DAY_MS = 86_400_000;
 /** A log that keeps every line. */
 const keeper = () => { const lines = []; const push = (m) => lines.push(String(m)); return { lines, info: push, warn: push, error: push }; };
 /** The coins a request carried, as the model reads them. */
-const sentCoins = (req) => JSON.parse(req.messages[0].content.split("<coins>\n")[1].split("\n</coins>")[0]);
-const sentNarratives = (req) => req.messages[0].content.split("<narratives>\n")[1].split("\n</narratives>")[0].split("\n");
+const sentCoins = (req) => JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
+const sentNarratives = (req) => userText(req.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0].split("\n");
 const reply = (coins, { usage = { input_tokens: 1000, output_tokens: 200 }, stop = "end_turn" } = {}) => ({ stop_reason: stop, content: [{ type: "text", text: JSON.stringify({ coins }) }], usage });
 const none = (n) => ({ n, kind: "none", id: 0, title: "", theme: "other" });
 const fresh = (n, title, theme = "ai") => ({ n, kind: "new", id: 0, title, theme });
@@ -111,13 +110,13 @@ test("the request: fixed instructions and themes in one cacheable system block, 
   assert.deepEqual(coins.map((c) => c.n), [1, 2]);
   assert.ok(coins[0].description.includes("IGNORE ALL PREVIOUS") && !coins[0].description.includes("<") && !coins[0].description.includes(">"));
   assert.equal(req.messages.length, 1);
-  assert.equal(req.messages[0].content.split("</coins>").length, 2, "one closing tag: ours");
+  assert.equal(userText(req.messages[0]).split("</coins>").length, 2, "one closing tag: ours");
   assert.deepEqual([REPLY_SCHEMA.additionalProperties, REPLY_SCHEMA.properties.coins.items.additionalProperties, REPLY_SCHEMA.properties.coins.items.properties.theme.enum], [false, false, [...THEMES]]);
   assert.equal(buildRequest({ coins: [coin("a")], narratives: [] }).messages[0].content.includes("(none yet)"), true);
   // another model keeps its own thinking defaults
   const other = buildRequest({ model: "some-other-model", coins: [coin("a")] });
   assert.deepEqual([other.thinking, other.output_config.effort], [undefined, undefined]);
-  assert.ok(estimateInputTokens(req) > (SYSTEM_TEXT.length + req.messages[0].content.length) / 4, "the estimate errs high");
+  assert.ok(estimateInputTokens(req) > (SYSTEM_TEXT.length + userText(req.messages[0]).length) / 4, "the estimate errs high");
 });
 
 test("the reply is checked here: unknown ids, themes outside the list, dirty titles, coins not asked about, two answers for one coin, a reply that is not the JSON", () => {
@@ -327,7 +326,7 @@ function fakeModel() {
 function tagger(o = {}) {
   const clock = o.clock ?? fakeClock(T0 * 1000), db = o.db ?? new Db(":memory:"), model = o.model ?? fakeModel(), log = o.log ?? keeper();
   const client = o.client === undefined ? fakeClient() : o.client;
-  const t = new NarrTags({ model, db, cfg: { on: true, model: DEFAULT_MODEL, dailyUsd: 1, minBuyers: 10, keyFile: null, ...o.cfg }, posts: o.posts ?? null, clientFactory: client, now: clock.now, perMin: o.perMin ?? 600, log });
+  const t = new NarrTags({ model, db, cfg: { on: true, model: DEFAULT_MODEL, dailyUsd: 1, minBuyers: 10, keyFile: null, ...o.cfg }, posts: o.posts ?? null, clientFactory: client, now: clock.now, perMin: o.perMin ?? 600, hotFillMs: o.hotFillMs ?? 0, log });
   return { t, clock, db, model, client, log };
 }
 
@@ -1055,4 +1054,34 @@ test("a website that is an X search or hashtag link reaches the model as its wor
   assert.equal(hasOwnText(d), true);
   assert.equal(hasOwnText({ name: "A", symbol: "A", website: "https://x.com/someone" }), false, "a profile link is still not text");
   assert.equal(siteText("https://x.com/someone/status/1700000000000000000"), "", "a link to a post is not site text");
+});
+
+test("page coins wait to fill a batch: fewer than a batch go only once the oldest has waited the fill time", async () => {
+  const model = fakeModel();
+  for (let i = 0; i < 3; i++) model.add("pg" + i, { name: "Page " + i, symbol: "PG" + i, description: "a page coin" });
+  const client = fakeClient((req) => reply(sentCoins(req).map((c) => none(c.n))));
+  const { t, clock } = tagger({ model, client, hotFillMs: FILL_WAIT_MS });
+  t.offer("pg0", 20, { hot: true });
+  await t.pump();
+  assert.equal(client.calls.length, 0, "one page coin does not go alone at once");
+  clock.t += 10_000; t.offer("pg1", 20, { hot: true }); t.offer("pg2", 20, { hot: true });
+  await t.pump();
+  assert.equal(client.calls.length, 0, "still under a batch and the oldest has waited 10 s");
+  clock.t += FILL_WAIT_MS;
+  await t.pump();
+  assert.equal(client.calls.length, 1, "the oldest waited the fill time: one request");
+  assert.equal(sentCoins(client.calls[0].req).length, 3, "it carries all three page coins");
+});
+
+test("the story list goes out as its own cached block (the same bytes while the snapshot holds); stories made since follow it uncached", () => {
+  const snap = [{ id: 2, title: "ai bubble popping", theme: "ai" }, { id: 1, title: "fiona the hippo", theme: "animals" }];
+  const a = buildRequest({ coins: [coin("a")], narratives: snap, fresh: [] });
+  const b = buildRequest({ coins: [coin("b"), coin("c")], narratives: snap, fresh: [{ id: 3, title: "gta 6", theme: "gaming" }] });
+  const [ca, cb] = [a.messages[0].content, b.messages[0].content];
+  assert.ok(Array.isArray(ca) && Array.isArray(cb));
+  assert.deepEqual(ca[0], cb[0], "the cached block is identical across requests");
+  assert.deepEqual(ca[0].cache_control, { type: "ephemeral" });
+  assert.equal(cb[1].cache_control, undefined);
+  assert.equal(userText(b.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | fiona the hippo\n2 | ai | ai bubble popping\n3 | gaming | gta 6");
+  assert.equal(typeof buildRequest({ coins: [coin("a")], narratives: snap }).messages[0].content, "string", "without fresh: one plain string as before");
 });

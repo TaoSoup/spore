@@ -441,8 +441,13 @@ the site depends on it, and nothing here says anything about a coin's price.
   treated as a guess. When a description or post says what the coin is about, that decides, not the name. New titles name the story at the level a
   reader would search for it ("gta 6"), not one coin's angle on it.
 - **The request**: batches of 20 coins, at most 6 requests a minute, one at a time, through the official
-  `@anthropic-ai/sdk` (pinned). Each carries the fixed instructions and themes (a cacheable system block), the 150 most
-  recently used narratives (id, theme, title) and the coins as JSON. The answer is forced into a JSON schema; per coin
+  `@anthropic-ai/sdk` (pinned). A batch goes when 20 coins wait or the oldest has waited 2 min (`FILL_WAIT_MS`), page
+  coins included: measured live on Sonnet 5.5, sending page coins at once made requests of one or two coins that each
+  paid for the whole story list (about $1.25 an hour); waiting and caching the list brought it to about $0.37 an hour.
+  Each request carries the fixed instructions and themes (a cached system block), the story list (id, theme, title) as
+  a cached block of its own (a snapshot of the 150 most recently used narratives, kept for 15 min, `SNAP_MS`, and
+  renewed at once after a retitle, so its bytes repeat and the provider reads it from cache), the narratives made or
+  used since the snapshot after it, uncached, and the coins as JSON. The answer is forced into a JSON schema; per coin
   an existing narrative's id (optionally with a wider title for it, see below), a new title and theme, or "none". No
   thinking is requested; the output allowance grows with the batch (64 tokens plus 56 a coin).
 - **The server decides, not the model**: an id that was not offered is rejected, a theme outside the list becomes
