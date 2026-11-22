@@ -1201,6 +1201,23 @@ export function storyLine(e: Pick<OneEntry, "card" | "coinsN" | "newN"> & Partia
   if (h.kind === "family") return { kind: "family", title: h.line, theme, post: null, text: "", href: null, count: n };
   return { kind: "post", title: [h.who, h.when].filter(Boolean).join(" · "), theme, post: null, text: h.text, href: h.href, count: n };
 }
+/// A story block's header, as drawn: `title` on the first line with the theme pill; `total` (the story's buyers over
+/// the timeframe, the sum `oneList` ranks it by) as the bold figure on the right, then `words` ("buyers · 2 coins · 1
+/// new", with countLine's moved / gone). `sub`: the small muted second line: a narrative's "@handle · 6 min ago" (a link
+/// to its post when `href`), a post story's "@handle · 27 min ago" followed by the post's words (`text`, cut), a family's
+/// "waking up · 12 min". A post story's title is "Linked post" (its who and when are on the second line), a family's
+/// "$SYM family".
+export type StoryHeader = { kind: StoryLine["kind"]; title: string; theme: string; sub: string; text: string; href: string | null; total: string; words: string };
+export function storyHeader(e: Pick<OneEntry, "card" | "coinsN" | "newN" | "buyers"> & Partial<Pick<OneEntry, "movedN" | "goneN">>, nowS: number, nar = true): StoryHeader {
+  const line = storyLine(e, nowS, nar);
+  const b = whole(e.buyers);
+  const base = { kind: line.kind, theme: line.theme, text: "", href: line.href, total: count(b), words: `${b === 1 ? "buyer" : "buyers"} · ${line.count}` };
+  if (line.kind === "narrative") return { ...base, title: line.title, sub: line.post ?? "" };
+  const h = e.card ? storyHead(e.card, nowS) : null;
+  // A post with no usable handle: storyHead's who is "Linked post" itself, which the title already says.
+  if (line.kind === "post") return { ...base, title: "Linked post", sub: h ? [h.who.startsWith("@") ? h.who : "", h.when].filter(Boolean).join(" · ") : line.title, text: line.text };
+  return { ...base, title: h?.who ?? line.title, sub: h?.when ?? "" };
+}
 /// The one muted line under a single coin's name: its post ("@handle · 13 min ago · the post's words", a link to the
 /// post) or its family ("$SYM family · waking up · 12 min"); null for a loose row and for a narrative story cut to one
 /// row by a filter (that row names its story with the title tag).

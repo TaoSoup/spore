@@ -2,11 +2,12 @@
 // ONE LIST, ONE STYLE: every coin, in a story or not, is the same coin row (CoinRow), and stories and single coins are
 // ranked together by buyers over the chosen timeframe (lib/discover.ts oneList: a story by the sum over its coins,
 // copies included; a single coin by its own; then more coins, then the order received).
-// - A story (two or more coin rows of one card) is a slim header line over its rows, which sit under it with a thin
-//   left rule: a narrative's title (title-cased, one line) with its theme pill and, when the story has a post, a muted
-//   "@handle · 6 min ago"; a post story's "@handle · 27 min ago" and the post's words on one line (a link to the post
-//   on x.com, rebuilt from the id); a family story "$SYM family · waking up · 12 min". On the right, muted, "3 coins ·
-//   1 new". The three coins with the most buyers show; the rest wait behind "+N more coins", which opens in place. A
+// - A story (two or more coin rows of one card) is a contained block in the list (its own border, a tinted ground,
+//   rounded corners; its rows are the same rows, in the same columns): a header of the title (a narrative's,
+//   title-cased; "Linked post"; "$SYM family") with its theme pill, on the right the story's buyers over the timeframe
+//   in bold and, muted, "buyers · 3 coins · 1 new"; under the title a small muted line: "@handle · 6 min ago" (a link
+//   to the post on x.com, rebuilt from the id), a post story's words after it, or a family's "waking up · 12 min"
+//   (lib/discover.ts storyHeader). The three coins with the most buyers show; the rest wait behind "+N more coins", which opens in place. A
 //   narrative story lists its new coins (created in the last hour, a small "new" pill) first, then the older ones.
 // - A post or family card of one coin is a plain row with one muted line under the coin's name: the post ("@handle ·
 //   13 min ago · the post's words", a link) or the family. A loose coin is a plain row; while narratives are shown it
@@ -51,7 +52,7 @@ import {
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
   activeTheme, buyLabel, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
   listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
-  closeShrunk, showMore, storiesView, storyLine, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
+  closeShrunk, showMore, storiesView, storyHeader, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
@@ -249,8 +250,8 @@ function Rows({ rows, o, parent }: { rows: readonly StoryShown[]; o: RowOpts; pa
 const ThemePill = ({ theme }: { theme: string }) => (theme ? <span className="dsc-pill sm dsc-st-theme" title="The theme a language model gave this story. It can be wrong."><span className="dsc-vh">Theme: </span>{theme}</span> : null);
 
 /// One entry of the list. A single coin: its row, with its post or family on one muted line under the name (a
-/// one-coin card), or its story's title tag (a loose coin while narratives are shown). A story: a slim header line
-/// (not a control), its first three rows under a thin left rule, and "+N more coins", which opens the rest in place.
+/// one-coin card), or its story's title tag (a loose coin while narratives are shown). A story: a block with a header
+/// (not a control), its first three rows, and "+N more coins", which opens the rest in place.
 /// `nar`: narratives are shown.
 function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: boolean; open: boolean; onToggle: () => void }) {
   const id = useId();
@@ -262,25 +263,26 @@ function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: bo
     const row = e.left && !r.left ? { ...r, left: true, moved: e.moved } : r;
     return <RowAndCopies r={row} o={o} parent={parent} story={nar && e.card?.kind !== "post" && e.card?.kind !== "family"} sub={coinStory(e.card, o.now)} />;
   }
-  const line = storyLine(e, o.now, nar);
+  const h = storyHeader(e, o.now, nar);
   const { shown, more } = storySplit(e.rows, open);
   const isNar = e.card?.kind === "narrative";
-  const label = line.kind === "narrative" ? `Story: ${line.title}` : line.title;
+  const label = h.kind === "narrative" ? `Story: ${h.title}` : h.kind === "post" ? `${h.title} ${h.sub}` : h.title;
+  const postTitle = `Open the post on X. ${NARRATIVE_FOOT}`;
+  // the second line: who posted and when (a post story's words after it), or the family's waking time
+  const subText = h.kind === "post" ? [h.sub, h.text].filter(Boolean).join(" · ") : h.sub;
+  const sub = !subText ? null : h.href
+    ? <a className="dsc-sh-sub" href={h.href} target="_blank" rel="noopener noreferrer" title={postTitle}>{h.kind === "post" && XIcon}<span>{subText}</span></a>
+    : <span className="dsc-sh-sub"><span>{subText}</span></span>;
   return (
     <li className={`dsc-story${e.left ? " left" : ""}`}>
       <div className="dsc-sh">
-        <div className="dsc-sh-l">
-          <span className={`dsc-sh-t${line.kind === "narrative" ? " nar" : ""}`}>{line.title}</span>
-          <ThemePill theme={line.theme} />
-          {line.post && (line.href
-            ? <a className="dsc-sh-q" href={line.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{line.post}</a>
-            : <span className="dsc-sh-q">{line.post}</span>)}
-          {line.kind === "post" && (line.href
-            ? <a className="dsc-sh-text" href={line.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{XIcon}<span>{line.text || "View post"}</span></a>
-            : line.text ? <span className="dsc-sh-text"><span>{line.text}</span></span> : null)}
+        <div className="dsc-sh-top">
+          <span className="dsc-sh-t">{h.title}</span>
+          <ThemePill theme={h.theme} />
           {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
         </div>
-        <span className="dsc-sh-n">{line.count}</span>
+        <span className="dsc-sh-n" title={`Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
+        {sub}
       </div>
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
         {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}

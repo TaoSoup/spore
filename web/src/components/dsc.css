@@ -121,23 +121,26 @@
 .dsc-why { min-width: 0; font-size: var(--fs-2xs); color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-why a { color: var(--muted); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
 .dsc-trend { padding-top: 10px; padding-bottom: 6px; }
-/* one list: a story is a slim header line over its coin rows, which sit under it with a thin left rule; a single
-   coin is a plain row. No big numbers: the count on the right is muted */
-.dsc-story { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; border-bottom: 1px solid var(--line-soft); transition: opacity var(--dur-2); }
-.dsc-story:last-child { border-bottom: 0; }
+/* one list: a story is a contained block (its own border, a tinted ground, rounded corners) holding a header and its
+   coin rows; a single coin is a plain row between blocks. The block reaches --dsc-bx into the card's padding on each
+   side and pads back by the same amount (less its 1 px border), so its rows' content box is exactly the list's: the
+   same row grid, the same container width, every column in line with the header and the single rows */
+.dsc-story { --dsc-bx: 8px; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; margin: 10px calc(-1 * var(--dsc-bx)); padding: 0 calc(var(--dsc-bx) - 1px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--glass); transition: opacity var(--dur-2); }
+.dsc-story + .dsc-story { margin-top: 0; }
+/* the row just above a block: the block's border is the separator */
+.dsc-one > li:has(+ .dsc-story) { border-bottom: 0; }
 .dsc-story.left { opacity: .55; }
-.dsc-sh { display: flex; align-items: baseline; gap: 4px 12px; min-width: 0; padding: 10px 0 4px; }
-.dsc-sh-l { flex: 1 1 auto; display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
-.dsc-sh-t { flex: 0 1 auto; min-width: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
-.dsc-sh-q { flex: 0 1 auto; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-a.dsc-sh-q:hover, a.dsc-sh-q:focus-visible { color: var(--ink); }
-.dsc-sh-text { flex: 0 10 auto; display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); color: var(--ink-2); overflow: hidden; }
-.dsc-sh-text span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsc-sh-text:hover, .dsc-sh-text:focus-visible { color: var(--ink); }
+/* the header: title and theme pill, the author line under them; the buyers on the right of both */
+.dsc-sh { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "top n" "sub n"; align-items: center; gap: 2px 12px; min-width: 0; padding: 10px 0 8px; border-bottom: 1px solid var(--line-soft); }
+.dsc-sh-top { grid-area: top; display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.dsc-sh-t { flex: 0 1 auto; min-width: 0; font-size: var(--fs-base); font-weight: 500; line-height: 20px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.dsc-sh-sub { grid-area: sub; justify-self: start; display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); overflow: hidden; white-space: nowrap; }
+.dsc-sh-sub span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
 .dsc-x { flex: none; color: var(--muted); }
-.dsc-sh-n { flex: none; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
-.dsc-coins .dsc-st-rows { margin-left: 4px; padding-left: 12px; border-left: 2px solid var(--line-soft); }
-.dsc-st-more { margin: 0; padding: 4px 0 8px 18px; }
+.dsc-sh-n { grid-area: n; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+.dsc-sh-n b { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dsc-st-more { margin: 0; padding: 6px 0 8px 32px; border-top: 1px solid var(--line-soft); }
 .dsc-page-more { display: flex; justify-content: center; margin: 0; }
 .dsc-newp { border: 1px dashed var(--line-soft); background: none; }
 /* a story's theme as a small pill beside its title (a language model's word: cut, never wider than the line allows) */
@@ -188,7 +191,7 @@ a.dsc-sh-q:hover, a.dsc-sh-q:focus-visible { color: var(--ink); }
   /* a blocked coin's reason is long nowrap text: on its own third line, so the auto column stays the Buy's width */
   .dsc-act.blocked { grid-area: auto; grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; }
   .dsc-act.blocked .dsc-why { text-align: left; }
-  .dsc-ptags, .dsc-safety, .dsc-csub { padding-left: 0; }
+  .dsc-ptags, .dsc-safety, .dsc-csub, .dsc-st-more { padding-left: 0; }
 }
 /* a phone-width list: three lines a coin. Line 1: logo, ticker, the chart and Buy (Buy on its own line made a
    row about 170 px tall at 375 px). Line 2, the full width of the row: the tag, the age, the parent tags and the
@@ -225,10 +228,9 @@ a.dsc-sh-q:hover, a.dsc-sh-q:focus-visible { color: var(--ink); }
   .dsc-card { padding: 12px; }
   .dsc-cols .opt, .dsc-num.opt { display: none; }
   .dsc-coin .dsc-nums { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .dsc-sh { flex-wrap: wrap; }
-  .dsc-sh-l { flex-wrap: wrap; row-gap: 2px; }
-  .dsc-sh-t { max-width: 100%; }
-  .dsc-sh-text { flex: 1 1 100%; }
+  /* the block keeps a small inset (the card's padding is 12 px here); the header wraps: title, numbers, author */
+  .dsc-story { --dsc-bx: 6px; }
+  .dsc-sh { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "n" "sub"; }
   .dsc-copyrow { padding-left: 0; }
   .dsc-trend { padding: 8px 12px 4px; }
   .dsc-bar { align-items: stretch; }

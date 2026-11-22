@@ -157,6 +157,21 @@ test("o9. a story's header line: the narrative's title and theme (and its post),
   assert.equal(D.countLine(12, -1), "12 coins");
 });
 
+test("o9b. a story block's header: the total buyers ranked by, 'buyers · 2 coins · 1 new', and the author line under the title", () => {
+  const b = body([nar([row("N1", 4, { isNew: true }), row("N2", 6)], { post: POST }), post(POST.id, [row("A", 1), row("B", 2)]), fam("F", [row("D", 3), row("E", 1_200)])], [], { tagging: { on: true }, themes: [{ theme: "politics", cards: 1 }] });
+  const by = new Map(list(b).entries.map((e) => [e.key, e] as const));
+  assert.deepEqual(D.storyHeader(by.get("narrative:n:7")!, NOW), { kind: "narrative", title: "Trump Tariff Panic", theme: "Politics", sub: "@poster · 6 min ago", text: "", href: "https://x.com/i/status/1895000000000000001", total: "10", words: "buyers · 2 coins · 1 new" });
+  assert.deepEqual(D.storyHeader(by.get(`post:${POST.id}`)!, NOW), { kind: "post", title: "Linked post", theme: "", sub: "@poster · 6 min ago", text: "big news more below", href: "https://x.com/i/status/1895000000000000001", total: "3", words: "buyers · 2 coins" });
+  const f = D.storyHeader(by.get("family:F")!, NOW);
+  assert.deepEqual([f.title, f.sub, f.total, f.words, f.href], ["$FAM family", "waking up · 12 min", "1,203", "buyers · 2 coins", null]);
+  // the total is the sum the list ranks the story by; held dimmed rows add nothing and keep their words
+  assert.equal(D.storyHeader({ card: null, coinsN: 0, newN: 0, buyers: 1, movedN: 2 }, NOW).words, "buyer · 2 moved");
+  // a post with no usable handle: the title says "Linked post" once, the line under it is only the age
+  const anon = post("1895000000000000002", [row("G", 1), row("H", 2)], { post: { id: "1895000000000000002", handle: null, text: "", at: NOW - 360, url: "" } });
+  const ah = D.storyHeader(list(body([anon], [])).entries.find((e) => e.key === "post:1895000000000000002")!, NOW);
+  assert.deepEqual([ah.title, ah.sub], ["Linked post", "6 min ago"]);
+});
+
 test("o10. a single coin's line: its post with when and its words (a link), its family, or none", () => {
   const p = D.coinStory(post(POST.id, [row("A", 1)]), NOW);
   assert.deepEqual(p, { text: "@poster · 6 min ago · big news more below", href: "https://x.com/i/status/1895000000000000001" });
