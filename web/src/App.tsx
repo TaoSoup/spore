@@ -1,5 +1,5 @@
 import { Component, Fragment, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useNavigationType, type Location } from "react-router-dom";
 import { SPORE_COIN } from "./lib/policy";
 import Mark, { MARK_PATH, MARK_SPORES } from "./components/Mark";
 import { ToastProvider } from "./components/Toast";
@@ -19,7 +19,6 @@ import { useEvents } from "./lib/events";
 import { count } from "./lib/format";
 import { ErrorBox } from "./components/Bits";
 import { FOOTER_ABOUT, FOOTER_BOTTOM, NON_CUSTODIAL } from "./lib/copy";
-import Home from "./pages/Home";
 import Explore from "./pages/Explore";
 import MapPage from "./pages/Map";
 import CoinPage from "./pages/Coin";
@@ -316,7 +315,7 @@ function Shell() {
       <a className="skip" href="#main">Skip to content</a>
       <header className={`nav ${scrolled ? "scrolled" : ""} ${isMap ? "solid" : ""} ${menu ? "menu-open" : ""} ${compact ? "compact" : ""}`}>
         <div className="nav-inner" ref={innerRef}>
-          <NavLink ref={wordRef} to="/" className="wordmark" aria-label="Spore home"><Mark /><span className="wordmark-text" aria-hidden="true">spore</span></NavLink>
+          <NavLink ref={wordRef} to="/map" end className="wordmark" aria-label="Spore map"><Mark /><span className="wordmark-text" aria-hidden="true">spore</span></NavLink>
           <nav id="primary-nav" ref={menuRef} className={`nav-links ${menu ? "open" : ""}`} aria-label="Primary">
             <SlidingPill hover items="a.nav-item" />
             {menu && phone && <div className="nav-sheet-wallet"><WalletMenu inline onAction={() => { closeMenu(); burgerRef.current?.focus(); }} /></div>}
@@ -338,7 +337,7 @@ function Shell() {
         {/* Keyed by path so a page change plays the transition; search-param changes (the launch form's parent) keep the page mounted. */}
         <div className={`route ${leaving ? "leaving" : ""}`} key={shown.pathname}>
           <RouteBoundary><Routes location={shown}>
-            <Route path="/" element={<Home />} />
+            <Route path="/" element={<ToMap />} />
             <Route path="/explore" element={<Explore />} />
             <Route path="/map" element={<MapPage />} />
             <Route path="/c/:mint" element={<CoinPage />} />
@@ -411,6 +410,12 @@ function Embeds() {
       <Route path="*" element={<EmbedNotFound />} />
     </Routes>
   );
+}
+
+/** The bare address opens the map (the landing page was removed); any query string, such as ?focus=, comes along. */
+function ToMap() {
+  const { search, hash } = useLocation();
+  return <Navigate to={`/map${search}${hash}`} replace />;
 }
 
 export default function App() {
