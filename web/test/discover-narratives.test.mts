@@ -161,10 +161,9 @@ test("n7. a narrative card: two runs in the order received, totals with copies, 
   assert.equal(D.narrativeHead({ narrative: { ...N2 }, post: null }, NOW).newCoins, 0);
   const bad = D.narrativeHead({ narrative: N1, post: { ...POST, id: "javascript:alert(1)", handle: null, at: null } }, NOW);
   assert.deepEqual(bad.post, { text: "Linked post", href: null });
-  assert.equal(D.NEW_LABEL, "New this hour");
-  assert.equal(D.OLDER_LABEL, "Older coins in this story");
+  assert.deepEqual([D.NEW_ROW_PILL, D.NEW_ROW_TITLE], ["this hour", "Created 30-60 minutes ago"]);
   assert.equal(D.MODEL_NOTE, "Stories are grouped by a language model reading each coin's public text. It can be wrong.");
-  for (const s of [D.MODEL_NOTE, D.TAG_NOTE, D.NEW_COINS_TITLE, D.NEW_LABEL, D.OLDER_LABEL]) assert.doesNotMatch(s, /recommend|good|likely|early|signal|alpha/i);
+  for (const s of [D.MODEL_NOTE, D.TAG_NOTE, D.NEW_ROW_PILL, D.NEW_ROW_TITLE]) assert.doesNotMatch(s, /recommend|good|likely|early|signal|alpha/i);
 });
 
 test("n8. held: a narrative card keeps its place, its rows their run and size; live trades move its coins; idle, the server's shape", () => {
@@ -211,7 +210,7 @@ test("n12. held: a coin that joins a story card is marked moved where it was, no
   const held = D.storiesView(read2, before, true);
   assert.deepEqual(held.loose.map((r) => [r.mint, !!r.left, !!r.moved]), [["X", true, true], ["Y", true, true], ["Z", false, false]]);
   assert.deepEqual(held.cards.map((c) => [c.key, !!c.left, !!c.moved, c.coins.map((r) => !!r.left)]), [["n:7", true, false, [false, false, false]], ["n:5", false, false, [false, false]]]);
-  assert.deepEqual([D.MOVED_PILL, D.REGROUPED_PILL, D.LEFT_PILL], ["Moved to another card", "Regrouped", "No longer listed"]);
+  assert.deepEqual([D.MOVED_PILL, D.REGROUPED_PILL, D.LEFT_PILL], ["Moved to another story", "Regrouped", "No longer listed"]);
   assert.equal(D.cardTotals(held.loose).coinsN, 1, "a moved row is counted once, on its card");
   // the themes hold too: the shown one stays first with its last count, the new one goes last; the chosen theme still filters
   assert.deepEqual(held.themes, [{ theme: "politics", cards: 1 }, { theme: "ai", cards: 1 }]);
@@ -232,5 +231,5 @@ test("n12. held: a coin that joins a story card is marked moved where it was, no
   // idle: exactly what the server sent
   const idle = D.storiesView(read2, held, false);
   assert.deepEqual([idle.cards.map((c) => c.key), idle.loose.map((r) => [r.mint, r.left, r.moved]), idle.themes], [["n:5"], [["Z", undefined, undefined]], [{ theme: "ai", cards: 1 }]]);
-  for (const w of [D.MOVED_PILL, D.MOVED_TITLE, D.REGROUPED_PILL, D.REGROUPED_TITLE, D.LOOSE_TITLE_NAR, D.looseTitle(3, 0, true)]) assert.doesNotMatch(w, /recommend|good|likely|early|signal|alpha/i);
+  for (const w of [D.MOVED_PILL, D.MOVED_TITLE, D.REGROUPED_PILL, D.REGROUPED_TITLE]) assert.doesNotMatch(w, /recommend|good|likely|early|signal|alpha/i);
 });

@@ -1,5 +1,5 @@
 // The Discover page's story view (web/src/lib/discover.ts, GET /api/stories): the size pills, a card's numbers after
-// the filter, the relative time, the initials, the card head and chip words, the folded copies, the dust words, the
+// the filter, the relative time, the story head words, the folded copies, the dust words, the
 // held order, live prices over the view, and the read's URL. No DOM, no network (a fake fetch for the read).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -98,78 +98,49 @@ test("5. relative time: minutes, hours, days, then the date; unknown is empty", 
   for (const none of [null, undefined, NaN]) assert.equal(D.relTime(none, NOW), "");
 });
 
-test("6. initials: the first letters of two words, else the first two characters; ? without a handle", () => {
-  assert.equal(D.initials("poster"), "PO");
-  assert.equal(D.initials("@elon_musk"), "EM");
-  assert.equal(D.initials("ElonMusk"), "EM");
-  assert.equal(D.initials("__a__"), "A");
-  assert.equal(D.initials("x"), "X");
-  assert.equal(D.initials("NASA"), "NA");
-  assert.equal(D.initials("a_b_c"), "AB");
-  assert.equal(D.initials("9gag"), "9G");
-  for (const none of [null, undefined, "", "  ", "@", "___"]) assert.equal(D.initials(none), "?");
-});
-
 test("7. the card head: who and when first; a merged card names the family after; the link is rebuilt from the id", () => {
   const h = D.storyHead(card(), NOW);
   assert.equal(h.line, "@poster · 6 min ago · $PAR family waking");
-  assert.deepEqual([h.kind, h.who, h.when, h.tail, h.initials], ["post", "@poster", "6 min ago", "$PAR family waking", "PO"]);
+  assert.deepEqual([h.kind, h.who, h.when, h.tail], ["post", "@poster", "6 min ago", "$PAR family waking"]);
   assert.equal(h.text, "big news more below", "one line");
   assert.equal(h.href, "https://x.com/i/status/1895000000000000001", "never the body's url");
   // a post card across parents, without a family
   assert.equal(D.storyHead(card({ family: null }), NOW).line, "@poster · 6 min ago");
   // a media-only post, a pre-snowflake id without a time, a handle that has not the shape of one, a bad id
   const odd = D.storyHead(card({ family: null, post: { id: "javascript:1", handle: "<b>", text: "", at: null, url: "" } }), NOW);
-  assert.deepEqual([odd.who, odd.when, odd.text, odd.href, odd.initials, odd.line], ["Linked post", "", "", null, "?", "Linked post"]);
+  assert.deepEqual([odd.who, odd.when, odd.text, odd.href, odd.line], ["Linked post", "", "", null, "Linked post"]);
   // a family card
   const f = D.storyHead(card({ kind: "family", key: FAM.mint, post: null }), NOW);
-  assert.deepEqual([f.kind, f.line, f.href, f.text, f.initials], ["family", "$PAR family · waking up · 12 min", null, "", null]);
+  assert.deepEqual([f.kind, f.line, f.href, f.text], ["family", "$PAR family · waking up · 12 min", null, ""]);
   assert.equal(D.storyHead({ kind: "family", post: null, family: { mint: "AbcdEFGHijklMNOPqrst", symbol: null, image: null, startedAt: null } }, NOW).line, "Abcd…qrst family · waking up");
   assert.equal(D.storyHead({ kind: "family", post: null, family: null }, NOW).line, "Family · waking up");
 });
 
-test("8. a coin chip, the copies mark and +N more", () => {
-  const c = D.storyChip(row("A", { symbol: "DOG", buyers5m: 96 }));
-  assert.equal(c.text, "$DOG 96 buyers · $41K +38%");
-  assert.deepEqual(c.chg, { text: "+38%", tone: "up" });
-  assert.equal(c.copies, null);
-  assert.equal(D.storyChip(row("A", { buyers5m: 1, tf: undefined, copies: [copy("A2"), copy("A3")] })).text, "$DOG 1 buyer · $41K · ×3 copies");
-  assert.equal(D.storyChip(row("AbcdEFGHijklMNOPqrst", { symbol: null, mcapUsd: null, buyers5m: 0 })).text, "Abcd…qrst 0 buyers", "no market cap: no change either");
-  assert.equal(D.storyChip(row("A", { tf: { p0: 1, chg: -4.25, volUsd: 1, buys: 1, sells: 1, buyers: 1 } })).chg?.tone, "down");
+test("8. the copies mark", () => {
   assert.equal(D.copiesMark(row("A")), null);
   assert.equal(D.copiesMark(row("A", { copies: [] })), null);
   assert.equal(D.copiesMark(row("A", { copies: [copy("A2")] })), "×2 copies");
-  assert.equal(D.CHIPS_MAX, 3);
-  assert.equal(D.moreChips(4), "+4 more");
-  for (const none of [0, -2, NaN]) assert.equal(D.moreChips(none), null);
+  assert.equal(D.copiesMark(row("A", { copies: [copy("A2"), copy("A3")] })), "×3 copies");
 });
 
 test("9. a folded copy's line: when it launched or was first seen, its liquidity, its buyers", () => {
   assert.equal(D.copyFacts(copy("A2", { createdAt: NOW - 3 * 3600 }), NOW), "launched 3 h ago · $310.00 liquidity · 9 buyers in 5 min");
   assert.equal(D.copyFacts(copy("A2", { createdAt: null, firstSeenAt: NOW - 600, liqUsd: 5_200, buyers5m: 1 }), NOW), "first seen 10 min ago · $5.2K liquidity · 1 buyer in 5 min");
   assert.equal(D.copyFacts(copy("A2", { createdAt: null, firstSeenAt: null, liqUsd: null, buyers5m: 0 }), NOW), "0 buyers in 5 min");
+  // with the page's timeframe: the copy's buyers over it when the server sends them, else its 5-minute buyers said as such
+  assert.equal(D.copyFacts(copy("A2", { createdAt: null, liqUsd: null, buyers: 31 }), NOW, "1h"), "31 buyers in the last hour");
+  assert.equal(D.copyFacts(copy("A2", { createdAt: null, liqUsd: null, buyers: 1 }), NOW, "1m"), "1 buyer in the last minute");
+  assert.equal(D.copyFacts(copy("A2", { createdAt: null, liqUsd: null }), NOW, "1h"), "9 buyers in 5 min");
   assert.deepEqual(D.copiesOf(row("A", { copies: [null as never, copy("A2"), { mint: 5 } as never] })).map((c) => c.mint), ["A2"]);
   assert.deepEqual(D.copiesOf(null), []);
 });
 
-test("10. the words around the lists: counts and what was measured, never a verdict", () => {
-  assert.equal(D.looseTitle(12), "No story found · 12 coins");
-  assert.equal(D.looseTitle(1), "No story found · 1 coin");
-  assert.equal(D.looseTitle(30, 95), "No story found · 30 of 125 coins", "the server sent 30 of them");
-  assert.equal(D.looseTitle(30, 0), "No story found · 30 coins");
-  // while narratives are shown a row here can name its story, so the heading does not say there is none
-  assert.equal(D.looseTitle(12, 0, true), "Not in a story card · 12 coins");
-  assert.equal(D.looseTitle(1, 0, true), "Not in a story card · 1 coin");
-  assert.equal(D.looseTitle(30, 95, true), "Not in a story card · 30 of 125 coins");
-  assert.match(D.LOOSE_TITLE_NAR, /on no story card/);
-  assert.equal(D.looseMore(95), "95 more coins of any size are not shown.");
-  assert.equal(D.looseMore(1), "1 more coin of any size is not shown.");
-  for (const none of [0, -1, NaN]) assert.equal(D.looseMore(none), null);
+test("10. the words around the list: counts and what was measured, never a verdict", () => {
   assert.equal(D.dustLine(1234), "1,234 hidden as bot dust");
   assert.deepEqual(D.dustChip("paper")?.text, "Paper cap");
   assert.deepEqual(D.dustChip("tiny")?.text, "Tiny buys");
   for (const none of [undefined, null, "", "other"]) assert.equal(D.dustChip(none), null);
-  const words = [D.STORIES_SUB, D.LOOSE_TITLE, D.DUST_NOTE, D.COPIES_TITLE, D.DUST_CHIP.paper.title, D.DUST_CHIP.tiny.title, D.storyHead(card(), NOW).line, D.storyChip(row("A")).text, D.FOOT_NOTE].join(" ");
+  const words = [D.STORIES_SUB, D.DUST_NOTE, D.COPIES_TITLE, D.DUST_CHIP.paper.title, D.DUST_CHIP.tiny.title, D.storyHead(card(), NOW).line, D.FOOT_NOTE].join(" ");
   assert.doesNotMatch(words, /recommend|good|best|safe\b|will rise|likely|bullish|gem|real\b|original|official|scam|fake|because|caused/i);
   assert.match(D.FOOT_NOTE, /it is not a forecast/);
 });

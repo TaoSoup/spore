@@ -1,58 +1,58 @@
-// Discover: one view of what is being bought right now, grouped by story (GET /api/stories), in the calm style of
-// the Portfolio page. A reader sees at a glance who posted and how big the story is.
-// - Story cards, most buyers first. A post card: a circle with the handle's initials, "@handle · 6 min ago" (and
-//   "· $SYM family waking" when a waking family chose the same post), the first words of the post on one line (a link
-//   to the post on x.com, rebuilt from the id). A family card (a family buying far above its normal level, no usable
-//   post): the family's image and "$SYM family · waking up · 12 min". On the right two numbers: buyers in 5 min and
-//   coins, summed over the card's coins. Under it up to three coin chips ("$SYM 96 buyers · $41K +38%", "×3 copies"
-//   on a folded one) and "+N more"; the head opens the list of all its coins.
-// - "No story found · N coins": the coins that link no stored post and whose family is not waking up ("30 of 125
-//   coins" when the server sent only the first of them). While narratives are shown it reads "Not in a story card":
-//   a coin whose story has no second coin on the page is listed here with its story's title.
-// - "N hidden as bot dust · Show": coins left out of both (a market cap over 100 times the liquidity, or under $5
+// Discover: one list of what is being bought right now (GET /api/stories), in the calm style of the Portfolio page.
+// ONE LIST, ONE STYLE: every coin, in a story or not, is the same coin row (CoinRow), and stories and single coins are
+// ranked together by buyers over the chosen timeframe (lib/discover.ts oneList: a story by the sum over its coins,
+// copies included; a single coin by its own; then more coins, then the order received).
+// - A story (two or more coin rows of one card) is a slim header line over its rows, which sit under it with a thin
+//   left rule: a narrative's title (title-cased, one line) with its theme pill and, when the story has a post, a muted
+//   "@handle · 6 min ago"; a post story's "@handle · 27 min ago" and the post's words on one line (a link to the post
+//   on x.com, rebuilt from the id); a family story "$SYM family · waking up · 12 min". On the right, muted, "3 coins ·
+//   1 new". The three coins with the most buyers show; the rest wait behind "+N more coins", which opens in place. A
+//   narrative story lists its new coins (created in the last hour, a small "new" pill) first, then the older ones.
+// - A post or family card of one coin is a plain row with one muted line under the coin's name: the post ("@handle ·
+//   13 min ago · the post's words", a link) or the family. A loose coin is a plain row; while narratives are shown it
+//   carries its story's title as a small muted tag.
+// - The first 20 entries (a story or a single coin), then "Show 20 more" until all are shown.
+// - "N hidden as bot dust · Show": coins left out of the list (a market cap over 100 times the liquidity, or under $5
 //   bought a buyer), each with a "Paper cap" or "Tiny buys" chip once shown.
-// The size pills (All / Small / Mid / Large by market cap, kept in this browser) filter what was received: a card
-// whose coins are all filtered out is gone, and a card's numbers count the coins it still shows (lib/discover.ts
-// filterStories). A row stays under the pill of its read: a live trade moves its market cap, never the lists.
-// Coins with the same ticker and image are folded under the one with the most liquidity and listed
-// under it (launch time, liquidity, buyers); none is called the original.
+// The size pills (All / Small / Mid / Large by market cap, kept in this browser) filter what was received: a story
+// whose coins are all filtered out is gone, and a story's numbers count the coins it still shows (lib/discover.ts
+// filterStories, tfTotals). A row stays under the pill of its read: a live trade moves its market cap, never the list.
+// Coins with the same ticker and image are folded under the one with the most liquidity and listed under it (launch
+// time, liquidity, buyers); none is called the original.
 // Narrative tags (a server with NARRATIVES=on, and at least one narrative card in the read; otherwise nothing of this
-// is drawn and the page is as described above): a narrative card leads with the story's title in large type and its
-// theme as a small pill, no circle; its numbers are buyers in 5 min and new coins in 1 h; its chips come in two
-// labelled runs ("New this hour", "Older coins in this story"), and opened it lists the new coins, a thin divider,
-// then the older ones. A post or family card whose coins share a narrative shows the theme pill only, and a loose row
-// its story's title as a small muted tag. A row of theme pills under the size pills ("All themes" and the themes of
-// the narrative cards, in a fixed order by name; the choice is kept in this browser) filters cards and loose rows; it
-// combines with the size. A pill once shown stays for the visit and the chosen theme stays in force when its last card
-// drops out (the list then says no such story is being bought), so the filter only ever changes by a click. A title is
-// written by a language model: untrusted, drawn as a React text node on one line, never as markup or in an address.
-// A post is what the coins link, picked by their creators and unchecked: the page says who posted and when, never why
-// a coin is bought or what it will do.
-// Every list uses one coin row (CoinRow): ticker, a price sparkline over the last hour, market cap with its change over
-// the chosen timeframe (1m / 5m / 30m / 1h, the `tf=` of the read, kept in this browser), liquidity, volume, txns,
-// buyers, the measured safety chips, and a Buy that shows its amount ("Buy 0.5 SOL"). The amount is one of the trade
-// settings' three buy presets (P1 / P2 / P3 in the bar; the amounts are edited in Trade settings), and Buy runs the
-// same instant trade as the map and the coin page (components/useInstantTrade.ts: the reader's Trade-with choice signs,
-// a locked trading wallet is asked to unlock, a failed check opens the ticket); with instant trades off or no wallet it
-// opens the ticket with the amount filled in. No other signing path.
+// is drawn): a row of theme pills under the size pills ("All themes" and the themes of the narrative cards, in a fixed
+// order by name; the choice is kept in this browser) keeps the stories of that theme and the single coins tagged with
+// it; it combines with the size. A pill once shown stays for the visit and the chosen theme stays in force when its
+// last story drops out, so the filter only ever changes by a click. A title is written by a language model:
+// untrusted, drawn as a React text node on one line, never as markup or in an address. A post is what the coins link,
+// picked by their creators and unchecked: the page says who posted and when, never why a coin is bought or what it
+// will do.
+// Every number follows the timeframe switch (1m / 5m / 30m / 1h, the `tf=` of the read, kept in this browser): a row's
+// buyers ("96 not sold"), market cap change, volume and txns are the read's `tf` numbers, a story's totals and the
+// ranking add up those buyers, and the column names say the timeframe ("Buyers · 5m"). The sparkline is the last hour.
+// Buy shows its amount ("Buy 0.5 SOL"): one of the trade settings' three buy presets (P1 / P2 / P3 in the bar; the
+// amounts are edited in Trade settings), and Buy runs the same instant trade as the map and the coin page
+// (components/useInstantTrade.ts: the reader's Trade-with choice signs, a locked trading wallet is asked to unlock, a
+// failed check opens the ticket); with instant trades off or no wallet it opens the ticket with the amount filled in.
+// No other signing path.
 // Live numbers: the SSE "trade" of the coins on screen moves their price, market cap (flashing once), change and
 // sparkline between reads (lib/discover.ts liveMerge); the view is read every 10 s while the tab is visible. Nothing
-// moves while the lists are in use (a mouse over them, a tap or scroll on them in the last 5 s, or keyboard focus in
-// them): cards and rows keep their places and take fresh numbers, a new one is added at the end and one that left
-// stays, dimmed; the server's order comes back once the page is idle (storiesView). Under an open ticket, or while a
-// Buy is under way, no read is applied.
+// moves while the list is in use (a mouse over it, a tap or scroll on it in the last 5 s, or keyboard focus in it):
+// stories and rows keep their places and take fresh numbers, a new one is added at the end and one that left stays,
+// dimmed ("Moved to another story" when it is listed elsewhere now); the ranking comes back once the page is idle
+// (storiesView, oneList). Under an open ticket, or while a Buy is under way, no read is applied.
 // Every class here starts with "dsc-" (components/dsc.css; discover.css belongs to the Coins page).
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type Dispatch, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { api, errorMessage, pumpUrl, type Coin, type CoinSafety, type CoinSpark, type Stories, type Tf } from "../lib/api";
 import {
-  AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, CHIPS_MAX, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, LOOSE_TITLE, LOOSE_TITLE_NAR, MINT_PREFIX_TITLE, MODEL_NOTE, MOVED_PILL, MOVED_TITLE, REGROUPED_PILL, REGROUPED_TITLE, NEW_COINS_TITLE, NEW_LABEL, OLDER_LABEL,
-  SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS,
-  activeTheme, buyLabel, buyersCell, cardKey, cardTotals, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
-  listStatus, liveStories, looseMore, looseTitle, mintPrefix, moreChips, nameIfDiffers, narrativeHead, narrativeOf, narrativeTitle, narrativesOn, normSym, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
-  splitNew, storiesView, storyChip, storyHead, storyMints, themeLabel, themePills, tradesByMint, txns, urlPrefs, writePref,
-  type LiveTrade, type SizeKey, type StoriesView, type StoryCardShown, type StoryShown,
+  AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, MINT_PREFIX_TITLE, MODEL_NOTE, MOVED_PILL, MOVED_TITLE, NEW_ROW_PILL, NEW_ROW_TITLE, REGROUPED_PILL, REGROUPED_TITLE,
+  SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
+  activeTheme, buyLabel, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
+  listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
+  closeShrunk, showMore, storiesView, storyLine, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
+  type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
 import { NARRATIVE_FOOT } from "../lib/narrative";
@@ -118,9 +118,9 @@ function Safety({ s }: { s: CoinSafety | undefined }) {
 
 
 /// One coin, shared by every list: a table row on a wide screen, two lines in a narrow list and three in a phone-width
-/// one (dsc.css container queries).
+/// one (dsc.css container queries; on a phone the liquidity, volume and txns cells, marked `opt`, are not drawn).
 /// `dup`: another row of the list has this ticker, so the start of the mint tells them apart; `extra`: the row's own
-/// chips (copies, why it is dust, its parent).
+/// chips (copies, why it is dust, its parent, its story).
 function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf: Tf; now: number; extra?: ReactNode; dup?: boolean }) {
   const tag = coinTag(c), ch = chgText(c.tf?.chg), x = txns(c.tf), by = buyersCell(c.tf, tf), ag = rowAge(c, now), nm = nameIfDiffers(c);
   // written twice: in the name line, and first on the tags line of a phone-width list (dsc.css shows one of the two)
@@ -149,10 +149,10 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
       </div>
       <span className="dsc-chart"><PriceSpark s={c.spark} /></span>
       <div className="dsc-nums">
-        {/* Buyers first and in the brighter ink: it is what the page is about */}
-        <span className="dsc-num lead" title={by.title}><span className="dsc-k">Buyers {tf} </span><span className="dsc-v">{by.n}</span>{by.sub && <span className="dsc-sub2">{by.sub}</span>}</span>
-        <span className="dsc-num" title={`Market cap; change over ${tf}`}>
-          <span className="dsc-k">Mcap </span>
+        {/* Buyers first and in the brighter ink: it is what the list is ranked by */}
+        <span className="dsc-num lead" title={by.title}><span className="dsc-k">Buyers · {tf} </span><span className="dsc-v">{by.n}</span>{by.sub && <span className="dsc-sub2">{by.sub}</span>}</span>
+        <span className="dsc-num" title={`Market cap; change over ${tfWords(tf)}`}>
+          <span className="dsc-k">Mcap · {tf} </span>
           {/* the key restarts the flash on each moving trade; a read without one remounts it plain */}
           <span key={c.flash?.n ?? 0} className={`dsc-v${c.flash ? ` dsc-flash ${c.flash.dir}` : ""}`}>{usd(c.mcapUsd)}</span>
           <span className="dsc-sub2 dsc-mc">
@@ -160,12 +160,12 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
             {c.thin === true && <><span className="dsc-dot" aria-hidden="true"> · </span><span className="dsc-thin" title={THIN_TITLE}>{THIN_TEXT}<span className="dsc-vh">: market cap over 100 times the liquidity</span></span></>}
           </span>
         </span>
-        <span className="dsc-num" title={LIQ_TITLE}><span className="dsc-k">Liquidity </span><span className="dsc-v">{usd(c.liqUsd)}</span></span>
-        <span className="dsc-num" title={`Volume over ${tf}`}><span className="dsc-k">Volume {tf} </span><span className="dsc-v">{c.tf ? usd(c.tf.volUsd) : "—"}</span></span>
+        <span className="dsc-num opt" title={LIQ_TITLE}><span className="dsc-k">Liquidity </span><span className="dsc-v">{usd(c.liqUsd)}</span></span>
+        <span className="dsc-num opt" title={`Volume over ${tfWords(tf)}`}><span className="dsc-k">Volume · {tf} </span><span className="dsc-v">{c.tf ? usd(c.tf.volUsd) : "—"}</span></span>
         {/* buys and sells on one line when they fit (they wrap to two when not), each with a letter and the word for
             screen readers: never told apart by colour alone */}
-        <span className="dsc-num" title={`Trades over ${tf}: buys (B) and sells (S)`}>
-          <span className="dsc-k">Txns {tf} </span><span className="dsc-v">{x.total}</span>
+        <span className="dsc-num opt" title={`Trades over ${tfWords(tf)}: buys (B) and sells (S)`}>
+          <span className="dsc-k">Txns · {tf} </span><span className="dsc-v">{x.total}</span>
           <span className="dsc-sub2 dsc-bs">
             <span className="up"><span aria-hidden="true">B </span>{x.buys}<span className="dsc-vh"> buys</span></span>
             <span className="down"><span aria-hidden="true">S </span>{x.sells}<span className="dsc-vh"> sells</span></span>
@@ -178,11 +178,12 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
   );
 }
 
-/// The column names over the rows (the cells carry their own names for screen readers and narrow lists).
+/// The column names over the rows (the cells carry their own names for screen readers and narrow lists). Each names
+/// the timeframe its numbers are over.
 function Cols({ tf }: { tf: Tf }) {
   return (
     <div className="dsc-cols" aria-hidden="true">
-      <span>Coin</span><span>Last hour</span><span>Buyers {tf}</span><span>Mcap · {tf}</span><span>Liquidity</span><span>Volume {tf}</span><span>Txns {tf}</span><span />
+      <span>Coin</span><span>Last hour</span><span>Buyers · {tf}</span><span>Mcap · {tf}</span><span className="opt">Liquidity</span><span className="opt">Volume · {tf}</span><span className="opt">Txns · {tf}</span><span />
     </div>
   );
 }
@@ -190,164 +191,104 @@ function Cols({ tf }: { tf: Tf }) {
 const XIcon = <svg className="dsc-x" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.8 3h3.1l-6.8 7.8 8 10.2h-6.3l-4.9-6.4L5.3 21H2.2l7.3-8.3L1.8 3h6.4l4.4 5.9L17.8 3Zm-1.1 16.2h1.7L7.4 4.7H5.6l11.1 14.5Z" /></svg>;
 
 /// A row's own chips: "No longer listed" for a row kept only while the page is in use (the dimming alone says nothing
-/// to a screen reader; "Moved to another card" when the coin is still listed elsewhere), "×3 copies" on a row others are folded under, why a dust row is dust, and its parent (on the
-/// map) where the list mixes parents.
-/// `story`: the row also names its narrative (a loose row while narratives are shown): the title as a small muted tag,
-/// a text node cut to one line.
-function RowTags({ r, parent, story }: { r: StoryShown; parent: boolean; story?: boolean }) {
+/// to a screen reader; "Moved to another story" when the coin is still listed elsewhere), "this hour" on a narrative
+/// story's coin created 30-60 minutes ago (newRowPill; a younger one's "new" tag already says it), "×3 copies" on a row others are folded under, why a dust row is dust, and
+/// its parent (on the map) where the list mixes parents.
+/// `story`: the row also names its narrative (a single coin while narratives are shown): the title as a small muted
+/// tag, a text node cut to one line. `sub`: a single coin's post or family, one muted line under its name.
+function RowTags({ r, parent, story, fresh, sub }: { r: StoryShown; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null }) {
   const tag = parent ? parentTag(r) : null, copies = copiesMark(r), dust = dustChip(r.reason), nar = story ? narrativeOf(r) : null;
-  if (!tag && !copies && !dust && !r.left && !nar) return null;
-  return (
-    <span className="dsc-ptags">
-      {nar && <span className="dsc-st-ntag" title={TAG_NOTE}><span className="dsc-vh">Story: </span>{narrativeTitle(nar.title)}</span>}
-      {r.left && (r.moved
-        ? <span className="dsc-pill sm st-left" title={MOVED_TITLE}>{MOVED_PILL}</span>
-        : <span className="dsc-pill sm st-left" title="The server stopped listing this coin; the row goes once the page is idle">{LEFT_PILL}</span>)}
-      {dust && <span className="dsc-chip" title={dust.title}>{dust.text}</span>}
-      {copies && <span className="dsc-chip" title={COPIES_TITLE}>{copies}</span>}
-      {tag && r.parent && <Link className="dsc-ptag" to={mapLink(r.parent.mint)} title={`${tag.replace(/^under /, "")} and the coins under it on the map`}>{tag}</Link>}
+  const line = sub && sub.text ? (
+    <span className="dsc-csub">
+      {sub.href
+        ? <a href={sub.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{XIcon}<span>{sub.text}</span></a>
+        : <span>{sub.text}</span>}
     </span>
+  ) : null;
+  if (!tag && !copies && !dust && !r.left && !nar && !fresh) return line;
+  return (
+    <>
+      {line}
+      <span className="dsc-ptags">
+        {fresh && <span className="dsc-pill sm dsc-newp" title={NEW_ROW_TITLE}>{NEW_ROW_PILL}</span>}
+        {nar && <span className="dsc-st-ntag" title={TAG_NOTE}><span className="dsc-vh">Story: </span>{narrativeTitle(nar.title)}</span>}
+        {r.left && (r.moved
+          ? <span className="dsc-pill sm st-left" title={MOVED_TITLE}>{MOVED_PILL}</span>
+          : <span className="dsc-pill sm st-left" title="The server stopped listing this coin; the row goes once the page is idle">{LEFT_PILL}</span>)}
+        {dust && <span className="dsc-chip" title={dust.title}>{dust.text}</span>}
+        {copies && <span className="dsc-chip" title={COPIES_TITLE}>{copies}</span>}
+        {tag && r.parent && <Link className="dsc-ptag" to={mapLink(r.parent.mint)} title={`${tag.replace(/^under /, "")} and the coins under it on the map`}>{tag}</Link>}
+      </span>
+    </>
   );
 }
 
-/// The rows of one list: each coin, and under it the coins folded into it (same ticker and image), one line each.
-/// `among`: the whole list when `rows` is one run of it (a narrative card's new or older coins), so a ticker repeated
-/// across the runs still shows the start of its mint.
-function Rows({ rows, t, tf, now, parent, story, among }: { rows: readonly StoryShown[]; t: TradeCtl; tf: Tf; now: number; parent: boolean; story?: boolean; among?: readonly StoryShown[] }) {
-  const dups = repeatedSyms(among ?? rows);
+type RowOpts = { t: TradeCtl; tf: Tf; now: number; dups: ReadonlySet<string> };
+/// One coin row and, under it, the coins folded into it (same ticker and image), one line each.
+function RowAndCopies({ r, o, parent, story, fresh, sub }: { r: StoryShown; o: RowOpts; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null }) {
   return (
     <>
-      {rows.map((r) => (
-        <Fragment key={r.mint}>
-          <CoinRow c={r} t={t} tf={tf} now={now} dup={dups.has(normSym(r.symbol))} extra={<RowTags r={r} parent={parent} story={story} />} />
-          {copiesOf(r).map((k) => (
-            <li key={k.mint} className="dsc-copyrow" title={COPIES_TITLE}>
-              <span className="dsc-vh">Same ticker and image: </span>
-              <Link className="dsc-copy-mint" to={coinLink(k.mint)}>{short(k.mint)}</Link>
-              <span className="dsc-copy-facts">{copyFacts(k, now)}</span>
-            </li>
-          ))}
-        </Fragment>
+      <CoinRow c={r} t={o.t} tf={o.tf} now={o.now} dup={o.dups.has(normSym(r.symbol))} extra={<RowTags r={r} parent={parent} story={story} fresh={fresh} sub={sub} />} />
+      {copiesOf(r).map((k) => (
+        <li key={k.mint} className="dsc-copyrow" title={COPIES_TITLE}>
+          <span className="dsc-vh">Same ticker and image: </span>
+          <Link className="dsc-copy-mint" to={coinLink(k.mint)}>{short(k.mint)}</Link>
+          <span className="dsc-copy-facts">{copyFacts(k, o.now, o.tf)}</span>
+        </li>
       ))}
     </>
   );
 }
 
-/// A card's first coins as chips, then "+N more" (which opens the card).
-function Chips({ rows, tf, onToggle, label }: { rows: readonly StoryShown[]; tf: Tf; onToggle: () => void; label?: string }) {
-  const chips = rows.slice(0, CHIPS_MAX), more = moreChips(rows.length - chips.length);
-  return (
-    <ul className="dsc-st-chips" aria-label={label}>
-      {chips.map((r) => {
-        const ch = storyChip(r);
-        return (
-          <li key={r.mint}>
-            <Link className={`dsc-st-chip${r.left ? " left" : ""}`} to={coinLink(r.mint)} title={`${ch.text}. Buyers over 5 min; market cap and its change over ${tf}`}>
-              <b>{ch.sym}</b><span>{ch.buyers}</span>
-              {ch.mcap && <span><span aria-hidden="true">· </span>{ch.mcap}</span>}
-              {ch.chg && <span className={ch.chg.tone}>{ch.chg.text}</span>}
-              {ch.copies && <i>{ch.copies}</i>}
-            </Link>
-          </li>
-        );
-      })}
-      {more && <li><button type="button" className="linkish dsc-link" aria-label={`${more} coins: show every coin of this story`} onClick={onToggle}>{more}</button></li>}
-    </ul>
-  );
+/// The rows of a plain list (the dust): each coin and its folded copies.
+function Rows({ rows, o, parent }: { rows: readonly StoryShown[]; o: RowOpts; parent: boolean }) {
+  return <>{rows.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} /></Fragment>)}</>;
 }
+
 /// A theme as a small pill ("AI", "Market crash"); nothing for an unknown theme.
 const ThemePill = ({ theme }: { theme: string }) => (theme ? <span className="dsc-pill sm dsc-st-theme" title="The theme a language model gave this story. It can be wrong."><span className="dsc-vh">Theme: </span>{theme}</span> : null);
 
-type CardProps = { c: StoryCardShown; now: number; open: boolean; onToggle: () => void; t: TradeCtl; tf: Tf };
-/// One story: who (or which family), how many buyers and coins, its first coins as chips; the head opens every coin.
-/// `nar`: narratives are shown, so a card whose coins share one carries its theme pill.
-function StoryCard({ c, now, open, onToggle, t, tf, nar }: CardProps & { nar: boolean }) {
+/// One entry of the list. A single coin: its row, with its post or family on one muted line under the name (a
+/// one-coin card), or its story's title tag (a loose coin while narratives are shown). A story: a slim header line
+/// (not a control), its first three rows under a thin left rule, and "+N more coins", which opens the rest in place.
+/// `nar`: narratives are shown.
+function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: boolean; open: boolean; onToggle: () => void }) {
   const id = useId();
-  const h = storyHead(c, now);
-  const fam = c.family;
-  const coinsWord = c.coinsN === 1 ? "coin" : "coins";
-  const theme = nar ? themeLabel(narrativeOf(c)?.theme) : "";
-  const who = (
-    <button type="button" className="dsc-st-who" aria-expanded={open} aria-controls={open ? id : undefined} title={open ? "Hide this story's coins" : "Show every coin of this story"}
-      onClick={(e) => { e.stopPropagation(); onToggle(); }}>
-      <b>{h.who}</b>{h.when && <span> · {h.when}</span>}{h.tail && <span> · {h.tail}</span>}{c.left && <span title={c.moved ? REGROUPED_TITLE : undefined}> · {c.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
-    </button>
-  );
+  const parent = e.card?.kind !== "family";
+  if (!e.head) {
+    const r = e.rows[0];
+    if (!r) return null;
+    // a one-coin card the read no longer has: its row says so, as a row would
+    const row = e.left && !r.left ? { ...r, left: true, moved: e.moved } : r;
+    return <RowAndCopies r={row} o={o} parent={parent} story={nar && e.card?.kind !== "post" && e.card?.kind !== "family"} sub={coinStory(e.card, o.now)} />;
+  }
+  const line = storyLine(e, o.now, nar);
+  const { shown, more } = storySplit(e.rows, open);
+  const isNar = e.card?.kind === "narrative";
+  const label = line.kind === "narrative" ? `Story: ${line.title}` : line.title;
   return (
-    <li className={`dsc-card dsc-story${open ? " open" : ""}${c.left ? " left" : ""}`}>
-      {/* the whole head toggles for a mouse or a finger; the button inside is the same control for a keyboard */}
-      <div className="dsc-st-head" onClick={onToggle}>
-        {h.kind === "post" ? <span className="dsc-st-av" aria-hidden="true">{h.initials}</span> : <Logo src={fam?.image} label={fam?.symbol} size={40} />}
-        <div className="dsc-st-id">
-          {theme ? <div className="dsc-st-line">{who}<ThemePill theme={theme} /></div> : who}
-          {h.href && (
-            <a className="dsc-st-text" href={h.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`} onClick={(e) => e.stopPropagation()}>
-              {XIcon}<span>{h.text || "View post"}</span>
-            </a>
-          )}
+    <li className={`dsc-story${e.left ? " left" : ""}`}>
+      <div className="dsc-sh">
+        <div className="dsc-sh-l">
+          <span className={`dsc-sh-t${line.kind === "narrative" ? " nar" : ""}`}>{line.title}</span>
+          <ThemePill theme={line.theme} />
+          {line.post && (line.href
+            ? <a className="dsc-sh-q" href={line.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{line.post}</a>
+            : <span className="dsc-sh-q">{line.post}</span>)}
+          {line.kind === "post" && (line.href
+            ? <a className="dsc-sh-text" href={line.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{XIcon}<span>{line.text || "View post"}</span></a>
+            : line.text ? <span className="dsc-sh-text"><span>{line.text}</span></span> : null)}
+          {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
         </div>
-        <div className="dsc-st-nums">
-          <span className="dsc-st-n" title="Wallets that bought $1 or more in the last 5 minutes, added up over this story's coins"><b>{count(c.buyers5m)}</b><span>buyers · 5 min</span></span>
-          <span className="dsc-st-n" title="Coins of this story being bought now, folded copies counted"><b>{count(c.coinsN)}</b><span>{coinsWord}</span></span>
-        </div>
+        <span className="dsc-sh-n">{line.count}</span>
       </div>
-      {open ? (
-        <>
-          <section id={id} className="dsc-coins" aria-label={`Coins of ${h.who}`}>
-            <Cols tf={tf} />
-            <ul><Rows rows={c.coins} t={t} tf={tf} now={now} parent={c.kind === "post"} /></ul>
-          </section>
-          <p className="dsc-foot"><button type="button" className="linkish dsc-link" onClick={onToggle}>Hide coins</button></p>
-        </>
-      ) : <Chips rows={c.coins} tf={tf} onToggle={onToggle} />}
-    </li>
-  );
-}
-
-/// A narrative card: the story's title in large type with its theme pill, buyers in 5 min and new coins in 1 h, then
-/// the coins as two labelled runs of chips (new this hour, older); the head opens every coin, new ones first.
-/// The title is a language model's words: a text node on one line, nothing else is done with it.
-function NarrativeCard({ c, now, open, onToggle, t, tf }: CardProps) {
-  const id = useId();
-  const h = narrativeHead(c, now);
-  const { fresh, older } = splitNew(c.coins);
-  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
-  return (
-    <li className={`dsc-card dsc-story dsc-st-nar${open ? " open" : ""}${c.left ? " left" : ""}`}>
-      <div className="dsc-st-head" onClick={onToggle}>
-        <div className="dsc-st-id">
-          <div className="dsc-st-line">
-            <button type="button" className="dsc-st-title" aria-expanded={open} aria-controls={open ? id : undefined} title={open ? "Hide this story's coins" : "Show every coin of this story"}
-              onClick={(e) => { e.stopPropagation(); onToggle(); }}>{h.title}</button>
-            <ThemePill theme={h.theme} />
-            {c.left && <span className="dsc-pill sm st-left" title={c.moved ? REGROUPED_TITLE : undefined}>{c.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
-          </div>
-          {h.post && (h.post.href
-            ? <a className="dsc-st-text dsc-st-quiet" href={h.post.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`} onClick={stop}>{XIcon}<span>{h.post.text}</span></a>
-            : <span className="dsc-st-text dsc-st-quiet"><span>{h.post.text}</span></span>)}
-        </div>
-        <div className="dsc-st-nums">
-          <span className="dsc-st-n" title="Wallets that bought $1 or more in the last 5 minutes, added up over this story's coins"><b>{count(c.buyers5m)}</b><span>buyers · 5 min</span></span>
-          <span className="dsc-st-n" title={NEW_COINS_TITLE}><b>{count(h.newCoins)}</b><span>{h.newCoins === 1 ? "new coin" : "new coins"} · 1 h</span></span>
-        </div>
-      </div>
-      {open ? (
-        <>
-          <section id={id} className="dsc-coins" aria-label={`Coins of the story ${h.title}`}>
-            <Cols tf={tf} />
-            <ul>
-              <Rows rows={fresh} among={c.coins} t={t} tf={tf} now={now} parent />
-              {fresh.length > 0 && older.length > 0 && <li className="dsc-st-div">{OLDER_LABEL}</li>}
-              <Rows rows={older} among={c.coins} t={t} tf={tf} now={now} parent />
-            </ul>
-          </section>
-          <p className="dsc-foot"><button type="button" className="linkish dsc-link" onClick={onToggle}>Hide coins</button></p>
-        </>
-      ) : (
-        <div className="dsc-st-runs">
-          {fresh.length > 0 && <><span className="dsc-st-lbl" aria-hidden="true">{NEW_LABEL}</span><Chips rows={fresh} tf={tf} onToggle={onToggle} label={NEW_LABEL} /></>}
-          {older.length > 0 && <><span className="dsc-st-lbl" aria-hidden="true">{OLDER_LABEL}</span><Chips rows={older} tf={tf} onToggle={onToggle} label={OLDER_LABEL} /></>}
-        </div>
+      <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
+        {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
+      </ul>
+      {more > 0 && (
+        <p className="dsc-st-more">
+          <button type="button" className="linkish dsc-link" aria-expanded={open} aria-controls={id} onClick={onToggle}>{moreCoins(more, open)}</button>
+        </p>
       )}
     </li>
   );
@@ -568,6 +509,24 @@ export default function Discover() {
   }, [view, nar, themePref]);
   const theme = activeTheme(themePref, pills);
   const shown = useMemo(() => (view ? filterStories(view, size, theme) : null), [view, size, theme]);
+  // ---- one list: stories and single coins ranked together by buyers over the timeframe (lib/discover.ts oneList).
+  // While the list is in use (the last read was applied held) the entries and their rows keep the order on screen.
+  const orderRef = useRef<OneOrder | null>(null);
+  const list = useMemo(() => {
+    if (!shown) return null;
+    const r = oneList(shown, nowS(), orderRef.current, held.paused);
+    orderRef.current = r.order;
+    return r.entries;
+  }, [shown, held.paused]);
+  // a story opened, then cut by a read to the rows always shown, is closed again: grown back later it shows three
+  // rows and "+N more coins", not everything at once. A story off this list (another page, a filter, one read) stays open.
+  useEffect(() => {
+    if (!list) return;
+    setOpened((s) => closeShrunk(s, list));
+  }, [list]);
+  // the entries shown: the first PAGE_ENTRIES, and PAGE_ENTRIES more a click; back to one page on another timeframe or filter
+  const [limit, setLimit] = useState(PAGE_ENTRIES);
+  useEffect(() => { setLimit(PAGE_ENTRIES); }, [tf, size, theme]);
 
   // ---- live numbers: the trades of the coins on screen, applied in batches
   const mints = useMemo(() => storyMints(view, showDust), [view, showDust]);
@@ -602,11 +561,11 @@ export default function Discover() {
   const shownTf = held.stale ? parseTf(held.shownKey) : tf;
   const status = listStatus({ error: held.error, hasRows: view !== null, paused: held.paused, stale: held.stale });
   const m = meta && meta.tf === shownTf ? meta : null;
-  const looseN = shown ? cardTotals(shown.loose).coinsN : 0;
-  // the loose coins the server did not send: in the count under All; under a size they cannot be told apart, so a line says so
-  // (the same under a theme: what was not sent has no theme to go by)
   const unfiltered = size === "all" && theme === ALL_THEMES;
-  const looseHead = looseTitle(looseN, unfiltered ? view?.hiddenLoose ?? 0 : 0, nar), looseNote = unfiltered ? null : looseMore(view?.hiddenLoose ?? 0);
+  const page = pageEntries(list ?? [], limit);
+  // a ticker repeated anywhere on the page shows the start of its mint
+  const dups = useMemo(() => repeatedSyms(page.shown.flatMap((e) => e.rows)), [page.shown]);
+  const o: RowOpts = { t, tf: shownTf, now, dups };
   const body = view === null || shown === null ? (
     held.error ? <ErrorBox error="The list could not be loaded." retry={held.retry} details={held.error} /> : <Skel />
   ) : (
@@ -621,22 +580,19 @@ export default function Discover() {
           ? <p className="dsc-empty">{emptyFiltered(size, theme)} <button type="button" className="linkish dsc-link" onClick={() => { setSize("all"); if (theme !== ALL_THEMES) setTheme(ALL_THEMES); }}>{theme === ALL_THEMES ? "Show all sizes" : "Show everything"}</button></p>
           : <p className="dsc-empty">{emptyTrending(shownTf, m?.floor, m?.candidates, m?.floor5m)}</p>
       )}
-      {shown.cards.length > 0 && (
-        <ul className="dsc-list" aria-label="Stories, most buyers first">
-          {shown.cards.map((c) => {
-            const k = cardKey(c), p = { c, now, open: opened.has(k), onToggle: () => toggle(k), t, tf: shownTf };
-            return c.kind === "narrative" ? <NarrativeCard key={k} {...p} /> : <StoryCard key={k} {...p} nar={nar} />;
-          })}
-        </ul>
-      )}
-      {unfiltered && view.hiddenCards > 0 && <p className="dsc-more-note">{count(view.hiddenCards)} smaller {view.hiddenCards === 1 ? "story is" : "stories are"} not shown.</p>}
-      {shown.loose.length > 0 && (
-        <section className="dsc-sec" aria-label={looseHead}>
-          <h2 className="dsc-h2" title={nar ? LOOSE_TITLE_NAR : LOOSE_TITLE}>{looseHead}</h2>
+      {page.shown.length > 0 && (
+        <section className="dsc-sec" aria-label={`Stories and coins, most buyers over ${tfWords(shownTf)} first`}>
           <div className="dsc-card dsc-trend">
-            <div className="dsc-coins"><Cols tf={shownTf} /><ul><Rows rows={shown.loose} t={t} tf={shownTf} now={now} parent story={nar} /></ul></div>
+            <div className="dsc-coins">
+              <Cols tf={shownTf} />
+              <ul className="dsc-one">
+                {page.shown.map((e) => <Entry key={e.key} e={e} o={o} nar={nar} open={opened.has(e.key)} onToggle={() => toggle(e.key)} />)}
+              </ul>
+            </div>
           </div>
-          {looseNote && <p className="dsc-more-note">{looseNote}</p>}
+          {page.rest > 0 && (
+            <p className="dsc-page-more"><button type="button" className="btn sm ghost" onClick={() => setLimit(page.shown.length + PAGE_ENTRIES)}>{showMore(page.rest)}</button></p>
+          )}
         </section>
       )}
       {shown.dustN > 0 && (
@@ -650,7 +606,7 @@ export default function Discover() {
               <p className="dsc-more-note">{DUST_NOTE}{shown.dustN > shown.dust.length ? ` Showing ${count(shown.dust.length)} of ${count(shown.dustN)}.` : ""}</p>
               {shown.dust.length > 0 && (
                 <div className="dsc-card dsc-trend">
-                  <div className="dsc-coins"><Cols tf={shownTf} /><ul><Rows rows={shown.dust} t={t} tf={shownTf} now={now} parent /></ul></div>
+                  <div className="dsc-coins"><Cols tf={shownTf} /><ul><Rows rows={shown.dust} o={o} parent /></ul></div>
                 </div>
               )}
             </>

@@ -120,54 +120,34 @@
 .dsc-buy { max-width: 100%; padding: 0 10px; font-family: var(--mono); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dsc-why { min-width: 0; font-size: var(--fs-2xs); color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsc-why a { color: var(--muted); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
-.dsc-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin: 0; min-width: 0; font-size: var(--fs-xs); color: var(--muted); }
-.dsc-foot > span { min-width: 0; }
-.dsc-foot .dsc-link { font-size: var(--fs-xs); margin-left: auto; }
 .dsc-trend { padding-top: 10px; padding-bottom: 6px; }
-/* a story card: who (a circle with the handle's initials, or the family's image), the post's first words on one line,
-   and on the right the two numbers that say how big it is. The head opens the card's coins */
-.dsc-st-head { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; min-width: 0; cursor: pointer; }
-.dsc-st-av { display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line-soft); border-radius: 50%; background: var(--glass-2); font-size: var(--fs-sm); font-weight: 600; letter-spacing: .02em; color: var(--ink-2); }
-.dsc-st-id { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
-/* the strongest text of the card: the handle, then when, in the muted ink */
-.dsc-st-who { min-width: 0; padding: 0; border: 0; background: none; font: inherit; font-size: var(--fs-sm); text-align: left; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.dsc-st-who b { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
-.dsc-st-head:hover .dsc-st-who b, .dsc-st-who:focus-visible b { color: var(--accent); }
-.dsc-st-text { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); }
-.dsc-st-text .dsc-x { flex: none; color: var(--muted); }
-.dsc-st-text span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsc-st-text:hover, .dsc-st-text:focus-visible { color: var(--ink); }
-.dsc-st-nums { display: flex; align-items: flex-start; gap: 20px; }
-.dsc-st-n { display: grid; justify-items: end; gap: 2px; }
-.dsc-st-n b { font-family: var(--mono); font-size: var(--fs-xl); font-weight: 600; line-height: 1.1; color: var(--ink); font-variant-numeric: tabular-nums; }
-.dsc-st-n span { font-size: var(--fs-2xs); color: var(--muted); white-space: nowrap; }
-/* its first coins as chips: ticker, buyers, market cap and change; they wrap */
-.dsc-st-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0; padding: 0; list-style: none; min-width: 0; }
-.dsc-st-chips li { display: flex; min-width: 0; max-width: 100%; }
-.dsc-st-chip { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; max-width: 100%; padding: 3px 10px; border: 1px solid var(--line-soft); border-radius: 999px; font-size: var(--fs-xs); line-height: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; }
-.dsc-st-chip b { min-width: 0; font-family: var(--mono); font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
-.dsc-st-chip > span { flex: none; }
-.dsc-st-chip .up { color: var(--good); }
-.dsc-st-chip .down { color: var(--bad); }
-.dsc-st-chip i { flex: none; font-style: normal; font-size: var(--fs-2xs); color: var(--ink-2); }
-.dsc-st-chip.left { opacity: .55; }
-.dsc-st-chip:hover, .dsc-st-chip:focus-visible { border-color: var(--line); text-decoration: none; }
-.dsc-st-chip:hover b, .dsc-st-chip:focus-visible b { color: var(--accent); }
-/* narrative tags (drawn only when the server tags stories). A narrative card has no circle: the story's title in large
-   type on one line (cut with an ellipsis: the words are a language model's), its theme as a small pill beside it, and
-   an optional quiet "@handle · 6 min ago" under it. Its chips come as two labelled runs */
-.dsc-st-nar .dsc-st-head { grid-template-columns: minmax(0, 1fr) auto; }
-.dsc-st-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.dsc-st-line .dsc-st-who { flex: 0 1 auto; }
-.dsc-st-title { flex: 0 1 auto; min-width: 0; padding: 0; border: 0; background: none; font: inherit; font-size: var(--fs-lg); font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; text-align: left; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color var(--dur-2); }
-.dsc-st-head:hover .dsc-st-title, .dsc-st-title:focus-visible { color: var(--accent); }
-.dsc-st-theme { flex: none; max-width: 45%; border: 1px solid var(--line-soft); background: var(--glass); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; display: inline-block; }
-.dsc-st-quiet { justify-self: start; max-width: 100%; font-size: var(--fs-xs); color: var(--muted); }
-.dsc-st-runs { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 8px 12px; min-width: 0; }
-.dsc-st-lbl { font-size: var(--fs-2xs); line-height: 26px; color: var(--muted); white-space: nowrap; }
-/* opened: a thin label between the new coins and the older ones */
-.dsc-st-div { padding: 10px 0 4px; border-bottom: 1px solid var(--line-soft); font-size: var(--fs-2xs); color: var(--muted); }
-/* a loose row's story: its title, small and muted, cut on one line */
+/* one list: a story is a slim header line over its coin rows, which sit under it with a thin left rule; a single
+   coin is a plain row. No big numbers: the count on the right is muted */
+.dsc-story { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; border-bottom: 1px solid var(--line-soft); transition: opacity var(--dur-2); }
+.dsc-story:last-child { border-bottom: 0; }
+.dsc-story.left { opacity: .55; }
+.dsc-sh { display: flex; align-items: baseline; gap: 4px 12px; min-width: 0; padding: 10px 0 4px; }
+.dsc-sh-l { flex: 1 1 auto; display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.dsc-sh-t { flex: 0 1 auto; min-width: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.dsc-sh-q { flex: 0 1 auto; min-width: 0; font-size: var(--fs-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+a.dsc-sh-q:hover, a.dsc-sh-q:focus-visible { color: var(--ink); }
+.dsc-sh-text { flex: 0 10 auto; display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-xs); color: var(--ink-2); overflow: hidden; }
+.dsc-sh-text span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsc-sh-text:hover, .dsc-sh-text:focus-visible { color: var(--ink); }
+.dsc-x { flex: none; color: var(--muted); }
+.dsc-sh-n { flex: none; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
+.dsc-coins .dsc-st-rows { margin-left: 4px; padding-left: 12px; border-left: 2px solid var(--line-soft); }
+.dsc-st-more { margin: 0; padding: 4px 0 8px 18px; }
+.dsc-page-more { display: flex; justify-content: center; margin: 0; }
+.dsc-newp { border: 1px dashed var(--line-soft); background: none; }
+/* a story's theme as a small pill beside its title (a language model's word: cut, never wider than the line allows) */
+.dsc-st-theme { flex: none; align-self: center; max-width: 45%; border: 1px solid var(--line-soft); background: var(--glass); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+/* a single coin's post or family: one muted line under its name, in line with the ticker */
+.dsc-csub { display: block; min-width: 0; padding-left: 32px; font-size: var(--fs-2xs); color: var(--muted); overflow: hidden; white-space: nowrap; }
+.dsc-csub > a, .dsc-csub > span { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; color: var(--muted); }
+.dsc-csub span span, .dsc-csub a span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dsc-csub a:hover, .dsc-csub a:focus-visible { color: var(--ink); }
+/* a single coin's story (while narratives are shown): its title, small and muted, cut on one line */
 .dsc-st-ntag { min-width: 0; max-width: min(100%, 22em); font-size: var(--fs-2xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* the theme pills: a second row under the size pills, the full width of the bar; they wrap on a narrow screen */
 .dsc-themes { flex: 0 0 100%; min-width: 0; padding-bottom: 8px; }
@@ -179,9 +159,8 @@
 .dsc-copy-mint { font-family: var(--mono); color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 2px; }
 .dsc-copy-mint:hover, .dsc-copy-mint:focus-visible { color: var(--ink); }
 .dsc-copy-facts { min-width: 0; }
-/* the lists under the cards: coins with no story, and the dust behind its toggle */
+/* the list and the dust behind its toggle */
 .dsc-sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
-.dsc-h2 { margin: 0; font-size: var(--fs-base); font-weight: 500; letter-spacing: 0; color: var(--ink-2); }
 .dsc-dust-line, .dsc-more-note { margin: 0; font-size: var(--fs-sm); color: var(--muted); }
 .dsc-more-note { font-size: var(--fs-xs); }
 /* the loading cards */
@@ -209,7 +188,7 @@
   /* a blocked coin's reason is long nowrap text: on its own third line, so the auto column stays the Buy's width */
   .dsc-act.blocked { grid-area: auto; grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; }
   .dsc-act.blocked .dsc-why { text-align: left; }
-  .dsc-ptags, .dsc-safety { padding-left: 0; }
+  .dsc-ptags, .dsc-safety, .dsc-csub { padding-left: 0; }
 }
 /* a phone-width list: three lines a coin. Line 1: logo, ticker, the chart and Buy (Buy on its own line made a
    row about 170 px tall at 375 px). Line 2, the full width of the row: the tag, the age, the parent tags and the
@@ -227,6 +206,7 @@
   .dsc-ptags, .dsc-safety, .dsc-meta.out { display: contents; }
   .dsc-meta.in { display: none; }
   .dsc-coin-tags .dsc-tag, .dsc-coin-tags .dsc-age { flex: none; }
+  .dsc-csub { flex: 0 0 100%; }
   .dsc-sub2 { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
   .dsc-mc { display: flex; flex-wrap: wrap; column-gap: 4px; }
   .dsc-mc .dsc-dot { display: none; }
@@ -239,30 +219,22 @@
   .dsc-link::after, .dsc-ptag::after { content: ""; position: absolute; inset: -10px -6px; }
   .dsc-seg button { height: 32px; min-width: 40px; }
 }
-/* phone: a smaller card; the story head keeps its numbers on the right and its first line wraps */
+/* phone: a smaller card; each row keeps the logo and ticker, the chart, buyers, market cap and Buy (liquidity, volume
+   and txns are left out, so no row is wider than the screen); a story's post line wraps under its title */
 @media (max-width: 640px) {
   .dsc-card { padding: 12px; }
-  .dsc-st-head { align-items: start; }
-  .dsc-st-who { white-space: normal; overflow: visible; }
-  .dsc-st-nums { gap: 12px; }
-  .dsc-st-n b { font-size: var(--fs-lg); }
-  /* a narrative card: the title keeps the card's width, the two numbers sit on one line under it */
-  .dsc-st-nar .dsc-st-head { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .dsc-st-nar .dsc-st-nums { gap: 20px; }
-  .dsc-st-nar .dsc-st-n { justify-items: start; }
-  /* a story's title is its main fact: on a phone it wraps (the server caps it at 40 characters, two lines here) and
-     the theme pill drops under it when both do not fit */
-  .dsc-st-nar .dsc-st-line { flex-wrap: wrap; gap: 4px 8px; }
-  .dsc-st-title { font-size: var(--fs-md); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
-  .dsc-st-runs { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-  .dsc-st-lbl { line-height: 16px; }
-  .dsc-st-runs .dsc-st-chips + .dsc-st-lbl { margin-top: 6px; }
+  .dsc-cols .opt, .dsc-num.opt { display: none; }
+  .dsc-coin .dsc-nums { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .dsc-sh { flex-wrap: wrap; }
+  .dsc-sh-l { flex-wrap: wrap; row-gap: 2px; }
+  .dsc-sh-t { max-width: 100%; }
+  .dsc-sh-text { flex: 1 1 100%; }
   .dsc-copyrow { padding-left: 0; }
   .dsc-trend { padding: 8px 12px 4px; }
   .dsc-bar { align-items: stretch; }
   .dsc-ctl { width: 100%; justify-content: space-between; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dsc-card, .dsc-coin, .dsc-coin-top b, .dsc-panel, .dsc-st-title { transition: none; }
+  .dsc-card, .dsc-coin, .dsc-coin-top b, .dsc-panel, .dsc-story { transition: none; }
   .dsc-v.dsc-flash, .dsc-v.dsc-flash.down { animation: none; }
 }

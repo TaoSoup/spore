@@ -51,8 +51,8 @@ const byDepth = (a, b) => liq(b) - liq(a) || (b.buyers5m ?? 0) - (a.buyers5m ?? 
 
 /**
  * `rows` (in rank order) with same-ticker same-image coins folded into one row each: the lead (most liquidity) stands
- * where the best-ranked of them stood and gets `copies: [{ mint, createdAt, firstSeenAt, liqUsd, buyers5m }]`, deepest
- * first. A row that folds nothing is returned as it came (no `copies`). The input rows are not changed.
+ * where the best-ranked of them stood and gets `copies: [{ mint, createdAt, firstSeenAt, liqUsd, buyers5m, buyers }]`
+ * (`buyers`: the copy's buyers over the row's timeframe, its `tf.buyers`), deepest first. A row that folds nothing is returned as it came (no `copies`). The input rows are not changed.
  */
 export function foldCopies(rows) {
   const groups = new Map(), order = [];
@@ -64,7 +64,7 @@ export function foldCopies(rows) {
   return order.map((g) => {
     if (g.length === 1) return g[0];
     const [lead, ...rest] = [...g].sort(byDepth);
-    return { ...lead, copies: rest.map((r) => ({ mint: r.mint, createdAt: r.createdAt ?? null, firstSeenAt: r.firstSeenAt ?? null, liqUsd: r.liqUsd ?? null, buyers5m: r.buyers5m ?? 0 })) };
+    return { ...lead, copies: rest.map((r) => ({ mint: r.mint, createdAt: r.createdAt ?? null, firstSeenAt: r.firstSeenAt ?? null, liqUsd: r.liqUsd ?? null, buyers5m: r.buyers5m ?? 0, buyers: r.tf?.buyers ?? 0 })) };
   });
 }
 

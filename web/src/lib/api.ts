@@ -326,7 +326,8 @@ export type Trending = { asOf: number; tf: Tf; rows: TrendRow[]; floor?: number;
 /// `family.startedAt` are unix seconds; the web rebuilds the post link from the id (lib/narrative.ts safePostUrl).
 /// A card's `buyers5m` and `coinsN` count its coins and their copies; `hidden.dust` counts every dust coin (at most 30
 /// are sent), `hidden.cards` the cards past the 20 sent, `hidden.loose` the coins of no card past the 30 loose rows sent.
-export type StoryCopy = { mint: string; createdAt: number | null; firstSeenAt: number | null; liqUsd: number | null; buyers5m: number };
+/// `buyers`: the copy's buyers over the read's `tf` (its `tf.buyers`; a server before it sent none).
+export type StoryCopy = { mint: string; createdAt: number | null; firstSeenAt: number | null; liqUsd: number | null; buyers5m: number; buyers?: number };
 /// Narrative tags (a newer server with NARRATIVES=on): a language model reads each coin's public text and names the story it
 /// belongs to. `title` is model-written, untrusted text (shown as plain text only); `theme` is one of the server's fixed
 /// lower-case themes. Context only. A row anywhere may carry its `narrative`; a row of a "narrative" card carries

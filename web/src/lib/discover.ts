@@ -244,10 +244,17 @@ function keepShown(f: WakeFamily, r: FamilyRow): FamilyRow {
 export const LEFT_PILL = "No longer listed";
 /// A story row or card kept in place while the page is in use although the read lists its coins somewhere else now
 /// (a coin joined a story card, or a card was regrouped): still listed, so it is not called dropped.
-export const MOVED_PILL = "Moved to another card";
-export const MOVED_TITLE = "This coin is now listed on another card or list; this row goes once the page is idle";
+export const MOVED_PILL = "Moved to another story";
+export const MOVED_TITLE = "This coin is now listed in another story or as a row of its own; this row goes once the page is idle";
+/// The small pill on a narrative story's coin that the server marks `isNew` (created in the last 60 minutes) while its
+/// row's own tag already reads "existing" (over 30 minutes): the 30-60 minute band. Under 30 minutes the row's "new"
+/// tag says it, so one row never shows "new" twice, nor "existing" beside "new".
+export const NEW_ROW_PILL = "this hour";
+export const NEW_ROW_TITLE = "Created 30-60 minutes ago";
+/// Whether a story row carries NEW_ROW_PILL (`nar`: the row is in a narrative story).
+export const newRowPill = (r: Pick<StoryShown, "isNew" | "existing">, nar: boolean): boolean => nar && r.isNew === true && r.existing === true;
 export const REGROUPED_PILL = "Regrouped";
-export const REGROUPED_TITLE = "The coins of this card are now listed on other cards; this card goes once the page is idle";
+export const REGROUPED_TITLE = "The coins of this story are now listed in other stories or as rows of their own; this story goes once the page is idle";
 
 /// While the list is in use a new family is added at the end and a card that turned live keeps its cooling shape, so
 /// a wake-up could start unseen under a resting pointer. `heldNews` is what the pill above the list names: families
@@ -907,8 +914,6 @@ export function splitNew<R extends { isNew?: boolean }>(coins: readonly R[]): { 
   for (const c of coins) (c && c.isNew === true ? fresh : older).push(c);
   return { fresh, older };
 }
-export const NEW_LABEL = "New this hour";
-export const OLDER_LABEL = "Older coins in this story";
 /// A narrative card's head: the title, its theme as words ("" when unknown), the second number (`newCoins`: coins of
 /// the story created in the last 60 min, as the server counted them over every tagged coin) and, when the card has a
 /// post, one quiet line "@handle · 6 min ago" with the post's address rebuilt from its id (null for a bad id).
@@ -922,7 +927,6 @@ export function narrativeHead(c: Pick<StoryCard, "narrative" | "post">, nowS: nu
   }
   return { title: narrativeTitle(n?.title), theme: themeLabel(n?.theme), newCoins: whole(n?.newCoins1h), post };
 }
-export const NEW_COINS_TITLE = "Coins tagged with this story that were created in the last 60 minutes";
 /// Added to the page's note while narratives are shown.
 export const MODEL_NOTE = "Stories are grouped by a language model reading each coin's public text. It can be wrong.";
 export const TAG_NOTE = "The story a language model read in this coin's public text. It can be wrong.";
@@ -943,66 +947,39 @@ export function relTime(at: number | null | undefined, nowS: number): string {
   const d = Math.floor(h / 24);
   return d < 30 ? `${d} d ago` : postDate(at, nowS);
 }
-/// The two letters in a post card's circle, from the handle: the first letters of its first two words ("elon_musk",
-/// "ElonMusk": "EM"), else its first two characters ("poster": "PO"); "?" without a handle. Upper case.
-export function initials(handle: string | null | undefined): string {
-  const h = typeof handle === "string" ? handle.replace(/^@/, "").trim() : "";
-  const words = h.split(/[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
-  if (!words.length) return "?";
-  return (words.length > 1 ? words[0][0] + words[1][0] : words[0].slice(0, 2)).toUpperCase();
-}
 const famLabel = (f: { symbol?: string | null; mint: string }): string => (f.symbol ? `$${f.symbol}` : short(f.mint));
 /// A card's head. Post card: who "@handle", when "6 min ago", `tail` "$SYM family waking" when a waking family chose
 /// the same post, `text` the post's words on one line ("" for a media-only post) and `href` the post on x.com (rebuilt
 /// from the id). Family card: who "$SYM family", when "waking up · 12 min" (since its start). `line` is the whole first
 /// line. Only who posted, when, and what is waking: a post is what the coins link, never the reason.
-export type StoryHead = { kind: "post" | "family"; who: string; when: string; tail: string | null; line: string; text: string; href: string | null; initials: string | null };
+export type StoryHead = { kind: "post" | "family"; who: string; when: string; tail: string | null; line: string; text: string; href: string | null };
 export function storyHead(c: Pick<StoryCard, "kind" | "post" | "family">, nowS: number): StoryHead {
   const f = c.family && typeof c.family.mint === "string" ? c.family : null;
   if (c.post) {
     const p = { state: "ok" as const, handle: c.post.handle, text: c.post.text };
     const h = postHandle(p);
     const who = h ? `@${h}` : "Linked post", when = relTime(c.post.at, nowS), tail = f ? `${famLabel(f)} family waking` : null;
-    return { kind: "post", who, when, tail, line: [who, when, tail].filter(Boolean).join(" · "), text: postText(p), href: safePostUrl(c.post.id), initials: initials(h) };
+    return { kind: "post", who, when, tail, line: [who, when, tail].filter(Boolean).join(" · "), text: postText(p), href: safePostUrl(c.post.id) };
   }
   const who = f ? `${famLabel(f)} family` : "Family";
   const when = f && finite(f.startedAt) ? `waking up · ${durText(nowS - f.startedAt)}` : "waking up";
-  return { kind: "family", who, when, tail: null, line: `${who} · ${when}`, text: "", href: null, initials: null };
+  return { kind: "family", who, when, tail: null, line: `${who} · ${when}`, text: "", href: null };
 }
-/// How many chips a card shows before "+N more".
-export const CHIPS_MAX = 3;
 /// "×3 copies" on a row with two others folded under it: three coins that look the same, none named as the first.
 export const copiesMark = (r: { copies?: unknown } | null | undefined): string | null => { const n = copiesOf(r).length; return n > 0 ? `×${count(n + 1)} copies` : null; };
 export const COPIES_TITLE = "Coins with the same ticker and image, folded into one row. The row shown is the one with the most liquidity; nothing here says which came first.";
-/// A coin chip: "$SYM 96 buyers · $41K +38%" (buyers over 5 min, as the card's number; the market cap and its change
-/// over the chosen timeframe), then "×3 copies" on a folded one.
-export type StoryChip = { sym: string; buyers: string; mcap: string; chg: { text: string; tone: Tone } | null; copies: string | null; text: string };
-export function storyChip(r: Pick<StoryShown, "mint" | "symbol" | "buyers5m" | "mcapUsd" | "tf"> & { copies?: unknown }): StoryChip {
-  const s = r.symbol ? `$${r.symbol}` : short(r.mint), buyers = plural(whole(r.buyers5m), "buyer"), mcap = finite(r.mcapUsd) ? usd(r.mcapUsd) : "";
-  const chg = mcap && finite(r.tf?.chg) ? chgText(r.tf?.chg) : null, copies = copiesMark(r);
-  return { sym: s, buyers, mcap, chg, copies, text: `${s} ${buyers}${mcap ? ` · ${mcap}${chg ? ` ${chg.text}` : ""}` : ""}${copies ? ` · ${copies}` : ""}` };
-}
-export const moreChips = (n: number): string | null => (whole(n) > 0 ? `+${count(whole(n))} more` : null);
 /// A folded copy as one line under its row: when it launched (or was first seen trading), its liquidity, its buyers.
-export function copyFacts(c: StoryCopy, nowS: number): string {
+/// `tf`: the page's timeframe; the copy's buyers over it when the server sends them ("9 buyers in the last hour"),
+/// else its 5-minute buyers, said as such.
+export function copyFacts(c: StoryCopy, nowS: number, tf?: Tf): string {
   const seen = finite(c.createdAt) && c.createdAt > 0 ? `launched ${relTime(c.createdAt, nowS)}` : finite(c.firstSeenAt) && c.firstSeenAt > 0 ? `first seen ${relTime(c.firstSeenAt, nowS)}` : "";
-  return [seen, finite(c.liqUsd) ? `${usd(c.liqUsd)} liquidity` : "", `${plural(whole(c.buyers5m), "buyer")} in 5 min`].filter(Boolean).join(" · ");
+  const buyers = tf && finite(c.buyers) ? `${plural(whole(c.buyers), "buyer")} in ${tfWords(tf)}` : `${plural(whole(c.buyers5m), "buyer")} in 5 min`;
+  return [seen, finite(c.liqUsd) ? `${usd(c.liqUsd)} liquidity` : "", buyers].filter(Boolean).join(" · ");
 }
 /// The words around the lists.
 export const STORIES_SUB = "What is being bought now, grouped by the post or family behind it";
-/// `more`: the coins of no card the server did not send: "No story found · 30 of 125 coins". `nar` (narratives are
-/// shown): a row here can carry a story's title (a story with one coin on the page gets no card), so the heading says
-/// what the list is, "Not in a story card · 12 coins".
-export const looseTitle = (n: number, more = 0, nar = false): string => {
-  const lead = nar ? "Not in a story card" : "No story found";
-  return whole(more) > 0 ? `${lead} · ${count(whole(n))} of ${plural(whole(n) + whole(more), "coin")}` : `${lead} · ${plural(whole(n), "coin")}`;
-};
-/// Under a size pill the coins not sent cannot be told apart by size: one line says how many there are.
-export const looseMore = (more: number): string | null => (whole(more) > 0 ? `${plural(whole(more), "more coin")} of any size ${whole(more) === 1 ? "is" : "are"} not shown.` : null);
-export const LOOSE_TITLE = "Coins being bought that link no stored post and whose family is not waking up";
-export const LOOSE_TITLE_NAR = "Coins being bought that are on no story card: no story shared with another listed coin, no stored post, and a family that is not waking up";
 export const dustLine = (n: number): string => `${count(whole(n))} hidden as bot dust`;
-export const DUST_NOTE = "Left out of the lists above: a market cap over 100 times the liquidity, or under $5 bought per buyer.";
+export const DUST_NOTE = "Left out of the list above: a market cap over 100 times the liquidity, or under $5 bought per buyer.";
 export const DUST_CHIP: Record<DustReason, { text: string; title: string }> = {
   paper: { text: "Paper cap", title: "Market cap over 100 times the liquidity" },
   tiny: { text: "Tiny buys", title: "Under $5 of volume per buyer over the chosen timeframe" },
@@ -1099,6 +1076,139 @@ export function storyMints(v: StoriesView | null, withDust = false): Set<string>
   for (const r of v.loose) s.add(r.mint);
   if (withDust) for (const r of v.dust) s.add(r.mint);
   return s;
+}
+
+// ---- one list: stories and single coins ranked together, every coin drawn as the same row
+
+/// An entry of the list: a story of two or more coin rows (`head`: drawn under a slim header line), or one coin (a
+/// loose row, or a post / family card of one row, drawn as a plain row with its story under its name). `card` is null
+/// for a loose row. `rows` are in the order drawn. `buyers`, `coinsN`, `newN`: over the rows shown (copies counted,
+/// a row kept dimmed after it left not counted), `buyers` over the page's timeframe (each row's `tf.buyers`).
+/// `movedN`, `goneN`: the rows drawn dimmed (left, and listed elsewhere now or not at all), said on the header line.
+export type OneEntry = { key: string; card: StoryCardShown | null; rows: StoryShown[]; head: boolean; buyers: number; coinsN: number; newN: number; movedN: number; goneN: number; left: boolean; moved: boolean };
+/// What the list looked like, so a read applied while the page is in use moves nothing: the entries' keys in the order
+/// drawn and, per entry, its rows' mints in order and whether it was drawn under a header.
+export type OneOrder = { keys: string[]; rows: Map<string, string[]>; heads: Map<string, boolean> };
+/// Rows a story shows before "+N more coins"; entries a page shows before "Show 20 more".
+export const STORY_ROWS_SHOWN = 3;
+export const PAGE_ENTRIES = 20;
+/// A coin counts as new for this long after its launch (the server's NEW_S): a folded copy's share of "· 1 new".
+export const NEW_COIN_S = 3600;
+
+/// A row's buyers over the page's timeframe, its folded copies included (a copy without the figure counts 0).
+export const rowBuyers = (r: Pick<StoryShown, "tf"> & { copies?: unknown }): number =>
+  whole(r.tf?.buyers) + copiesOf(r).reduce((n, k) => n + whole(k.buyers), 0);
+/// The numbers of a run of rows over the page's timeframe: buyers, coins (copies counted) and how many of them are new
+/// (a row the server marked `isNew`; on such a row, a copy launched within the last hour). A row that left is not counted
+/// there: it is counted apart, as moved (still listed elsewhere) or gone.
+export function tfTotals(rows: readonly StoryShown[], nowS: number): { buyers: number; coinsN: number; newN: number; movedN: number; goneN: number } {
+  let buyers = 0, coinsN = 0, newN = 0, movedN = 0, goneN = 0;
+  for (const r of rows) {
+    if (!r) continue;
+    if (r.left) { if (r.moved === true) movedN++; else goneN++; continue; }
+    buyers += rowBuyers(r); coinsN += 1; if (r.isNew === true) newN++;
+    for (const k of copiesOf(r)) { coinsN++; if (r.isNew !== undefined && finite(k.createdAt) && k.createdAt > nowS - NEW_COIN_S) newN++; }
+  }
+  return { buyers, coinsN, newN, movedN, goneN };
+}
+/// A story's rows in the order drawn: most buyers over the timeframe first (ties in the order received); a narrative
+/// story's new coins first, then the older ones, each run so ordered.
+export function storyRows(rows: readonly StoryShown[], narrative = false): StoryShown[] {
+  const by = rows.map((r, i) => ({ r, i, b: rowBuyers(r) })).sort((x, y) => y.b - x.b || x.i - y.i).map((x) => x.r);
+  if (!narrative) return by;
+  const { fresh, older } = splitNew(by);
+  return [...fresh, ...older];
+}
+/// Held: the items keep the order they were drawn in (`was`: their keys), one new to the list goes last.
+function keepOrder<T>(items: readonly T[], key: (t: T) => string, was: readonly string[] | undefined): T[] {
+  if (!was) return [...items];
+  const at = new Map(was.map((k, i) => [k, i] as const));
+  return items.map((t, i) => ({ t, i, p: at.get(key(t)) ?? Infinity })).sort((x, y) => (x.p === y.p ? x.i - y.i : x.p < y.p ? -1 : 1)).map((x) => x.t);
+}
+/// The list after the filters (filterStories): every card and every loose row as one entry, ranked together by buyers
+/// over the timeframe (a story by the sum over its rows, copies included; a single coin by its own, with its copies),
+/// then more coins, then the order received (the cards in the server's order, then the loose rows). `hold` (the page
+/// is in use) with `prev`: the entries and their rows keep the order on screen with fresh numbers, a new one goes last.
+export function oneList(shown: Pick<StoriesShown, "cards" | "loose">, nowS: number, prev: OneOrder | null = null, hold = false): { entries: OneEntry[]; order: OneOrder } {
+  const raw: OneEntry[] = [];
+  for (const c of shown.cards) {
+    const key = cardKey(c);
+    const was = hold ? prev?.rows.get(key) : undefined;
+    let rows = was ? keepOrder(c.coins, (r) => r.mint, was) : storyRows(c.coins, c.kind === "narrative");
+    // held, an entry drawn as a plain row stays one: a coin the read added to its card waits until the page is idle
+    // (a header growing above it would move the row, and its Buy button, from under the pointer). It ranks and counts
+    // by the row it draws.
+    if (was && prev?.heads.get(key) === false) {
+      const one = rows.filter((r) => r.mint === was[0]);
+      if (one.length) rows = one;
+    }
+    raw.push({ key, card: c, rows, head: rows.length >= 2, ...tfTotals(rows, nowS), left: c.left === true, moved: c.moved === true });
+  }
+  for (const r of shown.loose) raw.push({ key: `loose:${r.mint}`, card: null, rows: [r], head: false, ...tfTotals([r], nowS), left: r.left === true, moved: r.moved === true });
+  const ranked = raw.map((e, i) => ({ e, i })).sort((x, y) => y.e.buyers - x.e.buyers || y.e.coinsN - x.e.coinsN || x.i - y.i).map((x) => x.e);
+  const entries = hold && prev ? keepOrder(ranked, (e) => e.key, prev.keys) : ranked;
+  return {
+    entries,
+    order: { keys: entries.map((e) => e.key), rows: new Map(entries.map((e) => [e.key, e.rows.map((r) => r.mint)] as const)), heads: new Map(entries.map((e) => [e.key, e.head] as const)) },
+  };
+}
+/// The stories still open after a read: one now down to the rows always shown is closed (grown back later, it shows
+/// three rows and "+N more coins" again). A key not in `entries` (another page, a filter, one read) stays open.
+/// The same set when nothing changed.
+export function closeShrunk(opened: ReadonlySet<string>, entries: readonly Pick<OneEntry, "key" | "rows">[]): ReadonlySet<string> {
+  let n: Set<string> | null = null;
+  for (const e of entries) if (opened.has(e.key) && e.rows.length <= STORY_ROWS_SHOWN) (n ??= new Set(opened)).delete(e.key);
+  return n ?? opened;
+}
+/// A story's rows split at STORY_ROWS_SHOWN: the ones drawn, and how many are behind "+N more coins" (`open`: all are drawn).
+export function storySplit<R>(rows: readonly R[], open: boolean, max = STORY_ROWS_SHOWN): { shown: R[]; more: number } {
+  const more = Math.max(0, rows.length - max);
+  return { shown: open ? [...rows] : rows.slice(0, max), more };
+}
+/// The toggle under a story's first rows: "+2 more coins", and "Hide 2 coins" once open.
+export const moreCoins = (n: number, open: boolean): string => (open ? `Hide ${plural(whole(n), "coin")}` : `+${plural(whole(n), "more coin")}`);
+/// The first `limit` entries (never under one page) and how many wait behind "Show 20 more".
+export function pageEntries<E>(entries: readonly E[], limit: number): { shown: E[]; rest: number } {
+  const n = Math.max(PAGE_ENTRIES, finite(limit) ? Math.floor(limit) : PAGE_ENTRIES);
+  return { shown: entries.slice(0, n), rest: Math.max(0, entries.length - n) };
+}
+export const showMore = (rest: number): string => `Show ${count(Math.min(PAGE_ENTRIES, whole(rest)))} more`;
+/// A story's header line. `title`: the narrative's title (title-cased), "@handle · 27 min ago" for a post story, or the
+/// family as its card names it ("$SYM family · waking up · 12 min"). `theme`: its theme as words ("" for none, or when
+/// narratives are not shown). `post`: a narrative story's "@handle · 6 min ago" (muted, after the pill), with `href`;
+/// `text` and `href`: a post story's words on one line and the post on x.com (rebuilt from the id). `count`: "3 coins · 1 new".
+export type StoryLine = { kind: "narrative" | "post" | "family"; title: string; theme: string; post: string | null; text: string; href: string | null; count: string };
+/// `movedN`, `goneN`: rows still drawn, dimmed, while the page is in use ("2 coins · 1 moved"); with no other coin left,
+/// only those ("2 moved", never "0 coins").
+export const countLine = (coinsN: number, newN: number, movedN = 0, goneN = 0): string => {
+  const c = whole(coinsN), m = whole(movedN), g = whole(goneN);
+  return [
+    c > 0 || m + g === 0 ? plural(c, "coin") : "",
+    whole(newN) > 0 ? `${count(whole(newN))} new` : "",
+    m > 0 ? `${count(m)} moved` : "",
+    g > 0 ? `${count(g)} gone` : "",
+  ].filter(Boolean).join(" · ");
+};
+export function storyLine(e: Pick<OneEntry, "card" | "coinsN" | "newN"> & Partial<Pick<OneEntry, "movedN" | "goneN">>, nowS: number, nar = true): StoryLine {
+  const c = e.card, n = countLine(e.coinsN, e.newN, e.movedN, e.goneN);
+  if (!c) return { kind: "post", title: "", theme: "", post: null, text: "", href: null, count: n };
+  if (c.kind === "narrative") {
+    const h = narrativeHead(c, nowS);
+    return { kind: "narrative", title: h.title, theme: h.theme, post: h.post?.text ?? null, text: "", href: h.post?.href ?? null, count: n };
+  }
+  const theme = nar ? themeLabel(narrativeOf(c)?.theme) : "";
+  const h = storyHead(c, nowS);
+  if (h.kind === "family") return { kind: "family", title: h.line, theme, post: null, text: "", href: null, count: n };
+  return { kind: "post", title: [h.who, h.when].filter(Boolean).join(" · "), theme, post: null, text: h.text, href: h.href, count: n };
+}
+/// The one muted line under a single coin's name: its post ("@handle · 13 min ago · the post's words", a link to the
+/// post) or its family ("$SYM family · waking up · 12 min"); null for a loose row and for a narrative story cut to one
+/// row by a filter (that row names its story with the title tag).
+export function coinStory(card: Pick<StoryCard, "kind" | "post" | "family"> | null, nowS: number): { text: string; href: string | null } | null {
+  if (!card || card.kind === "narrative") return null;
+  const h = storyHead(card, nowS);
+  if (h.kind === "family") return { text: h.line, href: null };
+  return { text: [h.who, h.when, h.text].filter(Boolean).join(" · "), href: h.href };
 }
 
 // ---- alerts

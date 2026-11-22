@@ -120,7 +120,9 @@ test("copies: same ticker (any case) and same image fold into the row with the m
   ];
   const out = foldCopies(rows);
   assert.deepEqual(mints(out), ["a2", "z", "a4", "n1", "n2"], "the lead stands where the best-ranked of them stood; another image, or no image, does not fold");
-  assert.deepEqual(out[0].copies, [{ mint: "a1", createdAt: 10, firstSeenAt: null, liqUsd: 100, buyers5m: 9 }, { mint: "a3", createdAt: null, firstSeenAt: 77, liqUsd: null, buyers5m: 2 }]);
+  assert.deepEqual(out[0].copies, [{ mint: "a1", createdAt: 10, firstSeenAt: null, liqUsd: 100, buyers5m: 9, buyers: 10 }, { mint: "a3", createdAt: null, firstSeenAt: 77, liqUsd: null, buyers5m: 2, buyers: 10 }]);
+  // a copy also carries its buyers over the timeframe of the read (its tf.buyers), so the page can add up any timeframe
+  assert.deepEqual(foldCopies([row("c1", { symbol: "Q", image: "i", liqUsd: 9, tf: { buyers: 31 } }), row("c2", { symbol: "Q", image: "i", liqUsd: 1, tf: { buyers: 4 } }), row("c3", { symbol: "Q", image: "i", liqUsd: 0, tf: undefined })])[0].copies.map((c) => [c.mint, c.buyers]), [["c2", 4], ["c3", 0]]);
   assert.deepEqual([out[0].symbol, out[0].liqUsd, "copies" in out[1], rows[2].copies], [" dog ", 900, false, undefined]);
   assert.deepEqual(Object.keys(out[0]).filter((k) => /real|orig|official/i.test(k)), []);
   assert.deepEqual(totals(out), { buyers5m: 9 + 4 + 2 + 10 * 4, coinsN: 7 });
