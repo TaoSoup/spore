@@ -854,6 +854,18 @@ export class Wakeups {
     if (!this.listed.has(P)) return null;
     return this.#live(w, Math.max(this.#complete(nowS), P.lastK)) ? "live" : "cooling";
   }
+  /**
+   * The wake-up of parent `mint` now, `{ startedAt, live, silent, postId }`, or null (none, or already over). O(1): one
+   * Map read, plus a look into the newest list builds (one per timeframe) for the post the family's card showed
+   * (`postId`, null when no build named one). lib/attention.mjs files a trade under the family's story with this.
+   */
+  wakeOf(mint, nowS = this.#nowS()) {
+    const P = this.parents.get(mint), w = P?.wake;
+    if (!w || this.#over(w, nowS)) return null;
+    let postId = null;
+    for (const h of this.hits.values()) { const f = h?.built?.get(mint); if (f && f.startedAt === w.startedAt && f.post?.id) { postId = f.post.id; break; } }
+    return { startedAt: w.startedAt, live: this.#live(w, Math.max(this.#complete(nowS), P.lastK)), silent: !!w.silent, postId };
+  }
   /** The waking parents in the list's order: live first, newest start first, then cooling ones; `skipOver` leaves out wake-ups already over (no tick ran). */
   #order(nowS, skipOver = false) {
     const Lg = this.#complete(nowS), act = [];

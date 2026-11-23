@@ -345,6 +345,31 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 export type StoryCard = {
   kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
   narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
+  attention?: StoryAttention | null;
+};
+/// Story attention (a newer server; absent on an older one): how many wallets the story draws now, as context, never a
+/// forecast. `phase` describes the last hour against the hour before and the story's own peak ("new": no normal yet,
+/// under 6 h of history, 12 baseline buckets or 10 buyers in the last hour). `buyers5m.last`: distinct wallets that
+/// bought $1+ of the story's coins in the last complete 5-minute bucket; `now`: so far in the open one. `multiple`: the
+/// story's share of all buyers on Spore in that bucket over its median share in its own history (null for "new").
+/// `startAt` (unix s): the post's time (`startSource` "post"), the family's wake-up ("wake") or the first bucket with a
+/// buyer ("buyers"). `leader.share`: 0-1 of the card's coin buyers over the last two buckets.
+export type StoryPhase = "new" | "rising" | "peaked" | "fading" | "steady";
+/// Why a story is "new": too little history (6 h, 12 buckets), too few buyers in the last hour, or a last hour the server
+/// did not see whole (a restart).
+export type StoryNewWhy = "history" | "quiet" | "unseen";
+export type StoryAttention = {
+  phase: StoryPhase; buyers5m: { now: number; last: number }; multiple: number | null; newWhy?: StoryNewWhy | null;
+  startAt: number | null; startSource: "post" | "wake" | "buyers" | null; minutes: number | null;
+  leader: { mint: string; symbol: string | null; share: number } | null;
+};
+/// `GET /api/story-series/:key`: the story's 5-minute buckets (`t` its start, unix s) of up to the last 14 days, oldest
+/// first, with its start and normal (`baseline.ratio`: its median share of site buyers; `ready`: enough history for a
+/// multiple to mean something). `partial`: the bucket the server started in.
+export type StoryBucket = { t: number; buyers: number; siteBuyers: number; launchesFast: number; launches: number; buyUsd: number; partial: boolean };
+export type StorySeries = {
+  key: string; asOf: number; bucketS: number; startAt: number | null; startSource: "post" | "wake" | "buyers" | null; firstBuyersAt: number | null;
+  baseline: { ratio: number; buckets: number; ready: boolean } | null; buckets: StoryBucket[];
 };
 /// `tagging.on` false (or absent, an older server): no narrative anywhere. `capped`: the daily spend cap was reached.
 export type StoryTagging = { on: boolean; tagged?: number; pending?: number; capped?: boolean };
@@ -523,6 +548,8 @@ export const api = {
   trending: (tf?: Tf) => request<Trending>(`/trending${qs({ tf })}`),
   /// The same coins grouped by story (see `Stories`); the server caches it 5 s.
   stories: (tf?: Tf) => request<Stories>(`/stories${qs({ tf })}`),
+  /// One story's 5-minute series (a card's `key`; the colon of "n:<id>" is encoded).
+  storySeries: (key: string, since?: number) => request<StorySeries>(`/story-series/${encodeURIComponent(key)}${qs({ since })}`),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).

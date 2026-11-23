@@ -501,6 +501,9 @@ export class CoinRows {
     // Only rows the body lists may queue holder reads, the cards' first; a dust row asks for none.
     const fill = (r, holders) => { const c = model.coins.get(r.mint); r.safety = c ? this.safetyOf(c, { holders }) : { devPct: null, top10Pct: null, sniperPct: null, state: "unknown" }; };
     for (const card of g.cards) { yield; for (const r of card.coins) fill(r, true); }
+    // Story attention (lib/attention.mjs): read from memory, one card a step (a card's open-bucket buyers are merged).
+    const att = model.attention;
+    if (att) for (const card of g.cards) { yield; try { card.attention = att.cardAttention(card, snap.nowS); } catch (e) { card.attention = null; this.log.warn?.(`coinrows: attention ${card.key}: ${e?.message ?? e}`); } }
     yield;
     for (const r of g.loose) fill(r, true);
     yield;

@@ -56,6 +56,8 @@ import {
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
+import { glance } from "../lib/story-attention";
+import StoryChart from "../components/StoryChart";
 import { NARRATIVE_FOOT } from "../lib/narrative";
 import { useEvents } from "../lib/events";
 import { useStats, useTick } from "../lib/hooks";
@@ -253,8 +255,8 @@ const ThemePill = ({ theme }: { theme: string }) => (theme ? <span className="ds
 /// one-coin card), or its story's title tag (a loose coin while narratives are shown). A story: a block with a header
 /// (not a control), its first three rows, and "+N more coins", which opens the rest in place.
 /// `nar`: narratives are shown.
-function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: boolean; open: boolean; onToggle: () => void }) {
-  const id = useId();
+function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: RowOpts; nar: boolean; open: boolean; onToggle: () => void; chart: boolean; onChart: () => void }) {
+  const id = useId(), chartId = useId();
   const parent = e.card?.kind !== "family";
   if (!e.head) {
     const r = e.rows[0];
@@ -273,6 +275,9 @@ function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: bo
   const sub = !subText ? null : h.href
     ? <a className="dsc-sh-sub" href={h.href} target="_blank" rel="noopener noreferrer" title={postTitle}>{h.kind === "post" && XIcon}<span>{subText}</span></a>
     : <span className="dsc-sh-sub"><span>{subText}</span></span>;
+  // story attention (a newer server): the phase, its multiple of normal when it has one, the buyers of the last 5
+  // minutes, how long since the start, the leading coin; and the control that opens the chart (lib/story-attention.ts)
+  const g = glance(e.card?.attention, o.now);
   return (
     <li className={`dsc-story${e.left ? " left" : ""}`}>
       <div className="dsc-sh">
@@ -283,7 +288,19 @@ function Entry({ e, o, nar, open, onToggle }: { e: OneEntry; o: RowOpts; nar: bo
         </div>
         <span className="dsc-sh-n" title={`Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
         {sub}
+        {g && e.card && (
+          <div className="dsc-sh-g">
+            <span className={`dsc-ph${g.muted ? " mute" : ""}`} title={g.phaseTitle}><span className="dsc-vh">Attention: </span>{g.phase}</span>
+            {g.multiple && <span className="dsc-gl dsc-gl-x" title={g.multipleTitle}>{g.multiple}</span>}
+            <span className="dsc-gl" title={g.buyersTitle}><b>{g.buyers}</b> {g.buyersLabel}</span>
+            {g.start && <span className="dsc-gl">{g.start}</span>}
+            {g.leader && <span className="dsc-gl dsc-gl-lead">{g.leader}</span>}
+          </div>
+        )}
+        {/* its own grid cell, outside the glance line's clipping, so its focus ring and touch area are whole */}
+        {g && e.card && <button type="button" className="linkish dsc-link dsc-sh-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
       </div>
+      {g && e.card && chart && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
         {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
       </ul>
@@ -447,6 +464,9 @@ export default function Discover() {
   // the stories the reader opened (by card key, so they stay open over the reads), and whether the dust is shown
   const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (key: string) => setOpened((s) => { const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n; });
+  // the stories whose chart the reader opened (by entry key; a chart reads its series once, when opened)
+  const [charts, setCharts] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleChart = (key: string) => setCharts((s) => { const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n; });
   const [showDust, setShowDust] = useState(false);
   const { stats } = useStats();
   const { connection } = useConnection();
@@ -588,7 +608,7 @@ export default function Discover() {
             <div className="dsc-coins">
               <Cols tf={shownTf} />
               <ul className="dsc-one">
-                {page.shown.map((e) => <Entry key={e.key} e={e} o={o} nar={nar} open={opened.has(e.key)} onToggle={() => toggle(e.key)} />)}
+                {page.shown.map((e) => <Entry key={e.key} e={e} o={o} nar={nar} open={opened.has(e.key)} onToggle={() => toggle(e.key)} chart={charts.has(e.key)} onChart={() => toggleChart(e.key)} />)}
               </ul>
             </div>
           </div>

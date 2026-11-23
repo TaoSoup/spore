@@ -18,6 +18,7 @@ import { launchFeeOf, DEFAULT_LAUNCH_FEE_SOL, splitShares, rootShares, ROOT_SPLI
 import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs";
 import { Wakeups } from "./wakeups.mjs";
 import { CoinRows, parseTf } from "./coinrows.mjs";
+import { parseStoryKey } from "./stories.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
 import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
@@ -400,7 +401,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), narrTags: narrTags?.snapshot?.() ?? { on: false } };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), attention: model.attention?.snapshot?.() ?? null, narrTags: narrTags?.snapshot?.() ?? { on: false } };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 
@@ -724,6 +725,21 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     const tf = tfOf(req, res);
     if (tf) sendCachedJson(req, res, await rows.stories(tf), WAKE_CACHE);
   }));
+  // One story's 5-minute series (README §API, lib/attention.mjs): its stored buckets of the last 14 days (or from
+  // `since`), its start and its normal. `key` is a stories card's key: "n:<id>" (the client encodes the colon), a post id
+  // or a parent mint; 400 for anything else. One indexed read per key, cached 30 s in memory, header the same.
+  app.get("/api/story-series/:key", (req, res) => {
+    const key = String(req.params.key ?? ""), p = parseStoryKey(key);
+    if (!p || (p.kind === "family" && !isMint(key))) return res.status(400).json({ error: "invalid story key" });
+    let since = null;
+    if (req.query.since != null && req.query.since !== "") {
+      since = Number(req.query.since);
+      if (!Number.isInteger(since) || since < 0 || since > 1e11) return res.status(400).json({ error: "since must be a time in unix seconds" });
+    }
+    const att = model.attention;
+    if (!att) return res.status(404).json({ error: "no story series on this server" });
+    sendCachedJson(req, res, att.seriesOf(key, since), { cacheControl: "public, max-age=30" });
+  });
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search
   // box accept all of pump.fun, DESIGN §11.1) is looked up live, like /api/coin/:mint does; the

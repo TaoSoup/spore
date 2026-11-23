@@ -140,6 +140,37 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
 .dsc-x { flex: none; color: var(--muted); }
 .dsc-sh-n { grid-area: n; font-size: var(--fs-xs); color: var(--muted); white-space: nowrap; }
 .dsc-sh-n b { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+/* story attention: one line under the header (wraps on a phone). Every phase is drawn the same, neutral (no arrow, no
+   colour for up: fading weighs what rising weighs); "new" is muted. The multiple of normal comes second, smaller. */
+.dsc-sh { grid-template-areas: "top n" "sub n" "g c"; }
+.dsc-sh-g { grid-area: g; display: flex; align-items: baseline; gap: 2px 10px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: var(--fs-2xs); line-height: 18px; color: var(--muted); }
+.dsc-ph { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-2xs); line-height: 16px; color: var(--ink-2); }
+.dsc-ph.mute { border-style: dashed; color: var(--muted); }
+.dsc-gl { flex: none; min-width: 0; }
+.dsc-gl b { font-family: var(--mono); font-weight: 600; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.dsc-gl-x { font-size: calc(var(--fs-2xs) * .92); color: var(--muted); cursor: help; }
+.dsc-gl-lead { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+/* the chart control: its own cell beside the glance line (not inside its overflow clip: the focus ring and the coarse
+   pointer's larger touch area must not be cut) */
+.dsc-sh-chart { grid-area: c; align-self: center; justify-self: end; font-size: var(--fs-2xs); line-height: 18px; }
+/* the story's chart, inside the block between its header and its rows: a fixed height in every state (reading, failed,
+   drawn), so nothing under it moves when the series arrives */
+.dsc-sc { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.dsc-sc-head, .dsc-sc-foot { display: flex; justify-content: space-between; gap: 10px; min-width: 0; min-height: 16px; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.dsc-sc-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dsc-sc-read { flex: none; font-family: var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.dsc-sc-box { position: relative; min-width: 0; touch-action: pan-y; }
+.dsc-sc-box.none { display: grid; place-items: center; border: 1px dashed var(--line-soft); border-radius: var(--radius-sm, 6px); }
+.dsc-sc-box.none p { margin: 0; font-size: var(--fs-2xs); color: var(--muted); }
+.dsc-sc-svg { display: block; overflow: visible; }
+.dsc-sc-line { stroke: var(--ink-2); }
+.dsc-sc-one { stroke: var(--muted); stroke-opacity: .7; stroke-dasharray: 4 4; }
+.dsc-sc-post { stroke: var(--muted); stroke-dasharray: 1 3; }
+.dsc-sc-cross line { stroke: var(--line-2); }
+.dsc-sc-cross circle { fill: var(--bg-0); stroke: var(--ink-2); stroke-width: 1.5; }
+.dsc-sc-key { display: inline-flex; align-items: center; gap: 4px; }
+.dsc-sc-dash, .dsc-sc-pmark { display: inline-block; width: 14px; height: 0; border-top: 1px dashed var(--line-2); }
+.dsc-sc-pmark { width: 0; height: 10px; border-top: 0; border-left: 1px dotted var(--muted); }
 .dsc-st-more { margin: 0; padding: 6px 0 8px 32px; border-top: 1px solid var(--line-soft); }
 .dsc-page-more { display: flex; justify-content: center; margin: 0; }
 .dsc-newp { border: 1px dashed var(--line-soft); background: none; }
@@ -230,7 +261,12 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
   .dsc-coin .dsc-nums { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   /* the block keeps a small inset (the card's padding is 12 px here); the header wraps: title, numbers, author */
   .dsc-story { --dsc-bx: 6px; }
-  .dsc-sh { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "n" "sub"; }
+  .dsc-sh { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "n" "sub" "g" "c"; }
+  .dsc-sh-g { flex-wrap: wrap; white-space: normal; }
+  .dsc-sh-chart { justify-self: start; }
+  /* the chart's note and its reading on two fixed lines (a reading that wrapped would move the rows under it) */
+  .dsc-sc-head { flex-direction: column; gap: 0; height: 32px; }
+  .dsc-sc-read { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .dsc-copyrow { padding-left: 0; }
   .dsc-trend { padding: 8px 12px 4px; }
   .dsc-bar { align-items: stretch; }

@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "written": "2026-11-23",
+  "about": "Pre-registered event log (server/README.md §Story attention). Each event below was written down BEFORE its date, with the rule that decides whether coins named after it drew more buyers than usual. Do not edit an event after its window opened: add a new one instead. The server records per-event 5-minute buyers of matching coins (table event_buckets) while an event's recording window is open; scripts/event-results.mjs prints each result by the rule written here.",
+  "rule": {
+    "match": "A coin matches when its on-chain name or symbol (lower-cased, NFKC) contains one of `words` as a whole word (words are runs of letters and digits), one of `phrases` as consecutive whole words, or one of `parts` anywhere inside it (name and symbol with everything but letters and digits removed). Only coins the index tracks are seen: spawns (children of other coins) and coins priced in another asset. Coins priced in SOL are not indexed live, so most fresh event coins are invisible unless they become parents.",
+    "metric": "share = distinct wallets that bought $1+ of any matching coin in a window / distinct wallets that bought $1+ of any tracked coin in the same window (event_buckets.site_buyers: the recorder writes one row per event for every 5-minute bucket it closed while the event recorded, 0 matching buyers included; never trimmed). Summed per 5-minute bucket over the window's observed buckets (those with a row, i.e. watched by the recorder): a wallet active in two buckets counts twice on both sides.",
+    "preExisting": "A matching coin is pre-existing when it was created before T-36h; undated coins count as new.",
+    "comparison": "The same 12 clock hours as the event window (T..T+12h) on each of the 14 prior days (T-d*24h, d = 1..14), each day's window share computed the same way; days with fewer than 72 of 144 buckets observed are left out.",
+    "hit": "HIT when (1) the event-window share is above the 90th percentile (nearest rank) of the comparison days' shares, with at least 5 comparison days, AND (2) the pre-existing coins' share in the event window is above their own baseline share (T-7d..T-2d). Otherwise MISS; with under 5 comparison days or no observed baseline, NOT ENOUGH DATA.",
+    "recording": "The server keeps an event's rows from T-14d (comparison) to T+36h (end of the after window); the windows themselves are listed per event."
+  },
+  "events": [
+    {
+      "id": "us-thanksgiving-2026",
+      "what": "US Thanksgiving (Thu Nov 26 2026) and the White House turkey pardon (usually the Tuesday or Wednesday before)",
+      "at": "2026-11-25T17:00:00Z",
+      "precision": "about a day: the pardon's day and hour are not known in advance; T is midday US Eastern on Wed Nov 25, so the event window covers Wednesday afternoon to the night before Thanksgiving and the after window covers Thanksgiving day",
+      "keywords": { "words": ["thanksgiving", "turkey", "gobble", "pardon"], "phrases": [], "parts": [] },
+      "windows": { "baseline": ["-7d", "-2d"], "pre": ["-24h", "0"], "event": ["0", "+12h"], "after": ["+12h", "+36h"] },
+      "metric": "share of site-wide $1+ buyers (rule.metric)",
+      "comparison": "same 12 hours on the prior 14 days (rule.comparison)",
+      "hit": "event share > 90th percentile of the comparison days AND pre-existing coins above their own baseline share (rule.hit)",
+      "notes": "Whole words only. 'gobble' as a name part would catch the unrelated 'Gobbler' coins (20+ on Nov 23), so it is a whole word here. 'turkey' also names the country, and 'pardon' also catches political pardon coins ('Pardons For Sale', 'Pardon Inu' exist already): both are kept as the request named them, and the pre-existing test is there for exactly this. Counts seen on Nov 23 (search, capped at 20): turkey 20+, thanksgiving 12, gobble 20+ (mostly Gobbler), pardon 9."
+    },
+    {
+      "id": "pumpfun-kyc-2026",
+      "what": "Pump.fun KYC / the end of external-wallet login",
+      "at": "2026-11-30T00:00:00Z",
+      "precision": "about a day: the date comes from public chatter before Nov 23 and is not confirmed; no hour known",
+      "keywords": { "words": ["kyc"], "phrases": ["know your cat"], "parts": [] },
+      "windows": { "baseline": ["-7d", "-2d"], "pre": ["-24h", "0"], "event": ["0", "+12h"], "after": ["+12h", "+36h"] },
+      "metric": "share of site-wide $1+ buyers (rule.metric)",
+      "comparison": "same 12 hours on the prior 14 days (rule.comparison)",
+      "hit": "event share > 90th percentile of the comparison days AND pre-existing coins above their own baseline share (rule.hit)",
+      "notes": "KYC is a common ticker already ('Know Your Coin', 'Know Your Customer', several 'Know Your Cat'): 20+ on Nov 23, so pre-existing coins are many."
+    },
+    {
+      "id": "sbf-docuseries-2026",
+      "what": "SBF docuseries premiere",
+      "at": "2026-11-30T08:00:00Z",
+      "precision": "about a day: streaming releases usually go live at midnight US Pacific; the exact hour is not confirmed",
+      "keywords": { "words": ["sbf"], "phrases": [], "parts": ["bankman"] },
+      "windows": { "baseline": ["-7d", "-2d"], "pre": ["-24h", "0"], "event": ["0", "+12h"], "after": ["+12h", "+36h"] },
+      "metric": "share of site-wide $1+ buyers (rule.metric)",
+      "comparison": "same 12 hours on the prior 14 days (rule.comparison)",
+      "hit": "event share > 90th percentile of the comparison days AND pre-existing coins above their own baseline share (rule.hit)",
+      "notes": "Counts seen on Nov 23: sbf 20+, bankman 6. 'bankman' as a name part also matches 'Bankman-Fried' and 'SamBankman'. Same day as the KYC event: the two share hours, so a site-wide Nov 30 mood lifts both."
+    },
+    {
+      "id": "jensen-huang-congress-2026",
+      "what": "Jensen Huang before the US Congress",
+      "at": "2026-12-01T15:00:00Z",
+      "precision": "the day; the hearing's hour is not known (T is 10:00 US Eastern)",
+      "keywords": { "words": ["jensen", "huang"], "phrases": [], "parts": [] },
+      "windows": { "baseline": ["-7d", "-2d"], "pre": ["-24h", "0"], "event": ["0", "+12h"], "after": ["+12h", "+36h"] },
+      "metric": "share of site-wide $1+ buyers (rule.metric)",
+      "comparison": "same 12 hours on the prior 14 days (rule.comparison)",
+      "hit": "event share > 90th percentile of the comparison days AND pre-existing coins above their own baseline share (rule.hit)",
+      "notes": "'nvidia' is left out on purpose: on Nov 23 the search listed 20+ NVIDIA coins created long before (several named just 'NVIDIA', 'OFFICIAL NVIDIA COIN'), and NVDAx is a listed-stock parent whose whole family trades every day; they would decide the pre-existing test alone. jensen 20+ and huang 20+ on Nov 23 too, mostly 'Jensen Huang' coins."
+    }
+  ]
+}

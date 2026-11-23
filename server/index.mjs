@@ -173,6 +173,9 @@ narrTags?.start();
 // Wake-ups (GET /api/discover, SSE `wake`): the model feeds them per trade and seeded them at load; createApp gave them
 // the hub and the linked posts. The tick closes 5-minute buckets on time when a family's next trade is late.
 model.wakeups.attach({ hub, narrative }).start();
+// Story attention (lib/attention.mjs): the model feeds it per live trade; a timer closes each 5-minute bucket in one
+// sliced job (story rows, calibration, coin days, pre-registered events from prereg/events.json), unref'd.
+model.attention.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the
 // index to settle. AGENTS=off|dry never constructs this.
 let liveTimer = null;
@@ -194,7 +197,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); model.wakeups.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();

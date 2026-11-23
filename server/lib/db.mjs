@@ -146,6 +146,36 @@ CREATE TABLE IF NOT EXISTS narrative_spend (
   day TEXT PRIMARY KEY, in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0,
   usd REAL NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS story_buckets (
+  story_key TEXT NOT NULL, t INTEGER NOT NULL, buyers INTEGER NOT NULL, buy_usd REAL NOT NULL, sells INTEGER NOT NULL,
+  launches_fast INTEGER NOT NULL, launches INTEGER NOT NULL, site_buyers INTEGER NOT NULL,
+  leader_mint TEXT, leader_buyers INTEGER NOT NULL DEFAULT 0, coins INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (story_key, t)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS story_buckets_t ON story_buckets(t);
+CREATE TABLE IF NOT EXISTS story_starts (
+  story_key TEXT PRIMARY KEY, start_at INTEGER NOT NULL, source TEXT NOT NULL, first_buyers_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS calib (
+  story_key TEXT NOT NULL, t INTEGER NOT NULL, phase TEXT NOT NULL, multiple REAL, buyers5m INTEGER NOT NULL, hour_buyers INTEGER NOT NULL,
+  leader_mint TEXT, leader_price_usd REAL, story_buy_usd REAL NOT NULL,
+  buyers_1h INTEGER, price_1h REAL, filled_1h INTEGER NOT NULL DEFAULT 0,
+  buyers_6h INTEGER, price_6h REAL, filled_6h INTEGER NOT NULL DEFAULT 0, cov_1h INTEGER, cov_6h INTEGER,
+  PRIMARY KEY (story_key, t)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS calib_t ON calib(t);
+CREATE INDEX IF NOT EXISTS calib_due1 ON calib(t) WHERE filled_1h = 0;
+CREATE INDEX IF NOT EXISTS calib_due6 ON calib(t) WHERE filled_6h = 0;
+CREATE TABLE IF NOT EXISTS coin_days (
+  mint TEXT NOT NULL, day TEXT NOT NULL, high_usd REAL, low_usd REAL, close_usd REAL, close_t INTEGER,
+  buyers INTEGER NOT NULL DEFAULT 0, buys INTEGER NOT NULL DEFAULT 0, trades INTEGER NOT NULL DEFAULT 0, volume_usd REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (mint, day)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS event_buckets (
+  event_id TEXT NOT NULL, t INTEGER NOT NULL, buyers INTEGER NOT NULL, pre_buyers INTEGER NOT NULL, new_buyers INTEGER NOT NULL,
+  pre_coins INTEGER NOT NULL, new_coins INTEGER NOT NULL, site_buyers INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (event_id, t)
+) WITHOUT ROWID;
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -243,11 +273,21 @@ export class Db {
     // which is the only time it may be: lib/narrtags.mjs TagEngine #retitle) came later: added when absent, 0 in older
     // rows. The version of the tagging rules the stored answers were made under is the kv row 'narr_rules_version'
     // (narrRulesReset below; not a schema version: the tables stay, their rows go).
-    if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped")) this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
+    // `story_buckets`, `story_starts`, `calib`, `coin_days` and `event_buckets` (story attention, lib/attention.mjs) are new
+    // tables only too: what each story drew per 5 minutes (one row per story with a trade in it, plus one `story_key` '*'
+    // row for the whole site; `t` the bucket's start, unix s; `flags` 1 = the bucket the process started in, partial),
+    // kept 14 days by a sliced trim of its own (never by the trades trim); when each story started and saw its first
+    // buyers; a snapshot per story every 5 minutes with what followed 1 h and 6 h later and how many of those buckets the
+    // server saw whole (`cov_1h` / `cov_6h`, added when absent; kept 90 days); per coin per UTC day
+    // ('YYYY-MM-DD') its high, low and close USD price, buyers, buys, trades and volume (never trimmed); and per
+    // pre-registered event (server/prereg/events.json) the buyers of its matching coins per 5 minutes (never trimmed).
+    if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped"))this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
+    const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
+    for (const c of ["cov_1h", "cov_6h"]) if (!calibCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE calib ADD COLUMN ${c} INTEGER`);
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -423,6 +463,34 @@ export class Db {
       pnlUnreadCountOf: p("SELECT COUNT(*) AS n FROM pnl_unread WHERE wallet = ?"),
       pnlUnreadOf: p("SELECT wallet, sig, ord, attempts, next_at, errors FROM pnl_unread WHERE wallet = ? ORDER BY added_at ASC, sig ASC"),
       pnlWalletsUnstored: p("SELECT wallet FROM pnl_wallets WHERE unread > 0 AND NOT EXISTS (SELECT 1 FROM pnl_unread u WHERE u.wallet = pnl_wallets.wallet)"),
+      // Story attention (lib/attention.mjs): every read goes by a primary key or the t index.
+      storyBucketPut: p(`INSERT OR REPLACE INTO story_buckets (story_key, t, buyers, buy_usd, sells, launches_fast, launches, site_buyers, leader_mint, leader_buyers, coins, flags)
+        VALUES (:key, :t, :buyers, :buyUsd, :sells, :launchesFast, :launches, :siteBuyers, :leaderMint, :leaderBuyers, :coins, :flags)`),
+      storyRows: p("SELECT t, buyers, buy_usd, sells, launches_fast, launches, site_buyers, leader_mint, leader_buyers, coins, flags FROM story_buckets WHERE story_key = ? AND t >= ? ORDER BY t ASC LIMIT ?"),
+      storyBuyersIn: p("SELECT COALESCE(SUM(buyers), 0) AS n, COUNT(*) AS c FROM story_buckets WHERE story_key = ? AND t >= ? AND t < ?"),
+      siteSeenIn: p("SELECT COUNT(*) AS c FROM story_buckets WHERE story_key = '*' AND t >= ? AND t < ? AND (flags & 1) = 0"),
+      storyTrim: p("DELETE FROM story_buckets WHERE (story_key, t) IN (SELECT story_key, t FROM story_buckets WHERE t < ? LIMIT ?)"),
+      storyStartGet: p("SELECT start_at, source, first_buyers_at FROM story_starts WHERE story_key = ?"),
+      storyStartPut: p(`INSERT INTO story_starts (story_key, start_at, source, first_buyers_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(story_key) DO UPDATE SET start_at = excluded.start_at, source = excluded.source, updated_at = excluded.updated_at`),
+      calibPut: p(`INSERT OR IGNORE INTO calib (story_key, t, phase, multiple, buyers5m, hour_buyers, leader_mint, leader_price_usd, story_buy_usd)
+        VALUES (:key, :t, :phase, :multiple, :buyers5m, :hourBuyers, :leaderMint, :leaderPriceUsd, :storyBuyUsd)`),
+      calibDue1: p("SELECT story_key, t, leader_mint FROM calib WHERE filled_1h = 0 AND t <= ? ORDER BY t ASC LIMIT ?"),
+      calibDue6: p("SELECT story_key, t, leader_mint FROM calib WHERE filled_6h = 0 AND t <= ? ORDER BY t ASC LIMIT ?"),
+      calibFill1: p("UPDATE calib SET buyers_1h = ?, price_1h = ?, cov_1h = ?, filled_1h = 1 WHERE story_key = ? AND t = ?"),
+      calibFill6: p("UPDATE calib SET buyers_6h = ?, price_6h = ?, cov_6h = ?, filled_6h = 1 WHERE story_key = ? AND t = ?"),
+      calibTrim: p("DELETE FROM calib WHERE (story_key, t) IN (SELECT story_key, t FROM calib WHERE t < ? LIMIT ?)"),
+      coinDayAdd: p(`INSERT INTO coin_days (mint, day, high_usd, low_usd, close_usd, close_t, buyers, buys, trades, volume_usd)
+        VALUES (:mint, :day, :high, :low, :close, :closeT, :buyers, :buys, :trades, :volume)
+        ON CONFLICT(mint, day) DO UPDATE SET
+          high_usd = CASE WHEN excluded.high_usd IS NULL THEN high_usd WHEN high_usd IS NULL OR excluded.high_usd > high_usd THEN excluded.high_usd ELSE high_usd END,
+          low_usd = CASE WHEN excluded.low_usd IS NULL THEN low_usd WHEN low_usd IS NULL OR excluded.low_usd < low_usd THEN excluded.low_usd ELSE low_usd END,
+          close_usd = CASE WHEN excluded.close_t IS NOT NULL AND (close_t IS NULL OR excluded.close_t >= close_t) THEN excluded.close_usd ELSE close_usd END,
+          close_t = CASE WHEN excluded.close_t IS NOT NULL AND (close_t IS NULL OR excluded.close_t >= close_t) THEN excluded.close_t ELSE close_t END,
+          buyers = buyers + excluded.buyers, buys = buys + excluded.buys, trades = trades + excluded.trades, volume_usd = volume_usd + excluded.volume_usd`),
+      coinDaysOf: p("SELECT day, high_usd, low_usd, close_usd, close_t, buyers, buys, trades, volume_usd FROM coin_days WHERE mint = ? AND day >= ? ORDER BY day ASC"),
+      eventBucketPut: p(`INSERT OR REPLACE INTO event_buckets (event_id, t, buyers, pre_buyers, new_buyers, pre_coins, new_coins, site_buyers, flags)
+        VALUES (:id, :t, :buyers, :preBuyers, :newBuyers, :preCoins, :newCoins, :siteBuyers, :flags)`),
     };
   }
 
@@ -746,6 +814,48 @@ export class Db {
   /** Removes a wallet's `n` oldest trades; returns how many went. */
   walletTradesTrim(wallet, n) { return Number(this.q.walletTradesTrim.run(wallet, n).changes); }
   walletTradesCount(wallet) { return this.q.walletTradesCount.get(wallet).n; }
+
+  // ---- story attention (lib/attention.mjs): times in unix s; a bucket's `t` is its start (a multiple of 300)
+  /** Writes story bucket rows (`[{ key, t, buyers, buyUsd, sells, launchesFast, launches, siteBuyers, leaderMint, leaderBuyers, coins, flags }]`) in one transaction. */
+  storyBucketsPut(rows) {
+    if (!rows.length) return;
+    this.transaction(() => { for (const r of rows) this.q.storyBucketPut.run({ key: r.key, t: r.t, buyers: r.buyers, buyUsd: r.buyUsd ?? 0, sells: r.sells ?? 0, launchesFast: r.launchesFast ?? 0, launches: r.launches ?? 0, siteBuyers: r.siteBuyers ?? 0, leaderMint: r.leaderMint ?? null, leaderBuyers: r.leaderBuyers ?? 0, coins: r.coins ?? 0, flags: r.flags ?? 0 }); });
+  }
+  /** A story's rows from `sinceT` on, oldest first, at most `limit`. */
+  storyRows(key, sinceT, limit = 5000) {
+    return this.q.storyRows.all(key, sinceT, limit).map((r) => ({ t: r.t, buyers: r.buyers, buyUsd: r.buy_usd, sells: r.sells, launchesFast: r.launches_fast, launches: r.launches, siteBuyers: r.site_buyers, leaderMint: r.leader_mint, leaderBuyers: r.leader_buyers, coins: r.coins, flags: r.flags }));
+  }
+  /** `{ buyers, rows }`: the sum of a story's bucket buyers with `from <= t < to`, and how many rows that was. */
+  storyBuyersIn(key, from, to) { const r = this.q.storyBuyersIn.get(key, from, to); return { buyers: Number(r.n), rows: Number(r.c) }; }
+  /** How many site rows ('*') with `from <= t < to` are not partial: the buckets of that window the server saw whole. */
+  siteSeenIn(from, to) { return Number(this.q.siteSeenIn.get(from, to).c); }
+  /** Deletes at most `limit` story bucket rows older than `beforeT`; returns how many went. */
+  storyTrim(beforeT, limit) { return Number(this.q.storyTrim.run(beforeT, limit).changes); }
+  storyStartGet(key) { const r = this.q.storyStartGet.get(key); return r ? { startAt: r.start_at, source: r.source, firstBuyersAt: r.first_buyers_at } : null; }
+  /** Writes story starts (`[{ key, startAt, source, firstBuyersAt }]`) in one transaction: a new row, or a moved `startAt` (first_buyers_at never changes). */
+  storyStartsPut(rows, at) { if (rows.length) this.transaction(() => { for (const r of rows) this.q.storyStartPut.run(r.key, r.startAt, r.source, r.firstBuyersAt, at); }); }
+  /** Writes calibration snapshots in one transaction (one per story and bucket: a second is ignored). */
+  calibPut(rows) {
+    if (!rows.length) return;
+    this.transaction(() => { for (const r of rows) this.q.calibPut.run({ key: r.key, t: r.t, phase: r.phase, multiple: r.multiple ?? null, buyers5m: r.buyers5m, hourBuyers: r.hourBuyers, leaderMint: r.leaderMint ?? null, leaderPriceUsd: r.leaderPriceUsd ?? null, storyBuyUsd: r.storyBuyUsd ?? 0 }); });
+  }
+  /** Snapshots whose 1 h (`h` 1) or 6 h (`h` 6) outcome is not filled, with `t <= upToT`, oldest first: `[{ key, t, leaderMint }]`. */
+  calibDue(h, upToT, limit) { return (h === 6 ? this.q.calibDue6 : this.q.calibDue1).all(upToT, limit).map((r) => ({ key: r.story_key, t: r.t, leaderMint: r.leader_mint })); }
+  /** Fills outcomes (`[{ key, t, buyers, priceUsd, cov }]`; `cov`: the window's buckets seen whole) of horizon `h` (1 or 6) in one transaction. */
+  calibFill(h, rows) { if (rows.length) this.transaction(() => { const q = h === 6 ? this.q.calibFill6 : this.q.calibFill1; for (const r of rows) q.run(r.buyers ?? null, r.priceUsd ?? null, r.cov ?? null, r.key, r.t); }); }
+  calibTrim(beforeT, limit) { return Number(this.q.calibTrim.run(beforeT, limit).changes); }
+  /** Adds coin-day deltas (`[{ mint, day, high, low, close, closeT, buyers, buys, trades, volume }]`) in one transaction: high/low widen, the newest close wins, counts add up. */
+  coinDaysAdd(rows) {
+    if (!rows.length) return;
+    this.transaction(() => { for (const r of rows) this.q.coinDayAdd.run({ mint: r.mint, day: r.day, high: r.high ?? null, low: r.low ?? null, close: r.close ?? null, closeT: r.closeT ?? null, buyers: r.buyers ?? 0, buys: r.buys ?? 0, trades: r.trades ?? 0, volume: r.volume ?? 0 }); });
+  }
+  /** A coin's day rows from `sinceDay` ('YYYY-MM-DD') on, oldest first. */
+  coinDays(mint, sinceDay = "0000-00-00") { return this.q.coinDaysOf.all(mint, sinceDay).map((r) => ({ day: r.day, highUsd: r.high_usd, lowUsd: r.low_usd, closeUsd: r.close_usd, closeT: r.close_t, buyers: r.buyers, buys: r.buys, trades: r.trades, volumeUsd: r.volume_usd })); }
+  /** Writes event bucket rows (`[{ id, t, buyers, preBuyers, newBuyers, preCoins, newCoins, siteBuyers, flags }]`) in one transaction. */
+  eventBucketsPut(rows) {
+    if (!rows.length) return;
+    this.transaction(() => { for (const r of rows) this.q.eventBucketPut.run({ id: r.id, t: r.t, buyers: r.buyers, preBuyers: r.preBuyers, newBuyers: r.newBuyers, preCoins: r.preCoins, newCoins: r.newCoins, siteBuyers: r.siteBuyers, flags: r.flags ?? 0 }); });
+  }
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }

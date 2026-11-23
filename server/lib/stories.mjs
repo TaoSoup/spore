@@ -28,6 +28,44 @@ export const NEW_S = 3_600;
 
 const pos = (x) => typeof x === "number" && Number.isFinite(x) && x > 0;
 
+// ---------------------------------------------------------------- story keys
+// One key per story, the same in the cards below, in the 5-minute series (lib/attention.mjs, table story_buckets) and in
+// GET /api/story-series/:key:
+// - a narrative card: "n:<narrative id>" (digits after "n:");
+// - a post card: the X post id (snowflake digits, as in the post's URL);
+// - a family card: the parent's mint (base58).
+// The three never collide: an id has only digits, a mint has letters, "n:" has a colon.
+// The series also keeps one row per 5 minutes under SITE_KEY ("*"), the whole site, which is never a card.
+const NARR_KEY_RE = /^n:[1-9]\d{0,11}$/, POST_KEY_RE = /^[1-9]\d{0,18}$/, MINT_KEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+export const SITE_KEY = "*";
+/** The key of a story: `kind` "narrative" (id: the narrative id), "post" (id: the post id) or "family" (id: the parent mint). */
+export function storyKey(kind, id) {
+  if (kind === "narrative") return `n:${id}`;
+  if (kind === "post" || kind === "family") return String(id);
+  throw new Error(`unknown story kind ${kind}`);
+}
+/** `{ kind, id }` of a story key (a narrative id as a number), or null for anything else (SITE_KEY included). */
+export function parseStoryKey(key) {
+  if (typeof key !== "string") return null;
+  if (NARR_KEY_RE.test(key)) return { kind: "narrative", id: Number(key.slice(2)) };
+  if (POST_KEY_RE.test(key)) return { kind: "post", id: key };
+  if (MINT_KEY_RE.test(key)) return { kind: "family", id: key };
+  return null;
+}
+/**
+ * The story a coin's trade is filed under, by the cards' own precedence (groupStories below): its narrative when that
+ * narrative holds 2+ coins (`narrativeCoins`: the caller's count of them; lib/attention.mjs passes 2 while the narrative
+ * is "on": 2+ of its non-dust coins, copies folded, with a $1+ buyer in the last hour, held an hour after); else the post it links, when that post may be shown (`postOk`); else its
+ * family, when that family is waking (live, not silent: `family` given), under the family's chosen post when that post
+ * may be shown, else under the parent's mint; else null (no story). Pure.
+ */
+export function coinStoryKey({ narrativeId = null, narrativeCoins = 0, postId = null, postOk = false, family = null } = {}) {
+  if (narrativeId != null && narrativeCoins >= 2) return storyKey("narrative", narrativeId);
+  if (postId != null && postOk) return storyKey("post", postId);
+  if (family?.mint) return family.postId != null && family.postOk ? storyKey("post", family.postId) : storyKey("family", family.mint);
+  return null;
+}
+
 /**
  * Why a row is bot dust, or null: "paper" for a market cap over PAPER_RATIO times its real liquidity (only with a
  * known liquidity above zero), "tiny" for under TINY_USD of volume per buyer over the timeframe (only with a buyer).
@@ -163,7 +201,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     // With tagging: the narrative every coin of the card shares, else null. Without: no such field.
     const one = tagOf ? b.rows.reduce((t, r) => (t === undefined ? r.narrative ?? null : t && r.narrative?.id === t.id ? t : null), undefined) ?? null : undefined;
     cards.push({
-      kind: b.kind, key: b.id,
+      kind: b.kind, key: storyKey(b.kind, b.id),
       post: p ? { id: b.id, handle: p.handle, text: p.text, at: postTime(b.id, nowMs), url: postUrl(b.id) } : null,
       family: w ? { mint: w.mint, symbol: w.symbol ?? null, image: w.image ?? null, startedAt: w.startedAt ?? null } : null,
       buyers5m: t.buyers5m, coinsN: t.coinsN, coins,
@@ -184,7 +222,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     let nc = 0;
     try { nc = Number(newCoins1hOf(id)) || 0; } catch { nc = 0; }
     cards.push({
-      kind: "narrative", key: `n:${id}`,
+      kind: "narrative", key: storyKey("narrative", id),
       narrative: { id: n.id, title: n.title, theme: n.theme, newCoins1h: nc },
       post: p ? { id: pid, handle: p.handle, text: p.text, at: postTime(pid, nowMs), url: postUrl(pid) } : null,
       family: null,

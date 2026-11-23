@@ -10,6 +10,7 @@ import { imageProxyUrl } from "./meta.mjs";
 import { Activity } from "./activity.mjs";
 import { Wakeups } from "./wakeups.mjs";
 import { CoinRows } from "./coinrows.mjs";
+import { Attention } from "./attention.mjs";
 import { drain, runSliced } from "./sliced.mjs";
 
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -137,6 +138,10 @@ export class Model {
     // Coin rows (lib/coinrows.mjs, the Discover rows and GET /api/trending): the last hour of trades in memory, fed by the
     // same live trades and the seed's last hour; the server attaches the holder reads (lib/holders.mjs).
     this.coinRows = new CoinRows({ model: this, now: () => this.now(), log });
+    // Story attention (lib/attention.mjs: the stories cards' `attention`, GET /api/story-series): what each story drew per
+    // 5 minutes, fed by the live trades only (never the boot seed: its buckets are stored), with the quiet recorders
+    // (calibration, coin days, pre-registered events); the server starts its close timer.
+    this.attention = new Attention({ model: this, now: () => this.now(), log });
     this.heatCache = null;
     this.touched = new Map();       // mint → last API access (ms); the refresh loop prioritises these
     this.updatedAt = nowS();
@@ -432,7 +437,7 @@ export class Model {
    * is tracked: one Map lookup per trade otherwise. It is asked for a replayed trade too, since the wallet may have
    * become tracked between the two deliveries; its own primary key keeps the row single.
    */
-  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) { this.activity.record(t); this.wakeups.record(t); this.coinRows.record(t); } this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
+  recordTrade(t) { const fresh = this.db.insertTrade(t); if (fresh) { this.activity.record(t); this.wakeups.record(t); this.coinRows.record(t); this.attention?.record(t); } this.walletTrades?.onTrade(t); this.#bump(); return fresh; }
   /**
    * A trade read back from the chain (lib/trade-fill.mjs): stored, and kept for a tracked trader. Nothing else, for these reasons:
    * - Activity is not fed: its ring is time-ordered, and an hours-old row would stay counted about a day too long. The
