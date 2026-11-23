@@ -75,6 +75,15 @@ test("runSliced: the generator runs in bounded turns with I/O between, returns i
   await assert.rejects(runSliced((function* () { yield; throw new Error("boom"); })()), /boom/);
 });
 
+test("runSliced: the longest single step and the label the generator yielded at its end (\"end\" for the last step)", async () => {
+  const busy = (ms) => { const t = performance.now(); while (performance.now() - t < ms); };
+  const run = await runSliced((function* () { busy(1); yield "a"; busy(12); yield "b"; busy(1); yield "c"; busy(1); })());
+  assert.equal(run.maxStepAt, "b");
+  assert.ok(run.maxStepMs >= 12 && run.maxStepMs <= run.maxSliceMs, `${run.maxStepMs.toFixed(1)} ms`);
+  const tail = await runSliced((function* () { yield "a"; busy(12); })());
+  assert.equal(tail.maxStepAt, "end");
+});
+
 test("runSliced: one scheduler for every job: K jobs in flight still hold the loop one SLICE_MS per turn, and all of them progress", async () => {
   const K = 12;
   slicedStats.maxTurnMs = 0; slicedStats.maxJobs = 0;

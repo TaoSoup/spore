@@ -4,7 +4,7 @@
 // memory. No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { XPosts, XPOST_URL, XPOST_MAX_BYTES, MAX_WAITING, RETRY_MS, XPOST_PAUSE_MS, XPOST_PAUSE_MAX_MS, BREAK_AFTER, WAIT_AHEAD, XPOST_LRU, FAILED_MAX, XPOST_TOUCH_S, XPOST_KEEP_S, RECHECK_GONE_S, RECHECK_DENIED_S, RECHECK_NEW_S, RECHECK_OLD_S } from "../lib/xposts.mjs";
+import { XPosts, XPOST_URL, XPOST_MAX_BYTES, MAX_WAITING, RETRY_MS, XPOST_PAUSE_MS, XPOST_PAUSE_MAX_MS, BREAK_AFTER, WAIT_AHEAD, XPOST_LRU, FAILED_MAX, XPOST_TOUCH_S, XPOST_KEEP_S, XPOST_FLUSH_MAX, RECHECK_GONE_S, RECHECK_DENIED_S, RECHECK_NEW_S, RECHECK_OLD_S } from "../lib/xposts.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
 import { fakeClock, T0 } from "./helpers/chain.mjs";
@@ -460,7 +460,7 @@ test("11. a restart keeps the rows and the day's count; an id asked again is not
   b.x.stop(); db.close();
 });
 
-test("12. asked_at: a read marks the row as asked for at most once an hour, also when the record comes from memory", async () => {
+test("12. asked_at: a read marks the row as asked for at most once an hour, also when the record comes from memory; the write waits for flushTouches", async () => {
   const db = new Db(":memory:");
   const { x, clock } = make({ opts: { db } });
   const id = idAt();
@@ -472,12 +472,43 @@ test("12. asked_at: a read marks the row as asked for at most once an hour, also
   assert.equal(db.xpostGet(id).askedAt, NOW_S, "under an hour: not written");
   clock.t += 1000;
   x.peek(id);
-  assert.equal(db.xpostGet(id).askedAt, NOW_S + XPOST_TOUCH_S, "an hour on: written, from a memory hit");
+  assert.equal(db.xpostGet(id).askedAt, NOW_S, "an hour on: not written by the read itself");
+  assert.equal(x.snapshot().touchesWaiting, 1);
+  assert.equal(x.flushTouches(), 1);
+  assert.equal(db.xpostGet(id).askedAt, NOW_S + XPOST_TOUCH_S, "an hour on: written by the flush, from a memory hit");
+  assert.equal(x.flushTouches(), 0, "nothing left to write");
   x.state(id); x.canQueue(id);
   clock.t += 2 * XPOST_TOUCH_S * 1000;
   x.state(id); x.canQueue(id);
   assert.equal(db.xpostGet(id).askedAt, NOW_S + XPOST_TOUCH_S, "only peek counts as asking");
   x.stop(); db.close();
+});
+
+test("12b. the asked-for writes go in batches: at most XPOST_FLUSH_MAX a flush, oldest first; a newer row is never moved back; the prune and stop() write the rest", async () => {
+  const db = new Db(":memory:");
+  const { x, clock } = make({ opts: { db } });
+  const ids = Array.from({ length: XPOST_FLUSH_MAX + 5 }, (_, i) => idAt(3600, i));
+  for (const id of ids) db.xpostSet({ id, state: "ok", handle: "tradfi", text: "Hello world", flagged: false, fetchedAt: NOW_S, askedAt: NOW_S, recheckAt: NOW_S + RECHECK_OLD_S });
+  clock.t += XPOST_TOUCH_S * 1000;
+  const writes = [];
+  const run = db.xpostTouchMany.bind(db);
+  db.xpostTouchMany = (rows) => { writes.push(rows.length); return run(rows); };
+  for (const id of ids) x.peek(id);
+  assert.equal(x.flushTouches(XPOST_FLUSH_MAX), XPOST_FLUSH_MAX);
+  assert.deepEqual(writes, [XPOST_FLUSH_MAX], "one transaction");
+  assert.equal(db.xpostGet(ids[0]).askedAt, NOW_S + XPOST_TOUCH_S, "the oldest first");
+  assert.equal(db.xpostGet(ids.at(-1)).askedAt, NOW_S, "the rest wait");
+  // a row written newer meanwhile (a fetch's answer) is not moved back by a waiting touch
+  db.xpostTouch(ids.at(-1), NOW_S + 2 * XPOST_TOUCH_S);
+  x.prune();
+  assert.equal(x.snapshot().touchesWaiting, 0, "the prune wrote them first");
+  assert.equal(db.xpostGet(ids.at(-2)).askedAt, NOW_S + XPOST_TOUCH_S);
+  assert.equal(db.xpostGet(ids.at(-1)).askedAt, NOW_S + 2 * XPOST_TOUCH_S, "never moved back");
+  clock.t += XPOST_TOUCH_S * 1000;
+  x.peek(ids[0]);
+  x.stop();
+  assert.equal(db.xpostGet(ids[0]).askedAt, NOW_S + 2 * XPOST_TOUCH_S, "stop() writes what waits");
+  db.close();
 });
 
 test("13. prune: rows not asked for 30 days go, and past the row cap the least recently asked; start() prunes and stop() ends its timer", async () => {

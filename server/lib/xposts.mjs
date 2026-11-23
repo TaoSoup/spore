@@ -9,6 +9,7 @@
 // When X pauses us (a 429) or the endpoint stops answering usefully (BREAK_AFTER failed answers in a row, the breaker),
 // the line is emptied and nothing is queued until the pause ends: the people who asked are gone by then, and a later
 // ask starts over. A 401 or 403 is X's answer about that one post (protected, withheld) and no sign of that.
+import { performance } from "node:perf_hooks";
 import { readText } from "./rpc.mjs";
 import { abortableSleep } from "./tx-events.mjs";
 import { parseOembed, postTime, postUrl } from "./narrative.mjs";
@@ -33,6 +34,10 @@ export const WAIT_AHEAD = 10;
 export const XPOST_LRU = 5_000;
 /** `asked_at` is rewritten at most this often per row (s); rows not asked for XPOST_KEEP_S go, and the least recently asked past XPOST_MAX_ROWS; checked every XPOST_PRUNE_MS. */
 export const XPOST_TOUCH_S = 3_600, XPOST_KEEP_S = 30 * 86_400, XPOST_MAX_ROWS = 50_000, XPOST_PRUNE_MS = 3_600_000;
+/** A peek's asked-for time is not written at once (a write per post, in a request or the attention close, held the loop
+ * 35 ms after a restart, Nov 23 2026): it waits in memory and goes every XPOST_FLUSH_MS, at most XPOST_FLUSH_MAX rows in
+ * one transaction (the rest at the next flush; the prune writes one batch and waits for its next hour while more wait; stop() writes them all). */
+export const XPOST_FLUSH_MS = 10_000, XPOST_FLUSH_MAX = 100;
 /** When a stored answer is asked for again (s after its fetch): a 404; a 401/403 or an answer that did not parse; a post younger than RECHECK_YOUNG_S; an older post. */
 export const RECHECK_GONE_S = 7 * 86_400, RECHECK_DENIED_S = 6 * 3_600, RECHECK_NEW_S = 3 * 86_400, RECHECK_OLD_S = 14 * 86_400, RECHECK_YOUNG_S = 30 * 86_400;
 const DAY_MS = 86_400_000;
@@ -65,8 +70,9 @@ export class XPosts {
     const day = this.#day();
     this.budget = saved && saved.day === day && Number.isFinite(saved.used) ? { day, used: saved.used } : { day, used: 0 };
     this.spentLogged = null;
+    this.touches = new Map(); this.flushTimer = null; // post id → asked-for time not yet written (flushTouches)
     this.ac = new AbortController(); this.started = false; this.stopped = false; this.idleWaiters = [];
-    this.stats = { calls: 0, ok: 0, notFound: 0, denied: 0, unparsed: 0, rateLimited: 0, errors: 0, timeouts: 0, tooLarge: 0, badJson: 0, flagged: 0, tripped: 0, pruned: 0, lastError: null, lastMs: null };
+    this.stats = { calls: 0, ok: 0, notFound: 0, denied: 0, unparsed: 0, rateLimited: 0, errors: 0, timeouts: 0, tooLarge: 0, badJson: 0, flagged: 0, tripped: 0, pruned: 0, touched: 0, touchErrors: 0, pruneDeferred: 0, lastFlushMs: null, maxFlushMs: 0, lastError: null, lastMs: null };
   }
   #day() { return Math.floor(this.now() / DAY_MS); }
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -87,7 +93,7 @@ export class XPosts {
     this.#rollDay();
     let cached = this.lru.size;
     try { cached = this.db?.xpostCount() ?? cached; } catch { /* the in-memory count */ }
-    return { callsToday: this.budget.used, daily: this.daily, perMin: this.perMin, waiting: this.queue.length, pausedMs: Math.max(0, this.pausedUntil - this.now()), cached, ...this.stats };
+    return { callsToday: this.budget.used, daily: this.daily, perMin: this.perMin, waiting: this.queue.length, touchesWaiting: this.touches.size, pausedMs: Math.max(0, this.pausedUntil - this.now()), cached, ...this.stats };
   }
   /** Starts the hourly prune (the fetches need no start: a want() runs them). */
   start() {
@@ -95,13 +101,32 @@ export class XPosts {
     this.started = true;
     this.prune();
     this.pruneTimer = setInterval(() => this.prune(), XPOST_PRUNE_MS); this.pruneTimer.unref?.();
+    this.flushTimer = setInterval(() => this.flushTouches(XPOST_FLUSH_MAX), XPOST_FLUSH_MS); this.flushTimer.unref?.();
     return this;
   }
   /** Saves the day's count and ends every wait; no request goes out after this. */
   stop() {
     if (this.stopped) return;
-    this.stopped = true; clearInterval(this.pruneTimer); this.queue.length = 0;
+    this.stopped = true; clearInterval(this.pruneTimer); clearInterval(this.flushTimer); this.flushTouches(Infinity); this.queue.length = 0;
     this.#save(); this.ac.abort(new Error("stopping")); this.#wake();
+  }
+  /**
+   * Writes up to `max` waiting asked-for times (oldest first) in one transaction; returns how many it handled (a row gone
+   * or already newer counts as handled; stats.touched counts the rows that moved). A failed write keeps them for the next
+   * flush. The write's time is kept (lastFlushMs, maxFlushMs: it runs on a timer, outside the sliced jobs' gauge).
+   */
+  flushTouches(max = XPOST_FLUSH_MAX) {
+    if (!this.touches.size || !this.db) return 0;
+    const rows = [];
+    for (const e of this.touches) { if (rows.length >= max) break; rows.push(e); }
+    const t0 = performance.now();
+    let moved = 0;
+    try { moved = this.db.xpostTouchMany(rows); } catch (e) { this.stats.touchErrors++; return 0; }
+    const ms = Math.round((performance.now() - t0) * 100) / 100;
+    this.stats.lastFlushMs = ms; if (ms > this.stats.maxFlushMs) this.stats.maxFlushMs = ms;
+    for (const [id, at] of rows) if (this.touches.get(id) === at) this.touches.delete(id);
+    this.stats.touched += moved;
+    return rows.length;
   }
   #wake() { if (!this.running && !this.queue.length) for (const r of this.idleWaiters.splice(0)) r(); }
   /** Resolves when no fetch runs and none waits (tests). */
@@ -109,6 +134,10 @@ export class XPosts {
   /** Drops rows not asked for XPOST_KEEP_S, then the least recently asked past XPOST_MAX_ROWS; returns how many went. */
   prune() {
     let n = 0;
+    // the asked-for times first (the prune goes by them), one capped batch; while more wait (a backlog after a restart,
+    // or a failed write) the prune waits for its next hour rather than delete a row that was just asked for
+    this.flushTouches();
+    if (this.touches.size && !this.stopped) { this.stats.pruneDeferred++; return 0; }
     try {
       n = this.db?.xpostPrune(this.#nowS() - XPOST_KEEP_S, XPOST_MAX_ROWS) ?? 0;
       if (n) { this.stats.pruned += n; this.lru.clear(); }
@@ -150,14 +179,14 @@ export class XPosts {
   /**
    * The stored record of post `id`, `{ id, state: "ok" | "none", handle, text, flagged, fetchedAt, askedAt, recheckAt }`
    * (unix s; `text` "" for a flagged post), or null. A record due a recheck is still given. Reading it marks the row
-   * as asked for (what the prune goes by), written at most once per XPOST_TOUCH_S.
+   * as asked for (what the prune goes by), at most once per XPOST_TOUCH_S, written by the next flushTouches.
    */
   peek(id) {
     if (!isId(id)) return null;
     const r = this.#rec(id);
     if (!r) return null;
     const nowS = this.#nowS();
-    if (nowS - r.askedAt >= XPOST_TOUCH_S) { r.askedAt = nowS; try { this.db?.xpostTouch(id, nowS); } catch { /* the next read writes it */ } }
+    if (nowS - r.askedAt >= XPOST_TOUCH_S) { r.askedAt = nowS; if (this.db) this.touches.set(id, nowS); }
     return r;
   }
   /** "ok" | "none" from the record; else "wait" while the fetch is in flight or near the head of the line; else "idle" (not being fetched now). */

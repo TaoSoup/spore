@@ -54,6 +54,61 @@ test("fee_paid round-trips and is never erased by a later upsert without it; the
   db.close();
 });
 
+test("calib: a table keyed story first is rebuilt time first once, rows and outcomes kept; the time index goes; a second migrate leaves it be", () => {
+  const db = new Db(":memory:");
+  db.db.exec(`DROP TABLE calib; CREATE TABLE calib (
+    story_key TEXT NOT NULL, t INTEGER NOT NULL, phase TEXT NOT NULL, multiple REAL, buyers5m INTEGER NOT NULL, hour_buyers INTEGER NOT NULL,
+    leader_mint TEXT, leader_price_usd REAL, story_buy_usd REAL NOT NULL, buyers_1h INTEGER, price_1h REAL, filled_1h INTEGER NOT NULL DEFAULT 0,
+    buyers_6h INTEGER, price_6h REAL, filled_6h INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (story_key, t)) WITHOUT ROWID;
+    CREATE INDEX calib_t ON calib(t);`); // as first shipped (no cov columns yet)
+  db.db.exec("INSERT INTO calib (story_key, t, phase, multiple, buyers5m, hour_buyers, leader_mint, leader_price_usd, story_buy_usd, buyers_1h, price_1h, filled_1h) VALUES ('n:1', 600, 'steady', 1.5, 3, 20, 'M', 0.5, 12.5, 7, 0.6, 1), ('p:9', 300, 'new', NULL, 1, 4, NULL, NULL, 0, NULL, NULL, 0)");
+  db.migrate();
+  const pk = db.db.prepare("PRAGMA table_info(calib)").all().filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  assert.deepEqual(pk, ["t", "story_key"]);
+  const idx = db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'calib' ORDER BY name").all().map((r) => r.name);
+  assert.deepEqual(idx, ["calib_due1", "calib_due6"]);
+  const rows = db.db.prepare("SELECT story_key, t, phase, multiple, buyers_1h, filled_1h, cov_1h FROM calib ORDER BY t").all().map((r) => ({ ...r }));
+  assert.deepEqual(rows, [{ story_key: "p:9", t: 300, phase: "new", multiple: null, buyers_1h: null, filled_1h: 0, cov_1h: null }, { story_key: "n:1", t: 600, phase: "steady", multiple: 1.5, buyers_1h: 7, filled_1h: 1, cov_1h: null }]);
+  db.migrate();
+  // the database's own statements work on the rebuilt table
+  assert.deepEqual(db.calibDue(1, 600, 10), [{ key: "p:9", t: 300, leaderMint: null }]);
+  db.calibPut([{ key: "n:1", t: 900, phase: "rising", multiple: 2, buyers5m: 4, hourBuyers: 30, leaderMint: "M", leaderPriceUsd: 1, storyBuyUsd: 9 }]);
+  db.calibFill(1, [{ key: "p:9", t: 300, buyers: 5, priceUsd: 1.1, cov: 12 }]);
+  assert.deepEqual(db.calibDue(1, 900, 10), [{ key: "n:1", t: 900, leaderMint: "M" }]);
+  assert.equal(db.calibTrim(1000, 10), 3);
+  db.close();
+});
+
+test("calib: a script's connection (rebuild: false) leaves a story-first table and its time index as they are", () => {
+  const db = new Db(":memory:", { rebuild: false });
+  db.db.exec(`DROP TABLE calib; CREATE TABLE calib (
+    story_key TEXT NOT NULL, t INTEGER NOT NULL, phase TEXT NOT NULL, multiple REAL, buyers5m INTEGER NOT NULL, hour_buyers INTEGER NOT NULL,
+    leader_mint TEXT, leader_price_usd REAL, story_buy_usd REAL NOT NULL, buyers_1h INTEGER, price_1h REAL, filled_1h INTEGER NOT NULL DEFAULT 0,
+    buyers_6h INTEGER, price_6h REAL, filled_6h INTEGER NOT NULL DEFAULT 0, cov_1h INTEGER, cov_6h INTEGER, PRIMARY KEY (story_key, t)) WITHOUT ROWID;
+    CREATE INDEX calib_t ON calib(t);`);
+  db.migrate();
+  const pk = db.db.prepare("PRAGMA table_info(calib)").all().filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+  assert.deepEqual(pk, ["story_key", "t"]);
+  assert.ok(db.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'calib_t'").get(), "its trim's index stays");
+  db.close();
+});
+
+test("storyTrim: rows older than the cut go an hour window at a time from the oldest, story by story; 0 when none is left", () => {
+  const db = new Db(":memory:");
+  const rows = [];
+  for (let h = 0; h < 3; h++) for (let b = 0; b < 12; b++) for (const key of ["n:1", "n:2", "p:3"]) rows.push({ key, t: h * 3600 + b * 300, buyers: 1, siteBuyers: 10, coins: 1 });
+  rows.push({ key: "n:1", t: 4 * 3600, buyers: 1, siteBuyers: 10, coins: 1 }); // newer than the cut
+  db.storyBucketsPut(rows);
+  const cut = 3 * 3600;
+  const steps = [];
+  for (let got; (got = db.storyTrim(cut, 20)) > 0;) steps.push(got);
+  assert.equal(steps.reduce((a, b) => a + b, 0), 108, "every expired row");
+  assert.ok(steps.length >= 6, `in steps of at most 20 (${steps.join(",")})`);
+  assert.equal(db.db.prepare("SELECT COUNT(*) AS n FROM story_buckets").get().n, 1, "the newer row stays");
+  assert.equal(db.storyTrim(cut, 20), 0);
+  db.close();
+});
+
 test("launcher: the column is added to a database from before it, round-trips and is never erased by an upsert without it", () => {
   const db = new Db(":memory:");
   assert.ok(db.db.prepare("PRAGMA table_info(coins)").all().some((c) => c.name === "launcher"), "present on a fresh database");

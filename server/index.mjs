@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.mjs";
 import { Db } from "./lib/db.mjs";
+import { Checkpointer } from "./lib/checkpointer.mjs";
 import { Model } from "./lib/model.mjs";
 import { Rpc, redact } from "./lib/rpc.mjs";
 import { EventHub } from "./lib/events.mjs";
@@ -46,6 +47,9 @@ try { cfg = loadConfig(process.env, { here, argv: process.argv.slice(2) }); }
 catch (e) { console.error(`spore: ${e.message}`); process.exit(1); }
 
 const db = new Db(join(cfg.dataDir, "spore.sqlite"));
+// The WAL checkpoint runs in a worker thread (lib/checkpointer.mjs): in a commit on the main thread it held the loop 45-81 ms.
+const checkpointer = new Checkpointer(db, join(cfg.dataDir, "spore.sqlite"), { log }).start();
+db.checkpointer = checkpointer; // health
 const model = new Model(db, { platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, platformMinBps: cfg.platformMinBps, mode: cfg.show, log });
 model.load();
 configureLocalMetaHost({ domain: cfg.pagesDomain, dir: join(cfg.metaDir, "m") });
@@ -155,8 +159,9 @@ const imageWarm = setInterval(warmLogos, 30 * 60_000); imageWarm.unref();
 // Uploaded metadata nobody launched with is removed after META_GC_HOURS (0 keeps everything); the
 // model decides what is referenced, so a file a coin points at is never touched.
 const metaGc = cfg.metaGcHours > 0 ? setInterval(() => { metahost.gc({ referenced: (name) => model.referencesMetaFile(name), maxAgeMs: cfg.metaGcHours * 3600_000 }).catch((e) => log.warn(`metahost gc: ${e.message}`)); }, 3600_000) : null; metaGc?.unref();
-// A periodic checkpoint keeps the WAL small so a crash loses little and a backup copies one file.
-const checkpoint = setInterval(() => db.checkpoint(), 15 * 60_000); checkpoint.unref();
+// A periodic checkpoint keeps the WAL small so a crash loses little and a backup copies one file: the worker's every
+// second (lib/checkpointer.mjs), or, when it is not running, a TRUNCATE on the main thread every 15 minutes.
+const checkpoint = setInterval(() => { if (checkpointer.state !== "worker") db.checkpoint(); }, 15 * 60_000); checkpoint.unref();
 
 try { await indexer.start(); } catch (e) { log.error(`indexer failed to start: ${e.stack ?? e}`); process.exitCode = 1; shutdown("indexer"); }
 // Off-chain metadata for every tracked coin (DESIGN §11.5): a background sweep every minute, by
@@ -198,10 +203,11 @@ function shutdown(signal) {
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
   indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
-  server.close(() => { try { rpc.close(); apiKeys.flush(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
+  // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
+  server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();
-  setTimeout(() => { log.warn("forced exit"); try { apiKeys.flush(); db.close(); } catch { /* ignore */ } process.exit(process.exitCode ?? 0); }, 8_000).unref();
+  setTimeout(() => { log.warn("forced exit"); try { apiKeys.flush(); checkpointer.stop(); db.close(); } catch { /* ignore */ } process.exit(process.exitCode ?? 0); }, 8_000).unref();
 }
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));

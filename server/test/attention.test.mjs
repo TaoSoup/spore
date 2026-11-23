@@ -278,8 +278,9 @@ test("close: a story with 7 h of stored history gets its normal, a multiple and 
   for (let i = 0; i < 6; i++) w.trade(A, `a${i}`, T0 + i);
   for (let i = 0; i < 14; i++) w.trade(O, `o${i}`, T0 + i);
   const reads = [];
-  const orig = w.db.storyRows.bind(w.db);
+  const orig = w.db.storyRows.bind(w.db), origBase = w.db.storyBaseRows.bind(w.db);
   w.db.storyRows = (...a) => { reads.push(a[0]); return orig(...a); };
+  w.db.storyBaseRows = (...a) => { reads.push(a[0]); return origBase(...a); };
   w.close(T0 + B + GRACE_S);
   const S = w.att.stories.get(X);
   assert.deepEqual(reads, [SITE_KEY, X], "the site's last hour once (the buckets seen), then one read for its baseline and last hour");

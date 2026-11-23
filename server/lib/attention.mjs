@@ -83,12 +83,12 @@ export const FAST_S = 60;
 export const PARTIAL = 1;
 /** Memory caps: open buckets, wallets per coin per bucket, coin-wallet pairs per bucket, site wallets per bucket, coins per bucket, stories held, coin days held. */
 export const OPEN_MAX = 3, SET_MAX = 20_000, PAIRS_MAX = 500_000, SITE_MAX = 200_000, COINS_MAX = 50_000, STORIES_MAX = 5_000, DAYS_MAX = 200_000;
-/** Per close: story rows written at most, rows per transaction, baselines read at most, calibration snapshots at most, outcomes filled per horizon at most, coin days per transaction. */
-export const ROWS_MAX = 2_000, CHUNK = 200, BASE_PER_CLOSE = 100, CALIB_MAX = 300, CALIB_FILL = 300, DAY_CHUNK = 500;
+/** Per close: story rows written at most, rows per transaction, baselines read at most, calibration snapshots at most, outcomes filled per horizon at most, coin days per transaction, calibration rows per transaction. */
+export const ROWS_MAX = 2_000, CHUNK = 200, BASE_PER_CLOSE = 100, CALIB_MAX = 300, CALIB_FILL = 300, DAY_CHUNK = 100, CALIB_CHUNK = 100;
 /** A story's baseline is read again after this long (ms). */
 export const BASE_REFRESH_MS = 30 * 60_000;
-/** The trims run this often (s), deleting this many rows per step. */
-export const TRIM_EVERY_S = 3600, TRIM_CHUNK = 2_000;
+/** The trims run this often (s), deleting this many rows per step (story rows fewer: a step's rows are taken story by story, so they share pages). */
+export const TRIM_EVERY_S = 3600, TRIM_CHUNK = 2_000, STORY_TRIM_CHUNK = 200;
 /** Series bodies cached this long (ms), at most this many; rows a series reads at most (14 days). */
 export const SERIES_TTL_MS = 30_000, SERIES_MAX = 64, SERIES_ROWS = KEEP_S / BUCKET_S;
 /** Events: a coin is pre-existing when created this long before T (s); the recorder keeps an event's rows from REC_BEFORE_S before T to REC_AFTER_S after it. */
@@ -252,7 +252,7 @@ export class Attention {
     this.events = []; this.evOpen = []; this.evMemo = new Map();
     this.series = new Map();   // story key|since → { at, body }
     this.job = null; this.timer = null; this.trimmedAt = 0;
-    this.stats = { trades: 0, capped: 0, late: 0, daysCapped: 0, closes: 0, lastCloseMs: null, maxSliceMs: 0, rows: 0, lastRows: 0, baselines: 0, calib: 0, filled: 0, dayRows: 0, eventRows: 0, trimmed: 0, evictions: 0, errors: 0 };
+    this.stats = { trades: 0, capped: 0, late: 0, daysCapped: 0, closes: 0, lastCloseMs: null, maxSliceMs: 0, lastStepMs: null, lastStepAt: null, maxStepMs: 0, maxStepAt: null, rows: 0, lastRows: 0, baselines: 0, calib: 0, filled: 0, dayRows: 0, eventRows: 0, trimmed: 0, evictions: 0, errors: 0 };
     if (events) this.setEvents(events);
   }
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -382,6 +382,8 @@ export class Attention {
     this.job = runSliced(this.closeGen(b, nowS)).then((run) => {
       this.stats.lastCloseMs = r2(run.cpuMs);
       if (run.maxSliceMs > this.stats.maxSliceMs) this.stats.maxSliceMs = r2(run.maxSliceMs);
+      this.stats.lastStepMs = r2(run.maxStepMs); this.stats.lastStepAt = run.maxStepAt;
+      if (run.maxStepMs > this.stats.maxStepMs) { this.stats.maxStepMs = r2(run.maxStepMs); this.stats.maxStepAt = run.maxStepAt; }
     }).catch((e) => { this.stats.errors++; this.log.warn?.(`attention: close failed: ${e?.message ?? e}`); }).finally(() => { this.job = null; });
     return this.job;
   }
@@ -484,11 +486,12 @@ export class Attention {
     const model = this.model, db = model.db, K = b.k, T = K * BUCKET_S, nowMs = this.now();
     const nt = model.coinRows?.narr?.on ? model.coinRows.narr : null, wk = model.wakeups;
     this.stats.closes++;
+    let st = "coins"; // the step's label (lib/sliced.mjs: the slowest step's is kept in stats)
     // 1. each coin's facts: its story's inputs, whether it is dust, its narrative's window
     const list = [], tags = new Set(), px = new Map();
     let n = 0;
     for (const [m, C] of b.coins) {
-      if ((++n & 63) === 0) yield;
+      if ((++n & 63) === 0) yield st;
       const c = model.coins.get(m) ?? null;
       let tagId = null;
       try { const tg = nt ? nt.tagOf(m) : null; tagId = tg && Number.isInteger(tg.id) ? tg.id : null; } catch { tagId = null; }
@@ -506,14 +509,17 @@ export class Attention {
       if (tagId != null) { tags.add(tagId); if (nb > 0 && !dust) this.#narrSaw(tagId, this.#copyKeyOf(m), K); }
       list.push({ m, C, c, tagId, pid, pok, fam, dust });
     }
-    yield;
+    yield st;
+    st = "narratives";
     const narrOn = new Set();
-    for (const id of tags) { if ((++n & 255) === 0) yield; if (this.#narrOn(id, K)) narrOn.add(id); }
+    for (const id of tags) { if ((++n & 255) === 0) yield st; if (this.#narrOn(id, K)) narrOn.add(id); }
     // 2. the stories of the bucket
+    yield st; // the step before ends here, under its own label
+    st = "stories";
     const per = new Map();
     let siteUsd = 0, siteSells = 0, siteLaunches = 0, siteFast = 0;
     for (const x of list) {
-      if ((++n & 255) === 0) yield;
+      if ((++n & 255) === 0) yield st;
       const C = x.C, nb = C.b?.size ?? 0;
       siteUsd += C.usd; siteSells += C.sells;
       this.#dayBuyers(x.m, K, nb);
@@ -539,29 +545,34 @@ export class Attention {
         if (nb > s.leadN || (nb === s.leadN && x.m < s.lead)) { s.lead = x.m; s.leadN = nb; s.leadP = C.p; }
       }
     }
-    yield;
+    yield st;
+    st = "merge";
     let merged = 0;
     for (const s of per.values()) {
       if (s.sets.length === 1) s.buyers = s.sets[0].size;
       else if (s.sets.length > 1) {
         const u = new Set();
-        for (const set of s.sets) for (const w of set) { u.add(w); if ((++merged & 8191) === 0) yield; }
+        for (const set of s.sets) for (const w of set) { u.add(w); if ((++merged & 8191) === 0) yield st; }
         s.buyers = u.size;
       }
       s.sets = null;
-      if ((++n & 255) === 0) yield;
+      if ((++n & 255) === 0) yield st;
     }
-    yield;
+    yield st;
     const ranked = [...per.values()].sort((x, y) => y.buyers - x.buyers || y.coins - x.coins || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
     const kept = ranked.slice(0, ROWS_MAX), flags = b.partial ? PARTIAL : 0, siteN = b.site.size;
     // 3. the rows: one per story kept, one for the site
+    yield st; // the step before ends here, under its own label
+    st = "rows";
     const rows = kept.map((s) => ({ key: s.key, t: T, buyers: s.buyers, buyUsd: r2(s.usd), sells: s.sells, launchesFast: s.fast, launches: s.launches, siteBuyers: siteN, leaderMint: s.lead, leaderBuyers: s.leadN, coins: s.coins, flags }));
     rows.push({ key: SITE_KEY, t: T, buyers: siteN, buyUsd: r2(siteUsd), sells: siteSells, launchesFast: siteFast, launches: siteLaunches, siteBuyers: siteN, leaderMint: null, leaderBuyers: 0, coins: b.coins.size, flags });
     for (let i = 0; i < rows.length; i += CHUNK) {
-      yield;
+      yield st;
       try { db.storyBucketsPut(rows.slice(i, i + CHUNK)); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: rows not stored (${e?.code ?? e?.message ?? "error"})`); }
     }
     this.stats.rows += rows.length; this.stats.lastRows = rows.length;
+    yield st; // the step before ends here, under its own label
+    st = "seen";
     // the buckets seen whole: the process's first close reads the last hour's site rows back once (one indexed read)
     if (!this.seenInit) {
       this.seenInit = true;
@@ -575,10 +586,12 @@ export class Attention {
     for (let j = 0; j < 12; j++) if (this.seen.has(K - j)) { if (j < 6) seenLast++; else seenPrev++; }
     const whole = seenLast === 6 && seenPrev === 6; // the last hour was seen whole: a phase, a multiple and a snapshot mean something
     // 4. the stories' state
+    yield st; // the step before ends here, under its own label
+    st = "state";
     const starts = [];
     for (const s of kept) {
       if (!(s.buyers > 0)) continue;
-      if ((++n & 63) === 0) yield;
+      if ((++n & 63) === 0) yield st;
       let S = this.stories.get(s.key);
       if (S) this.stories.delete(s.key);
       else S = { key: s.key, hist: [], base: null, baseAt: -Infinity, fill: true, peak30: 0, att: null, lead: null, lastK: -1, usd: 0, start: null };
@@ -588,21 +601,25 @@ export class Attention {
       S.lead = s.lead ? { mint: s.lead, n: s.leadN, p: s.leadP } : null; S.lastK = K; S.usd = s.usd;
     }
     while (this.stories.size > STORIES_MAX) { this.stories.delete(this.stories.keys().next().value); this.stats.evictions++; }
+    yield st; // the step before ends here, under its own label
+    st = "starts";
     try { db.storyStartsPut(starts, nowS); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: starts not stored (${e?.code ?? e?.message ?? "error"})`); }
-    yield;
+    yield st;
     // 5. the baselines due: most buyers in the last hour first; a story new to memory reads its last hour back too
+    yield st; // the step before ends here, under its own label
+    st = "baselines";
     const hourOf = (S) => { let h = 0; for (const x of S.hist) if (x.k > K - 12) h += x.b; return h; };
     const due = [];
     for (const S of this.stories.values()) {
-      if ((++n & 255) === 0) yield;
+      if ((++n & 255) === 0) yield st;
       const h = hourOf(S), first = S.start?.firstBuyersAt;
       if (S.fill || (h >= MIN_HOUR_BUYERS && fin(first) && nowS - first >= MIN_HISTORY_S && nowMs - S.baseAt >= BASE_REFRESH_MS)) due.push([S, h]);
     }
     due.sort((x, y) => y[1] - x[1]);
     for (const [S] of due.slice(0, BASE_PER_CLOSE)) {
-      yield;
+      yield st;
       let rs = [];
-      try { rs = db.storyRows(S.key, nowS - KEEP_S, SERIES_ROWS + 16); } catch { rs = []; }
+      try { rs = db.storyBaseRows(S.key, nowS - KEEP_S, SERIES_ROWS + 16); } catch { rs = []; }
       S.base = baselineOf(rs, nowS); S.baseAt = nowMs; this.stats.baselines++;
       if (S.base.peak30 > S.peak30) S.peak30 = S.base.peak30;
       if (S.fill) {
@@ -612,10 +629,12 @@ export class Attention {
         S.fill = false;
       }
     }
-    yield;
+    yield st;
     // 6. every story's attention as of this close; a story with no buyer in 12 buckets is let go
+    yield st; // the step before ends here, under its own label
+    st = "attention";
     for (const [key, S] of this.stories) {
-      if ((++n & 255) === 0) yield;
+      if ((++n & 255) === 0) yield st;
       while (S.hist.length && S.hist[0].k <= K - 12) S.hist.shift();
       if (!S.hist.length) { this.stories.delete(key); continue; }
       const last = S.lastK === K ? S.hist[S.hist.length - 1].b : 0;
@@ -627,55 +646,72 @@ export class Attention {
       const newWhy = multiple != null ? null : !whole ? "unseen" : !historyReady({ base: S.base, firstBuyersAt, nowS }) ? "history" : "quiet";
       S.att = { k: K, last, last30, prev30, hour: last30 + prev30, multiple, phase: phaseOf({ multiple, last30, prev30, peak30: S.peak30 }), newWhy };
     }
-    yield;
+    yield st;
     // 7. calibration: a snapshot of the busiest stories (only when the last hour was seen whole: a restart's hole would
     // read as a drop), then the outcomes that came due (1 h and 6 h after)
+    yield st; // the step before ends here, under its own label
+    st = "calib";
     const snaps = !whole ? [] : [...this.stories.values()].filter((S) => S.att && S.att.hour > 0).sort((x, y) => y.att.hour - x.att.hour || (x.key < y.key ? -1 : 1)).slice(0, CALIB_MAX);
     const crow = [];
     for (const S of snaps) {
-      if ((++n & 15) === 0) yield;
+      if ((++n & 15) === 0) yield st;
       const lead = S.lead?.mint ?? null;
       let p = lead ? b.coins.get(lead)?.p ?? null : null;
       if (lead && p == null) { try { p = db.usdPriceAt(lead, T + BUCKET_S)?.priceUsd ?? null; } catch { p = null; } }
       crow.push({ key: S.key, t: T, phase: S.att.phase, multiple: S.att.multiple, buyers5m: S.att.last, hourBuyers: S.att.hour, leaderMint: lead, leaderPriceUsd: p, storyBuyUsd: S.lastK === K ? r2(S.usd) : 0 });
     }
-    try { db.calibPut(crow); this.stats.calib += crow.length; } catch (e) { this.stats.errors++; this.log.warn?.(`attention: calibration not stored (${e?.code ?? e?.message ?? "error"})`); }
+    for (let i = 0; i < crow.length; i += CALIB_CHUNK) {
+      if (i) yield st;
+      try { db.calibPut(crow.slice(i, i + CALIB_CHUNK)); this.stats.calib += Math.min(CALIB_CHUNK, crow.length - i); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: calibration not stored (${e?.code ?? e?.message ?? "error"})`); }
+    }
+    yield st; // the step before ends here, under its own label
+    st = "fill";
     yield* this.#fillGen(T);
     // 8. coin days: the deltas since the last flush
+    yield st; // the step before ends here, under its own label
+    st = "days";
     const days = [...this.days.values()];
     this.days = new Map();
     for (let i = 0; i < days.length; i += DAY_CHUNK) {
-      yield;
+      yield st;
       try { db.coinDaysAdd(days.slice(i, i + DAY_CHUNK).map((D) => ({ mint: D.mint, day: dayOf(D.d * 86_400), high: D.hi, low: D.lo, close: D.close, closeT: D.ct, buyers: D.buyers, buys: D.buys, trades: D.trades, volume: r2(D.vol) }))); this.stats.dayRows += Math.min(DAY_CHUNK, days.length - i); }
       catch (e) { this.stats.errors++; this.log.warn?.(`attention: coin days not stored (${e?.code ?? e?.message ?? "error"})`); }
     }
+    yield st; // the step before ends here, under its own label
+    st = "events";
     // 9. the events' rows: one per event recording at this bucket, with 0 matched buyers too, carrying the site's buyers
     // (the denominator, kept with the event: story_buckets is trimmed after 14 days) and the flags
     const evs = this.evOpen.filter((e) => T + BUCKET_S > e.recFrom && T < e.recTo);
     if (evs.length) {
-      yield;
+      yield st;
       const er = evs.map((e) => { const E = b.ev?.get(e.id); return { id: e.id, t: T, buyers: E?.all.size ?? 0, preBuyers: E?.pre.size ?? 0, newBuyers: E?.nw.size ?? 0, preCoins: E?.preC.size ?? 0, newCoins: E?.newC.size ?? 0, siteBuyers: siteN, flags }; });
       try { db.eventBucketsPut(er); this.stats.eventRows += er.length; } catch (e) { this.stats.errors++; this.log.warn?.(`attention: event rows not stored (${e?.code ?? e?.message ?? "error"})`); }
     }
     // 10. the last bucket's per-coin buyers (a card's leader), the launches of the last 2 buckets, the series cache
+    yield st; // the step before ends here, under its own label
+    st = "last";
     const lc = new Map();
     for (const x of list) { const nb = x.C.b?.size ?? 0; if (nb > 0) lc.set(x.m, nb); }
     this.lastCoin = lc; this.lastK = K;
     for (const [m, k] of this.launched) { if (k >= K - 1) break; this.launched.delete(m); }
     this.series.clear();
     // 11. the trims, once an hour, a few thousand rows a step
+    yield st; // the step before ends here, under its own label
+    st = "trims";
     if (nowS - this.trimmedAt >= TRIM_EVERY_S) {
       this.trimmedAt = nowS;
-      for (const [trim, before] of [[(x, l) => db.storyTrim(x, l), nowS - KEEP_S], [(x, l) => db.calibTrim(x, l), nowS - CALIB_KEEP_S]]) {
+      // story rows go an hour window at a time (db.storyTrim), so a short step does not mean the end: they stop at 0
+      for (const [trim, before, chunk, untilNone] of [[(x, l) => db.storyTrim(x, l), nowS - KEEP_S, STORY_TRIM_CHUNK, true], [(x, l) => db.calibTrim(x, l), nowS - CALIB_KEEP_S, TRIM_CHUNK, false]]) {
         for (;;) {
-          yield;
+          yield st;
           let got = 0;
-          try { got = trim(before, TRIM_CHUNK); } catch { got = 0; }
+          try { got = trim(before, chunk); } catch { got = 0; }
           this.stats.trimmed += got;
-          if (got < TRIM_CHUNK) break;
+          if (untilNone ? got === 0 : got < chunk) break;
         }
       }
     }
+    yield st; // the last step carries its label too ("end" is then an empty step)
   }
 
   /**
@@ -692,7 +728,7 @@ export class Attention {
       try { due = db.calibDue(h, T - H, CALIB_FILL); } catch { due = []; }
       const out = [];
       for (const r of due) {
-        if ((++n & 15) === 0) yield;
+        if ((++n & 15) === 0) yield `fill${h}h`;
         const from = r.t + BUCKET_S, to = from + H;
         let buyers = null, priceUsd = null, cov = covs.get(r.t);
         try { buyers = db.storyBuyersIn(r.key, from, to).buyers; } catch { buyers = null; }
@@ -700,8 +736,11 @@ export class Attention {
         if (r.leaderMint) { try { priceUsd = db.usdPriceAt(r.leaderMint, to)?.priceUsd ?? null; } catch { priceUsd = null; } }
         out.push({ key: r.key, t: r.t, buyers, priceUsd, cov });
       }
-      yield;
-      try { db.calibFill(h, out); this.stats.filled += out.length; } catch (e) { this.stats.errors++; this.log.warn?.(`attention: outcomes not stored (${e?.code ?? e?.message ?? "error"})`); }
+      for (let i = 0; i < out.length; i += CALIB_CHUNK) {
+        yield `fill${h}h`;
+        try { db.calibFill(h, out.slice(i, i + CALIB_CHUNK)); this.stats.filled += Math.min(CALIB_CHUNK, out.length - i); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: outcomes not stored (${e?.code ?? e?.message ?? "error"})`); }
+      }
+      yield `fill${h}h`;
     }
   }
 

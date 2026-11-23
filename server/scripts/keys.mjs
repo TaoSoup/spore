@@ -32,7 +32,7 @@ const table = (rows, cols) => {
 if (!["create", "list", "revoke", "usage"].includes(cmd)) usage();
 const file = join(dataDir, "spore.sqlite");
 if (!existsSync(file)) { console.error(`no database at ${file} (set DATA_DIR or --data)`); process.exit(2); }
-const db = new Db(file, { busyMs: 5_000 });
+const db = new Db(file, { busyMs: 5_000, rebuild: false }); // never rebuild a table under the running server
 const keys = new ApiKeys(db);
 try {
   if (cmd === "create") {

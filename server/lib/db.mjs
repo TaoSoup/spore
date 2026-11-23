@@ -12,6 +12,13 @@ export const SCHEMA_VERSION = 3;
 /** Trade retention per mint (insertTrade): its newest TRADE_KEEP rows whatever their age, and every row of the last TRADE_DAY_S. */
 export const TRADE_KEEP = 2000, TRADE_DAY_S = 86_400;
 
+/** The calibration log's columns (story attention, lib/attention.mjs); keyed time first (migrate: a close's rows share a bucket time). */
+const CALIB_COLS = `story_key TEXT NOT NULL, t INTEGER NOT NULL, phase TEXT NOT NULL, multiple REAL, buyers5m INTEGER NOT NULL, hour_buyers INTEGER NOT NULL,
+  leader_mint TEXT, leader_price_usd REAL, story_buy_usd REAL NOT NULL,
+  buyers_1h INTEGER, price_1h REAL, filled_1h INTEGER NOT NULL DEFAULT 0,
+  buyers_6h INTEGER, price_6h REAL, filled_6h INTEGER NOT NULL DEFAULT 0, cov_1h INTEGER, cov_6h INTEGER`;
+const CALIB_INDEXES = "CREATE INDEX IF NOT EXISTS calib_due1 ON calib(t) WHERE filled_1h = 0; CREATE INDEX IF NOT EXISTS calib_due6 ON calib(t) WHERE filled_6h = 0;";
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS backfill_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -157,15 +164,10 @@ CREATE TABLE IF NOT EXISTS story_starts (
   story_key TEXT PRIMARY KEY, start_at INTEGER NOT NULL, source TEXT NOT NULL, first_buyers_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS calib (
-  story_key TEXT NOT NULL, t INTEGER NOT NULL, phase TEXT NOT NULL, multiple REAL, buyers5m INTEGER NOT NULL, hour_buyers INTEGER NOT NULL,
-  leader_mint TEXT, leader_price_usd REAL, story_buy_usd REAL NOT NULL,
-  buyers_1h INTEGER, price_1h REAL, filled_1h INTEGER NOT NULL DEFAULT 0,
-  buyers_6h INTEGER, price_6h REAL, filled_6h INTEGER NOT NULL DEFAULT 0, cov_1h INTEGER, cov_6h INTEGER,
-  PRIMARY KEY (story_key, t)
+  ${CALIB_COLS},
+  PRIMARY KEY (t, story_key)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS calib_t ON calib(t);
-CREATE INDEX IF NOT EXISTS calib_due1 ON calib(t) WHERE filled_1h = 0;
-CREATE INDEX IF NOT EXISTS calib_due6 ON calib(t) WHERE filled_6h = 0;
+${CALIB_INDEXES}
 CREATE TABLE IF NOT EXISTS coin_days (
   mint TEXT NOT NULL, day TEXT NOT NULL, high_usd REAL, low_usd REAL, close_usd REAL, close_t INTEGER,
   buyers INTEGER NOT NULL DEFAULT 0, buys INTEGER NOT NULL DEFAULT 0, trades INTEGER NOT NULL DEFAULT 0, volume_usd REAL NOT NULL DEFAULT 0,
@@ -186,7 +188,8 @@ export class Db {
    * CLI (scripts/keys.mjs) writes to the same file as the running server; its transactions take
    * well under a millisecond, so a short wait turns a would-be SQLITE_BUSY into a tiny pause.
    */
-  constructor(file, { busyMs = 2_000 } = {}) {
+  constructor(file, { busyMs = 2_000, rebuild = true } = {}) {
+    this.rebuild = rebuild; // one-time table rebuilds (calib below): the server only, never a script beside a running server
     if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
     this.tradeAdds = new Map(); // mint → rows inserted since its last trim (insertTrade)
@@ -288,6 +291,20 @@ export class Db {
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
     for (const c of ["cov_1h", "cov_6h"]) if (!calibCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE calib ADD COLUMN ${c} INTEGER`);
+    // calib keyed time first (Nov 23 2026; it was story first): a close writes ~300 snapshots of one bucket time and fills
+    // ~300 outcomes of one or two bucket times, which key-first spread over one page per story (~250-280 WAL pages a
+    // commit on a copy of the live rows; time first, ~20), about 750 fewer pages a close, so the close brings on fewer
+    // WAL checkpoints. Rebuilt once, in one transaction; the time index it needed goes.
+    const calibFirst = calibCols.find((c) => c.pk === 1)?.name;
+    if (this.rebuild && calibFirst !== "t") {
+      const cols = "story_key, t, phase, multiple, buyers5m, hour_buyers, leader_mint, leader_price_usd, story_buy_usd, buyers_1h, price_1h, filled_1h, buyers_6h, price_6h, filled_6h, cov_1h, cov_6h";
+      this.db.exec("BEGIN");
+      try {
+        this.db.exec(`CREATE TABLE calib_new (${CALIB_COLS}, PRIMARY KEY (t, story_key)) WITHOUT ROWID; INSERT INTO calib_new (${cols}) SELECT ${cols} FROM calib; DROP TABLE calib; ALTER TABLE calib_new RENAME TO calib; ${CALIB_INDEXES}`);
+        this.db.exec("COMMIT");
+      } catch (e) { try { this.db.exec("ROLLBACK"); } catch { /* none open */ } throw e; }
+    }
+    if (this.rebuild || calibFirst === "t") this.db.exec("DROP INDEX IF EXISTS calib_t"); // a story-first table still needs it (its trim)
     if (current < SCHEMA_VERSION) this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
   }
 
@@ -469,7 +486,11 @@ export class Db {
       storyRows: p("SELECT t, buyers, buy_usd, sells, launches_fast, launches, site_buyers, leader_mint, leader_buyers, coins, flags FROM story_buckets WHERE story_key = ? AND t >= ? ORDER BY t ASC LIMIT ?"),
       storyBuyersIn: p("SELECT COALESCE(SUM(buyers), 0) AS n, COUNT(*) AS c FROM story_buckets WHERE story_key = ? AND t >= ? AND t < ?"),
       siteSeenIn: p("SELECT COUNT(*) AS c FROM story_buckets WHERE story_key = '*' AND t >= ? AND t < ? AND (flags & 1) = 0"),
-      storyTrim: p("DELETE FROM story_buckets WHERE (story_key, t) IN (SELECT story_key, t FROM story_buckets WHERE t < ? LIMIT ?)"),
+      storyBaseRows: p("SELECT t, buyers, site_buyers, flags FROM story_buckets WHERE story_key = ? AND t >= ? ORDER BY t ASC LIMIT ?"),
+      // story by story ("+": through the time index, sorted, not a walk of the whole key), so one step's rows share pages;
+      // storyTrim bounds the window to the oldest hour, so the sort is of one hour's rows however long the backlog
+      storyTrim: p("DELETE FROM story_buckets WHERE (story_key, t) IN (SELECT story_key, t FROM story_buckets WHERE t < ? ORDER BY +story_key LIMIT ?)"),
+      storyMinT: p("SELECT MIN(t) AS m FROM story_buckets"),
       storyStartGet: p("SELECT start_at, source, first_buyers_at FROM story_starts WHERE story_key = ?"),
       storyStartPut: p(`INSERT INTO story_starts (story_key, start_at, source, first_buyers_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(story_key) DO UPDATE SET start_at = excluded.start_at, source = excluded.source, updated_at = excluded.updated_at`),
@@ -701,6 +722,8 @@ export class Db {
   xpostSet(r) { this.q.xpostSet.run({ id: r.id, state: r.state, handle: r.handle ?? null, text: r.text ?? null, flagged: r.flagged ? 1 : 0, fetchedAt: r.fetchedAt, askedAt: r.askedAt, recheckAt: r.recheckAt }); }
   xpostDel(id) { return Number(this.q.xpostDel.run(id).changes) > 0; }
   xpostTouch(id, at) { return Number(this.q.xpostTouch.run(at, id).changes) > 0; }
+  /** Writes many asked-for times (`[[id, at]]`) in one transaction; returns how many rows moved. */
+  xpostTouchMany(rows) { let n = 0; if (rows.length) this.transaction(() => { for (const [id, at] of rows) n += Number(this.q.xpostTouch.run(at, id).changes); }); return n; }
   /** Drops the rows not asked for since `beforeS`, then the least recently asked past `maxRows`; returns how many went. */
   xpostPrune(beforeS, maxRows) { return this.transaction(() => { let n = Number(this.q.xpostPruneOld.run(beforeS).changes); const over = this.q.xpostCount.get().n - maxRows; if (over > 0) n += Number(this.q.xpostPruneOver.run(over).changes); return n; }); }
   xpostCount() { return this.q.xpostCount.get().n; }
@@ -825,12 +848,18 @@ export class Db {
   storyRows(key, sinceT, limit = 5000) {
     return this.q.storyRows.all(key, sinceT, limit).map((r) => ({ t: r.t, buyers: r.buyers, buyUsd: r.buy_usd, sells: r.sells, launchesFast: r.launches_fast, launches: r.launches, siteBuyers: r.site_buyers, leaderMint: r.leader_mint, leaderBuyers: r.leader_buyers, coins: r.coins, flags: r.flags }));
   }
+  /** A story's rows from `sinceT` on for its baseline (lib/attention.mjs baselineOf): `[{ t, buyers, siteBuyers, flags }]`, oldest first, at most `limit`. */
+  storyBaseRows(key, sinceT, limit) { return this.q.storyBaseRows.all(key, sinceT, limit).map((r) => ({ t: r.t, buyers: r.buyers, siteBuyers: r.site_buyers, flags: r.flags })); }
   /** `{ buyers, rows }`: the sum of a story's bucket buyers with `from <= t < to`, and how many rows that was. */
   storyBuyersIn(key, from, to) { const r = this.q.storyBuyersIn.get(key, from, to); return { buyers: Number(r.n), rows: Number(r.c) }; }
   /** How many site rows ('*') with `from <= t < to` are not partial: the buckets of that window the server saw whole. */
   siteSeenIn(from, to) { return Number(this.q.siteSeenIn.get(from, to).c); }
-  /** Deletes at most `limit` story bucket rows older than `beforeT`; returns how many went. */
-  storyTrim(beforeT, limit) { return Number(this.q.storyTrim.run(beforeT, limit).changes); }
+  /** Deletes at most `limit` story bucket rows older than `beforeT`, from the oldest hour of them, story by story; returns how many went (0: none older is left). */
+  storyTrim(beforeT, limit) {
+    const m = this.q.storyMinT.get()?.m;
+    if (m == null || m >= beforeT) return 0;
+    return Number(this.q.storyTrim.run(Math.min(beforeT, m + 3600), limit).changes);
+  }
   storyStartGet(key) { const r = this.q.storyStartGet.get(key); return r ? { startAt: r.start_at, source: r.source, firstBuyersAt: r.first_buyers_at } : null; }
   /** Writes story starts (`[{ key, startAt, source, firstBuyersAt }]`) in one transaction: a new row, or a moved `startAt` (first_buyers_at never changes). */
   storyStartsPut(rows, at) { if (rows.length) this.transaction(() => { for (const r of rows) this.q.storyStartPut.run(r.key, r.startAt, r.source, r.firstBuyersAt, at); }); }
@@ -859,6 +888,12 @@ export class Db {
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }
+  /** One passive checkpoint on the main connection: `{ busy, log, done }` frames (busy: another connection was checkpointing; log -1) (lib/checkpointer.mjs, when the log has not started over for long). */
+  checkpointPassive() { const r = this.db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get(); return { busy: !!r.busy, log: r.log, done: r.checkpointed }; }
+  /** The main connection's automatic checkpoint, in log pages (0: off; lib/checkpointer.mjs runs it in a worker). */
+  autoCheckpoint(pages) { this.db.exec(`PRAGMA wal_autocheckpoint = ${Math.max(0, Math.floor(pages))}`); }
+  /** The size (bytes) the log file is cut back to when it starts over. */
+  journalSizeLimit(bytes) { this.db.exec(`PRAGMA journal_size_limit = ${Math.max(-1, Math.floor(bytes))}`); }
   /** Consistent online copy to `file` (node:sqlite's backup API; safe while the server writes). */
   async backup(file) { return backup(this.db, file); }
   close() { this.checkpoint(); this.db.close(); }

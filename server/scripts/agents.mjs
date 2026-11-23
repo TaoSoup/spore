@@ -45,7 +45,7 @@ try { cfg = loadConfig({ ...process.env, DATA_DIR: dataDir }, { here: join(here,
 catch (e) { console.error(`agents: ${e.message}`); process.exit(2); }
 
 const quiet = { info() {}, warn: (m) => console.error(`warn: ${m}`), error: (m) => console.error(`error: ${m}`) };
-const db = new Db(file, { busyMs: 5_000 });
+const db = new Db(file, { busyMs: 5_000, rebuild: false }); // never rebuild a table under the running server
 const registry = new AgentRegistry(db);
 const iso = (s) => (s ? new Date(s * 1000).toISOString().replace(".000Z", "Z") : "-");
 const table = (rows, cols) => {

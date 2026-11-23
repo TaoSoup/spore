@@ -25,13 +25,14 @@ export function drain(gen) {
 }
 
 /**
- * Runs `gen` on the shared scheduler. Resolves with `{ value, cpuMs, slices, maxSliceMs }`: the generator's return
- * value, the time spent in it, how many turns it took part in and its longest share of one turn; rejects with what
- * the generator threw.
+ * Runs `gen` on the shared scheduler. Resolves with `{ value, cpuMs, slices, maxSliceMs, maxStepMs, maxStepAt }`: the
+ * generator's return value, the time spent in it, how many turns it took part in, its longest share of one turn, its
+ * longest single step and what the generator yielded at the end of that step (a label, when it yields one; "end" for
+ * the last step); rejects with what the generator threw.
  */
 export function runSliced(gen) {
   return new Promise((resolve, reject) => {
-    live.push({ gen, resolve, reject, cpuMs: 0, slices: 0, maxSliceMs: 0, turnMs: 0, turn: -1 });
+    live.push({ gen, resolve, reject, cpuMs: 0, slices: 0, maxSliceMs: 0, maxStepMs: 0, maxStepAt: null, turnMs: 0, turn: -1 });
     slicedStats.jobs = live.length;
     if (live.length > slicedStats.maxJobs) slicedStats.maxJobs = live.length;
     schedule();
@@ -57,10 +58,11 @@ function turn() {
     try { r = job.gen.next(); } catch (e) { error = e ?? new Error("sliced job failed"); }
     const dt = performance.now() - ts;
     job.turnMs += dt; job.cpuMs += dt;
+    if (dt > job.maxStepMs) { job.maxStepMs = dt; job.maxStepAt = error ? "error" : r.done ? "end" : r.value ?? null; }
     if (error || r.done) {
       live.splice(next, 1); // `next` now points at the job after it
       const slices = job.slices + 1, maxSliceMs = Math.max(job.maxSliceMs, job.turnMs);
-      if (error) job.reject(error); else job.resolve({ value: r.value, cpuMs: job.cpuMs, slices, maxSliceMs });
+      if (error) job.reject(error); else job.resolve({ value: r.value, cpuMs: job.cpuMs, slices, maxSliceMs, maxStepMs: job.maxStepMs, maxStepAt: job.maxStepAt });
     } else next++;
     if (performance.now() >= until) break;
   }
