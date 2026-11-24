@@ -134,14 +134,18 @@ export function totals(rows) {
  *
  * `tagOf(row)`: the coin's narrative `{ id, title, theme }` or null; null (the default) for no tagging at all, and the
  * result is then exactly as described above plus `themes: []`. With it: a tagged row carries `narrative: { id, title,
- * theme }` wherever it is listed; `cards` may hold `{ kind: "narrative", key: "n:<id>", narrative: { id, title, theme,
+ * theme }` wherever it is listed. `subjectOf(narrative)` (lib/subjects.mjs; null for none): `{ key, title, quiet }` or
+ * null; the coins of two or more narratives of one story subject (not quiet) then make one card `{ kind: "narrative",
+ * key: "t:...", narrative: { id (the leading angle's), title (the subject's), theme, newCoins1h (summed) }, subject:
+ * { key, title, angles: [{ id, title, buyers5m, coinsN }] }, ... }` instead of their own cards (rule 2c).
+ * `cards` may hold `{ kind: "narrative", key: "n:<id>", narrative: { id, title, theme,
  * newCoins1h }, post, family: null, buyers5m, coinsN, newN, olderN, coins }` (rule 2b; each coin row has `isNew`;
  * `newN` / `olderN` count every coin, copies included, an unknown creation time as older; `post`: the post of its
  * most-bought coin that links one that may be shown, else null; `newCoins1hOf(id)` gives `newCoins1h`); a post or
  * family card has `narrative`: the one all its coins share, else null. `themes`: `[{ theme, cards }]` of the
  * narrative cards listed, most cards first.
  */
-export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0 } = {}) {
+export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null } = {}) {
   const posts = new Map(); // post id → { handle, text } | null, asked once
   const post = (id) => {
     if (id == null) return null;
@@ -162,11 +166,28 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   }
   const tagged = (row) => { const t = tags.get(row.mint); return t ? { ...row, narrative: t } : row; };
   // Rule 2b: which narratives hold two or more coins that are not dust (copies folded count once).
+  // Rule 2c (with `subjectOf`): the coins of two or more narratives of one subject (a story row of subjects/table.json)
+  // make one block, whatever each narrative's own count; a subject reached by one narrative only leaves it to rule 2b.
+  const sbins = new Map(), subjOfN = new Map(); // subject key → { s, rows, nids }; narrative id → subject key (kept bins)
+  if (subjectOf && tags.size) {
+    const asked = new Map();
+    for (const row of rows) {
+      const t = tags.get(row.mint);
+      if (!t || dustWhy(row)) continue;
+      if (!asked.has(t.id)) { let s = null; try { s = subjectOf(t) ?? null; } catch { s = null; } asked.set(t.id, s && !s.quiet && typeof s.key === "string" && typeof s.title === "string" ? s : null); }
+      const s = asked.get(t.id);
+      if (!s) continue;
+      let b = sbins.get(s.key);
+      if (!b) sbins.set(s.key, b = { s, rows: [], nids: new Set() });
+      b.rows.push(row); b.nids.add(t.id);
+    }
+    for (const [k, b] of sbins) if (b.nids.size < 2) sbins.delete(k); else for (const id of b.nids) subjOfN.set(id, k);
+  }
   const nbins = new Map(); // narrative id → its rows, in rank order
   if (tags.size) {
     for (const row of rows) {
       const t = tags.get(row.mint);
-      if (!t || dustWhy(row)) continue;
+      if (!t || dustWhy(row) || subjOfN.has(t.id)) continue;
       let b = nbins.get(t.id);
       if (!b) nbins.set(t.id, b = []);
       b.push(row);
@@ -179,7 +200,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   for (const row of rows) {
     const why = dustWhy(row);
     if (why) { dustN++; if (dust.length < DUST_MAX) dust.push({ ...tagged(row), reason: why }); continue; }
-    if (nbins.has(tags.get(row.mint)?.id)) continue; // on its narrative's card
+    if (nbins.has(tags.get(row.mint)?.id) || subjOfN.has(tags.get(row.mint)?.id)) continue; // on its narrative's or subject's card
     const own = postIdOf(row) ?? null, wake = row.parent?.mint ? wakes.get(row.parent.mint) ?? null : null;
     if (own != null && post(own)) {
       // The coin's own link comes first: it is counted under the post its creator pointed at, whatever its family shows.
@@ -208,25 +229,48 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       ...(one === undefined ? null : { narrative: one }),
     });
   }
+  // The post shown: of the coins that link a post that may be shown, the one with the most 5-minute buyers (then the mint).
+  const bestPost = (b) => {
+    for (const r of [...b].sort((x, y) => (y.buyers5m ?? 0) - (x.buyers5m ?? 0) || byMint(x.mint, y.mint))) {
+      const own = postIdOf(r) ?? null;
+      if (own != null && post(own)) { const p = post(own); return { id: own, handle: p.handle, text: p.text, at: postTime(own, nowMs), url: postUrl(own) }; }
+    }
+    return null;
+  };
+  const newCoins = (id) => { try { return Number(newCoins1hOf(id)) || 0; } catch { return 0; } };
   for (const [id, b] of nbins) {
     const n = tags.get(b[0].mint);
     const coins = foldCopies(b.map((r) => ({ ...r, narrative: n, isNew: isNew(r) }))), t = totals(coins);
-    // The post shown: of the coins that link a post that may be shown, the one with the most 5-minute buyers (then the mint).
-    let p = null, pid = null;
-    for (const r of [...b].sort((x, y) => (y.buyers5m ?? 0) - (x.buyers5m ?? 0) || byMint(x.mint, y.mint))) {
-      const own = postIdOf(r) ?? null;
-      if (own != null && post(own)) { pid = own; p = post(own); break; }
-    }
     let newN = 0;
     for (const r of b) if (isNew(r)) newN++;
-    let nc = 0;
-    try { nc = Number(newCoins1hOf(id)) || 0; } catch { nc = 0; }
     cards.push({
       kind: "narrative", key: storyKey("narrative", id),
-      narrative: { id: n.id, title: n.title, theme: n.theme, newCoins1h: nc },
-      post: p ? { id: pid, handle: p.handle, text: p.text, at: postTime(pid, nowMs), url: postUrl(pid) } : null,
+      narrative: { id: n.id, title: n.title, theme: n.theme, newCoins1h: newCoins(id) },
+      post: bestPost(b),
       family: null,
       buyers5m: t.buyers5m, coinsN: t.coinsN, newN, olderN: b.length - newN, coins,
+    });
+  }
+  // A subject block: a narrative card keyed by the subject ("t:..."), titled by it, its narratives listed as `angles`
+  // (most 5-minute buyers first); `narrative.id` / `theme` are the leading angle's, `newCoins1h` the angles' sum.
+  for (const [key, b] of sbins) {
+    const per = new Map(); // narrative id → { id, title, buyers5m, coinsN }
+    const coins = foldCopies(b.rows.map((r) => ({ ...r, narrative: tags.get(r.mint), isNew: isNew(r) }))), t = totals(coins);
+    for (const c of coins) {
+      const n = c.narrative, x = per.get(n.id) ?? { id: n.id, title: n.title, theme: n.theme, buyers5m: 0, coinsN: 0 };
+      const one = totals([c]);
+      x.buyers5m += one.buyers5m; x.coinsN += one.coinsN; per.set(n.id, x);
+    }
+    const angles = [...per.values()].sort((x, y) => y.buyers5m - x.buyers5m || y.coinsN - x.coinsN || x.id - y.id);
+    let newN = 0;
+    for (const r of b.rows) if (isNew(r)) newN++;
+    cards.push({
+      kind: "narrative", key,
+      narrative: { id: angles[0].id, title: b.s.title, theme: angles[0].theme, newCoins1h: [...b.nids].reduce((s, id) => s + newCoins(id), 0) },
+      subject: { key, title: b.s.title, angles: angles.map(({ id, title, buyers5m, coinsN }) => ({ id, title, buyers5m, coinsN })) },
+      post: bestPost(b.rows),
+      family: null,
+      buyers5m: t.buyers5m, coinsN: t.coinsN, newN, olderN: b.rows.length - newN, coins,
     });
   }
   cards.sort((x, y) => y.buyers5m - x.buyers5m || y.coinsN - x.coinsN || byMint(x.key, y.key));

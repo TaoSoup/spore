@@ -248,3 +248,36 @@ test("narrative cards sort and cap with the others; themes count the narrative c
   const odd = groupStories({ rows: rows.slice(0, 2), nowMs: NOW_MS, tagOf: () => ({ id: "7", title: 5 }) });
   assert.deepEqual([odd.cards.length, "narrative" in odd.loose[0]], [0, false], "a tag that is not { id, title, theme } is no tag");
 });
+
+test("subject blocks (rule 2c): narratives of one story subject fold into one card keyed t:..., even one-coin narratives; quiet subjects and lone narratives stay as they were", async () => {
+  const { subjectMatcher } = await import("../lib/subjects.mjs");
+  const J1 = { id: 925, title: "jensen the white leather jacket", theme: "tech" }, J2 = { id: 1021, title: "nvidia reinstates jensen huang ceo", theme: "tech" };
+  const J3 = { id: 513, title: "nvidia ceo gooner exposed", theme: "tech" }, NV = { id: 1037, title: "2006 nvidia frog mascot", theme: "tech" }, NV2 = { id: 1028, title: "ninja nvidia office dog", theme: "tech" };
+  const G1 = { id: 23, title: "gta 6", theme: "games" };
+  const subjectOf = subjectMatcher({ subjects: [
+    { key: "t:huang-jensen", title: "Jensen Huang", anchors: ["jensen", "huang"], include: [513] },
+    { key: "t:nvidia", title: "Nvidia", anchors: ["nvidia"], quiet: true },
+    { key: "t:gta", title: "GTA 6", anchors: ["gta"] },
+  ] });
+  assert.deepEqual(subjectOf(J2), { key: "t:huang-jensen", title: "Jensen Huang", quiet: false }, "a story row beats a quiet row");
+  assert.deepEqual(subjectOf(J3)?.key, "t:huang-jensen", "an include needs none of the words");
+  assert.deepEqual(subjectOf(NV), { key: "t:nvidia", title: "Nvidia", quiet: true });
+  assert.equal(subjectOf({ id: 1, title: "xiaohuang friends" }), null);
+  const rows = [
+    row("a", { buyers5m: 30 }), row("b", { buyers5m: 10 }), row("c", { buyers5m: 6 }), row("d", { buyers5m: 2 }),
+    row("n1", { buyers5m: 9 }), row("n2", { buyers5m: 4 }), row("n3", { buyers5m: 3 }), row("g1", { buyers5m: 5 }), row("g2", { buyers5m: 1 }),
+  ];
+  const tags = { a: J1, b: J1, c: J2, d: J3, n1: NV, n2: NV, n3: NV2, g1: G1, g2: G1 };
+  const g = groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags), newCoins1hOf: (id) => ({ 925: 4, 1021: 2 })[id] ?? 0, subjectOf });
+  const j = g.cards.find((c) => c.key === "t:huang-jensen");
+  assert.ok(j, "one Jensen block");
+  assert.deepEqual([j.kind, j.narrative, j.buyers5m, j.coinsN], ["narrative", { id: 925, title: "Jensen Huang", theme: "tech", newCoins1h: 6 }, 48, 4]);
+  assert.deepEqual(j.subject.angles.map((x) => [x.id, x.buyers5m, x.coinsN]), [[925, 40, 2], [1021, 6, 1], [513, 2, 1]], "one-coin narratives join the block");
+  assert.deepEqual(j.coins.map((r) => [r.mint, r.narrative.id]), [["a", 925], ["b", 925], ["c", 1021], ["d", 513]]);
+  assert.ok(g.cards.some((c) => c.key === "n:1037") && !g.cards.some((c) => c.key === "t:nvidia"), "a quiet subject: its narratives keep their own cards");
+  assert.ok(g.loose.some((r) => r.mint === "n3"), "and a one-coin quiet narrative stays loose");
+  assert.ok(g.cards.some((c) => c.key === "n:23") && !g.cards.some((c) => c.key === "t:gta"), "a subject reached by one narrative: the narrative card, as before");
+  assert.ok(!g.cards.some((c) => c.key === "n:925" || c.key === "n:1021"), "no Jensen narrative card beside the block");
+  const off = groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags) });
+  assert.deepEqual(groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags), subjectOf: () => { throw new Error("x"); } }), off, "a failing subjectOf changes nothing");
+});

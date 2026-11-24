@@ -143,6 +143,9 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
 /* story attention: one line under the header (wraps on a phone). Every phase is drawn the same, neutral (no arrow, no
    colour for up: fading weighs what rising weighs); "new" is muted. The multiple of normal comes second, smaller. */
 .dsc-sh { grid-template-areas: "top n" "sub n" "g c"; }
+/* a subject block (one story over several narratives): its angles get their own line above the post */
+.dsc-sh.has-ang { grid-template-areas: "top n" "ang n" "sub n" "g c"; }
+.dsc-sh-sub.dsc-sh-ang { grid-area: ang; }
 .dsc-sh-g { grid-area: g; display: flex; align-items: baseline; gap: 2px 10px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: var(--fs-2xs); line-height: 18px; color: var(--muted); }
 .dsc-ph { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-2xs); line-height: 16px; color: var(--ink-2); }
 .dsc-ph.mute { border-style: dashed; color: var(--muted); }
@@ -262,6 +265,7 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
   /* the block keeps a small inset (the card's padding is 12 px here); the header wraps: title, numbers, author */
   .dsc-story { --dsc-bx: 6px; }
   .dsc-sh { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "n" "sub" "g" "c"; }
+  .dsc-sh.has-ang { grid-template-areas: "top" "n" "ang" "sub" "g" "c"; }
   .dsc-sh-g { flex-wrap: wrap; white-space: normal; }
   .dsc-sh-chart { justify-self: start; }
   /* the chart's note and its reading on two fixed lines (a reading that wrapped would move the rows under it) */

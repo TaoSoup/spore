@@ -49,6 +49,7 @@ import { SOL_MINT } from "./jupiter.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { postOf } from "./narrative.mjs";
 import { groupStories } from "./stories.mjs";
+import { loadSubjects, TABLE_URL } from "./subjects.mjs";
 
 /** The timeframes a list can be asked over (s), in the order the snapshot keeps them. */
 export const TF_S = Object.freeze({ "1m": 60, "5m": 300, "30m": 1800, "1h": 3600 });
@@ -494,7 +495,8 @@ export class CoinRows {
       yield;
     }
     const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id), wakes, nowMs: p.at,
-      tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined });
+      tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined,
+      subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null });
     let tagging = { on: false, tagged: 0, pending: 0, capped: false };
     try { if (nt) tagging = nt.pageStats(); } catch { /* reads as off */ }
     yield;

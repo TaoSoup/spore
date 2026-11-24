@@ -50,7 +50,7 @@ import { api, errorMessage, pumpUrl, type Coin, type CoinSafety, type CoinSpark,
 import {
   AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, MINT_PREFIX_TITLE, MODEL_NOTE, MOVED_PILL, MOVED_TITLE, NEW_ROW_PILL, NEW_ROW_TITLE, REGROUPED_PILL, REGROUPED_TITLE,
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
-  activeTheme, buyLabel, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
+  activeTheme, angleLine, buyLabel, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
   listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
   closeShrunk, showMore, storiesView, storyHeader, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
@@ -278,15 +278,17 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
   // story attention (a newer server): the phase, its multiple of normal when it has one, the buyers of the last 5
   // minutes, how long since the start, the leading coin; and the control that opens the chart (lib/story-attention.ts)
   const g = glance(e.card?.attention, o.now);
+  const ang = angleLine(e.card);
   return (
     <li className={`dsc-story${e.left ? " left" : ""}`}>
-      <div className="dsc-sh">
+      <div className={`dsc-sh${ang ? " has-ang" : ""}`}>
         <div className="dsc-sh-top">
           <span className="dsc-sh-t">{h.title}</span>
           <ThemePill theme={h.theme} />
           {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
         </div>
         <span className="dsc-sh-n" title={`Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
+        {ang && <span className="dsc-sh-sub dsc-sh-ang" title={ang.title}><span>{ang.text}</span></span>}
         {sub}
         {g && e.card && (
           <div className="dsc-sh-g">

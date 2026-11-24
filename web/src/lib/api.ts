@@ -341,10 +341,14 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 /// `kind` "narrative" (key "n:<id>"): the coins that share one narrative, two or more of them; `narrative.newCoins1h`
 /// counts every tagged coin of it created in the last 60 min, `post` is the usable post of its most-bought coin that has
 /// one, `family` is null, `newN` / `olderN` split its coins by `isNew`. A "post" or "family" card carries `narrative`
-/// (without the count) when all its coins share one.
+/// (without the count) when all its coins share one. A subject block (key "t:..."): a "narrative" card for two or more
+/// narratives of one subject (the server's subjects table: Jensen Huang, say), `narrative.title` the subject's, its
+/// narratives in `subject.angles`, most 5-minute buyers first.
+export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: number };
 export type StoryCard = {
   kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
   narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
+  subject?: { key: string; title: string; angles: StoryAngle[] } | null;
   attention?: StoryAttention | null;
 };
 /// Story attention (a newer server; absent on an older one): how many wallets the story draws now, as context, never a

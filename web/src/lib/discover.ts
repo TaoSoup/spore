@@ -930,6 +930,17 @@ export function narrativeHead(c: Pick<StoryCard, "narrative" | "post">, nowS: nu
 /// Added to the page's note while narratives are shown.
 export const MODEL_NOTE = "Stories are grouped by a language model reading each coin's public text. It can be wrong.";
 export const TAG_NOTE = "The story a language model read in this coin's public text. It can be wrong.";
+/// A subject block's angle line: "3 angles: white leather jacket, reinstates ceo +1" (the two with the most buyers,
+/// titles as the tagger wrote them), with every angle and its buyers in `title`. null for any other card.
+export function angleLine(c: Pick<StoryCard, "subject"> | null | undefined): { text: string; title: string } | null {
+  const a = Array.isArray(c?.subject?.angles) ? c.subject.angles.filter((x) => x && typeof x.title === "string" && x.title) : [];
+  if (a.length < 2) return null;
+  const top = a.slice(0, 2).map((x) => x.title).join(", "), more = a.length - 2;
+  return {
+    text: `${a.length} angles: ${top}${more > 0 ? ` +${more}` : ""}`,
+    title: `One story told through ${a.length} narratives: ${a.map((x) => `${x.title} (${whole(x.buyers5m)} buyers, 5 min)`).join("; ")}`,
+  };
+}
 /// The empty line under a filter names the filters that are on.
 export function emptyFiltered(size: SizeKey, theme: string = ALL_THEMES): string {
   return theme !== ALL_THEMES ? `No ${themeLabel(theme)} story${size !== "all" ? " of this size" : ""} is being bought right now.` : "No coin of this size is being bought right now.";
