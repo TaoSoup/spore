@@ -530,6 +530,7 @@ the site depends on it, and nothing here says anything about a coin's price.
   stopped first; `also` in replay.json). They cost like any coin and count toward `--max-usd`; the tagged and "none"
   counts and shares stay those of the window's coins, and the groups list an extra coin with `also: true`. Also `--min-buyers`, `--per-min` (default 20), `--in-usd-per-m` /
   `--out-usd-per-m`. The key is never printed.
+- **Story groups** (step 0 of automatic grouping, nothing in the product reads it yet): `node scripts/story-groups.mjs --db <sqlite> [--at <ISO>] [--hours 24] [--base-hours 72] [--expect subjects/labels.json] [--table subjects/table.json] [--json]`. Narratives with buyers in the window join when their titles share a distinctive word (not on the NEVER lists or the everyday STOP list) and they share buyers: the median share of each one's wallets also bought by the others is 10% or more (wallets on 25+ coins left out), and the second narrative has 20+ buyers. Checked again after each narrative goes to one group (a story row before a company row, then the group with more buyers). Launches in coin names are reported, never enough alone. On Nov 23-24 (a slim extract of $1+ buys kept in local/data/extracts, since trades are trimmed to 24 h): 11 groups, Jensen 23 of 27 labelled narratives with 1 wrong, Helius 5 of 5, 7 of 13 table story rows found again (GTA 6, Zolana, Riemann, Cat Mario, Shrek and Harry Potter share too few buyers to count as one story); launch-only groups were all unrelated titles.
 - **Subject replay** (slice 0 of the subject layer; the Discover cards read the same table through lib/subjects.mjs, see the /api/stories subject blocks): one subject (a named person,
   company, franchise, project or event) is often split over many narratives. By `subjects/table.json`, in the 24 h
   before Nov 24 2026 01:05 UTC the Jensen Huang return was 35 narratives (27 with buyers) and GTA 6 was 77 (33 with
@@ -883,6 +884,7 @@ scripts/keys.mjs               partner API keys: create (printed once) / list / 
 scripts/attention-calib.mjs    story attention calibration, read-only: what followed each snapshot, per phase and multiple band
 scripts/event-results.mjs      pre-registered events, read-only: each event's result by its written rule
 scripts/narrative-replay.mjs   narrative tags, measured by hand: recent coins from a read-only database through the same tagging path, cost and groups reported (--dry-run sends nothing)
+scripts/story-groups.mjs       stories found from attention, read-only: narratives grouped by a shared distinctive word whose narratives share buyers (no hand table); scored against subjects/labels.json and the table
 scripts/subject-replay.mjs     subjects over narratives, read-only: candidate subject words, or a fold by an anchor table (story and quiet rows) with distinct buyers and label checks
 scripts/agents.mjs             root agents: enable / pause / rebuild-profile / run-once / list / seed
 test/*.test.mjs     root agents (profile fallback + model path + key never logged, scorer gates, designer filters, logo PNG, no signer / read-only RPC /
