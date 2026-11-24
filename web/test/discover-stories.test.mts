@@ -153,7 +153,7 @@ test("11. the view after a read: broken and repeated entries dropped, a coin sho
   assert.deepEqual(v.cards.map((c) => [c.key, c.coins.map((r) => r.mint)]), [[POST.id, ["A", "B", "X"]], ["k2", ["Z"]]]);
   assert.deepEqual(v.loose.map((r) => r.mint), ["L"]);
   assert.deepEqual([v.dust, v.hiddenDust, v.hiddenCards, v.hiddenLoose], [[], 0, 0, 0]);
-  for (const none of [null, undefined, {}]) assert.deepEqual(D.storiesView(none, null), { cards: [], loose: [], dust: [], hiddenDust: 0, hiddenCards: 0, hiddenLoose: 0, tagging: false, themes: [] });
+  for (const none of [null, undefined, {}]) assert.deepEqual(D.storiesView(none, null), { cards: [], loose: [], dust: [], hiddenDust: 0, hiddenCards: 0, hiddenLoose: 0, tagging: false, themes: [], siteBuyers: null });
   const full = D.storiesView(body(), null);
   assert.deepEqual([full.hiddenDust, full.hiddenCards, full.hiddenLoose, full.dust.map((r) => r.reason)], [44, 2, 95, ["tiny", "paper"]]);
   assert.equal(D.cardKey(full.cards[0]), `post:${POST.id}`);

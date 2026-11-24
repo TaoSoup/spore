@@ -480,7 +480,7 @@ test("API: story cards carry `attention` (additive), GET /api/story-series/:key 
     assert.deepEqual(Object.keys(card.attention), ["phase", "buyers5m", "multiple", "newWhy", "startAt", "startSource", "minutes", "leader"]);
     assert.deepEqual(card.attention, { phase: "new", buyers5m: { now: 2, last: 5 }, multiple: null, newWhy: "unseen", startAt: T0 - 120, startSource: "post", minutes: 8,
       leader: { mint: A, symbol: "NEEDLE", share: r2(5 / 9) } }, "NEEDLE: 4 + 1 of 9 coin buyers over the two buckets");
-    assert.deepEqual(Object.keys(s), ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes"], "the body's keys are unchanged");
+    assert.deepEqual(Object.keys(s), ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes", "siteBuyers"], "the body's keys are unchanged");
     const ser = await app.get(`/api/story-series/${X}`);
     assert.deepEqual([ser.status, ser.headers.get("cache-control")], [200, "public, max-age=30"]);
     assert.deepEqual(ser.body, { key: X, asOf: T0 + B + 60, bucketS: B, startAt: T0 - 120, startSource: "post", firstBuyersAt: T0, baseline: null,

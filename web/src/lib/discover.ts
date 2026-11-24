@@ -785,7 +785,7 @@ export type StoryCardShown = Omit<StoryCard, "coins"> & { coins: StoryShown[]; l
 /// `hiddenLoose`: the coins of no card past the loose rows sent.
 /// `tagging`: the server tags narratives (`tagging.on`); `themes`: the themes of its narrative cards, most cards first
 /// (while the page is in use: in the order shown, a theme the read no longer has kept with its last count).
-export type StoriesView = { cards: StoryCardShown[]; loose: StoryShown[]; dust: StoryShown[]; hiddenDust: number; hiddenCards: number; hiddenLoose: number; tagging: boolean; themes: StoryTheme[] };
+export type StoriesView = { cards: StoryCardShown[]; loose: StoryShown[]; dust: StoryShown[]; hiddenDust: number; hiddenCards: number; hiddenLoose: number; tagging: boolean; themes: StoryTheme[]; siteBuyers: number | null };
 
 /// The size pills, by market cap: small under $100K, mid $100K to $5M, large over $5M. A coin without a known market
 /// cap is only under "All".
@@ -943,6 +943,17 @@ export function angleLine(c: Pick<StoryCard, "subject"> | null | undefined): { t
     title: `One story told through ${a.length} narratives: ${a.map((x) => `${x.title} (${whole(x.buyers5m)} buyers, 5 min)`).join("; ")}`,
   };
 }
+/// Below this many tracked buyers in the window a share is left out: a few dozen wallets make a percentage jump around.
+export const SHARE_MIN_SITE = 50;
+/// A story's share of all tracked buyers: "57%", "<1%" (null when either count is unknown, the site count is under
+/// SHARE_MIN_SITE, or the count is not a distinct one). Tracked buyers: every wallet with an on-chain $1+ buy of a coin
+/// Spore tracks in the timeframe, from any app, counted once.
+export function shareOf(buyers: number | null | undefined, site: number | null | undefined, tfWords: string): { text: string; title: string } | null {
+  if (typeof buyers !== "number" || typeof site !== "number" || !Number.isFinite(buyers) || !Number.isFinite(site) || site < SHARE_MIN_SITE || buyers < 0) return null;
+  const p = Math.min(1, buyers / site) * 100;
+  const text = buyers > 0 && p < 1 ? "<1%" : `${Math.round(p)}%`;
+  return { text, title: `${count(buyers)} of the ${count(site)} wallets that bought a tracked coin over ${tfWords} (on-chain, from any app, each counted once). Only this story's coins listed here are counted, so its whole share can be higher.` };
+}
 /// The empty line under a filter names the filters that are on.
 export function emptyFiltered(size: SizeKey, theme: string = ALL_THEMES): string {
   return theme !== ALL_THEMES ? `No ${themeLabel(theme)} story${size !== "all" ? " of this size" : ""} is being bought right now.` : "No coin of this size is being bought right now.";
@@ -1052,7 +1063,8 @@ export function storiesView(fresh: Partial<Stories> | null | undefined, shown: S
   }
   const loose = cleanRows(fresh?.loose, seen), dust = cleanRows(fresh?.dust, seen);
   const themes = (fresh && Array.isArray(fresh.themes) ? fresh.themes : []).filter((t) => t && typeof t.theme === "string");
-  const next: StoriesView = { cards, loose, dust, hiddenDust: whole(fresh?.hidden?.dust), hiddenCards: whole(fresh?.hidden?.cards), hiddenLoose: whole(fresh?.hidden?.loose), tagging: fresh?.tagging?.on === true, themes };
+  const next: StoriesView = { cards, loose, dust, hiddenDust: whole(fresh?.hidden?.dust), hiddenCards: whole(fresh?.hidden?.cards), hiddenLoose: whole(fresh?.hidden?.loose), tagging: fresh?.tagging?.on === true, themes,
+    siteBuyers: typeof fresh?.siteBuyers === "number" && Number.isFinite(fresh.siteBuyers) && fresh.siteBuyers >= 0 ? Math.round(fresh.siteBuyers) : null };
   if (!hold || !shown) return next;
   const by = new Map(cards.map((c) => [cardKey(c), c] as const)), kept = new Set<string>(), held: StoryCardShown[] = [];
   for (const c of shown.cards) {
@@ -1157,7 +1169,7 @@ export function oneList(shown: Pick<StoriesShown, "cards" | "loose">, nowS: numb
     }
     // a story counts each buyer once (the server's distinct wallets over all its coins) while it is drawn whole; a story
     // held to one row, or showing rows that left, adds up the rows it draws, as before
-    const t = tfTotals(rows, nowS), whole1 = rows.length >= 2 && rows.length === c.coins.length && !t.movedN && !t.goneN;
+    const t = tfTotals(rows, nowS), whole1 = c.left !== true && rows.length >= 2 && rows.length === c.coins.length && !t.movedN && !t.goneN;
     const d = whole1 && typeof c.buyers === "number" && Number.isFinite(c.buyers) && c.buyers >= 0 ? Math.round(c.buyers) : null;
     raw.push({ key, card: c, rows, head: rows.length >= 2, ...t, ...(d != null ? { buyers: d, distinct: true } : null), left: c.left === true, moved: c.moved === true });
   }
@@ -1224,11 +1236,11 @@ export function storyLine(e: Pick<OneEntry, "card" | "coinsN" | "newN"> & Partia
 /// to its post when `href`), a post story's "@handle · 27 min ago" followed by the post's words (`text`, cut), a family's
 /// "waking up · 12 min". A post story's title is "Linked post" (its who and when are on the second line), a family's
 /// "$SYM family".
-export type StoryHeader = { kind: StoryLine["kind"]; title: string; theme: string; sub: string; text: string; href: string | null; total: string; words: string };
+export type StoryHeader = { kind: StoryLine["kind"]; title: string; theme: string; sub: string; text: string; href: string | null; total: string; words: string; unit: string; count: string };
 export function storyHeader(e: Pick<OneEntry, "card" | "coinsN" | "newN" | "buyers"> & Partial<Pick<OneEntry, "movedN" | "goneN">>, nowS: number, nar = true): StoryHeader {
   const line = storyLine(e, nowS, nar);
   const b = whole(e.buyers);
-  const base = { kind: line.kind, theme: line.theme, text: "", href: line.href, total: count(b), words: `${b === 1 ? "buyer" : "buyers"} · ${line.count}` };
+  const base = { kind: line.kind, theme: line.theme, text: "", href: line.href, total: count(b), words: `${b === 1 ? "buyer" : "buyers"} · ${line.count}`, unit: b === 1 ? "buyer" : "buyers", count: line.count };
   if (line.kind === "narrative") return { ...base, title: line.title, sub: line.post ?? "" };
   const h = e.card ? storyHead(e.card, nowS) : null;
   // A post with no usable handle: storyHead's who is "Linked post" itself, which the title already says.

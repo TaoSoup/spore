@@ -380,7 +380,7 @@ export type StorySeries = {
 /// `tagging.on` false (or absent, an older server): no narrative anywhere. `capped`: the daily spend cap was reached.
 export type StoryTagging = { on: boolean; tagged?: number; pending?: number; capped?: boolean };
 export type StoryTheme = { theme: string; cards: number };
-export type Stories = { asOf: number; tf: Tf; cards: StoryCard[]; loose: StoryRow[]; dust: DustRow[]; hidden: { dust: number; cards?: number; loose?: number }; floor?: number; floor5m?: number; candidates?: number; tagging?: StoryTagging; themes?: StoryTheme[] };
+export type Stories = { asOf: number; tf: Tf; cards: StoryCard[]; loose: StoryRow[]; dust: DustRow[]; hidden: { dust: number; cards?: number; loose?: number }; floor?: number; floor5m?: number; candidates?: number; tagging?: StoryTagging; themes?: StoryTheme[]; siteBuyers?: number | null };
 /// `GET /api/discover/:mint`: the family when it is listed, else "quiet" with the top 3 children by buyers in the last
 /// 15 min (`sinceStart` null) and the other figures null or 0. 404 for a mint the server does not know.
 export type DiscoverQuiet = {

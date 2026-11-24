@@ -501,6 +501,8 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
   w.trade(R[2], "r2", T0 + 61, { usd: 20 });
   w.trade(R[1], "r00", T0 + 65, { usd: 20 }); // a wallet of R0 buys R1 too: one buyer of the card, two of the rows
   w.trade(R[2], "cheap", T0 + 66, { usd: 0.5 }); // under $1: no buyer anywhere
+  const UN = w.coin(mintN(207), "UNTRK", { parent: null, tracked: false });
+  w.trade(UN, "un0", T0 + 64, { usd: 20 }); // a coin Spore does not track: its wallet is no tracked buyer
   for (const m of [F, U, L]) w.trade(m, `o${m.slice(0, 4)}`, T0 + 62, { usd: 30 });
   for (let i = 0; i < 3; i++) w.trade(TINY, `t${i}`, T0 + 63, { usd: 2 });
   const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }], [BAD, { id: BAD, state: "ok", handle: "rude", text: "", flagged: true }]]);
@@ -511,7 +513,7 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
   const app = await serveApp(w);
   try {
     const s = await app.get("/api/stories");
-    assert.deepEqual([s.status, s.headers.get("cache-control"), Object.keys(s.body)], [200, "public, max-age=5", ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes"]]);
+    assert.deepEqual([s.status, s.headers.get("cache-control"), Object.keys(s.body)], [200, "public, max-age=5", ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes", "siteBuyers"]]);
     const b = s.body;
     // no narrative tagger runs here: the body says so and nothing else changes
     assert.deepEqual([b.tagging, b.themes], [{ on: false, tagged: 0, pending: 0, capped: false }, []]);
@@ -523,6 +525,8 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
       ["post", X, 8, 3, ["R0", "R1", "R2"]],
     ]);
     assert.deepEqual(b.cards.map((c) => c.buyers), [50, 7], "each card counts its distinct $1+ wallets once (r00 bought two of its coins)");
+    assert.equal(b.siteBuyers, 50 + 4 + 2 + 1 + 1 + 3, "the site: every distinct $1+ wallet of a tracked coin, counted once (r00 once; one wallet bought FLAG, UNSEEN and LOOSE; $0.5 not; the untracked coin's wallet not)");
+    assert.ok(b.cards.every((c) => c.buyers <= b.siteBuyers));
     const [fam, post] = b.cards;
     assert.deepEqual([fam.post, fam.family.mint, fam.family.symbol, typeof fam.family.image, fam.family.startedAt >= T0 && fam.family.startedAt <= T0 + 100], [null, PAR, "PAR", "string", true]);
     assert.deepEqual([post.post, post.family], [{ id: X, handle: "poster", text: "big news", at: T0 - 600, url: postUrl(X) }, null]);

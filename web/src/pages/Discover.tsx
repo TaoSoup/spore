@@ -50,7 +50,7 @@ import { api, errorMessage, pumpUrl, type Coin, type CoinSafety, type CoinSpark,
 import {
   AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, MINT_PREFIX_TITLE, MODEL_NOTE, MOVED_PILL, MOVED_TITLE, NEW_ROW_PILL, NEW_ROW_TITLE, REGROUPED_PILL, REGROUPED_TITLE,
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
-  activeTheme, angleLine, buyLabel, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
+  activeTheme, angleLine, buyLabel, shareOf, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
   listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
   closeShrunk, showMore, storiesView, storyHeader, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
@@ -226,7 +226,7 @@ function RowTags({ r, parent, story, fresh, sub }: { r: StoryShown; parent: bool
   );
 }
 
-type RowOpts = { t: TradeCtl; tf: Tf; now: number; dups: ReadonlySet<string> };
+type RowOpts = { t: TradeCtl; tf: Tf; now: number; dups: ReadonlySet<string>; site: number | null };
 /// One coin row and, under it, the coins folded into it (same ticker and image), one line each.
 function RowAndCopies({ r, o, parent, story, fresh, sub }: { r: StoryShown; o: RowOpts; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null }) {
   return (
@@ -279,6 +279,9 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
   // minutes, how long since the start, the leading coin; and the control that opens the chart (lib/story-attention.ts)
   const g = glance(e.card?.attention, o.now);
   const ang = angleLine(e.card);
+  const share = e.distinct ? shareOf(e.buyers, o.site, tfWords(o.tf)) : null;
+  // a subject block has no attention record of its own yet: no phase, no 5-minute count, no chart; its leading coin stays
+  const subj = !!e.card?.subject;
   return (
     <li className={`dsc-story${e.left ? " left" : ""}`}>
       <div className={`dsc-sh${ang ? " has-ang" : ""}`}>
@@ -287,22 +290,25 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
           <ThemePill theme={h.theme} />
           {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
         </div>
-        <span className="dsc-sh-n" title={e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
+        <span className="dsc-sh-n">
+          <span className="dsc-nw" title={e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.unit}</span>
+          {share && <span className="dsc-nw" title={share.title}> · <b>{share.text}</b> of all tracked buyers</span>}<span className="dsc-nw"> · {h.count}</span>
+        </span>
         {ang && <span className="dsc-sh-sub dsc-sh-ang" title={ang.title}><span>{ang.text}</span></span>}
         {sub}
-        {g && e.card && (
+        {g && e.card && (!subj || g.leader) && (
           <div className="dsc-sh-g">
-            <span className={`dsc-ph${g.muted ? " mute" : ""}`} title={g.phaseTitle}><span className="dsc-vh">Attention: </span>{g.phase}</span>
-            {g.multiple && <span className="dsc-gl dsc-gl-x" title={g.multipleTitle}>{g.multiple}</span>}
-            <span className="dsc-gl" title={g.buyersTitle}><b>{g.buyers}</b> {g.buyersLabel}</span>
-            {g.start && <span className="dsc-gl">{g.start}</span>}
+            {!subj && <span className={`dsc-ph${g.muted ? " mute" : ""}`} title={g.phaseTitle}><span className="dsc-vh">Attention: </span>{g.phase}</span>}
+            {!subj && g.multiple && <span className="dsc-gl dsc-gl-x" title={g.multipleTitle}>{g.multiple}</span>}
+            {!subj && <span className="dsc-gl" title={g.buyersTitle}><b>{g.buyers}</b> {g.buyersLabel}</span>}
+            {!subj && g.start && <span className="dsc-gl">{g.start}</span>}
             {g.leader && <span className="dsc-gl dsc-gl-lead">{g.leader}</span>}
           </div>
         )}
         {/* its own grid cell, outside the glance line's clipping, so its focus ring and touch area are whole */}
-        {g && e.card && <button type="button" className="linkish dsc-link dsc-sh-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
+        {g && e.card && !subj && <button type="button" className="linkish dsc-link dsc-sh-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
       </div>
-      {g && e.card && chart && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
+      {g && e.card && !subj && chart && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
         {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
       </ul>
@@ -589,7 +595,7 @@ export default function Discover() {
   const page = pageEntries(list ?? [], limit);
   // a ticker repeated anywhere on the page shows the start of its mint
   const dups = useMemo(() => repeatedSyms(page.shown.flatMap((e) => e.rows)), [page.shown]);
-  const o: RowOpts = { t, tf: shownTf, now, dups };
+  const o: RowOpts = { t, tf: shownTf, now, dups, site: view?.siteBuyers ?? null };
   const body = view === null || shown === null ? (
     held.error ? <ErrorBox error="The list could not be loaded." retry={held.retry} details={held.error} /> : <Skel />
   ) : (

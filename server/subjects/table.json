@@ -1,5 +1,5 @@
 {
- "note": "Subjects for the Discover subject layer (replayed by scripts/subject-replay.mjs; nothing in the product reads this yet). Story rows fold every day; quiet rows (company, brand and product names) show as a block only at quietShare of site buyers and give way to story rows.",
+ "note": "Subjects for the Discover subject layer (replayed by scripts/subject-replay.mjs; Discover folds story rows into one card through lib/subjects.mjs). Story rows fold every day; quiet rows (company, brand and product names) show as a block only at quietShare of site buyers and give way to story rows.",
  "quietShare": 0.03,
  "subjects": [
   {

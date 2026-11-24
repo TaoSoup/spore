@@ -160,8 +160,8 @@ test("o9. a story's header line: the narrative's title and theme (and its post),
 test("o9b. a story block's header: the total buyers ranked by, 'buyers · 2 coins · 1 new', and the author line under the title", () => {
   const b = body([nar([row("N1", 4, { isNew: true }), row("N2", 6)], { post: POST }), post(POST.id, [row("A", 1), row("B", 2)]), fam("F", [row("D", 3), row("E", 1_200)])], [], { tagging: { on: true }, themes: [{ theme: "politics", cards: 1 }] });
   const by = new Map(list(b).entries.map((e) => [e.key, e] as const));
-  assert.deepEqual(D.storyHeader(by.get("narrative:n:7")!, NOW), { kind: "narrative", title: "Trump Tariff Panic", theme: "Politics", sub: "@poster · 6 min ago", text: "", href: "https://x.com/i/status/1895000000000000001", total: "10", words: "buyers · 2 coins · 1 new" });
-  assert.deepEqual(D.storyHeader(by.get(`post:${POST.id}`)!, NOW), { kind: "post", title: "Linked post", theme: "", sub: "@poster · 6 min ago", text: "big news more below", href: "https://x.com/i/status/1895000000000000001", total: "3", words: "buyers · 2 coins" });
+  assert.deepEqual(D.storyHeader(by.get("narrative:n:7")!, NOW), { kind: "narrative", title: "Trump Tariff Panic", theme: "Politics", sub: "@poster · 6 min ago", text: "", href: "https://x.com/i/status/1895000000000000001", total: "10", words: "buyers · 2 coins · 1 new", unit: "buyers", count: "2 coins · 1 new" });
+  assert.deepEqual(D.storyHeader(by.get(`post:${POST.id}`)!, NOW), { kind: "post", title: "Linked post", theme: "", sub: "@poster · 6 min ago", text: "big news more below", href: "https://x.com/i/status/1895000000000000001", total: "3", words: "buyers · 2 coins", unit: "buyers", count: "2 coins" });
   const f = D.storyHeader(by.get("family:F")!, NOW);
   assert.deepEqual([f.title, f.sub, f.total, f.words, f.href], ["$FAM family", "waking up · 12 min", "1,203", "buyers · 2 coins", null]);
   // the total is the sum the list ranks the story by; held dimmed rows add nothing and keep their words
@@ -256,4 +256,25 @@ test("o-distinct. a whole card shows the server's distinct buyers; a size-cut ca
   assert.deepEqual([none.buyers, none.distinct], [75, undefined], "an older server: the sum, as before");
   const one = e(body([post("p1", [row("A", 40)], { buyers: 39 })], []));
   assert.deepEqual([one.buyers, one.distinct], [40, undefined], "a one-row entry counts its row");
+});
+
+test("o-share. a story's share of all tracked buyers: rounded, '<1%' for a sliver, none on a small or unknown site count", () => {
+  assert.equal(D.shareOf(2518, 4400, "the last 5 min")?.text, "57%");
+  assert.equal(D.shareOf(10, 1169, "the last 5 min")?.text, "<1%");
+  assert.equal(D.shareOf(0, 1169, "the last 5 min")?.text, "0%");
+  assert.equal(D.shareOf(60, 50, "x")?.text, "100%", "never above all of them");
+  assert.equal(D.shareOf(10, D.SHARE_MIN_SITE - 1, "x"), null, "too few tracked buyers to mean anything");
+  assert.equal(D.shareOf(10, null, "x"), null);
+  assert.equal(D.shareOf(undefined, 500, "x"), null);
+  assert.match(D.shareOf(10, 1169, "the last 5 min")!.title, /10 of the 1,169 wallets that bought a tracked coin over the last 5 min.*on-chain, from any app, each counted once/);
+  assert.equal(view(body([], [], { siteBuyers: 1169 })).siteBuyers, 1169);
+  assert.equal(view(body([], [])).siteBuyers, null, "an older server: no share anywhere");
+  assert.equal(view(body([], [], { siteBuyers: -3 })).siteBuyers, null);
+});
+
+test("o-left. a card the server dropped, held on screen, keeps no distinct count and so no share", () => {
+  const first = view(body([post("p1", [row("A", 40), row("B", 30)], { buyers: 60 })], [], { siteBuyers: 4000 }));
+  const held = D.storiesView(body([], [row("Z", 2)], { siteBuyers: 600 }), first, true);
+  const e = D.oneList(D.filterStories(held, "all", "all"), NOW).entries.find((x) => x.key === "post:p1")!;
+  assert.deepEqual([e.left, e.distinct, e.buyers], [true, undefined, 70], "its rows' sum, not 60 over the new site count");
 });

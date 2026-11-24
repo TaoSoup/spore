@@ -33,7 +33,9 @@ const pos = (x) => typeof x === "number" && Number.isFinite(x) && x > 0;
 // GET /api/story-series/:key:
 // - a narrative card: "n:<narrative id>" (digits after "n:");
 // - a post card: the X post id (snowflake digits, as in the post's URL);
-// - a family card: the parent's mint (base58).
+// - a family card: the parent's mint (base58);
+// - a subject block: "t:<subject>" (subjects/table.json). It has no series of its own yet: parseStoryKey rejects it, and
+//   the 5-minute close files a block's coins under their narrative, post or family as before.
 // The three never collide: an id has only digits, a mint has letters, "n:" has a colon.
 // The series also keeps one row per 5 minutes under SITE_KEY ("*"), the whole site, which is never a card.
 const NARR_KEY_RE = /^n:[1-9]\d{0,11}$/, POST_KEY_RE = /^[1-9]\d{0,18}$/, MINT_KEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;

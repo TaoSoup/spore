@@ -470,12 +470,14 @@ export class CoinRows {
    * timeframe's window, over every coin of the card, copies included: the very trades the snapshot read (arrival
    * numbers up to `snap.seq`, trade time after cuts[k] with no upper bound, as the rows), so it never exceeds the sum of
    * the rows. A held trade let go since the snapshot (past the hour, or the cap) is missed: a few wallets low at most.
+   * Returns the site's tracked buyers over the same trades: distinct wallets with a $1+ buy of any tracked coin (the
+   * attention series' site row counts tracked coins too), the bottom of every card's share; null when unknown.
    */
   *#cardBuyersGen(snap, tf, cards) {
     const k = TF_KEYS.indexOf(tf), cut = snap.cuts?.[k], seq = snap.seq;
-    const of = new Map(), sets = cards.map(() => new Set());
+    const of = new Map(), sets = cards.map(() => new Set()), site = new Set(), tracked = new Map(), coins = this.model.coins;
     cards.forEach((c, i) => { for (const r of c.coins ?? []) { of.set(r.mint, i); for (const cp of r.copies ?? []) of.set(cp.mint, i); } });
-    if (k < 0 || !Number.isFinite(cut) || !Number.isFinite(seq) || !of.size) { for (const c of cards) c.buyers = null; return; }
+    if (k < 0 || !Number.isFinite(cut) || !Number.isFinite(seq)) { for (const c of cards) c.buyers = null; return null; }
     const a = this.a, end = a.length; // a swap during a yield leaves this array as it was: read on
     for (let i = this.h, n = 0; i < end; i++) {
       if ((++n & 1023) === 0) yield;
@@ -485,8 +487,12 @@ export class CoinRows {
       if (!e.b || !e.u || e.v < MIN_USD || e.t <= cut) continue;
       const ci = of.get(e.m);
       if (ci !== undefined) sets[ci].add(e.u);
+      let tk = tracked.get(e.m);
+      if (tk === undefined) tracked.set(e.m, tk = !!coins?.get(e.m)?.tracked);
+      if (tk) site.add(e.u);
     }
     cards.forEach((c, i) => { c.buyers = sets[i].size; });
+    return site.size;
   }
 
   /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
@@ -524,7 +530,7 @@ export class CoinRows {
     // Each card's buyers counted once: the distinct wallets with a $1+ buy in the timeframe (the snapshot's window) over
     // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One
     // pass over the held trades (a yield every 1024); the summed per-coin figures stay on the rows.
-    yield* this.#cardBuyersGen(snap, tf, g.cards);
+    const siteBuyers = yield* this.#cardBuyersGen(snap, tf, g.cards);
     let tagging = { on: false, tagged: 0, pending: 0, capped: false };
     try { if (nt) tagging = nt.pageStats(); } catch { /* reads as off */ }
     yield;
@@ -538,6 +544,6 @@ export class CoinRows {
     for (const r of g.loose) fill(r, true);
     yield;
     for (const r of g.dust) fill(r, false);
-    return { at: p.at, snap, body: { asOf: snap.nowS, tf, floor: p.floor, floor5m: p.floor5m, candidates: p.candidates, cards: g.cards, loose: g.loose, dust: g.dust, hidden: g.hidden, tagging, themes: g.themes } };
+    return { at: p.at, snap, body: { asOf: snap.nowS, tf, floor: p.floor, floor5m: p.floor5m, candidates: p.candidates, cards: g.cards, loose: g.loose, dust: g.dust, hidden: g.hidden, tagging, themes: g.themes, siteBuyers } };
   }
 }
