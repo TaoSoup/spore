@@ -563,3 +563,31 @@ test("close: bounded work: slices every 64 coins, story rows in transactions of 
 });
 
 const r2 = (x) => Math.round(x * 100) / 100;
+
+test("subjects and groups: a tagged coin is filed under its subject's and its group's t: key too (one-coin narratives included, buyers once); quiet subjects are not; a coin row per coin with a buyer", () => {
+  const w = world();
+  const J1 = w.coin(mintN(40), "JACKET", { parent: null }), J2 = w.coin(mintN(41), "HUANG", { parent: null }), NV = w.coin(mintN(42), "NVDA", { parent: null }), H = w.coin(mintN(43), "HIPPO", { parent: null });
+  const tags = new Map([[J1, { id: 925, title: "jensen the white leather jacket", theme: "tech" }], [J2, { id: 1021, title: "nvidia reinstates jensen huang ceo", theme: "tech" }], [NV, { id: 1037, title: "2006 nvidia frog mascot", theme: "tech" }], [H, { id: 986, title: "nikumaru the baby pygmy hippo", theme: "animals" }]]);
+  w.model.coinRows.narr = { on: true, tagOf: (m) => tags.get(m) ?? null };
+  const subjectOf = (n) => (/jensen|huang/.test(n.title) ? { key: "t:huang-jensen", title: "Jensen Huang", quiet: false } : /nvidia/.test(n.title) ? { key: "t:nvidia", title: "Nvidia", quiet: true } : null);
+  w.att.attachSubjects({ subjectOf, groups: { keyOf: (id) => (id === 986 ? "g:nikumaru-pygmy" : id === 925 || id === 1021 ? "g:huang-jensen" : null) } });
+  w.trade(J1, "a", T0 + 1); w.trade(J1, "b", T0 + 2); w.trade(J2, "a", T0 + 3); w.trade(J2, "c", T0 + 4); w.trade(NV, "d", T0 + 5); w.trade(H, "e", T0 + 6);
+  w.trade(H, "cheap", T0 + 7, { usd: 0.5 });
+  w.close(T0 + B + GRACE_S);
+  const j = w.rowsOf("t:huang-jensen")[0];
+  assert.deepEqual([j?.buyers, j?.coins], [3, 2], "a, b, c: a once");
+  assert.deepEqual([w.rowsOf("g:huang-jensen")[0]?.buyers, w.rowsOf("g:huang-jensen")[0]?.coins], [3, 2], "the automatic group has its own row (g:), never mixed into the table's t: row");
+  assert.equal(w.rowsOf("t:nvidia").length, 0, "a quiet subject gets no row");
+  assert.deepEqual([w.rowsOf("g:nikumaru-pygmy")[0]?.buyers, w.rowsOf("g:nikumaru-pygmy")[0]?.coins], [1, 1], "a group with one coin this bucket still records");
+  assert.equal(w.db.storyStartGet("t:huang-jensen").source, "buyers", "a subject has a start like any story");
+  const coins = w.db.db.prepare("SELECT mint, story_key, subject_key, group_key, buyers, copy_key FROM story_coins ORDER BY mint").all().map((r) => ({ ...r }));
+  assert.equal(coins.length, 3, "one row per coin with a $1+ buyer in a story (the lone Nvidia coin is in none: one-coin narrative, quiet subject, no group)");
+  const of = new Map(coins.map((r) => [r.mint, r]));
+  assert.deepEqual([of.get(J1).subject_key, of.get(J1).group_key, of.get(J1).buyers], ["t:huang-jensen", "g:huang-jensen", 2]);
+  assert.equal(of.get(NV), undefined);
+  assert.deepEqual([of.get(H).story_key, of.get(H).group_key], ["g:nikumaru-pygmy", "g:nikumaru-pygmy"], "a lone tagged coin with no post: its group is its story key");
+  // a subject card reads as before: its t: series is recorded, not shown yet
+  assert.equal(w.att.cardAttention({ kind: "narrative", key: "t:huang-jensen", subject: { key: "t:huang-jensen" }, coins: [] }, T0 + B + GRACE_S).phase, "new");
+  assert.ok(of.get(J1).copy_key);
+  w.end();
+});

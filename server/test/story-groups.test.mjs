@@ -55,3 +55,29 @@ test("parseArgs", () => {
   assert.throws(() => parseArgs([]), /required/);
   assert.throws(() => parseArgs(["--db", "x", "--hours", "0"]), /above 0/);
 });
+
+test("StoryGroups (live): one pass at a time; the answer maps each narrative to its group; a failed pass keeps the last map", async () => {
+  const { StoryGroups } = await import("../lib/story-groups-live.mjs");
+  const { EventEmitter } = await import("node:events");
+  let sent = 0, w = null;
+  class FakeWorker extends EventEmitter { constructor() { super(); w = this; } postMessage() { sent++; } unref() {} terminate() { return Promise.resolve(); } }
+  let now = 1_000_000;
+  const sg = new StoryGroups({ file: "x", table: "y", Worker: FakeWorker, log: { warn() {} }, now: () => now }).start();
+  sg.run(); sg.run();
+  assert.equal(sent, 1, "a second ask while busy is not sent");
+  w.emit("message", { ok: true, at: now, groups: [{ key: "t:huang-jensen", ids: [925, 1021] }, { key: "t:hao", ids: [7] }] });
+  assert.deepEqual([sg.keyOf(925), sg.keyOf(7), sg.keyOf(3)], ["g:huang-jensen", "g:hao", null], "group keys are g:, apart from the table's t:");
+  sg.run();
+  w.emit("message", { ok: false, error: "locked" });
+  assert.deepEqual([sg.keyOf(925), sg.stats.errors, sg.stats.groups], ["g:huang-jensen", 1, 2]);
+  // the words shift but the narratives are mostly the same: the key stays
+  sg.run();
+  w.emit("message", { ok: true, at: now, groups: [{ key: "t:huang-jacket-jensen", ids: [925, 1021, 1035] }] });
+  assert.deepEqual([sg.keyOf(1035), sg.stats.kept], ["g:huang-jensen", 1]);
+  // an answer over 3 passes old files nothing; a worker that ended is let go and started again at the next tick
+  now += 4 * sg.everyMs;
+  assert.equal(sg.keyOf(925), null);
+  w.emit("exit", 1);
+  assert.equal(sg.stats.alive, false);
+  await sg.stop();
+});

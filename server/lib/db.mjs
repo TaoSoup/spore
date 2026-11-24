@@ -160,6 +160,14 @@ CREATE TABLE IF NOT EXISTS story_buckets (
   PRIMARY KEY (story_key, t)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS story_buckets_t ON story_buckets(t);
+-- One row per coin of a story per 5-minute bucket (lib/attention.mjs): its buyers, buy USD, sells and last price, the
+-- story it was filed under (n:, post, family), the subject or automatic group it belongs to (t:, or null) and its copy
+-- key (same ticker and image: copycats). The outcome study reads price change and peak per coin from these.
+CREATE TABLE IF NOT EXISTS story_coins (
+  t INTEGER NOT NULL, mint TEXT NOT NULL, story_key TEXT NOT NULL, subject_key TEXT, group_key TEXT,
+  buyers INTEGER NOT NULL, buy_usd REAL NOT NULL, sells INTEGER NOT NULL, price_usd REAL, copy_key TEXT,
+  PRIMARY KEY (t, mint)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS story_starts (
   story_key TEXT PRIMARY KEY, start_at INTEGER NOT NULL, source TEXT NOT NULL, first_buyers_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -489,6 +497,8 @@ export class Db {
       storyBaseRows: p("SELECT t, buyers, site_buyers, flags FROM story_buckets WHERE story_key = ? AND t >= ? ORDER BY t ASC LIMIT ?"),
       // story by story ("+": through the time index, sorted, not a walk of the whole key), so one step's rows share pages;
       // storyTrim bounds the window to the oldest hour, so the sort is of one hour's rows however long the backlog
+      storyCoinPut: p("INSERT OR REPLACE INTO story_coins (t, mint, story_key, subject_key, group_key, buyers, buy_usd, sells, price_usd, copy_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
+      storyCoinsTrim: p("DELETE FROM story_coins WHERE (t, mint) IN (SELECT t, mint FROM story_coins WHERE t < ? ORDER BY t LIMIT ?)"),
       storyTrim: p("DELETE FROM story_buckets WHERE (story_key, t) IN (SELECT story_key, t FROM story_buckets WHERE t < ? ORDER BY +story_key LIMIT ?)"),
       storyMinT: p("SELECT MIN(t) AS m FROM story_buckets"),
       storyStartGet: p("SELECT start_at, source, first_buyers_at FROM story_starts WHERE story_key = ?"),
@@ -844,6 +854,13 @@ export class Db {
     if (!rows.length) return;
     this.transaction(() => { for (const r of rows) this.q.storyBucketPut.run({ key: r.key, t: r.t, buyers: r.buyers, buyUsd: r.buyUsd ?? 0, sells: r.sells ?? 0, launchesFast: r.launchesFast ?? 0, launches: r.launches ?? 0, siteBuyers: r.siteBuyers ?? 0, leaderMint: r.leaderMint ?? null, leaderBuyers: r.leaderBuyers ?? 0, coins: r.coins ?? 0, flags: r.flags ?? 0 }); });
   }
+  /** Writes per-coin story rows (`[{ t, mint, storyKey, subjectKey, groupKey, buyers, buyUsd, sells, priceUsd, copyKey }]`) in one transaction. */
+  storyCoinsPut(rows) {
+    if (!rows.length) return;
+    this.transaction(() => { for (const r of rows) this.q.storyCoinPut.run(r.t, r.mint, r.storyKey, r.subjectKey ?? null, r.groupKey ?? null, r.buyers, r.buyUsd ?? 0, r.sells ?? 0, r.priceUsd ?? null, r.copyKey ?? null); });
+  }
+  /** Deletes at most `limit` per-coin story rows older than `beforeT`, oldest first; returns how many went. */
+  storyCoinsTrim(beforeT, limit) { return Number(this.q.storyCoinsTrim.run(beforeT, limit).changes); }
   /** A story's rows from `sinceT` on, oldest first, at most `limit`. */
   storyRows(key, sinceT, limit = 5000) {
     return this.q.storyRows.all(key, sinceT, limit).map((r) => ({ t: r.t, buyers: r.buyers, buyUsd: r.buy_usd, sells: r.sells, launchesFast: r.launches_fast, launches: r.launches, siteBuyers: r.site_buyers, leaderMint: r.leader_mint, leaderBuyers: r.leader_buyers, coins: r.coins, flags: r.flags }));

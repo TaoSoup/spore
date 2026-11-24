@@ -34,6 +34,8 @@ import { startReconciler } from "./lib/agents-live/reconcile.mjs";
 import { idStyleFor } from "./lib/agents-live/models.mjs";
 import { createImageGen, imageUrlFor } from "./lib/agents-live/imagegen.mjs";
 import { createBriefStore } from "./lib/agents/brief.mjs";
+import { StoryGroups } from "./lib/story-groups-live.mjs";
+import { loadSubjects, TABLE_URL } from "./lib/subjects.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const log = {
@@ -180,6 +182,11 @@ narrTags?.start();
 model.wakeups.attach({ hub, narrative }).start();
 // Story attention (lib/attention.mjs): the model feeds it per live trade; a timer closes each 5-minute bucket in one
 // sliced job (story rows, calibration, coin days, pre-registered events from prereg/events.json), unref'd.
+// Subjects and automatic story groups (lib/subjects.mjs, lib/story-groups-live.mjs), with the narrative tags only: a
+// tagged coin is filed under its subject's and its group's t: key too, so they get a 5-minute history (not shown yet).
+const storyGroups = narrTags ? new StoryGroups({ file: join(cfg.dataDir, "spore.sqlite"), table: fileURLToPath(TABLE_URL), log }).start() : null;
+if (narrTags) model.attention.attachSubjects({ subjectOf: loadSubjects(TABLE_URL, log), groups: storyGroups });
+model.storyGroups = storyGroups; // health
 model.attention.start();
 // Live agents (DESIGN §13.1): one pass every tick, agents in turn; the first pass waits for the
 // index to settle. AGENTS=off|dry never constructs this.
@@ -202,7 +209,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
   server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();

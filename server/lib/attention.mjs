@@ -252,7 +252,7 @@ export class Attention {
     this.events = []; this.evOpen = []; this.evMemo = new Map();
     this.series = new Map();   // story key|since → { at, body }
     this.job = null; this.timer = null; this.trimmedAt = 0;
-    this.stats = { trades: 0, capped: 0, late: 0, daysCapped: 0, closes: 0, lastCloseMs: null, maxSliceMs: 0, lastStepMs: null, lastStepAt: null, maxStepMs: 0, maxStepAt: null, rows: 0, lastRows: 0, baselines: 0, calib: 0, filled: 0, dayRows: 0, eventRows: 0, trimmed: 0, evictions: 0, errors: 0 };
+    this.stats = { trades: 0, capped: 0, late: 0, daysCapped: 0, closes: 0, lastCloseMs: null, maxSliceMs: 0, lastStepMs: null, lastStepAt: null, maxStepMs: 0, maxStepAt: null, rows: 0, lastRows: 0, baselines: 0, calib: 0, filled: 0, dayRows: 0, eventRows: 0, coinRows: 0, trimmed: 0, evictions: 0, errors: 0 };
     if (events) this.setEvents(events);
   }
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -282,6 +282,8 @@ export class Attention {
     return this;
   }
   stop() { clearInterval(this.timer); this.timer = null; }
+  /** Subjects (lib/subjects.mjs matcher: narrative → { key, title, quiet } | null) and automatic groups (lib/story-groups-live.mjs: keyOf(narrative id)); a coin of either is filed under its t: key too. */
+  attachSubjects({ subjectOf = null, groups = null } = {}) { this.subjectOf = subjectOf; this.groups = groups; return this; }
 
   // ---------------------------------------------------------------- the feed
   /** One live trade `{ mint, time, isBuy, valueUsd, user, priceUsd }` of the model: O(1). */
@@ -493,8 +495,8 @@ export class Attention {
     for (const [m, C] of b.coins) {
       if ((++n & 63) === 0) yield st;
       const c = model.coins.get(m) ?? null;
-      let tagId = null;
-      try { const tg = nt ? nt.tagOf(m) : null; tagId = tg && Number.isInteger(tg.id) ? tg.id : null; } catch { tagId = null; }
+      let tagId = null, narr = null;
+      try { const tg = nt ? nt.tagOf(m) : null; tagId = tg && Number.isInteger(tg.id) ? tg.id : null; narr = tagId != null ? tg : null; } catch { tagId = null; }
       let pid = null;
       try { pid = c ? postOf(model.metaFor(c)) : null; } catch { pid = null; }
       const pok = pid != null && this.#postOk(pid, nowS);
@@ -507,7 +509,7 @@ export class Attention {
       }
       const nb = C.b?.size ?? 0, dust = this.#dustOf(c, C, nb, px) != null;
       if (tagId != null) { tags.add(tagId); if (nb > 0 && !dust) this.#narrSaw(tagId, this.#copyKeyOf(m), K); }
-      list.push({ m, C, c, tagId, pid, pok, fam, dust });
+      list.push({ m, C, c, tagId, narr, pid, pok, fam, dust });
     }
     yield st;
     st = "narratives";
@@ -516,7 +518,7 @@ export class Attention {
     // 2. the stories of the bucket
     yield st; // the step before ends here, under its own label
     st = "stories";
-    const per = new Map();
+    const per = new Map(), coinRows = [];
     let siteUsd = 0, siteSells = 0, siteLaunches = 0, siteFast = 0;
     for (const x of list) {
       if ((++n & 255) === 0) yield st;
@@ -528,22 +530,36 @@ export class Attention {
       if (launch) { this.launched.set(x.m, K); siteLaunches++; }
       if (x.dust) continue; // bot dust: in the site row, in no story (as on the cards)
       const key = coinStoryKey({ narrativeId: x.tagId, narrativeCoins: narrOn.has(x.tagId) ? 2 : 0, postId: x.pid, postOk: x.pok, family: x.fam });
-      if (key == null) continue;
-      let s = per.get(key);
-      if (!s) per.set(key, s = { key, sets: [], usd: 0, sells: 0, coins: 0, launches: 0, fast: 0, lead: null, leadN: 0, leadP: null, fam: null, buyers: 0 });
-      s.usd += C.usd; s.sells += C.sells; s.coins++;
-      if (x.fam && !s.fam) s.fam = x.fam;
-      if (launch) {
-        s.launches++;
-        // the story's post: a post story's own; a narrative's, the post this coin links (when it may be shown); a family has none
-        const kind = parseStoryKey(key)?.kind;
-        const pa = kind === "post" ? postTime(key, nowMs) : kind === "narrative" && x.pok ? postTime(x.pid, nowMs) : null;
-        if (pa != null && Math.abs(at - pa) <= FAST_S) { s.fast++; siteFast++; }
+      // a tagged coin is also filed under its subject (subjects/table.json, story rows) and its automatic group
+      // (lib/story-groups-live.mjs), "t:..." keys, whatever card it is on: a subject's history spans all its angles
+      let subjectKey = null, groupKey = null;
+      if (x.narr) {
+        try { const sj = this.subjectOf?.(x.narr); subjectKey = sj && !sj.quiet && typeof sj.key === "string" ? sj.key : null; } catch { subjectKey = null; }
+        try { groupKey = this.groups?.keyOf(x.tagId) ?? null; } catch { groupKey = null; }
       }
-      if (nb > 0) {
-        s.sets.push(C.b);
-        if (nb > s.leadN || (nb === s.leadN && x.m < s.lead)) { s.lead = x.m; s.leadN = nb; s.leadP = C.p; }
+      if (key == null && subjectKey == null && groupKey == null) continue;
+      let fast = false;
+      for (const k of new Set([key, subjectKey, groupKey])) {
+        if (k == null) continue;
+        let s = per.get(k);
+        if (!s) per.set(k, s = { key: k, sets: [], usd: 0, sells: 0, coins: 0, launches: 0, fast: 0, lead: null, leadN: 0, leadP: null, fam: null, buyers: 0 });
+        s.usd += C.usd; s.sells += C.sells; s.coins++;
+        if (x.fam && !s.fam) s.fam = x.fam;
+        if (launch) {
+          s.launches++;
+          // the story's post: a post story's own; a narrative's, the post this coin links (when it may be shown); a family has none
+          const kind = parseStoryKey(k)?.kind;
+          const pa = kind === "post" ? postTime(k, nowMs) : (kind === "narrative" || k.startsWith("t:") || k.startsWith("g:")) && x.pok ? postTime(x.pid, nowMs) : null;
+          if (pa != null && Math.abs(at - pa) <= FAST_S) { s.fast++; fast = true; }
+        }
+        if (nb > 0) {
+          s.sets.push(C.b);
+          if (nb > s.leadN || (nb === s.leadN && x.m < s.lead)) { s.lead = x.m; s.leadN = nb; s.leadP = C.p; }
+        }
       }
+      if (fast) siteFast++;
+      // the coin's own row for the outcome study (a coin with a $1+ buyer in the bucket)
+      if (nb > 0) coinRows.push({ t: T, mint: x.m, storyKey: key ?? subjectKey ?? groupKey, subjectKey, groupKey, buyers: nb, buyUsd: r2(C.usd), sells: C.sells, priceUsd: C.p, copyKey: this.#copyKeyOf(x.m) });
     }
     yield st;
     st = "merge";
@@ -571,6 +587,10 @@ export class Attention {
       try { db.storyBucketsPut(rows.slice(i, i + CHUNK)); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: rows not stored (${e?.code ?? e?.message ?? "error"})`); }
     }
     this.stats.rows += rows.length; this.stats.lastRows = rows.length;
+    for (let i = 0; i < coinRows.length; i += CHUNK) {
+      yield st;
+      try { db.storyCoinsPut(coinRows.slice(i, i + CHUNK)); this.stats.coinRows += Math.min(CHUNK, coinRows.length - i); } catch (e) { this.stats.errors++; this.log.warn?.(`attention: coin rows not stored (${e?.code ?? e?.message ?? "error"})`); }
+    }
     yield st; // the step before ends here, under its own label
     st = "seen";
     // the buckets seen whole: the process's first close reads the last hour's site rows back once (one indexed read)
@@ -651,7 +671,10 @@ export class Attention {
     // read as a drop), then the outcomes that came due (1 h and 6 h after)
     yield st; // the step before ends here, under its own label
     st = "calib";
-    const snaps = !whole ? [] : [...this.stories.values()].filter((S) => S.att && S.att.hour > 0).sort((x, y) => y.att.hour - x.att.hour || (x.key < y.key ? -1 : 1)).slice(0, CALIB_MAX);
+    // subject (t:) and group (g:) snapshots come on top of CALIB_MAX, so they never push an ordinary story out of the log
+    const subjKey = (k) => k.startsWith("t:") || k.startsWith("g:");
+    const live = !whole ? [] : [...this.stories.values()].filter((S) => S.att && S.att.hour > 0).sort((x, y) => y.att.hour - x.att.hour || (x.key < y.key ? -1 : 1));
+    const snaps = [...live.filter((S) => !subjKey(S.key)).slice(0, CALIB_MAX), ...live.filter((S) => subjKey(S.key))];
     const crow = [];
     for (const S of snaps) {
       if ((++n & 15) === 0) yield st;
@@ -701,7 +724,7 @@ export class Attention {
     if (nowS - this.trimmedAt >= TRIM_EVERY_S) {
       this.trimmedAt = nowS;
       // story rows go an hour window at a time (db.storyTrim), so a short step does not mean the end: they stop at 0
-      for (const [trim, before, chunk, untilNone] of [[(x, l) => db.storyTrim(x, l), nowS - KEEP_S, STORY_TRIM_CHUNK, true], [(x, l) => db.calibTrim(x, l), nowS - CALIB_KEEP_S, TRIM_CHUNK, false]]) {
+      for (const [trim, before, chunk, untilNone] of [[(x, l) => db.storyTrim(x, l), nowS - KEEP_S, STORY_TRIM_CHUNK, true], [(x, l) => db.calibTrim(x, l), nowS - CALIB_KEEP_S, TRIM_CHUNK, false], [(x, l) => db.storyCoinsTrim(x, l), nowS - KEEP_S, TRIM_CHUNK, false]]) {
         for (;;) {
           yield st;
           let got = 0;
@@ -763,7 +786,8 @@ export class Attention {
    * series has not closed a bucket for yet is "new", with its post's time or its family's wake-up start.
    */
   cardAttention(card, nowS = this.#nowS()) {
-    const S = this.stories.get(card?.key) ?? null, open = this.#openNow(nowS), nowK = Math.floor(nowS / BUCKET_S);
+    // a subject block's t: series is recorded, not shown yet (the header step will): its card reads as before
+    const S = card?.subject ? null : this.stories.get(card?.key) ?? null, open = this.#openNow(nowS), nowK = Math.floor(nowS / BUCKET_S);
     const fresh = this.lastK >= nowK - 2; // the last close's per-coin counts are still the last bucket's
     let first = null, u = null, best = null, bestN = 0, total = 0;
     const each = (mint, symbol) => {
@@ -775,7 +799,7 @@ export class Attention {
     };
     for (const r of card?.coins ?? []) { each(r.mint, r.symbol); for (const cp of r.copies ?? []) each(cp.mint, r.symbol); }
     const att = S?.att && S.att.k >= nowK - 2 ? S.att : null;
-    let start = S?.start ?? this.starts.get(card?.key) ?? null;
+    let start = S?.start ?? (card?.subject ? null : this.starts.get(card?.key)) ?? null;
     if (!start) {
       if (card?.kind === "post" && fin(card.post?.at)) start = { startAt: card.post.at, source: "post" };
       else if (card?.kind === "family" && fin(card.family?.startedAt)) start = { startAt: card.family.startedAt, source: "wake" };

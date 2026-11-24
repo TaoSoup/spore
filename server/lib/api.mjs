@@ -401,7 +401,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), attention: model.attention?.snapshot?.() ?? null, checkpoint: model.db?.checkpointer?.snapshot?.() ?? null, narrTags: narrTags?.snapshot?.() ?? { on: false } };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), attention: model.attention?.snapshot?.() ?? null, checkpoint: model.db?.checkpointer?.snapshot?.() ?? null, storyGroups: model.storyGroups ? { ...model.storyGroups.stats } : null, narrTags: narrTags?.snapshot?.() ?? { on: false } };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 

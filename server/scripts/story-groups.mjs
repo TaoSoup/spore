@@ -118,6 +118,9 @@ export function scoreLabels(groups, labels, activeIds) {
   return res;
 }
 
+// the server's file keeps coin names in `mints`; a slim extract keeps them on `coins`
+const hasCol = (db, table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((r) => r.name === col);
+
 /** Narratives with their window's wallets, the site's buyers, and launches per word now and in the base period. */
 export function readWindow(dbPath, { untilT, hours = 24, baseHours = 72, botCoins = 25 }) {
   const db = new DatabaseSync(resolve(dbPath), { readOnly: true });
@@ -137,7 +140,7 @@ export function readWindow(dbPath, { untilT, hours = 24, baseHours = 72, botCoin
     for (const n of narrs) { n.wallets = wallets.get(n.id) ?? new Set(); n.buyers = n.wallets.size; }
     const launches = new Map();
     const bump = (w, k) => { let L = launches.get(w); if (!L) launches.set(w, L = { now: 0, base: 0 }); L[k]++; };
-    for (const c of db.prepare("SELECT mint, name, symbol, created_at FROM coins WHERE created_at >= ? AND created_at < ?").iterate(baseT, untilT)) {
+    for (const c of db.prepare(hasCol(db, "coins", "name") ? "SELECT mint, name, symbol, created_at FROM coins WHERE created_at >= ? AND created_at < ?" : "SELECT c.mint, m.name, m.symbol, c.created_at FROM coins c LEFT JOIN mints m ON m.mint = c.mint WHERE c.created_at >= ? AND c.created_at < ?").iterate(baseT, untilT)) {
       const k = c.created_at >= sinceT ? "now" : "base";
       for (const w of new Set([...words(c.name), ...words(c.symbol)])) if (anchorOk(w)) bump(w, k);
     }

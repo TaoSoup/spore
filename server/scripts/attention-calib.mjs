@@ -65,7 +65,7 @@ export function readCalib(dbPath, days = 30) {
     db.exec("PRAGMA query_only = ON");
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'calib'").get()) throw new Error("this database has no calib table (the server has not run the story attention yet)");
     const newest = Number(db.prepare("SELECT MAX(t) AS t FROM calib").get()?.t ?? 0);
-    const rows = db.prepare("SELECT phase, multiple, buyers5m, hour_buyers, leader_price_usd, buyers_1h, price_1h, filled_1h, cov_1h, buyers_6h, price_6h, filled_6h, cov_6h FROM calib WHERE t >= ?").all(newest - Math.round(days * 86_400));
+    const rows = db.prepare("SELECT phase, multiple, buyers5m, hour_buyers, leader_price_usd, buyers_1h, price_1h, filled_1h, cov_1h, buyers_6h, price_6h, filled_6h, cov_6h FROM calib WHERE t >= ? AND story_key NOT LIKE 't:%' AND story_key NOT LIKE 'g:%'").all(newest - Math.round(days * 86_400)); // subject and group snapshots (t:, g:) are left out: they repeat their narratives' coins
     return { newest, rows: rows.length, table: calibTable(rows) };
   } finally { db.close(); }
 }
