@@ -107,7 +107,7 @@ export class CoinRows {
   /** `model`: the index (read only; its `wakeups` for creator facts, sniper shares and family states); `holders`: lib/holders.mjs (optional). */
   constructor({ model, holders = null, now = Date.now, log = console } = {}) {
     this.model = model; this.holders = holders; this.now = now; this.log = log; this.narr = null;
-    this.a = []; this.h = 0; // held trades from `h` on, in arrival order: { m, t, b, u, v, p }
+    this.a = []; this.h = 0; this.seq = 0; // held trades from `h` on, in arrival order: { m, t, b, u, v, p, s (arrival number) }
     this.hit = null; this.job = null;          // the latest snapshot and the build under way
     this.trend = new Map(); this.trendJobs = new Map(); // tf → { at, snap, body }, tf → its build
     this.story = new Map(); this.storyJobs = new Map(); // the same for the stories body
@@ -132,7 +132,7 @@ export class CoinRows {
     const a = this.a;
     if (a.length - this.h >= HOLD_MAX) { a[this.h++] = null; this.stats.capped++; }
     const p = num(t.priceUsd);
-    a.push({ m: t.mint, t: time, b: !!t.isBuy, u: typeof t.user === "string" ? t.user : null, v: num(t.valueUsd) ?? 0, p: p > 0 ? p : null });
+    a.push({ m: t.mint, t: time, b: !!t.isBuy, u: typeof t.user === "string" ? t.user : null, v: num(t.valueUsd) ?? 0, p: p > 0 ? p : null, s: ++this.seq });
     if (seed) this.stats.seedRows++; else this.stats.trades++;
   }
   /** Lets go of the held trades at the head that are past the hour; the array's dead head is dropped once it is most of it. */
@@ -176,7 +176,7 @@ export class CoinRows {
     const cuts = TF_KEYS.map((k) => nowS - TF_S[k]);
     const from = (Math.floor(nowS / SPARK_STEP) - (SPARK_N - 1)) * SPARK_STEP;
     const per = new Map();
-    const a = this.a, end = a.length;
+    const a = this.a, end = a.length, seq = this.seq; // the trades this pass reads: arrival numbers up to `seq`
     for (let i = this.h, n = 0; i < end; i++) {
       if ((++n & 1023) === 0) yield;
       const e = a[i];
@@ -216,7 +216,7 @@ export class CoinRows {
       if (A.tf[NF - 1].buyers >= need && coins.get(m)?.tracked) nt.offer(m, A.tf[NF - 1].buyers);
     }
     this.stats.snapCoins = per.size;
-    return { at, nowS, cuts, from, per, memo: new Map() };
+    return { at, nowS, cuts, from, per, seq, memo: new Map() };
   }
 
   /** A price from sqlite (the last priced trade at or before `t`), memoized in the snapshot. */
@@ -465,6 +465,30 @@ export class CoinRows {
     } catch (e) { this.log.warn?.(`coinrows: post ${id}: ${e?.message ?? e}`); return null; }
   }
 
+  /**
+   * Sets `card.buyers` on each card: the distinct wallets with a $1+ buy (MIN_USD, as the rows' `tf.buyers`) in the
+   * timeframe's window, over every coin of the card, copies included: the very trades the snapshot read (arrival
+   * numbers up to `snap.seq`, trade time after cuts[k] with no upper bound, as the rows), so it never exceeds the sum of
+   * the rows. A held trade let go since the snapshot (past the hour, or the cap) is missed: a few wallets low at most.
+   */
+  *#cardBuyersGen(snap, tf, cards) {
+    const k = TF_KEYS.indexOf(tf), cut = snap.cuts?.[k], seq = snap.seq;
+    const of = new Map(), sets = cards.map(() => new Set());
+    cards.forEach((c, i) => { for (const r of c.coins ?? []) { of.set(r.mint, i); for (const cp of r.copies ?? []) of.set(cp.mint, i); } });
+    if (k < 0 || !Number.isFinite(cut) || !Number.isFinite(seq) || !of.size) { for (const c of cards) c.buyers = null; return; }
+    const a = this.a, end = a.length; // a swap during a yield leaves this array as it was: read on
+    for (let i = this.h, n = 0; i < end; i++) {
+      if ((++n & 1023) === 0) yield;
+      const e = a[i];
+      if (!e) continue;
+      if (e.s > seq) break; // arrived after the snapshot: so did every later one
+      if (!e.b || !e.u || e.v < MIN_USD || e.t <= cut) continue;
+      const ci = of.get(e.m);
+      if (ci !== undefined) sets[ci].add(e.u);
+    }
+    cards.forEach((c, i) => { c.buyers = sets[i].size; });
+  }
+
   /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
   *#storyGen(snap, tf, wakes) {
     const model = this.model;
@@ -497,6 +521,10 @@ export class CoinRows {
     const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id), wakes, nowMs: p.at,
       tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined,
       subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null });
+    // Each card's buyers counted once: the distinct wallets with a $1+ buy in the timeframe (the snapshot's window) over
+    // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One
+    // pass over the held trades (a yield every 1024); the summed per-coin figures stay on the rows.
+    yield* this.#cardBuyersGen(snap, tf, g.cards);
     let tagging = { on: false, tagged: 0, pending: 0, capped: false };
     try { if (nt) tagging = nt.pageStats(); } catch { /* reads as off */ }
     yield;

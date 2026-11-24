@@ -244,3 +244,16 @@ test("o15. an opened story cut to the rows always shown is closed again; one off
   assert.deepEqual([...out].sort(), ["b", "c"]);
   assert.equal(D.closeShrunk(s, [e("a", 4), e("b", 7)]), s, "nothing changed: the same set");
 });
+
+test("o-distinct. a whole card shows the server's distinct buyers; a size-cut card, a held one or one without the figure adds up its rows", () => {
+  const e = (b: Stories, size: "all" | "small" | "mid" | "large" = "all") => list(b, size).entries.find((x) => x.key === "post:p1")!;
+  const coins = [row("A", 40, { mcapUsd: 9_000_000 }), row("B", 30, { mcapUsd: 8_000_000 }), row("S1", 3, { mcapUsd: 20_000 }), row("S2", 2, { mcapUsd: 30_000 })];
+  const whole = e(body([post("p1", coins, { buyers: 60 })], []));
+  assert.deepEqual([whole.buyers, whole.distinct], [60, true], "75 summed, 60 wallets: each counted once");
+  const cut = e(body([post("p1", coins, { buyers: 60 })], []), "small");
+  assert.deepEqual([cut.buyers, cut.distinct, cut.coinsN], [5, undefined, 2], "under a size pill the card draws part of its coins: their sum");
+  const none = e(body([post("p1", coins)], []));
+  assert.deepEqual([none.buyers, none.distinct], [75, undefined], "an older server: the sum, as before");
+  const one = e(body([post("p1", [row("A", 40)], { buyers: 39 })], []));
+  assert.deepEqual([one.buyers, one.distinct], [40, undefined], "a one-row entry counts its row");
+});

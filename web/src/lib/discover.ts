@@ -839,7 +839,9 @@ export function filterStories(v: StoriesView, size: SizeKey, theme: string = ALL
     const coins = size === "all" ? c.coins : c.coins.filter((r) => inSize(r, size));
     if (!coins.length) continue;
     // a card kept after the server dropped it shows its last numbers
-    cards.push(c.left ? { ...c, coins } : { ...c, coins, ...cardTotals(coins) });
+    // a card cut by the size pill draws part of its coins: the server's distinct count (over all of them) no longer fits
+    const part = coins.length !== c.coins.length ? { buyers: null } : null;
+    cards.push(c.left ? { ...c, coins, ...part } : { ...c, coins, ...cardTotals(coins), ...part });
   }
   const loose = unfiltered ? v.loose : v.loose.filter(rowOk);
   const dust = unfiltered ? v.dust : v.dust.filter(rowOk);
@@ -1096,7 +1098,7 @@ export function storyMints(v: StoriesView | null, withDust = false): Set<string>
 /// for a loose row. `rows` are in the order drawn. `buyers`, `coinsN`, `newN`: over the rows shown (copies counted,
 /// a row kept dimmed after it left not counted), `buyers` over the page's timeframe (each row's `tf.buyers`).
 /// `movedN`, `goneN`: the rows drawn dimmed (left, and listed elsewhere now or not at all), said on the header line.
-export type OneEntry = { key: string; card: StoryCardShown | null; rows: StoryShown[]; head: boolean; buyers: number; coinsN: number; newN: number; movedN: number; goneN: number; left: boolean; moved: boolean };
+export type OneEntry = { key: string; card: StoryCardShown | null; rows: StoryShown[]; head: boolean; buyers: number; distinct?: boolean; coinsN: number; newN: number; movedN: number; goneN: number; left: boolean; moved: boolean };
 /// What the list looked like, so a read applied while the page is in use moves nothing: the entries' keys in the order
 /// drawn and, per entry, its rows' mints in order and whether it was drawn under a header.
 export type OneOrder = { keys: string[]; rows: Map<string, string[]>; heads: Map<string, boolean> };
@@ -1153,7 +1155,11 @@ export function oneList(shown: Pick<StoriesShown, "cards" | "loose">, nowS: numb
       const one = rows.filter((r) => r.mint === was[0]);
       if (one.length) rows = one;
     }
-    raw.push({ key, card: c, rows, head: rows.length >= 2, ...tfTotals(rows, nowS), left: c.left === true, moved: c.moved === true });
+    // a story counts each buyer once (the server's distinct wallets over all its coins) while it is drawn whole; a story
+    // held to one row, or showing rows that left, adds up the rows it draws, as before
+    const t = tfTotals(rows, nowS), whole1 = rows.length >= 2 && rows.length === c.coins.length && !t.movedN && !t.goneN;
+    const d = whole1 && typeof c.buyers === "number" && Number.isFinite(c.buyers) && c.buyers >= 0 ? Math.round(c.buyers) : null;
+    raw.push({ key, card: c, rows, head: rows.length >= 2, ...t, ...(d != null ? { buyers: d, distinct: true } : null), left: c.left === true, moved: c.moved === true });
   }
   for (const r of shown.loose) raw.push({ key: `loose:${r.mint}`, card: null, rows: [r], head: false, ...tfTotals([r], nowS), left: r.left === true, moved: r.moved === true });
   const ranked = raw.map((e, i) => ({ e, i })).sort((x, y) => y.e.buyers - x.e.buyers || y.e.coinsN - x.e.coinsN || x.i - y.i).map((x) => x.e);

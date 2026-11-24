@@ -287,7 +287,7 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
           <ThemePill theme={h.theme} />
           {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
         </div>
-        <span className="dsc-sh-n" title={`Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
+        <span className="dsc-sh-n" title={e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.words}</span>
         {ang && <span className="dsc-sh-sub dsc-sh-ang" title={ang.title}><span>{ang.text}</span></span>}
         {sub}
         {g && e.card && (

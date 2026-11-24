@@ -349,6 +349,8 @@ export type StoryCard = {
   kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
   narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
   subject?: { key: string; title: string; angles: StoryAngle[] } | null;
+  /// distinct wallets with a $1+ buy over the timeframe across all the card's coins (copies included), each counted once (a newer server)
+  buyers?: number | null;
   attention?: StoryAttention | null;
 };
 /// Story attention (a newer server; absent on an older one): how many wallets the story draws now, as context, never a

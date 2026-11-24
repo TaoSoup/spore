@@ -499,6 +499,8 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
   for (let i = 0; i < 4; i++) w.trade(R[0], `r0${i}`, T0 + 60 + i, { usd: 20 });
   for (let i = 0; i < 2; i++) w.trade(R[1], `r1${i}`, T0 + 60 + i, { usd: 20 });
   w.trade(R[2], "r2", T0 + 61, { usd: 20 });
+  w.trade(R[1], "r00", T0 + 65, { usd: 20 }); // a wallet of R0 buys R1 too: one buyer of the card, two of the rows
+  w.trade(R[2], "cheap", T0 + 66, { usd: 0.5 }); // under $1: no buyer anywhere
   for (const m of [F, U, L]) w.trade(m, `o${m.slice(0, 4)}`, T0 + 62, { usd: 30 });
   for (let i = 0; i < 3; i++) w.trade(TINY, `t${i}`, T0 + 63, { usd: 2 });
   const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }], [BAD, { id: BAD, state: "ok", handle: "rude", text: "", flagged: true }]]);
@@ -518,8 +520,9 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
     assert.deepEqual([b.asOf, b.tf, b.floor, b.floor5m, b.candidates, b.hidden], [T0 + 100, "5m", 0, 0, 10, { dust: 1, cards: 0, loose: 0 }]);
     assert.deepEqual(b.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, c.coins.map((r) => r.symbol)]), [
       ["family", PAR, 50, 3, ["E0", "E1", "E2"]],
-      ["post", X, 7, 3, ["R0", "R1", "R2"]],
+      ["post", X, 8, 3, ["R0", "R1", "R2"]],
     ]);
+    assert.deepEqual(b.cards.map((c) => c.buyers), [50, 7], "each card counts its distinct $1+ wallets once (r00 bought two of its coins)");
     const [fam, post] = b.cards;
     assert.deepEqual([fam.post, fam.family.mint, fam.family.symbol, typeof fam.family.image, fam.family.startedAt >= T0 && fam.family.startedAt <= T0 + 100], [null, PAR, "PAR", "string", true]);
     assert.deepEqual([post.post, post.family], [{ id: X, handle: "poster", text: "big news", at: T0 - 600, url: postUrl(X) }, null]);
