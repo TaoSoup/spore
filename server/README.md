@@ -530,6 +530,59 @@ the site depends on it, and nothing here says anything about a coin's price.
   stopped first; `also` in replay.json). They cost like any coin and count toward `--max-usd`; the tagged and "none"
   counts and shares stay those of the window's coins, and the groups list an extra coin with `also: true`. Also `--min-buyers`, `--per-min` (default 20), `--in-usd-per-m` /
   `--out-usd-per-m`. The key is never printed.
+- **Subject replay** (slice 0 of the subject layer, nothing in the product reads it yet): one subject (a named person,
+  company, franchise, project or event) is often split over many narratives. By `subjects/table.json`, in the 24 h
+  before Nov 24 2026 01:05 UTC the Jensen Huang return was 35 narratives (27 with buyers) and GTA 6 was 77 (33 with
+  buyers). The script opens the database read-only and writes nothing:
+
+      node scripts/subject-replay.mjs --db <DATA_DIR>/spore.sqlite [--hours 24] [--at <ISO>] [--min 3] [--json]
+      node scripts/subject-replay.mjs --db <DATA_DIR>/spore.sqlite --anchors <table.json> [--expect <labels.json>] [--quiet-share 0.03] [--new-after <id>] [--hours 24] [--at <ISO>] [--json]
+
+  Without `--anchors` it lists candidate words: title words held by `--min` or more narratives with buyers in the
+  window, each with its narratives, distinct buyers, shared words and longer variants (gta → gta6); words on the
+  built-in `NEVER` lists (standing names like trump and elon, animals, seasons, generic words, platforms) are marked,
+  not dropped. With `--anchors` it folds narratives into the table's subjects: a narrative joins a subject that
+  `include`s it, else one whose anchor it holds as a whole word and that does not `exclude` it.
+  - **Story rows and quiet rows.** A story row's word names one story: a person inside one saga, an event, a fictional
+    work, or a meme or coin's own name. A company, brand or product name keeps making unrelated stories (on Nov 23,
+    Nvidia had mascot coins, stock chatter and the CEO succession), so its row is `quiet`. A quiet row folds as usual
+    but shows as a block only when its distinct buyers reach `quietShare` of the site's (3% by default, `--quiet-share`
+    or the table's `quietShare`). A person who simply posts a lot gets no row.
+  - **Ties.** When a title holds anchors of two subjects, a story row beats a quiet row, then the longer matched anchor
+    wins, then table order. The order never depends on counts, so it cannot flip.
+  - **Per subject** it prints:
+    - narratives, angles with buyers, and distinct $1+ buyers counted once;
+    - share of the site's buyers;
+    - whether it would show as a block (2+ angles with buyers, and for a quiet row the share);
+    - the checks largest angle ≤ subject ≤ sum of angles, and subject ≤ site.
+  - **`--new-after <id>`** lists, for narratives with a higher id (ids grow with time):
+    - each subject's new members, to spot wrong joins;
+    - new narratives with buyers that joined no subject, to spot misses that need an `include` or a new anchor.
+  - **`--expect`** checks labels and exits 2 when one fails:
+    - `in`/`out` ids per subject key;
+    - `neverAnchors`: words no row may use, whatever its key;
+    - `oneSubjectFor`;
+    - `none`: ids that must stand alone;
+    - `quiet`/`story`: row kinds. Once either is given, every row must have a kind.
+    - `absent`: keys that must not exist. It checks keys only; the deleted poster rows are also banned by word in
+      `neverAnchors`.
+  - **Keys.** A row's key is fixed in the table, so editing its anchors does not rename it. Without one, the key is
+    `t:` + the anchors sorted and joined by `-`. Formats are at the head of the script.
+
+  **The table and its labels.** `subjects/table.json` (22 subjects, 9 quiet) and `subjects/labels.json` (Jensen Huang /
+  Nvidia hand labels, row kinds and absent rows) were made Nov 24 2026 from the 24 h before 01:05 UTC:
+  - Claude Fable 5.2 judges picked the subjects from the candidate words; skeptics then added excludes and the labels.
+  - A second Fable panel turned the company rows quiet and deleted the poster rows (Toly, Mert, Ansem). It also moved
+    the CEO-succession titles 1003, 318 and 764 into Jensen, and left 1069 alone: its coins, "The Insider" and "Crime
+    is Legal", carry the ticker $Trump.
+  - A sweep of seven windows (Nov 23-24) showed that at 1% the Nvidia mascots and Anthropic protest+interview would
+    show as blocks. At 2% and 3% no quiet row shows.
+  - A Fable review of the change (3 reviewers, each finding checked by a skeptic) led to: the poster words added to
+    `neverAnchors`, every row labelled with a kind, a stricter check of `quiet` and `quietShare`, and the
+    new-titles-in-no-subject list.
+  - The table was built from the same data it is checked on, so read new narratives against it (`--new-after`) before
+    trusting it further.
+  - Replays of an old window shrink a little each day, because retention trims old trades.
 
 ## Story attention (lib/attention.mjs)
 
@@ -830,6 +883,7 @@ scripts/keys.mjs               partner API keys: create (printed once) / list / 
 scripts/attention-calib.mjs    story attention calibration, read-only: what followed each snapshot, per phase and multiple band
 scripts/event-results.mjs      pre-registered events, read-only: each event's result by its written rule
 scripts/narrative-replay.mjs   narrative tags, measured by hand: recent coins from a read-only database through the same tagging path, cost and groups reported (--dry-run sends nothing)
+scripts/subject-replay.mjs     subjects over narratives, read-only: candidate subject words, or a fold by an anchor table (story and quiet rows) with distinct buyers and label checks
 scripts/agents.mjs             root agents: enable / pause / rebuild-profile / run-once / list / seed
 test/*.test.mjs     root agents (profile fallback + model path + key never logged, scorer gates, designer filters, logo PNG, no signer / read-only RPC /
                     ledger reader (offsets, malformed lines, folding, titles, totals), site views (public rule, wallets, balance cache, coin roles),
