@@ -141,6 +141,10 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // the tagger does not run beside it. (ANTHROPIC_BASE_URL and ANTHROPIC_LOG need no check: lib/narrtags.mjs fixes the
   // host and the logging in code.) The value is never echoed.
   if (narrTags.on && env.ANTHROPIC_CUSTOM_HEADERS) errors.push("ANTHROPIC_CUSTOM_HEADERS is set in the environment: unset it to run with NARRATIVES=on (its headers would go out with every narrative request)");
+  // POST_LINES=off|on (lib/post-lines.mjs, default off): one model-written "subject: what happened" line per starting
+  // post on Discover. It runs only when the narrative tags run too (NARRATIVES=on, the key file, a priced model): the
+  // same model, the same key file and the same day's spend (NARRATIVE_DAILY_USD covers both together).
+  const postLines = { on: oneOf("POST_LINES", "off", ["off", "on"]) === "on" };
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
   // WS_HELIUS=1: the curve stream (new launches and curve trades, about 0.3 MB/s) uses RPC_USER_URL's WebSocket instead of
@@ -262,5 +266,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, storyGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, storyGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags, postLines };
 }

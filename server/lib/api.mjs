@@ -291,7 +291,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
 }
 
 export function createApp({ model, indexer, rpc, hub, images, meta, metahost = null, treasury = null, metaDir = null, platformWallet, splitBps, launchFeeSol = DEFAULT_LAUNCH_FEE_SOL, distDir, origins = [], log = console,
-  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, narrative = null, holders = null, narrTags = null, now = Date.now }) {
+  rates = null, jupiter = null, trustProxy = "loopback", hsts = "auto", logSample = 0.1, pagesDomain = null, cspConnect = [], apiKeys = null, publicUrl = DEFAULT_PUBLIC_URL, v1Limits = {}, agents = null, card = null, pnl = null, tradeFill = null, chartHistory = null, narrative = null, holders = null, narrTags = null, postLines = null, now = Date.now }) {
   const app = express();
   const startedAt = nowS();
   const launchFee = launchFeeOf(launchFeeSol, platformWallet);
@@ -364,6 +364,8 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Narrative tags (lib/narrtags.mjs), when the server runs them: the stories body then has narrative cards, and the
   // rows offer their coins to the tagger. Without them `tagging.on` is false and the body is as before.
   if (narrTags) rows.attach({ narr: narrTags });
+  // Post lines (lib/post-lines.mjs), when the server runs them: a listed card that shows a post then carries `line`.
+  if (postLines) rows.attach({ lines: postLines });
   const spawnedCache = new Map(); // sig → { at, result }
   // Root agents (DESIGN §13): read-only views of what the runner stored; the runner itself lives in index.mjs.
   const ag = { registry: agents?.registry ?? new AgentRegistry(model.db), mode: agents?.mode ?? "off", cooldownMin: agents?.cooldownMin ?? 60, dataDir: agents?.dataDir ?? null, runner: agents?.runner ?? null, vault: agents?.vault ?? null, live: agents?.live ?? null };
@@ -406,7 +408,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   // Sliced (model.statsAsync): the synchronous pass held the loop ~0.5 s on the local index (Nov 13 2026).
   app.get("/api/stats", wrap(async (req, res) => sendCachedJson(req, res, await model.statsAsync(), { maxAge: 3 })));
   app.get("/api/health", (req, res) => {
-    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), attention: model.attention?.snapshot?.() ?? null, checkpoint: model.db?.checkpointer?.snapshot?.() ?? null, storyGroups: model.storyGroups ? { ...model.storyGroups.stats } : null, narrTags: narrTags?.snapshot?.() ?? { on: false } };
+    const h = { ...healthOf({ model, indexer, hub, images, meta, metahost, treasury, rpc, startedAt, v1, agents: ag }), jupiter: jupiter ? jupiter.snapshot() : null, pnl: pnlOf.snapshot(), fill: fillOf?.snapshot() ?? null, history: histOf?.snapshot() ?? null, narrative: narrOf?.snapshot() ?? null, wakeups: wake.snapshot(), coinRows: rows.snapshot(), attention: model.attention?.snapshot?.() ?? null, checkpoint: model.db?.checkpointer?.snapshot?.() ?? null, storyGroups: model.storyGroups ? { ...model.storyGroups.stats } : null, narrTags: narrTags?.snapshot?.() ?? { on: false }, postLines: postLines?.snapshot?.() ?? { on: false } };
     res.status(!h.ok && req.query.strict != null ? 503 : 200).json(h);
   });
 

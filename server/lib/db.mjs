@@ -146,6 +146,14 @@ CREATE INDEX IF NOT EXISTS story_gate_at ON story_gate(at);
 CREATE TABLE IF NOT EXISTS trend_gate (mint TEXT PRIMARY KEY, at INTEGER NOT NULL, created_at INTEGER, outcome TEXT NOT NULL, symbol TEXT, name TEXT, mcap_usd REAL, why TEXT NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS trend_gate_at ON trend_gate(at);
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
+-- Post lines (lib/post-lines.mjs): per starting X post the "subject: what happened" line a language model wrote from
+-- the post's own text, kept for good by post id (a post does not change). state 'ok' (shown), 'rejected' (it failed the
+-- server's checks twice: never shown, never asked again) or 'gave-up' (no usable answer); asks: requests it was part of;
+-- coin: the mint of the coin named to the model (a line of kind 'mismatch' is about that coin and shown only on its card).
+CREATE TABLE IF NOT EXISTS post_lines (
+  post_id TEXT PRIMARY KEY, subject TEXT, happened TEXT, kind TEXT, state TEXT NOT NULL,
+  asks INTEGER NOT NULL DEFAULT 1, model TEXT, at INTEGER NOT NULL, coin TEXT
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
   created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, retitled INTEGER NOT NULL DEFAULT 0
@@ -303,6 +311,7 @@ export class Db {
     if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped"))this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
+    if (!this.db.prepare("PRAGMA table_info(post_lines)").all().some((c) => c.name === "coin")) this.db.exec("ALTER TABLE post_lines ADD COLUMN coin TEXT"); // a table made before the column was in its CREATE
     if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
@@ -447,6 +456,11 @@ export class Db {
         VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare)`),
       tagCounts: p("SELECT COUNT(narrative_id) AS tagged, COUNT(*) AS n FROM coin_tags"),
       tagRecentCreated: p("SELECT c.mint AS mint, t.narrative_id AS id, c.created_at AS created_at FROM coins c JOIN coin_tags t ON t.mint = c.mint WHERE c.created_at > ? AND t.narrative_id IS NOT NULL"),
+      lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin FROM post_lines WHERE post_id = ?"),
+      lineSet: p(`INSERT OR REPLACE INTO post_lines (post_id, subject, happened, kind, state, asks, model, at, coin)
+        VALUES (:postId, :subject, :happened, :kind, :state, :asks, :model, :at, :coin)`),
+      lineWipe: p("DELETE FROM post_lines"),
+      lineCounts: p("SELECT state, COUNT(*) AS n FROM post_lines GROUP BY state"),
       spendGet: p("SELECT in_tokens, out_tokens, usd, requests FROM narrative_spend WHERE day = ?"),
       spendAdd: p(`INSERT INTO narrative_spend (day, in_tokens, out_tokens, usd, requests) VALUES (:day, :inTokens, :outTokens, :usd, :requests)
         ON CONFLICT(day) DO UPDATE SET in_tokens = in_tokens + :inTokens, out_tokens = out_tokens + :outTokens, usd = MAX(0, usd + :usd), requests = requests + :requests`),
@@ -803,6 +817,25 @@ export class Db {
   tagCounts() { const r = this.q.tagCounts.get(); return { tagged: r.tagged, none: r.n - r.tagged }; }
   /** The tagged coins created after `sinceS`, `[{ mint, id, createdAt }]` (the coins_created index: a boot read of the last hour). */
   tagRecentCreated(sinceS) { return this.q.tagRecentCreated.all(sinceS).map((r) => ({ mint: r.mint, id: Number(r.id), createdAt: r.created_at })); }
+  /** A post's stored line (lib/post-lines.mjs) `{ postId, subject, happened, kind, state, asks, model, at, coin }`, or null: one indexed read. */
+  lineGet(postId) { const r = this.q.lineGet.get(postId); return r ? { postId: r.post_id, subject: r.subject, happened: r.happened, kind: r.kind, state: r.state, asks: r.asks, model: r.model, at: r.at, coin: r.coin ?? null } : null; }
+  lineSet(l) { this.q.lineSet.run({ postId: l.postId, subject: l.subject ?? null, happened: l.happened ?? null, kind: l.kind ?? null, state: l.state, asks: l.asks ?? 1, model: l.model ?? null, at: l.at, coin: l.coin ?? null }); }
+  /**
+   * The rules of the post lines changed (lib/post-lines.mjs applyLineRules): when the version stored under `key` is
+   * below `version` (no row = 1), every row of `post_lines` is deleted and `version` stored, in one transaction;
+   * `narrative_spend` is not touched. `{ reset, from, lines }`: whether it ran, the version before, the rows deleted.
+   */
+  lineRulesReset(key, version) {
+    const from = Number(this.kvGet(key, 1)) || 1;
+    if (from >= version) return { reset: false, from, lines: 0 };
+    return this.transaction(() => {
+      const lines = Number(this.q.lineWipe.run().changes);
+      this.kvSet(key, version);
+      return { reset: true, from, lines };
+    });
+  }
+  /** How many stored lines there are per state: `{ ok, rejected, gaveUp }`. */
+  lineCounts() { const o = { ok: 0, rejected: 0, gaveUp: 0 }; for (const r of this.q.lineCounts.all()) { if (r.state === "ok") o.ok = r.n; else if (r.state === "rejected") o.rejected = r.n; else if (r.state === "gave-up") o.gaveUp = r.n; } return o; }
   spendGet(day) { const r = this.q.spendGet.get(day); return r ? { inTokens: r.in_tokens, outTokens: r.out_tokens, usd: r.usd, requests: r.requests } : { inTokens: 0, outTokens: 0, usd: 0, requests: 0 }; }
   spendAdd(day, { inTokens = 0, outTokens = 0, usd = 0, requests = 0 } = {}) { this.q.spendAdd.run({ day, inTokens, outTokens, usd, requests }); }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }

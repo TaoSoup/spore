@@ -329,3 +329,68 @@ a.dsc-hx-lead:hover, a.dsc-hx-lead:focus-visible { text-decoration: underline; t
   .dsc-hx-sp span { margin-top: 2px; }
   .dsc-hx-facts { margin-top: 6px; padding-top: 5px; gap: 0 12px; }
 }
+
+/* The subject line (pages/Discover.tsx SubjectLineBlock): "Subject: what happened", the same on a single coin's card
+   and in a story's header. The subject in the accent with its colon, then the sentence in ink; it wraps to two lines
+   at most (three in a phone's story header) and is never cut to one line with an ellipsis. On the right, small and
+   muted: the "AI" badge, who posted, how long ago (an outlined chip for a post older than a week); on a phone that sits
+   on its own short line under the sentence. With a post the line is a native <details> summary: the poster's own words
+   open under it. About 32 px above the coin row on a wide screen, 46-66 px on a phone. */
+.dsc-ln { display: block; min-width: 0; }
+.dsc-ln-sum { display: flex; align-items: baseline; gap: 4px 14px; min-width: 0; list-style: none; }
+.dsc-ln-sum::-webkit-details-marker { display: none; }
+summary.dsc-ln-sum { cursor: pointer; border-radius: 6px; }
+summary.dsc-ln-sum:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+summary.dsc-ln-sum:hover .dsc-ln-h { text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+.dsc-ln-t { flex: 1 1 auto; min-width: 0; font-size: var(--fs-base); line-height: 20px; color: var(--ink); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.dsc-ln-t .dsc-pill { margin-right: 8px; vertical-align: 1px; }
+/* opened: the whole line, however long (on a phone two lines can cut a full-length sentence, and the body under it
+   shows the poster's words, not the summary) */
+.dsc-ln[open] > summary .dsc-ln-t { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.dsc-ln-s { font-weight: 650; color: var(--accent); text-transform: none; }
+.dsc-ln-h { font-weight: 600; color: var(--ink); }
+/* a post about an illness, a death or family: the subject is drawn quieter, not in the accent */
+.dsc-ln-personal .dsc-ln-s { color: var(--ink-2); }
+/* a post that names no event, a title with no post, a family: the sentence in a normal weight */
+.dsc-ln-light .dsc-ln-h { font-weight: 400; color: var(--ink-2); }
+/* no model line: the poster's own words, in quote marks and quieter (it is their text, not a summary) */
+.dsc-ln-quote .dsc-ln-h { font-weight: 500; color: var(--ink-2); }
+.dsc-ln-m { flex: none; display: inline-flex; align-items: baseline; gap: 8px; max-width: 46%; min-width: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; }
+.dsc-ln-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dsc-ln-ai, .dsc-ln-old { flex: none; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; font-size: 10px; line-height: 14px; }
+.dsc-ln-old { border-color: var(--line-soft); font-family: var(--mono); }
+.dsc-ln-when { flex: none; font-family: var(--mono); }
+/* the little mark that says the line opens: turned when it is open */
+summary.dsc-ln-sum .dsc-ln-m::after { content: "\203A"; flex: none; align-self: center; font-size: 13px; line-height: 12px; color: var(--muted); transition: transform var(--dur-2); }
+.dsc-ln[open] > summary .dsc-ln-m::after { transform: rotate(90deg); }
+/* opened: the poster's own words in full, the note that a model wrote the summary, and the link to the post */
+.dsc-ln-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(255,255,255,.02); }
+.dsc-ln-words { margin: 0; font-size: var(--fs-sm); line-height: 19px; color: var(--ink-2); overflow-wrap: anywhere; }
+.dsc-ln-nowords { color: var(--muted); }
+.dsc-ln-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); }
+.dsc-ln-foot .dsc-link { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-2xs); }
+/* a story header's line is a touch larger on a wide screen */
+.dsc-hx .dsc-ln-t { font-size: 15px; line-height: 21px; }
+/* a single coin with a story (the "B" card): a slim light card, the line on top and the coin's usual row under it. It
+   reaches --dsc-bx into the list card's padding and pads back by the same, as a story block does, so its row keeps the
+   list's column grid */
+.dsc-solo { --dsc-bx: 8px; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; margin: 10px calc(-1 * var(--dsc-bx)); padding: 0 calc(var(--dsc-bx) - 1px); border: 1px solid var(--line-soft); border-radius: 10px; background: linear-gradient(180deg, rgba(var(--accent-rgb), .03), rgba(var(--accent-rgb), .008)); }
+.dsc-solo > .dsc-ln { padding: 7px 6px 6px; border-bottom: 1px solid var(--line-soft); }
+.dsc-story + .dsc-solo, .dsc-solo + .dsc-solo, .dsc-solo + .dsc-story { margin-top: 0; }
+.dsc-one > li:has(+ .dsc-solo) { border-bottom: 0; }
+@media (max-width: 680px) {
+  .dsc-ln-sum { flex-direction: column; align-items: stretch; gap: 2px; }
+  .dsc-ln-t { font-size: var(--fs-base); line-height: 19px; }
+  .dsc-hx .dsc-ln-t { font-size: var(--fs-base); line-height: 19px; -webkit-line-clamp: 3; }
+  /* a line with nothing to open (no post) has no second place to be read in full: three lines here too */
+  div.dsc-ln .dsc-ln-t { -webkit-line-clamp: 3; }
+  .dsc-ln-m { max-width: 100%; }
+  .dsc-solo { --dsc-bx: 6px; }
+  .dsc-solo > .dsc-ln { padding: 6px 4px 5px; }
+}
+@media (pointer: coarse) {
+  summary.dsc-ln-sum { padding: 3px 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  summary.dsc-ln-sum .dsc-ln-m::after { transition: none; }
+}

@@ -571,6 +571,40 @@ test("stories: a waking family whose chosen post may be shown joins that post's 
   w.close();
 });
 
+test("stories with post lines: a listed card that shows a post offers it with the coin that links it, and carries `line` from the next build; nothing else changes", async () => {
+  const { PostLines } = await import("../lib/post-lines.mjs");
+  const w = world();
+  const idAt = (s, n = 0) => String(((BigInt(s * 1000) - 1288834974657n) << 22n) + BigInt(n));
+  const T0 = K0 * B, X = idAt(T0 - 600, 1);
+  const E = [0, 1, 2].map((i) => w.coin(mintN(190 + i), `E${i}`));
+  for (const m of E.slice(0, 2)) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: null, twitter: `https://x.com/a/status/${X}`, telegram: null, website: null, fetchedAt: 1, ok: true });
+  for (let i = 0; i < 51; i++) w.trade(E[i % 3], `w${i}`, T0 + i);
+  const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }]]);
+  const posts = { peek: (id) => records.get(id) ?? null, canQueue: () => "cached", want: () => "cached", state: () => "idle", snapshot: () => ({}), start() {}, stop() {} };
+  w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
+  w.clock.t = (T0 + 100) * 1000;
+  const plain = await w.rows.stories("1h");
+  assert.equal("line" in plain.cards[0], false, "without post lines a card has no such field");
+  const calls = [];
+  const client = async () => ({ messages: { create: async (req) => { calls.push(req); return { stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: "text", text: JSON.stringify({ posts: [{ n: 1, subject: "Big news", happened: "Poster says there is big news", kind: "claim" }] }) }] }; } } });
+  const lines = new PostLines({ db: w.model.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1 }, on: true, clientFactory: client, now: w.clock.now, fillMs: 0, log: quiet });
+  w.rows.attach({ lines });
+  w.wk.forget(); w.rows.story.clear();
+  let b = await w.rows.stories("1h");
+  assert.deepEqual([b.cards.length, "line" in b.cards[0], lines.pending()], [1, false, 1], "offered, not written yet");
+  await lines.pump();
+  const sent = JSON.parse(calls[0].messages[0].content.split("<posts>\n")[1].split("\n</posts>")[0]);
+  assert.deepEqual([sent.length, sent[0].by, sent[0].text, sent[0].coin_symbol], [1, "poster", "big news", "E0"]);
+  w.wk.forget(); w.rows.story.clear();
+  b = await w.rows.stories("1h");
+  assert.deepEqual(b.cards[0].line, { subject: "Big news", happened: "Poster says there is big news", kind: "claim" });
+  const { line, ...rest } = b.cards[0];
+  assert.deepEqual(rest, plain.cards[0], "every other field as without post lines");
+  assert.equal(calls.length, 1);
+  lines.stop();
+  w.close();
+});
+
 test("stories with narrative tags: the snapshot offers coins with 10+ buyers, the page's coins go first, a new tag shows in the next build, and the body carries tagging, themes and narrative cards", async () => {
   const w = world();
   const T0 = K0 * B;

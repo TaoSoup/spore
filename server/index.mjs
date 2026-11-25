@@ -27,6 +27,7 @@ import { Narrative, flagText } from "./lib/narrative.mjs";
 import { XPosts } from "./lib/xposts.mjs";
 import { Holders } from "./lib/holders.mjs";
 import { NarrTags, applyTagRules } from "./lib/narrtags.mjs";
+import { PostLines } from "./lib/post-lines.mjs";
 import { AgentRegistry } from "./lib/agents/registry.mjs";
 import { AgentRunner } from "./lib/agents/runner.mjs";
 import { createLlm } from "./lib/agents/llm.mjs";
@@ -144,10 +145,13 @@ const holders = cfg.holders ? new Holders({ model, rpc: rpc.lane("holders"), log
 // Answers made under older tagging rules are deleted once (a few thousand rows at most), with the tagger on or off.
 applyTagRules(db, log);
 const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, posts: narrative?.posts ?? null, log }) : null;
+// Post lines (lib/post-lines.mjs): only with POST_LINES=on beside a running tagger. One model-written "subject: what
+// happened" line per starting post on Discover, on the tagger's model, key file and day's spend (one cap for both).
+const postLines = narrTags?.on && cfg.postLines.on ? new PostLines({ db, cfg: cfg.narrTags, on: true, log }) : null;
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
-  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative, holders, narrTags,
+  apiKeys, publicUrl: cfg.publicUrl, v1Limits: cfg.v1Limits, jupiter, pnl, tradeFill, chartHistory, narrative, holders, narrTags, postLines,
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
@@ -188,6 +192,7 @@ tradeFill.start();
 chartHistory?.start();
 narrative?.start();
 narrTags?.start();
+postLines?.start();
 // Wake-ups (GET /api/discover, SSE `wake`): the model feeds them per trade and seeded them at load; createApp gave them
 // the hub and the linked posts. The tick closes 5-minute buckets on time when a family's next trade is late.
 model.wakeups.attach({ hub, narrative }).start();
@@ -220,7 +225,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); launchLog?.close(); model.coinRows?.stopStoryGate?.(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); launchLog?.close(); model.coinRows?.stopStoryGate?.(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); postLines?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
   server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();

@@ -108,7 +108,7 @@ export function parseTf(v) {
 export class CoinRows {
   /** `model`: the index (read only; its `wakeups` for creator facts, sniper shares and family states); `holders`: lib/holders.mjs (optional). */
   constructor({ model, holders = null, now = Date.now, log = console } = {}) {
-    this.model = model; this.holders = holders; this.now = now; this.log = log; this.narr = null;
+    this.model = model; this.holders = holders; this.now = now; this.log = log; this.narr = null; this.lines = null;
     this.a = []; this.h = 0; this.seq = 0; // held trades from `h` on, in arrival order: { m, t, b, u, v, p, s (arrival number) }
     this.hit = null; this.job = null;          // the latest snapshot and the build under way
     this.trend = new Map(); this.trendJobs = new Map(); // tf → { at, snap, body }, tf → its build
@@ -120,7 +120,8 @@ export class CoinRows {
     this.stats = { trades: 0, seedRows: 0, capped: 0, snaps: 0, lastSnapMs: null, maxSliceMs: 0, snapCoins: 0, trendBuilt: 0, lastTrendMs: null, trendMaxSliceMs: 0, lastTrendWaitMs: null, storiesBuilt: 0, lastStoriesMs: null, storiesMaxSliceMs: 0, served: 0, dbReads: 0, firstReads: 0 };
   }
   /** `narr`: the narrative tagger (lib/narrtags.mjs) or null: the stories body then has narrative cards and the snapshot offers it the coins with buyers. */
-  attach({ holders, narr } = {}) { if (holders !== undefined) this.holders = holders; if (narr !== undefined) this.narr = narr; return this; }
+  /** `lines`: the post lines (lib/post-lines.mjs) or null: the listed cards that show a post then offer it and carry `line` once it is written. */
+  attach({ holders, narr, lines } = {}) { if (holders !== undefined) this.holders = holders; if (narr !== undefined) this.narr = narr; if (lines !== undefined) this.lines = lines; return this; }
   /**
    * The story gate (lib/story-gate.mjs; STORY_GATE in lib/config.mjs): `{ mode: "shadow" | "on", cfg }`. While it runs the
    * stories view is also built once a minute with nobody asking, so the record (table story_gate) has no holes.
@@ -615,6 +616,27 @@ export class CoinRows {
     // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One
     // pass over the held trades (a yield every 1024); the summed per-coin figures stay on the rows.
     const siteBuyers = yield* this.#cardBuyersGen(snap, tf, g.cards);
+    // Post lines (lib/post-lines.mjs), when the server runs them: each listed card that shows a post offers it (page
+    // order, memory only; never in the gate's background build) and carries `line` once its line is stored and passed
+    // the checks (memory, else one indexed read the first time). The coin named to the model is the card's coin that
+    // links that post, else its first; a line that says the post may not match the coin (kind "mismatch") is carried
+    // only by a card whose coin is that same one, since for another coin it could be false. No other field changes;
+    // without a line the card is as before.
+    const pl = this.lines?.on ? this.lines : null;
+    if (pl) {
+      for (const card of g.cards) {
+        const post = card.post;
+        if (!post?.id) continue;
+        yield;
+        try {
+          const coin = card.coins?.find((r) => ids.get(r.mint) === post.id) ?? card.coins?.[0] ?? null;
+          const line = pl.lineOf(post.id, coin?.mint ?? null);
+          if (line) { card.line = line; continue; }
+          if (background) continue;
+          pl.offer(post.id, { mint: coin?.mint ?? null, handle: post.handle, text: post.text, at: post.at, coinName: coin?.name ?? null, coinSymbol: coin?.symbol ?? null, narrativeTitle: card.subject?.title ?? card.narrative?.title ?? null, narrativeTheme: card.narrative?.theme ?? null });
+        } catch (e) { this.log.warn?.(`coinrows: post line ${post.id}: ${e?.code ?? e?.name ?? "error"}`); }
+      }
+    }
     let tagging = { on: false, tagged: 0, pending: 0, capped: false };
     try { if (nt) tagging = nt.pageStats(); } catch { /* reads as off */ }
     yield;

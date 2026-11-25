@@ -347,8 +347,15 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 /// narratives of one subject (the server's subjects table: Jensen Huang, say), `narrative.title` the subject's, its
 /// narratives in `subject.angles`, most 5-minute buyers first.
 export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: number };
+/// A card's "subject: what happened" line (a server with POST_LINES=on): written by a language model from the card's
+/// post alone and checked by the server; it can be wrong. `kind`: what the post is ("event", an attributed "claim" or
+/// "pitch", "personal", "none" for a post that names no event, "mismatch" for a post about something else than the coin).
+export type PostLineKind = "event" | "claim" | "pitch" | "personal" | "none" | "mismatch";
+export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind };
 export type StoryCard = {
   kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
+  /// absent until the server has a checked line for the card's post (and always without POST_LINES)
+  line?: StoryPostLine;
   narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
   subject?: { key: string; title: string; angles: StoryAngle[] } | null;
   /// distinct wallets with a $1+ buy over the timeframe across all the card's coins (copies included), each counted once (a newer server)
