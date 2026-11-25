@@ -2,6 +2,7 @@
 // model, the RPC budget, the live subscription and the backfill, then serves /api/* (and web/dist in
 // production). No keys live here; the browser builds and signs every transaction itself.
 // Configuration is validated first (lib/config.mjs) so a bad deploy fails before it binds a port.
+import { LaunchLog } from "./lib/launch-log.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.mjs";
@@ -70,7 +71,9 @@ const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.img
 // First sight: every image url the model learns (a metadata image, an asset icon) gets its 64 px thumbnail queued at once.
 model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools } });
+const launchLog = cfg.launchLog ? new LaunchLog({ ...cfg.launchLog, log }) : null;
+if (launchLog) log.info(`launch log: every curve launch and trade → ${cfg.launchLog.file} (kept ${cfg.launchLog.keepHours} h)`);
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });
@@ -209,7 +212,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); launchLog?.close(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
   server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();

@@ -143,6 +143,9 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   if (narrTags.on && env.ANTHROPIC_CUSTOM_HEADERS) errors.push("ANTHROPIC_CUSTOM_HEADERS is set in the environment: unset it to run with NARRATIVES=on (its headers would go out with every narrative request)");
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
+  // LAUNCH_LOG=<file>: record every curve launch and trade the live stream delivers, tracked or not, in that sqlite file
+  // (lib/launch-log.mjs), kept LAUNCH_LOG_HOURS; measurement for the Discover trending gate. Off when empty.
+  const launchLog = get("LAUNCH_LOG", "") ? { file: get("LAUNCH_LOG", ""), keepHours: num("LAUNCH_LOG_HOURS", 72, { min: 1 }) } : null;
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
   const jupApiKey = get("JUP_API_KEY", "");
@@ -239,5 +242,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, launchLog, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
 }

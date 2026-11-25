@@ -110,7 +110,7 @@ export class Indexer {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
       livePools: true, mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
-    this.live = null; this.livePools = null; this.timers = []; this.stopped = false;
+    this.live = null; this.livePools = null; this.launchLog = opts.launchLog ?? null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
     this.hot = new Set(); this.cursor = 0; this.cursorRestored = false; this.pricingCursor = 0; this.refreshing = false;
@@ -167,7 +167,7 @@ export class Indexer {
   }
   stop() { this.stopped = true; this.live?.stop(); this.livePools?.stop(); for (const t of this.timers) clearInterval(t); }
 
-  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null }; }
+  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null, launchLog: this.launchLog?.snapshot() ?? null }; }
 
   // ---------------------------------------------------------------- map stream (DESIGN §11.5)
   /**
@@ -906,8 +906,13 @@ export class Indexer {
     events.forEach(({ name, data, program, ix }, idx) => {
       if (!accept.has(program)) return;
       try {
-        if (name === "CreateEvent") this.#onCreate(decodeEvent(name, data), slot);
-        else if (name === "TradeEvent") { if (this.model.coins.has(peekMint(data))) this.#onTrade(decodeEvent(name, data), signature, slot, idx); }
+        // LAUNCH_LOG (lib/launch-log.mjs): every curve launch and trade, tracked or not, decoded once for both uses.
+        const ll = this.launchLog && accept === LIVE_EVENT_PROGRAMS ? this.launchLog : null;
+        if (name === "CreateEvent") { const e = decodeEvent(name, data); ll?.create(e, slot); this.#onCreate(e, slot); }
+        else if (name === "TradeEvent") {
+          const tracked = this.model.coins.has(peekMint(data));
+          if (tracked || ll) { const e = decodeEvent(name, data); ll?.trade(e, signature, slot, idx); if (tracked) this.#onTrade(e, signature, slot, idx); }
+        }
         else if (name === "CompleteEvent") { const e = decodeEvent(name, data); if (this.model.coins.has(e.mint)) this.#onComplete(e); }
         else if (name === "BuyEvent" || name === "SellEvent") {
           // Most of pump-amm's trades are pools of coins outside the tree: the pool's key is read in place, the event decoded only for ours.
