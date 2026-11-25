@@ -151,6 +151,14 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // LAUNCH_LOG=<file>: record every curve launch and trade the live stream delivers, tracked or not, in that sqlite file
   // (lib/launch-log.mjs), kept LAUNCH_LOG_HOURS; measurement for the Discover trending gate. Off when empty.
   const launchLog = get("LAUNCH_LOG", "") ? { file: get("LAUNCH_LOG", ""), keepHours: num("LAUNCH_LOG_HOURS", 72, { min: 1 }) } : null;
+  // TREND_GATE=off|shadow|on (lib/trend-gate.mjs, default off): watch the plain SOL launches the indexer drops and pass
+  // those whose first minutes drew real buyers. "shadow" records each pass (table trend_gate) and changes nothing; "on"
+  // also inserts the launch into the tree (Discover and trending show it; the map does not until it has a child), at most
+  // TREND_GATE_PER_HOUR an hour. The thresholds: TREND_GATE_BUYERS counted buyers and TREND_GATE_SOL capped SOL inflow
+  // within TREND_GATE_WINDOW_S of the create; buyers whose first buy is in the create slot or the next TREND_GATE_EARLY_SLOTS
+  // slots, or in the first TREND_GATE_EARLY_S seconds, are not counted.
+  const trendGate = { mode: oneOf("TREND_GATE", "off", ["off", "shadow", "on"]), perHour: num("TREND_GATE_PER_HOUR", 60, { min: 1, max: 10_000, integer: true }),
+    cfg: { minCounted: num("TREND_GATE_BUYERS", 12, { min: 1, max: 1000, integer: true }), minInflowSol: num("TREND_GATE_SOL", 3, { min: 0, max: 10_000 }), windowS: num("TREND_GATE_WINDOW_S", 600, { min: 30, max: 3600, integer: true }), earlyAfterS: num("TREND_GATE_EARLY_S", 0, { min: 0, max: 600, integer: true }), earlySlots: num("TREND_GATE_EARLY_SLOTS", 3, { min: 0, max: 150, integer: true }) } };
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
   const jupApiKey = get("JUP_API_KEY", "");
@@ -247,5 +255,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
 }

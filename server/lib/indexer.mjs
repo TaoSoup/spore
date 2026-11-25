@@ -5,6 +5,7 @@
 //   live      CreateEvent / TradeEvent / CompleteEvent (+ pump-amm Buy/SellEvent for graduated coins)
 //   refresh   hot coins every tick, the whole set on a rolling schedule, SOL price every minute
 // All RPC traffic shares one budget (rpc.mjs), so the backfill never starves the live path.
+import { TrendGate } from "./trend-gate.mjs";
 import { USDC_MINT, PUMP_SDK, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, GLOBAL_PDA, QUOTE_CONTROL_PDA, PublicKey, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT,
   bondingCurvePda, canonicalPumpPoolPdaWithQuote, normalizeQuoteMint, feeSharingConfigPda, metaplexPda, pk, b58 } from "./sdk.mjs";
 import { BONDING_CURVE_DISCRIMINATOR, decodeCurve, decodeEvent, decodeMint, decodeMetaplex, decodePool, decodeShares, decodeTokenAccount, eventsInLogs, plain } from "./decode.mjs";
@@ -110,7 +111,13 @@ export class Indexer {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
     this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, wsHelius: null, createdAtProbe: true,
       livePools: true, mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
-    this.live = null; this.livePools = null; this.launchLog = opts.launchLog ?? null; this.timers = []; this.stopped = false;
+    this.live = null; this.livePools = null; this.launchLog = opts.launchLog ?? null; this.timers = [];
+    // TREND_GATE (lib/trend-gate.mjs): plain SOL launches onCreate drops are watched for their first minutes; a pass is
+    // recorded (table trend_gate) and, with mode "on", the launch is inserted into the tree with the trades it drew.
+    const tg = opts.trendGate ?? null;
+    this.gateMode = tg?.mode === "on" || tg?.mode === "shadow" ? tg.mode : "off";
+    this.gatePerHour = tg?.perHour ?? 60; this.gatePromoted = [];
+    this.gate = this.gateMode === "off" ? null : new TrendGate({ cfg: tg?.cfg ?? {}, onPass: (c, why) => this.#gatePass(c, why) }); this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
     this.hot = new Set(); this.cursor = 0; this.cursorRestored = false; this.pricingCursor = 0; this.refreshing = false;
@@ -156,6 +163,7 @@ export class Indexer {
     if (wh) this.timers.push(setInterval(() => { try { const m = this.model.db?.kvGet?.("wsMetered", null); this.model.db?.kvSet?.("wsMetered", { since: m?.since ?? Date.now(), bytes: this.live.meteredBytes, at: Date.now() }); } catch (e) { this.log.warn(`wsMetered: ${e.message}`); } }, 60_000));
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
+    if (this.gate) this.timers.push(setInterval(() => this.gate.sweep(), 60_000));
     this.refreshQuoteUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshQuoteUsd().catch(() => {}), QUOTE_USD_MS));
     this.backfillPoolVq().then(() => this.refreshPricingPools()).catch(() => {}); // pool virtual quotes never read, then every pool that prices other coins (biggest families first)
@@ -171,7 +179,7 @@ export class Indexer {
   }
   stop() { this.stopped = true; this.live?.stop(); this.livePools?.stop(); for (const t of this.timers) clearInterval(t); }
 
-  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null, launchLog: this.launchLog?.snapshot() ?? null }; }
+  snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null, launchLog: this.launchLog?.snapshot() ?? null, trendGate: this.gate ? { mode: this.gateMode, perHour: this.gatePerHour, promotedLastHour: this.gatePromoted.filter((t) => nowS() - t <= 3600).length, ...this.gate.snapshot() } : null }; }
 
   // ---------------------------------------------------------------- map stream (DESIGN §11.5)
   /**
@@ -914,8 +922,14 @@ export class Indexer {
         const ll = this.launchLog && accept === LIVE_EVENT_PROGRAMS ? this.launchLog : null;
         if (name === "CreateEvent") { const e = decodeEvent(name, data); ll?.create(e, slot); this.#onCreate(e, slot); }
         else if (name === "TradeEvent") {
-          const tracked = this.model.coins.has(peekMint(data));
-          if (tracked || ll) { const e = decodeEvent(name, data); ll?.trade(e, signature, slot, idx); if (tracked) this.#onTrade(e, signature, slot, idx); }
+          // a coin held only as a cached look-up (untracked) still stores its trades as before, and stays watched by the gate
+          const mint = peekMint(data), known = this.model.coins.has(mint), watched = !!this.gate?.has(mint) && !this.model.get(mint)?.tracked;
+          if (known || ll || watched) {
+            const e = decodeEvent(name, data);
+            ll?.trade(e, signature, slot, idx);
+            if (known) this.#onTrade(e, signature, slot, idx);
+            if (watched && accept === LIVE_EVENT_PROGRAMS) this.gate.trade(e, signature, slot, idx);
+          }
         }
         else if (name === "CompleteEvent") { const e = decodeEvent(name, data); if (this.model.coins.has(e.mint)) this.#onComplete(e); }
         else if (name === "BuyEvent" || name === "SellEvent") {
@@ -938,7 +952,7 @@ export class Indexer {
    */
   onCreate(e, slot) {
     const assetQuoted = e.depth < 1 && !!e.quoteMint && e.quoteMint !== SOL_MINT;
-    if (e.depth < 1 && !assetQuoted) return;
+    if (e.depth < 1 && !assetQuoted) { this.gate?.create(e, slot); return; }
     this.#insertCreate(e, slot);
     // The map hears about the pair at once when the parent is already tracked (both modes), and
     // after the parent chain is pulled otherwise (announcePair dedupes the second try).
@@ -948,6 +962,43 @@ export class Indexer {
     const emit = () => { const c = this.model.get(e.mint); if (c && (this.model.mode === "all" || this.model.isOurCoin(c))) this.hub?.emit("coin", this.model.view(c, { all: true })); this.announcePair(e.mint); };
     this.#enrich(e.mint, e.quoteMint).catch((x) => this.log.warn(`create ${e.mint}: ${x.message}`)).finally(emit);
     this.log.info(`live: spawn ${e.symbol} (${e.mint}) depth ${e.depth} under ${e.quoteMint ?? "SOL"}`);
+  }
+  /**
+   * A launch the trending gate passed (lib/trend-gate.mjs): recorded in trend_gate with what it measured and its market
+   * cap at the pass; with mode "on" and under the hourly cap it is inserted from its CreateEvent and the trades the gate
+   * kept are stored in order. They are stored as read-back rows (model.storeFilled: the coin rows count them, no SSE, no
+   * wake-up, no attention bucket), each after its own reserves, so its price is right; live trades from here on take the
+   * normal path. A childless root stays off the map (roots need children) and shows in trending and on Discover.
+   */
+  #gatePass(c, why) {
+    const last = c.last ?? null, sol = this.model.solUsd;
+    const mcapUsd = last && sol && Number(last.virtualTokenReserves) > 0 ? (Number(last.virtualQuoteReserves) / 1e9) / (Number(last.virtualTokenReserves) / 1e6) * 1e9 * sol : null;
+    const nowS0 = nowS();
+    while (this.gatePromoted.length && nowS0 - this.gatePromoted[0] > 3600) this.gatePromoted.shift();
+    const outcome = this.gateMode !== "on" ? "shadow" : this.gatePromoted.length >= this.gatePerHour ? "capped" : "promoted";
+    try { this.model.db.trendGatePut({ mint: c.mint, at: why.at, createdAt: c.t, outcome, symbol: c.create.symbol || null, name: c.create.name || null, mcapUsd: mcapUsd != null ? Math.round(mcapUsd) : null, why }); }
+    catch (x) { this.log.warn(`trend gate: record ${c.mint}: ${x.message}`); }
+    this.log.info(`trend gate: ${outcome} ${c.create.symbol ?? "?"} (${c.mint}) ${why.counted} counted buyers, ${why.inflowSol} SOL in ${why.secs} s${mcapUsd ? `, $${Math.round(mcapUsd / 1000)}k` : ""}`);
+    if (outcome !== "promoted") return;
+    this.gatePromoted.push(nowS0);
+    try { this.#promote(c); } catch (x) { this.log.warn(`trend gate: promote ${c.mint}: ${x.message}`); }
+  }
+  #promote(c) {
+    if (this.model.get(c.mint)?.tracked) return;
+    this.#insertCreate(c.create, c.slot);
+    // stream order is chain order; a stable sort on the slot alone keeps it (idx restarts in every transaction)
+    const trades = [...c.trades].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+    const replay = () => { for (const { e, sig, slot, idx } of trades) {
+      const coin = this.model.upsertCoin({ mint: e.mint, virtualQuoteReserves: e.virtualQuoteReserves, virtualTokenReserves: e.virtualTokenReserves, realQuoteReserves: e.realQuoteReserves, realTokenReserves: e.realTokenReserves });
+      const t = tradeOfEvent(this.model, coin, "TradeEvent", e, { sig, slot: slot ?? 0, idx, time: e.timestamp || nowS() });
+      const d = this.model.priceOf(coin.mint), quoteUsd = this.#quoteUsd(coin);
+      this.model.storeFilled({ ...t, mint: coin.mint, priceUsd: d?.priceUsd ?? null, valueUsd: quoteUsd != null ? units(t.quoteAmount, this.model.quoteDecimals(coin)) * quoteUsd : null });
+    } };
+    // one transaction for the whole replay (up to maxTrades rows and coin writes), not one commit per row
+    if (typeof this.model.db?.transaction === "function") this.model.db.transaction(replay); else replay();
+    this.hot.add(c.mint);
+    const v = this.model.get(c.mint);
+    if (v && this.model.mode === "all") this.hub?.emit("coin", this.model.view(v, { all: true }));
   }
   /** The coin a CreateEvent describes, straight into the tree (no RPC): curve state at creation, mint data, metadata queued. */
   #insertCreate(e, slot, extra = {}) {

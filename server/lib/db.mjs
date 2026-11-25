@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS x_posts (
   fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, recheck_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
+-- The trending gate (lib/trend-gate.mjs): every launch it passed, in shadow mode too, with what it measured (why: JSON)
+-- and what was done: "shadow" (only recorded), "promoted" (inserted into the tree) or "capped" (over the hourly cap).
+CREATE TABLE IF NOT EXISTS trend_gate (mint TEXT PRIMARY KEY, at INTEGER NOT NULL, created_at INTEGER, outcome TEXT NOT NULL, symbol TEXT, name TEXT, mcap_usd REAL, why TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
@@ -362,6 +365,8 @@ export class Db {
       lastPriceUsd: p("SELECT price_usd FROM trades WHERE mint = ? AND price_usd > 0 ORDER BY time DESC LIMIT 1"),
       launchFlowGet: p("SELECT bought, sold, created_at, sniped FROM launch_flow WHERE mint = ?"),
       sniperFlow: p("SELECT COALESCE(SUM(CAST(base_amount AS REAL)), 0) AS amt FROM trades WHERE mint = ?1 AND time >= ?2 AND time <= ?3 AND is_buy = 1 AND user != ?4 AND (time <= ?5 OR slot = ?6)"),
+      trendGatePut: p("INSERT OR IGNORE INTO trend_gate (mint, at, created_at, outcome, symbol, name, mcap_usd, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
+      trendGateRecent: p("SELECT mint, at, created_at, outcome, symbol, name, mcap_usd, why FROM trend_gate WHERE at >= ? ORDER BY at DESC LIMIT ?"),
       // The first whole record wins: a late print in a coin's window seen after it was written must not replace it.
       launchFlowPut: p("INSERT OR IGNORE INTO launch_flow (mint, bought, sold, created_at, sniped) VALUES (?, ?, ?, ?, ?)"),
       vol24: p("SELECT COUNT(*) AS n, COALESCE(SUM(value_usd), 0) AS usd FROM trades WHERE mint = ? AND time >= ?"),
@@ -615,6 +620,10 @@ export class Db {
   lastPriceUsd(mint) { return this.q.lastPriceUsd.get(mint)?.price_usd ?? null; }
   /** A coin's launch-window creator flow `{ bought, sold, createdAt, sniped }` (lib/wakeups.mjs; `sniped` null when not recorded), or null. */
   launchFlowGet(mint) { const r = this.q.launchFlowGet.get(mint); return r ? { bought: r.bought, sold: r.sold, createdAt: r.created_at, sniped: r.sniped ?? null } : null; }
+  /** One pass of the trending gate (lib/trend-gate.mjs); false when the mint was already recorded. */
+  trendGatePut({ mint, at, createdAt = null, outcome, symbol = null, name = null, mcapUsd = null, why }) { return Number(this.q.trendGatePut.run(mint, at, createdAt, outcome, symbol, name, mcapUsd, JSON.stringify(why ?? {})).changes) > 0; }
+  /** The gate's passes since `since` (unix s), newest first. */
+  trendGateRecent(since, limit = 200) { return this.q.trendGateRecent.all(since, limit).map((x) => ({ mint: x.mint, at: x.at, createdAt: x.created_at, outcome: x.outcome, symbol: x.symbol, name: x.name, mcapUsd: x.mcap_usd, why: JSON.parse(x.why) })); }
   /** Writes it unless the coin has one; returns whether it was written. */
   launchFlowPut(mint, bought, sold, createdAt, sniped = null) { return Number(this.q.launchFlowPut.run(mint, bought, sold, createdAt, sniped).changes) > 0; }
   /**

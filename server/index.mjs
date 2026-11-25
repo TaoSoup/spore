@@ -72,8 +72,9 @@ const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.img
 model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
 const launchLog = cfg.launchLog ? new LaunchLog({ ...cfg.launchLog, log }) : null;
+if (cfg.trendGate.mode !== "off") log.info(`trend gate: ${cfg.trendGate.mode} (${cfg.trendGate.cfg.minCounted} counted buyers + ${cfg.trendGate.cfg.minInflowSol} SOL in ${cfg.trendGate.cfg.windowS} s, first ${cfg.trendGate.cfg.earlyAfterS} s not counted${cfg.trendGate.mode === "on" ? `, at most ${cfg.trendGate.perHour} promoted an hour` : ""})`);
 if (launchLog) log.info(`launch log: every curve launch and trade → ${cfg.launchLog.file} (kept ${cfg.launchLog.keepHours} h)`);
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog } });
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog, trendGate: cfg.trendGate } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });
