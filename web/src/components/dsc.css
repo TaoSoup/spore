@@ -10,6 +10,7 @@
 .dsc-top-text { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; }
 .dsc-top h1 { font-size: var(--fs-xl); line-height: 1.2; }
 .dsc-sub { font-size: var(--fs-base); color: var(--muted); }
+.dsc-top-r { display: inline-flex; align-items: center; gap: 16px; flex: none; }
 .dsc-alert { flex: none; }
 .dsc-alert svg { flex: none; }
 .dsc-alert:disabled { opacity: 1; color: var(--muted); cursor: default; }

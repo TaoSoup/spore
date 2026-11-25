@@ -1,0 +1,61 @@
+/* The story timeline (pages/Timeline.tsx). Every class here starts with "tl-"; the page, bar, pills, links and notes are
+   Discover's own (dsc.css). One row style; one neutral colour for the charts, the accent only for the story ticks.
+   Grids use minmax(0, 1fr) tracks, so a long post or title is cut with an ellipsis and never widens the page. */
+.tl-days { flex-wrap: wrap; }
+.tl-select { height: 30px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-sunken); color: var(--ink-2); font-size: var(--fs-xs); }
+.tl-ctl-label { font-size: var(--fs-xs); color: var(--muted); }
+.tl-skel { padding: 24px 16px; font-size: var(--fs-sm); color: var(--muted); }
+.tl-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s5); min-width: 0; transition: opacity var(--dur-2); }
+.tl-body.stale { opacity: .6; }
+.tl-count { margin: 0; font-size: var(--fs-sm); color: var(--muted); }
+.tl-count b { color: var(--ink); font-weight: 600; }
+
+/* the band: the site's buyers per 5 min, with a tick where each story started */
+.tl-band { display: grid; gap: 6px; min-width: 0; padding: 12px 14px 8px; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); }
+.tl-band-head { display: flex; justify-content: space-between; gap: 12px; font-size: var(--fs-xs); color: var(--muted); min-width: 0; }
+.tl-band-read { font-family: var(--mono); color: var(--ink-2); white-space: nowrap; }
+.tl-band-box { position: relative; min-width: 0; }
+.tl-band-box svg { display: block; overflow: visible; touch-action: pan-y; }
+.tl-band-area { fill: rgba(255,255,255,.07); stroke: rgba(255,255,255,.28); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.tl-band-mark { stroke: var(--accent); stroke-opacity: .7; stroke-width: 1.5; }
+.tl-band-hot { stroke: var(--ink-2); stroke-opacity: .5; stroke-width: 1; stroke-dasharray: 2 3; }
+.tl-band-links { position: absolute; inset: 0; pointer-events: none; }
+.tl-band-links a { position: absolute; bottom: 0; width: 9px; height: 55%; margin-left: -4px; pointer-events: auto; }
+.tl-band-axis { position: relative; height: 14px; font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
+.tl-band-axis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+
+/* an hour's stories */
+.tl-hour { display: grid; gap: 8px; min-width: 0; }
+.tl-hour-h { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--ink-2); font-family: var(--mono); }
+.tl-hour-h span { font-family: inherit; font-weight: 400; font-size: var(--fs-xs); color: var(--muted); }
+.tl-list { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; list-style: none; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); }
+.tl-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 96px 92px 120px; align-items: center; gap: 14px; min-width: 0; padding: 10px 14px; scroll-margin-top: 90px; }
+.tl-row + .tl-row { border-top: 1px solid var(--line-soft); }
+.tl-row:target { background: var(--accent-soft); }
+.tl-time { font-family: var(--mono); font-size: var(--fs-sm); color: var(--ink-2); }
+.tl-main { display: grid; gap: 3px; min-width: 0; }
+.tl-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tl-kind { flex: none; }
+.tl-kind.k-post { color: var(--ink-2); }
+.tl-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-base); color: var(--ink); }
+.tl-sub { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: var(--fs-xs); color: var(--muted); min-width: 0; }
+.tl-sub .dsc-link { font-size: var(--fs-xs); }
+.tl-spark { display: block; }
+.tl-spark path { fill: none; stroke: rgba(255,255,255,.55); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.tl-peak { display: grid; justify-items: end; line-height: 1.15; }
+.tl-peak b { font-size: var(--fs-lg); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.tl-peak span { font-size: var(--fs-2xs); color: var(--muted); white-space: nowrap; }
+.tl-lead { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: var(--fs-sm); color: var(--ink-2); text-decoration: none; }
+.tl-lead span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-lead:hover span, .tl-lead:focus-visible span { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+
+/* phone: time and title on top, the numbers on one line under them */
+@media (max-width: 680px) {
+  .tl-row { grid-template-columns: 44px minmax(0, 1fr) auto; grid-template-areas: "time main main" ". spark peak" ". lead lead"; gap: 6px 10px; }
+  .tl-time { grid-area: time; }
+  .tl-main { grid-area: main; }
+  .tl-spark { grid-area: spark; }
+  .tl-peak { grid-area: peak; }
+  .tl-lead { grid-area: lead; }
+  .tl-lead.none { display: none; }
+}

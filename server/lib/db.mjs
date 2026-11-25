@@ -502,6 +502,12 @@ export class Db {
       storyTrim: p("DELETE FROM story_buckets WHERE (story_key, t) IN (SELECT story_key, t FROM story_buckets WHERE t < ? ORDER BY +story_key LIMIT ?)"),
       storyMinT: p("SELECT MIN(t) AS m FROM story_buckets"),
       storyStartGet: p("SELECT start_at, source, first_buyers_at FROM story_starts WHERE story_key = ?"),
+      // the story timeline (lib/timeline.mjs): every story's buckets in a window (the t index), and the starts of a list of keys
+      // the story timeline (lib/timeline.mjs): one grouped pass over the window (the t index) for each story's peak and first
+      // bucket, then the window's rows of the listed stories only (the primary key, one range per story)
+      timelinePeaks: p("SELECT story_key, max(buyers) AS peak, min(t) AS first_t FROM story_buckets WHERE t >= ?1 AND t < ?2 AND story_key <> '*' AND substr(story_key, 1, 2) NOT IN ('t:', 'g:') GROUP BY story_key"),
+      timelineRowsOf: p("SELECT b.story_key, b.t, b.buyers, b.buy_usd, b.launches, b.leader_mint, b.leader_buyers, b.coins FROM json_each(?3) k JOIN story_buckets b ON b.story_key = k.value AND b.t >= ?1 AND b.t < ?2"),
+      timelineStarts: p("SELECT story_key, start_at, source FROM story_starts WHERE story_key IN (SELECT value FROM json_each(?))"),
       storyStartPut: p(`INSERT INTO story_starts (story_key, start_at, source, first_buyers_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(story_key) DO UPDATE SET start_at = excluded.start_at, source = excluded.source, updated_at = excluded.updated_at`),
       calibPut: p(`INSERT OR IGNORE INTO calib (story_key, t, phase, multiple, buyers5m, hour_buyers, leader_mint, leader_price_usd, story_buy_usd)
@@ -877,6 +883,12 @@ export class Db {
     if (m == null || m >= beforeT) return 0;
     return Number(this.q.storyTrim.run(Math.min(beforeT, m + 3600), limit).changes);
   }
+  /** The story timeline's grouped pass: `[{ key, peak, firstT }]` per story with buckets in `from <= t < to`, site row and t:/g: filings left out. */
+  timelinePeaks(from, to) { return this.q.timelinePeaks.all(from, to).map((r) => ({ key: r.story_key, peak: r.peak, firstT: r.first_t })); }
+  /** The window's rows of the stories `keys`: `[{ key, t, buyers, buyUsd, launches, leaderMint, leaderBuyers, coins }]`. */
+  timelineRowsOf(keys, from, to) { return keys.length ? this.q.timelineRowsOf.all(from, to, JSON.stringify(keys)).map((r) => ({ key: r.story_key, t: r.t, buyers: r.buyers, buyUsd: r.buy_usd, launches: r.launches, leaderMint: r.leader_mint, leaderBuyers: r.leader_buyers, coins: r.coins })) : []; }
+  /** Map key to `{ startAt, source }` for the stored starts of `keys`. */
+  timelineStarts(keys) { const m = new Map(); if (keys.length) for (const r of this.q.timelineStarts.all(JSON.stringify(keys))) m.set(r.story_key, { startAt: r.start_at, source: r.source }); return m; }
   storyStartGet(key) { const r = this.q.storyStartGet.get(key); return r ? { startAt: r.start_at, source: r.source, firstBuyersAt: r.first_buyers_at } : null; }
   /** Writes story starts (`[{ key, startAt, source, firstBuyersAt }]`) in one transaction: a new row, or a moved `startAt` (first_buyers_at never changes). */
   storyStartsPut(rows, at) { if (rows.length) this.transaction(() => { for (const r of rows) this.q.storyStartPut.run(r.key, r.startAt, r.source, r.firstBuyersAt, at); }); }

@@ -32,7 +32,9 @@ import { AgentLedger } from "./agents-live/ledger.mjs";
 import { createBriefStore } from "./agents/brief.mjs";
 import { readBudget } from "./agents-live/budget.mjs";
 import { ogTags, injectOg, cardMintFor } from "./og.mjs";
-import { parsePost } from "./narrative.mjs";
+import { parsePost, postUrl } from "./narrative.mjs";
+import { buildTimeline, timelineQuery } from "./timeline.mjs";
+import { imageProxyUrl } from "./meta.mjs";
 import { createPortfolio } from "./portfolio.mjs";
 import { PnlTracker, ACTIVITY_MAX, sinceOf } from "./pnl-tracker.mjs";
 import { buildCandles, buildCandlesKeyed, pageNext, HIST_BUCKETS } from "./candles.mjs";
@@ -739,6 +741,47 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     const att = model.attention;
     if (!att) return res.status(404).json({ error: "no story series on this server" });
     sendCachedJson(req, res, att.seriesOf(key, since), { cacheControl: "public, max-age=30" });
+  });
+
+  // The story timeline (README §API, lib/timeline.mjs): every story the 5-minute series stored in a window of up to a day
+  // (`from`, `to`: unix s; default the last 24 h, a lone `from` the 24 h after it), newest start first, listed when its busiest
+  // 5 minutes had `min` (5, 20 or 100; default 20) buyers, with the site's buyers per 5 min. One grouped pass per window,
+  // rows of the listed stories only, cached TIMELINE_TTL_MS (64 windows), header the same.
+  const timelineCache = new Map(), TIMELINE_TTL_MS = 60_000, timelineBuilds = [], TIMELINE_BUILDS = 6;
+  app.get("/api/timeline", (req, res) => {
+    const nowS = Math.floor(Date.now() / 1000), q = timelineQuery(req.query, nowS);
+    if (q.error) return res.status(400).json({ error: q.error });
+    const ck = `${q.from}|${q.to}|${q.min}`, hit = timelineCache.get(ck);
+    if (hit && Date.now() - hit.at < TIMELINE_TTL_MS) return sendCachedJson(req, res, hit.body, { cacheControl: "public, max-age=60" });
+    // a cache miss reads ~50-70 ms on this loop: at most TIMELINE_BUILDS of them per 10 s for everyone, the rest wait
+    const tNow = Date.now();
+    while (timelineBuilds.length && tNow - timelineBuilds[0] > 10_000) timelineBuilds.shift();
+    if (timelineBuilds.length >= TIMELINE_BUILDS) { res.set("Retry-After", "10"); return res.status(429).json({ error: "the story history is busy; try again in a few seconds" }); }
+    timelineBuilds.push(tNow);
+    const db = model.db;
+    let peaks = [], siteRows = [];
+    try { peaks = db.timelinePeaks(q.from, q.to); siteRows = db.storyRows("*", q.from, 400).filter((r) => r.t < q.to); }
+    catch (e) { log.warn(`timeline: ${e.message}`); return res.status(503).json({ error: "the story history could not be read just now" }); }
+    const starts = (keys) => { try { return db.timelineStarts(keys); } catch { return new Map(); } };
+    const rowsOf = (keys) => { try { return db.timelineRowsOf(keys, q.from, q.to); } catch (e) { log.warn(`timeline rows: ${e.message}`); return []; } };
+    const posts = model.wakeups?.narrative?.posts ?? null;
+    const describe = (key) => {
+      const p = parseStoryKey(key);
+      if (p?.kind === "narrative") { const n = db.narrGet(p.id); return { kind: "narrative", title: n?.title ?? "A tagged story", theme: n?.theme ?? null }; }
+      if (p?.kind === "post") {
+        let r = null; try { r = posts?.peek?.(p.id) ?? null; } catch { r = null; }
+        // only a stored, readable, unflagged post is quoted (the stories cards' rule)
+        if (r && r.state === "ok" && r.handle && !r.flagged) return { kind: "post", title: String(r.text ?? "").slice(0, 280), handle: r.handle, url: postUrl(p.id) };
+        return { kind: "post", title: "An X post", handle: null, url: null };
+      }
+      if (p?.kind === "family") { const { name, symbol } = model.nameOf(key); return { kind: "family", title: symbol ? `$${symbol} family` : name ? `${name} family` : "A family", mint: key }; }
+      return { kind: "unknown", title: key };
+    };
+    const coinOf = (mint) => { const { name, symbol } = model.nameOf(mint); return { mint, symbol, name, image: imageProxyUrl(model.metaFor({ mint })?.image ?? null) }; };
+    const body = buildTimeline({ peaks, starts, rowsOf, siteRows, from: q.from, to: q.to, min: q.min, asOf: nowS, describe, coinOf });
+    timelineCache.set(ck, { at: Date.now(), body });
+    while (timelineCache.size > 64) timelineCache.delete(timelineCache.keys().next().value);
+    sendCachedJson(req, res, body, { cacheControl: "public, max-age=60" });
   });
 
   // An exact mint that the index does not know (any pump.fun coin: the parent picker and the search

@@ -653,7 +653,10 @@ export default function Discover() {
           <h1>Discover</h1>
           <p className="dsc-sub">{STORIES_SUB}</p>
         </div>
-        <AlertButton />
+        <span className="dsc-top-r">
+          <Link to="/timeline" className="dsc-link" title="Every story Spore recorded, by when it started">Story timeline</Link>
+          <AlertButton />
+        </span>
       </header>
       <div className="dsc-bar">
         <div className="dsc-bar-l">

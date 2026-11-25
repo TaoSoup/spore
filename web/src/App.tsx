@@ -38,6 +38,7 @@ import "./components/brand.css";
 
 // Discover is its own chunk: the page and its styles load when it is first opened.
 const Discover = lazy(() => import("./pages/Discover"));
+const Timeline = lazy(() => import("./pages/Timeline"));
 
 /// A page that fails to render says so in plain words, inside the shell, instead of blanking the site.
 class RouteBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -348,6 +349,7 @@ function Shell() {
             <Route path="/fees" element={<Fees />} />
             <Route path="/claim" element={<Claim />} />
             <Route path="/discover" element={<Suspense fallback={<div className="container" aria-busy="true" />}><Discover /></Suspense>} />
+            <Route path="/timeline" element={<Suspense fallback={<div className="container" aria-busy="true" />}><Timeline /></Suspense>} />
             <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/docs/api" element={<ApiDocs />} />
             <Route path="/agents" element={<Agents />} />

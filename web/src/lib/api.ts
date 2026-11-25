@@ -373,6 +373,13 @@ export type StoryAttention = {
 /// first, with its start and normal (`baseline.ratio`: its median share of site buyers; `ready`: enough history for a
 /// multiple to mean something). `partial`: the bucket the server started in.
 export type StoryBucket = { t: number; buyers: number; siteBuyers: number; launchesFast: number; launches: number; buyUsd: number; partial: boolean };
+/// GET /api/timeline (server lib/timeline.mjs): the stories the 5-minute series stored in a window, newest start first.
+export type TimelineStory = {
+  key: string; kind: "narrative" | "post" | "family" | "unknown"; title: string; theme?: string | null; handle?: string | null; url?: string | null; mint?: string;
+  startAt: number; startSource: string; carried: boolean; firstT: number; lastT: number; peak: number; peakT: number; buyUsd: number; launches: number; coins: number;
+  leader: { mint: string; symbol: string | null; name: string | null; image: string | null } | null; series: number[];
+};
+export type Timeline = { from: number; to: number; asOf: number; bucketS: number; min: number; site: { t: number; buyers: number }[]; stories: TimelineStory[]; listed: number; hidden: number; more: number };
 export type StorySeries = {
   key: string; asOf: number; bucketS: number; startAt: number | null; startSource: "post" | "wake" | "buyers" | null; firstBuyersAt: number | null;
   baseline: { ratio: number; buckets: number; ready: boolean } | null; buckets: StoryBucket[];
@@ -556,6 +563,7 @@ export const api = {
   stories: (tf?: Tf) => request<Stories>(`/stories${qs({ tf })}`),
   /// One story's 5-minute series (a card's `key`; the colon of "n:<id>" is encoded).
   storySeries: (key: string, since?: number) => request<StorySeries>(`/story-series/${encodeURIComponent(key)}${qs({ since })}`),
+  timeline: (from: number, to: number, min: number) => request<Timeline>(`/timeline${qs({ from, to, min })}`),
   /// Whether this server routes swaps through Jupiter (lib/jup.ts); 404 on a server without the route.
   jupStatus: () => request<{ enabled: boolean }>("/jup/status", {}, 10_000),
   /// Jupiter's /build for a swap between SOL and a tracked coin, asked by the server (it paces Jupiter's rate limit).
