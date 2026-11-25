@@ -812,6 +812,12 @@ export class NarrTags {
     const r = this.#rec(mint);
     return r?.id != null ? this.#narr(r.id) : null;
   }
+  /** Whether the tagger has settled `mint` (a tag or a "none" that stands): lib/stories.mjs rule 2d places only coins not read yet. */
+  answered(mint) {
+    if (!this.on) return false;
+    const r = this.#rec(mint);
+    return !!r && this.#settled(r);
+  }
   /** Whether a stored answer settles the coin: tagged, asked with its post, asked twice, or given up within GAVE_UP_S. */
   #settled(r) {
     if (r.model === GAVE_UP) return Math.floor(this.now() / 1000) - (r.at ?? 0) < GAVE_UP_S;

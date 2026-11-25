@@ -19,6 +19,7 @@
 // bought two of them counts twice), copies included; `coinsN` counts every coin of the card, copies included.
 import { PAPER_RATIO, TINY_USD, byMint } from "./rowshared.mjs";
 import { postTime, postUrl } from "./narrative.mjs";
+import { titleFitsName } from "./narrtags.mjs";
 
 /** Cards, loose rows and dust rows a body lists at most. */
 export const CARDS_MAX = 20, LOOSE_MAX = 30, DUST_MAX = 30;
@@ -147,7 +148,7 @@ export function totals(rows) {
  * family card has `narrative`: the one all its coins share, else null. `themes`: `[{ theme, cards }]` of the
  * narrative cards listed, most cards first.
  */
-export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null, keepAll = false } = {}) {
+export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null, keepAll = false, answeredOf = () => false } = {}) {
   const posts = new Map(); // post id → { handle, text } | null, asked once
   const post = (id) => {
     if (id == null) return null;
@@ -157,7 +158,8 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     posts.set(id, p);
     return p;
   };
-  const dust = [], bins = new Map(), loose = [];
+  const dust = [], bins = new Map();
+  let loose = [];
   let dustN = 0;
   // Narrative tags, asked once per row; a tagged row is listed as a copy that carries its narrative.
   const tags = new Map(); // mint → { id, title, theme }
@@ -215,6 +217,35 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       b.fams.set(wake.mint, (b.fams.get(wake.mint) ?? 0) + (row.buyers5m ?? 0));
     } else loose.push(tagged(row));
   }
+  // 2d. By name, with tagging: a loose coin the tagger has not read yet (a coin the trending gate just promoted, say; a
+  // coin it answered "none" for stays loose) joins the one narrative or subject bin whose title names it
+  // (lib/narrtags.mjs titleFitsName, the tagger's own test; a subject is matched by its title and its narratives'
+  // titles). Two or more fits: it stays loose. Added before the cards are built, so its copies fold and the counts take
+  // it like any coin. The row carries `byName: true` and the narrative it fits (a subject's: the narrative whose title
+  // fits, else its first row's); its own tag decides once read.
+  if (tagOf && loose.length && (nbins.size || sbins.size)) {
+    const fits = (title, row) => { try { return typeof title === "string" && titleFitsName(title, { name: row.name, symbol: row.symbol }); } catch { return false; } };
+    const targets = [];
+    for (const [, b] of nbins) { const n = tags.get(b[0].mint); targets.push({ titles: [[n.title, n]], add: (r) => b.push(r) }); }
+    for (const [, b] of sbins) {
+      const own = new Map();
+      for (const r of b.rows) { const t = tags.get(r.mint); if (t && !own.has(t.id)) own.set(t.id, t); }
+      const first = tags.get(b.rows[0].mint);
+      targets.push({ titles: [[b.s.title, first], ...[...own.values()].map((t) => [t.title, t])], add: (r) => b.rows.push(r) });
+    }
+    const keep = [];
+    for (const row of loose) {
+      let answered = true;
+      try { answered = !!row.narrative || !!answeredOf(row); } catch { answered = true; }
+      if (answered) { keep.push(row); continue; }
+      const hits = [];
+      for (const tg of targets) { const m = tg.titles.find(([title]) => fits(title, row)); if (m) hits.push([tg, m[1]]); }
+      if (hits.length !== 1) { keep.push(row); continue; }
+      const [tg, n] = hits[0];
+      tg.add({ ...row, byName: true, narrative: { id: n.id, title: n.title, theme: n.theme } });
+    }
+    loose = keep;
+  }
   const cards = [];
   for (const b of bins.values()) {
     const coins = foldCopies(b.rows), t = totals(coins);
@@ -257,7 +288,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   // (most 5-minute buyers first); `narrative.id` / `theme` are the leading angle's, `newCoins1h` the angles' sum.
   for (const [key, b] of sbins) {
     const per = new Map(); // narrative id → { id, title, buyers5m, coinsN }
-    const coins = foldCopies(b.rows.map((r) => ({ ...r, narrative: tags.get(r.mint), isNew: isNew(r) }))), t = totals(coins);
+    const coins = foldCopies(b.rows.map((r) => ({ ...r, narrative: tags.get(r.mint) ?? r.narrative, isNew: isNew(r) }))), t = totals(coins);
     for (const c of coins) {
       const n = c.narrative, x = per.get(n.id) ?? { id: n.id, title: n.title, theme: n.theme, buyers5m: 0, coinsN: 0 };
       const one = totals([c]);

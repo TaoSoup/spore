@@ -281,3 +281,30 @@ test("subject blocks (rule 2c): narratives of one story subject fold into one ca
   const off = groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags) });
   assert.deepEqual(groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags), subjectOf: () => { throw new Error("x"); } }), off, "a failing subjectOf changes nothing");
 });
+
+test("by name (rule 2d): an untagged loose coin named by exactly one narrative card's title joins it, marked byName; a tagged coin, two fits or no tagging keep it loose", () => {
+  const JS = { id: 31, title: "jensen spy affair", theme: "tech" }, CT = { id: 32, title: "turkey pardon", theme: "news" }, OT = { id: 33, title: "other thing", theme: "news" };
+  const rows = [
+    row("j1", { name: "Jensen Spy", symbol: "JSPY", buyers5m: 50 }), row("j2", { name: "Jensen Affair", symbol: "JAFF", buyers5m: 40 }),
+    row("t1", { name: "Free Turkey", symbol: "TURK", buyers5m: 30 }), row("t2", { name: "Turkey Pardon", symbol: "PARDON", buyers5m: 20 }),
+    row("new", { name: "Jensen Spy Wife", symbol: "WIFE", buyers5m: 15, createdAt: Math.floor(NOW_MS / 1000) - 60 }), // untagged, named by the Jensen story
+    row("both", { name: "Jensen Turkey", symbol: "JT", buyers5m: 12 }), // names both stories: stays loose
+    row("tagd", { name: "Jensen Spy", symbol: "JS2", buyers5m: 11 }), // tagged with another narrative: its tag wins
+    row("plain", { name: "Moon Dog", symbol: "MDOG", buyers5m: 9 }),
+  ];
+  const tags = { j1: JS, j2: JS, t1: CT, t2: CT, tagd: OT };
+  const g = groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags) });
+  const js = g.cards.find((c) => c.key === "n:31");
+  assert.deepEqual(js.coins.map((c) => [c.mint, c.byName === true]), [["j1", false], ["j2", false], ["new", true]]);
+  assert.deepEqual([js.coinsN, js.buyers5m, js.newN], [3, 105, 1]);
+  assert.equal(js.coins[2].narrative.id, 31);
+  assert.deepEqual(g.loose.map((r) => r.mint).sort(), ["both", "plain", "tagd"]);
+  const off = groupStories({ rows, nowMs: NOW_MS });
+  assert.equal(off.cards.length, 0, "no tagging: no narrative cards, nothing placed by name");
+  const none = groupStories({ rows, nowMs: NOW_MS, tagOf: tagsOf(tags), answeredOf: (r) => r.mint === "new" });
+  assert.ok(none.loose.some((r) => r.mint === "new"), "a coin the tagger answered 'none' for stays loose");
+  // a by-name coin with the same ticker and image as a card coin folds under it as a copy
+  const cp = groupStories({ rows: [...rows, row("j1b", { name: "Jensen Spy", symbol: "JSPY", image: "img-j1", buyers5m: 1 })].map((r) => (r.mint === "j1" ? { ...r, image: "img-j1" } : r)), nowMs: NOW_MS, tagOf: tagsOf(tags) });
+  const jc = cp.cards.find((c) => c.key === "n:31");
+  assert.deepEqual(jc.coins.map((c) => [c.mint, (c.copies ?? []).map((x) => x.mint)]), [["j1", ["j1b"]], ["j2", []], ["new", []]]);
+});

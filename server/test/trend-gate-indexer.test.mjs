@@ -92,3 +92,15 @@ test("trend gate in the indexer: a launch already cached by a look-up (untracked
   assert.equal(w.m.get(R3)?.tracked, true);
   w.db.close();
 });
+
+test("trend gate in the indexer: a promoted coin is offered to the narrative tagger at once, at the head of its line", () => {
+  const w = world({ mode: "on", cfg: CFG });
+  const offers = [];
+  w.m.coinRows.narr = { on: true, offer: (m, buyers, o) => offers.push([m, buyers, o?.hot === true]) };
+  const R4 = key(180);
+  feed(w.ix, createEv(R4), (s += 10));
+  for (const u of [key(181), key(182), key(183)]) feed(w.ix, buyEv(u, 0.5, T + 30, R4));
+  assert.deepEqual(offers, [[R4, 3, true]]);
+  w.m.coinRows.narr = null;
+  w.db.close();
+});

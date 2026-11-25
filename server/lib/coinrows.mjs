@@ -608,7 +608,8 @@ export class CoinRows {
     }
     const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id, { queue: !background }), wakes, nowMs: p.at,
       tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined,
-      subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null, keepAll: !!this.storyGate });
+      subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null, keepAll: !!this.storyGate,
+      answeredOf: nt ? (r) => nt.answered(r.mint) : undefined });
     if (this.storyGate) yield* this.#storyGateGen(snap, tf, g);
     // Each card's buyers counted once: the distinct wallets with a $1+ buy in the timeframe (the snapshot's window) over
     // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One

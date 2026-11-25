@@ -984,9 +984,9 @@ export class Indexer {
     this.log.info(`trend gate: ${outcome} ${c.create.symbol ?? "?"} (${c.mint}) ${why.counted} counted buyers, ${why.inflowSol} SOL in ${why.secs} s${mcapUsd ? `, $${Math.round(mcapUsd / 1000)}k` : ""}`);
     if (outcome !== "promoted") return;
     this.gatePromoted.push(nowS0);
-    try { this.#promote(c); } catch (x) { this.log.warn(`trend gate: promote ${c.mint}: ${x.message}`); }
+    try { this.#promote(c, why); } catch (x) { this.log.warn(`trend gate: promote ${c.mint}: ${x.message}`); }
   }
-  #promote(c) {
+  #promote(c, why = null) {
     if (this.model.get(c.mint)?.tracked) return;
     this.#insertCreate(c.create, c.slot);
     // stream order is chain order; a stable sort on the slot alone keeps it (idx restarts in every transaction)
@@ -1000,6 +1000,9 @@ export class Indexer {
     // one transaction for the whole replay (up to maxTrades rows and coin writes), not one commit per row
     if (typeof this.model.db?.transaction === "function") this.model.db.transaction(replay); else replay();
     this.hot.add(c.mint);
+    // the narrative tagger (lib/narrtags.mjs), when the server runs it, reads the coin now, at the head of its line, so it
+    // lands under its story within minutes; until then lib/stories.mjs places it by name (a story title that names it)
+    try { this.model.coinRows?.narr?.offer?.(c.mint, why?.counted ?? 0, { hot: true }); } catch (x) { this.log.warn(`trend gate: tag offer ${c.mint}: ${x.message}`); }
     const v = this.model.get(c.mint);
     if (v && this.model.mode === "all") this.hub?.emit("coin", this.model.view(v, { all: true }));
   }

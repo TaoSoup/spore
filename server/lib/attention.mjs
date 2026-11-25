@@ -825,7 +825,9 @@ export class Attention {
       total += v;
       if (v > bestN || (v > 0 && v === bestN && mint < best.mint)) { best = { mint, symbol: symbol ?? null }; bestN = v; }
     };
-    for (const r of card?.coins ?? []) { each(r.mint, r.symbol); for (const cp of r.copies ?? []) each(cp.mint, r.symbol); }
+    // a coin placed by name (lib/stories.mjs rule 2d) is not in the story's series until its tag files it: left out here
+    // too, so "now" and "last" count the same coins
+    for (const r of card?.coins ?? []) { if (r.byName) continue; each(r.mint, r.symbol); for (const cp of r.copies ?? []) each(cp.mint, r.symbol); }
     const att = S?.att && S.att.k >= nowK - 2 ? S.att : null;
     let start = S?.start ?? (card?.subject ? null : this.starts.get(card?.key)) ?? null;
     if (!start) {

@@ -333,7 +333,9 @@ export type StoryCopy = { mint: string; createdAt: number | null; firstSeenAt: n
 /// lower-case themes. Context only. A row anywhere may carry its `narrative`; a row of a "narrative" card carries
 /// `isNew` (created within the last 60 min; an unknown launch time counts as older).
 export type NarrativeRef = { id: number; title: string; theme: string };
-export type StoryRow = TrendRow & { copies?: StoryCopy[]; narrative?: NarrativeRef | null; isNew?: boolean };
+/// `byName`: the coin has no tag of its own yet and sits under the story because the story's title names it (the server's
+/// rule 2d, lib/stories.mjs); its own tag decides once read.
+export type StoryRow = TrendRow & { copies?: StoryCopy[]; narrative?: NarrativeRef | null; isNew?: boolean; byName?: boolean };
 export type DustReason = "paper" | "tiny";
 export type DustRow = StoryRow & { reason: DustReason };
 export type StoryPost = { id: string; handle: string | null; text: string | null; at: number | null; url: string };
