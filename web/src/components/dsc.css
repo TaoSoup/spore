@@ -285,3 +285,47 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
   .dsc-card, .dsc-coin, .dsc-coin-top b, .dsc-panel, .dsc-story { transition: none; }
   .dsc-v.dsc-flash, .dsc-v.dsc-flash.down { animation: none; }
 }
+
+/* The story header (Hybrid 1, Nov 25): who and when in the accent, the poster's own words (two lines at most), the
+   5-minute buyers big on the right with the story's last 3 hours as a small green shape, one facts line under a hairline.
+   Compact by design: about 110 px on a wide screen, 170 px on a phone. */
+.dsc-story { background: linear-gradient(180deg, rgba(var(--accent-rgb), .045), rgba(var(--accent-rgb), .015)); }
+.dsc-hx { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main att" "facts facts"; column-gap: 20px; min-width: 0; padding: 10px 6px 8px; border-bottom: 1px solid var(--line-soft); }
+.dsc-hx-main { grid-area: main; display: grid; gap: 4px; min-width: 0; align-content: start; }
+.dsc-hx-who { display: flex; align-items: baseline; gap: 10px; min-width: 0; margin: 0; font-size: var(--fs-xs); line-height: 18px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.dsc-hx-who .st-left { flex: none; }
+.dsc-hx-lead { flex: none; font-size: var(--fs-sm); font-weight: 600; color: var(--accent); text-decoration: none; }
+a.dsc-hx-lead:hover, a.dsc-hx-lead:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.dsc-hx-when { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dsc-hx-tag { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-2xs); }
+.dsc-hx-tag i { font-style: normal; font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-right: 6px; }
+.dsc-hx-tag em { font-style: normal; color: var(--ink-2); }
+.dsc-hx-say { margin: 0; font-size: var(--fs-base); line-height: 20px; font-weight: 500; color: var(--ink); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.dsc-hx-att { grid-area: att; align-self: center; display: flex; align-items: center; gap: 12px; }
+.dsc-hx-num { min-width: 64px; text-align: right; }
+.dsc-hx-num b { display: block; font: 600 26px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.dsc-hx-num span { display: block; margin-top: 4px; font-size: 10px; line-height: 10px; color: var(--muted); white-space: nowrap; }
+.dsc-hx-sp { width: 128px; }
+.dsc-hx-sp svg { display: block; width: 100%; height: 34px; }
+.dsc-hx-sp .a { fill: rgba(var(--accent-rgb), .16); stroke: none; }
+.dsc-hx-sp .l { fill: none; stroke: var(--accent); stroke-opacity: .85; stroke-width: 1.5; stroke-linejoin: round; }
+.dsc-hx-sp span { display: flex; justify-content: space-between; margin-top: 3px; font: 10px/10px var(--mono); color: var(--muted); }
+.dsc-hx-sp em { font-style: normal; }
+.dsc-hx-facts { grid-area: facts; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); line-height: 18px; color: var(--muted); min-width: 0; }
+.dsc-hx-facts b { font-family: var(--mono); font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dsc-hx-facts .dsc-gl-lead { color: var(--ink-2); }
+.dsc-hx-x { color: var(--ink-2); }
+.dsc-hx-ang { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.dsc-hx-chart { margin-left: auto; font-size: var(--fs-2xs); }
+@media (max-width: 680px) {
+  .dsc-hx { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "att" "facts"; padding: 10px 4px 8px; }
+  .dsc-hx-th, .dsc-hx-share, .dsc-hx-x.none { display: none; }
+  .dsc-hx-say { font-size: var(--fs-sm); line-height: 19px; }
+  .dsc-hx-att { margin-top: 6px; gap: 14px; }
+  .dsc-hx-num { min-width: 0; text-align: left; flex: none; }
+  .dsc-hx-num b { font-size: 24px; }
+  .dsc-hx-sp { flex: 1; width: auto; min-width: 0; }
+  .dsc-hx-sp svg { height: 22px; }
+  .dsc-hx-sp span { margin-top: 2px; }
+  .dsc-hx-facts { margin-top: 6px; padding-top: 5px; gap: 0 12px; }
+}

@@ -1233,6 +1233,43 @@ export function storyLine(e: Pick<OneEntry, "card" | "coinsN" | "newN"> & Partia
   if (h.kind === "family") return { kind: "family", title: h.line, theme, post: null, text: "", href: null, count: n };
   return { kind: "post", title: [h.who, h.when].filter(Boolean).join(" · "), theme, post: null, text: h.text, href: h.href, count: n };
 }
+/// The lead of a story header (the Hybrid 1 design, Nov 25): who and when first, then what they said.
+/// - a story with a linked post: `lead` "@handle" (a link to the post, `href`), `when` "5 h ago", `say` the poster's own
+///   words with links cut (shown quoted, `quoted`), and for a narrative its title as a small `tag` marked as written by a
+///   language model (`auto`); a subject block's tag is the subject's title (from the server's table, not a model);
+/// - a narrative with no post: no lead; `say` is its title (a model's: `tag.auto`, with the theme);
+/// - a family with no post: `lead` "$SYM family", `when` "waking up · 12 min", nothing said.
+/// Every text is the poster's or the model's, drawn as text, never as markup; the link is rebuilt from the post id.
+export type StoryLead = { lead: string | null; href: string | null; when: string; say: string | null; quoted: boolean; tag: { title: string; theme: string; auto: boolean } | null };
+export const cleanSay = (s: string | null | undefined): string | null => {
+  const t = String(s ?? "").replace(/https?:\/\/\S+/gi, " ").replace(/pic\.twitter\.com\/\S+/gi, " ").replace(/\s+/g, " ").trim();
+  return t ? t : null;
+};
+export function storyLead(c: StoryCard | null, nowS: number, nar = true): StoryLead {
+  const none: StoryLead = { lead: null, href: null, when: "", say: null, quoted: false, tag: null };
+  if (!c) return none;
+  const n = c.kind === "narrative" ? narrativeHead(c, nowS) : null;
+  const ownTag = n ? { title: c.subject ? narrativeTitle(c.subject.title) : n.title, theme: n.theme, auto: !c.subject }
+    : nar && narrativeOf(c) ? { title: narrativeTitle(narrativeOf(c)?.title), theme: themeLabel(narrativeOf(c)?.theme), auto: true } : null;
+  if (c.post) {
+    const h = storyHead(c, nowS);
+    const say = cleanSay(h.text);
+    return { lead: h.who, href: h.href, when: [h.when, h.tail].filter(Boolean).join(" · "), say, quoted: !!say, tag: ownTag };
+  }
+  if (n) return { ...none, say: n.title || null, tag: { title: "", theme: n.theme, auto: !c.subject } };
+  const h = storyHead(c, nowS);
+  return { ...none, lead: h.who, when: h.when, tag: ownTag };
+}
+/// The header sparkline's path in a `w` × `h` box: `line` and the closed `area` under it, scaled to the series' own peak
+/// (a shape, not a scale shared between stories); null for no series or one with no buyer at all.
+export function sparkGeo(ys: readonly number[] | null | undefined, w: number, h: number): { line: string; area: string; peak: number } | null {
+  if (!Array.isArray(ys) || ys.length < 2) return null;
+  const v = ys.map((y) => (typeof y === "number" && Number.isFinite(y) && y > 0 ? y : 0)), peak = Math.max(...v);
+  if (!(peak > 0)) return null;
+  const n = v.length, x = (i: number) => (i / (n - 1)) * w, y = (b: number) => h - 1 - (b / peak) * (h - 3);
+  const line = v.map((b, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(b).toFixed(1)}`).join("");
+  return { line, area: `${line}L${w} ${h}L0 ${h}Z`, peak };
+}
 /// A story block's header, as drawn: `title` on the first line with the theme pill; `total` (the story's buyers over
 /// the timeframe, the sum `oneList` ranks it by) as the bold figure on the right, then `words` ("buyers · 2 coins · 1
 /// new", with countLine's moved / gone). `sub`: the small muted second line: a narrative's "@handle · 6 min ago" (a link

@@ -52,7 +52,7 @@ import {
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
   activeTheme, angleLine, buyLabel, shareOf, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinStory, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
   listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
-  closeShrunk, showMore, storiesView, storyHeader, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
+  closeShrunk, showMore, sparkGeo, storiesView, storyHeader, storyLead, storyMints, storySplit, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
@@ -248,8 +248,8 @@ function Rows({ rows, o, parent }: { rows: readonly StoryShown[]; o: RowOpts; pa
   return <>{rows.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} /></Fragment>)}</>;
 }
 
-/// A theme as a small pill ("AI", "Market crash"); nothing for an unknown theme.
-const ThemePill = ({ theme }: { theme: string }) => (theme ? <span className="dsc-pill sm dsc-st-theme" title="The theme a language model gave this story. It can be wrong."><span className="dsc-vh">Theme: </span>{theme}</span> : null);
+/// The header sparkline's drawing box (CSS stretches it).
+const SPARK_W = 128, SPARK_H = 32;
 
 /// One entry of the list. A single coin: its row, with its post or family on one muted line under the name (a
 /// one-coin card), or its story's title tag (a loose coin while narratives are shown). A story: a block with a header
@@ -270,11 +270,6 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
   const isNar = e.card?.kind === "narrative";
   const label = h.kind === "narrative" ? `Story: ${h.title}` : h.kind === "post" ? `${h.title} ${h.sub}` : h.title;
   const postTitle = `Open the post on X. ${NARRATIVE_FOOT}`;
-  // the second line: who posted and when (a post story's words after it), or the family's waking time
-  const subText = h.kind === "post" ? [h.sub, h.text].filter(Boolean).join(" · ") : h.sub;
-  const sub = !subText ? null : h.href
-    ? <a className="dsc-sh-sub" href={h.href} target="_blank" rel="noopener noreferrer" title={postTitle}>{h.kind === "post" && XIcon}<span>{subText}</span></a>
-    : <span className="dsc-sh-sub"><span>{subText}</span></span>;
   // story attention (a newer server): the phase, its multiple of normal when it has one, the buyers of the last 5
   // minutes, how long since the start, the leading coin; and the control that opens the chart (lib/story-attention.ts)
   const g = glance(e.card?.attention, o.now);
@@ -282,33 +277,56 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
   const share = e.distinct ? shareOf(e.buyers, o.site, tfWords(o.tf)) : null;
   // a subject block has no attention record of its own yet: no phase, no 5-minute count, no chart; its leading coin stays
   const subj = !!e.card?.subject;
+  // the header's parts: who and what (storyLead), the 5-minute figure when the story has an attention record, its sparkline
+  const L = storyLead(e.card, o.now, nar);
+  const five = !!(g && e.card && !subj);
+  const sp = sparkGeo(e.card?.attention?.spark, SPARK_W, SPARK_H);
   return (
     <li className={`dsc-story${e.left ? " left" : ""}`}>
-      <div className={`dsc-sh${ang ? " has-ang" : ""}`}>
-        <div className="dsc-sh-top">
-          <span className="dsc-sh-t">{h.title}</span>
-          <ThemePill theme={h.theme} />
-          {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
+      {/* the header (the Hybrid 1 design, Nov 25): who posted and when, then what they said (their own words, cut to two
+          lines); on the right the buyers of the last 5 minutes, big, and the story's last 3 hours as a small shape; one
+          line of facts under a hairline. A narrative's title is a language model's: a small tag, marked as such. */}
+      <div className="dsc-hx">
+        <div className="dsc-hx-main">
+          <p className="dsc-hx-who">
+            {e.left && <span className="dsc-pill sm st-left" title={e.moved ? REGROUPED_TITLE : "The server stopped listing this story; it goes once the page is idle"}>{e.moved ? REGROUPED_PILL : LEFT_PILL}</span>}
+            {L.lead && (L.href
+              ? <a className="dsc-hx-lead" href={L.href} target="_blank" rel="noopener noreferrer" title={postTitle}>{L.lead}</a>
+              : <span className="dsc-hx-lead">{L.lead}</span>)}
+            {L.when && <span className="dsc-hx-when">{L.when}</span>}
+            {L.tag && (L.tag.auto || L.tag.title || L.tag.theme) && (
+              <span className="dsc-hx-tag" title={L.tag.auto ? "Title and theme written by a language model. They can be wrong." : "The subject from Spore's own subject table; the theme was written by a language model and can be wrong."}>
+                {L.tag.auto && <i>auto title</i>}{L.tag.title && <em>{L.tag.title}</em>}{L.tag.theme && <span className="dsc-hx-th">{L.tag.title ? " · " : ""}{L.tag.theme}</span>}
+              </span>
+            )}
+          </p>
+          {L.say && <p className="dsc-hx-say" title={L.say}>{L.quoted ? `\u201c${L.say}\u201d` : L.say}</p>}
         </div>
-        <span className="dsc-sh-n">
-          <span className="dsc-nw" title={e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.unit}</span>
-          {share && <span className="dsc-nw" title={share.title}> · <b>{share.text}</b> of all tracked buyers</span>}<span className="dsc-nw"> · {h.count}</span>
-        </span>
-        {ang && <span className="dsc-sh-sub dsc-sh-ang" title={ang.title}><span>{ang.text}</span></span>}
-        {sub}
-        {g && e.card && (!subj || g.leader) && (
-          <div className="dsc-sh-g">
-            {!subj && <span className={`dsc-ph${g.muted ? " mute" : ""}`} title={g.phaseTitle}><span className="dsc-vh">Attention: </span>{g.phase}</span>}
-            {!subj && g.multiple && <span className="dsc-gl dsc-gl-x" title={g.multipleTitle}>{g.multiple}</span>}
-            {!subj && <span className="dsc-gl" title={g.buyersTitle}><b>{g.buyers}</b> {g.buyersLabel}</span>}
-            {!subj && g.start && <span className="dsc-gl">{g.start}</span>}
-            {g.leader && <span className="dsc-gl dsc-gl-lead">{g.leader}</span>}
+        <div className="dsc-hx-att">
+          <div className="dsc-hx-num" title={five ? g!.buyersTitle : e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}>
+            <b>{five ? g!.buyers : h.total}</b><span>{five ? g!.buyersLabel : `${h.unit} · ${tfWords(o.tf)}`}</span>
           </div>
-        )}
-        {/* its own grid cell, outside the glance line's clipping, so its focus ring and touch area are whole */}
-        {g && e.card && !subj && <button type="button" className="linkish dsc-link dsc-sh-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
+          {sp && (
+            <div className="dsc-hx-sp" aria-hidden="true">
+              <svg viewBox={`0 0 ${SPARK_W} ${SPARK_H}`} preserveAspectRatio="none"><path className="a" d={sp.area} /><path className="l" d={sp.line} vectorEffect="non-scaling-stroke" /></svg>
+              <span><em>3 h ago</em><em>now</em></span>
+            </div>
+          )}
+        </div>
+        <div className="dsc-hx-facts">
+          {five && <span className={`dsc-ph${g!.muted ? " mute" : ""}`} title={g!.phaseTitle}><span className="dsc-vh">Attention: </span>{g!.phase}</span>}
+          {five && g!.start && <span>{g!.start}</span>}
+          {g?.leader && <span className="dsc-gl-lead">{g.leader}</span>}
+          {/* the timeframe's buyers, unless the timeframe is the big figure's own 5 minutes */}
+          {five && (o.tf !== "5m" || h.total !== g!.buyers) && <span title={e.distinct ? `Wallets that bought over ${tfWords(o.tf)}, each counted once across the coins of this story` : `Buyers over ${tfWords(o.tf)}, added up over the coins of this story`}><b>{h.total}</b> {h.unit} · {tfWords(o.tf)}</span>}
+          {share && <span className="dsc-hx-share" title={share.title}><b>{share.text}</b> of all tracked buyers</span>}
+          <span>{h.count}</span>
+          {five && <span className={`dsc-hx-x${g!.multiple ? "" : " none"}`} title={g!.multipleTitle}>{g!.multiple ?? "no normal level yet"}</span>}
+          {ang && <span className="dsc-hx-ang" title={ang.title}>{ang.text}</span>}
+          {five && <button type="button" className="linkish dsc-link dsc-hx-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
+        </div>
       </div>
-      {g && e.card && !subj && chart && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
+      {five && chart && e.card && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
         {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
       </ul>

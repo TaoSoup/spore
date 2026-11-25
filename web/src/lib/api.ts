@@ -371,7 +371,10 @@ export type StoryPhase = "new" | "rising" | "peaked" | "fading" | "steady";
 /// Why a story is "new": too little history (6 h, 12 buckets), too few buyers in the last hour, or a last hour the server
 /// did not see whole (a restart).
 export type StoryNewWhy = "history" | "quiet" | "unseen";
+/// `spark` (a newer server): the story's buyers per 5 minutes over the last 3 hours (36 buckets, oldest first, 0 where
+/// none was stored), for the header's sparkline; null when the series has none yet.
 export type StoryAttention = {
+  spark?: number[] | null;
   phase: StoryPhase; buyers5m: { now: number; last: number }; multiple: number | null; newWhy?: StoryNewWhy | null;
   startAt: number | null; startSource: "post" | "wake" | "buyers" | null; minutes: number | null;
   leader: { mint: string; symbol: string | null; share: number } | null;

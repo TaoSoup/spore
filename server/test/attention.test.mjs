@@ -477,9 +477,11 @@ test("API: story cards carry `attention` (additive), GET /api/story-series/:key 
     const s = (await app.get("/api/stories")).body;
     const card = s.cards.find((c) => c.key === X);
     assert.ok(card, "the post card");
-    assert.deepEqual(Object.keys(card.attention), ["phase", "buyers5m", "multiple", "newWhy", "startAt", "startSource", "minutes", "leader"]);
+    assert.deepEqual(Object.keys(card.attention), ["phase", "buyers5m", "multiple", "newWhy", "startAt", "startSource", "minutes", "leader", "spark"]);
     assert.deepEqual(card.attention, { phase: "new", buyers5m: { now: 2, last: 5 }, multiple: null, newWhy: "unseen", startAt: T0 - 120, startSource: "post", minutes: 8,
-      leader: { mint: A, symbol: "NEEDLE", share: r2(5 / 9) } }, "NEEDLE: 4 + 1 of 9 coin buyers over the two buckets");
+      leader: { mint: A, symbol: "NEEDLE", share: r2(5 / 9) }, spark: card.attention.spark }, "NEEDLE: 4 + 1 of 9 coin buyers over the two buckets");
+    assert.equal(card.attention.spark.length, 36);
+    assert.equal(card.attention.spark[35], 5, "the last closed bucket's 5 buyers end the sparkline");
     assert.deepEqual(Object.keys(s), ["asOf", "tf", "floor", "floor5m", "candidates", "cards", "loose", "dust", "hidden", "tagging", "themes", "siteBuyers"], "the body's keys are unchanged");
     const ser = await app.get(`/api/story-series/${X}`);
     assert.deepEqual([ser.status, ser.headers.get("cache-control")], [200, "public, max-age=30"]);
@@ -590,4 +592,12 @@ test("subjects and groups: a tagged coin is filed under its subject's and its gr
   assert.equal(w.att.cardAttention({ kind: "narrative", key: "t:huang-jensen", subject: { key: "t:huang-jensen" }, coins: [] }, T0 + B + GRACE_S).phase, "new");
   assert.ok(of.get(J1).copy_key);
   w.end();
+});
+
+test("story header sparkline: the last 36 buckets' buyers, oldest first, zeros where none was stored", async () => {
+  const { sparkOf, SPARK_N } = await import("../lib/attention.mjs");
+  const s = sparkOf([{ k: 100, b: 5 }, { k: 64, b: 9 }, { k: 65, b: 2 }, { k: 99, b: 7 }], 100);
+  assert.equal(s.length, SPARK_N);
+  assert.deepEqual([s[0], s[34], s[35]], [2, 7, 5], "bucket 65 opens the window; 64 is before it");
+  assert.equal(s.reduce((a, b) => a + b, 0), 14);
 });

@@ -150,6 +150,15 @@ export function baseline30Of(rows, K, seen) {
   return { median: sums.length >= 12 ? median(sums) : null, windows: sums.length };
 }
 
+/** Buckets in a story header's sparkline (3 h of 5 minutes). */
+export const SPARK_N = 36;
+/** The sparkline of a story header: buyers of the SPARK_N buckets ending at bucket `endK`, oldest first, 0 where none was stored. */
+export function sparkOf(spark, endK) {
+  const out = new Array(SPARK_N).fill(0), from = endK - SPARK_N + 1;
+  for (const x of spark) if (x.k >= from && x.k <= endK) out[x.k - from] = x.b;
+  return out;
+}
+
 /** The history gates: a normal from 12+ buckets, and the first buyers 6 h ago or more. */
 export function historyReady({ base, firstBuyersAt, nowS }) {
   return !!(base && base.ratio > 0 && base.n >= MIN_BASE_BUCKETS && fin(firstBuyersAt) && nowS - firstBuyersAt >= MIN_HISTORY_S);
@@ -636,6 +645,9 @@ export class Attention {
       this.stories.set(s.key, S); // to the end: the most recently active
       S.start = this.#startOf(s.key, s, T, starts);
       S.hist.push({ k: K, b: s.buyers, s: siteN });
+      // the header's sparkline (cardAttention spark): the last SPARK_N buckets' buyers, kept apart from hist (12 buckets)
+      (S.spark ??= []).push({ k: K, b: s.buyers });
+      while (S.spark.length && S.spark[0].k <= K - SPARK_N) S.spark.shift();
       S.lead = s.lead ? { mint: s.lead, n: s.leadN, p: s.leadP } : null; S.lastK = K; S.usd = s.usd;
     }
     while (this.stories.size > STORIES_MAX) { this.stories.delete(this.stories.keys().next().value); this.stats.evictions++; }
@@ -674,6 +686,10 @@ export class Attention {
         const have = new Set(S.hist.map((x) => x.k));
         for (const r of rs) { const k = Math.floor(r.t / BUCKET_S); if (k > K - 12 && k < K && !have.has(k) && r.buyers > 0) S.hist.push({ k, b: r.buyers, s: r.siteBuyers }); }
         S.hist.sort((x, y) => x.k - y.k);
+        // the sparkline's older buckets, read back once with the rest
+        const sp = new Set((S.spark ?? []).map((x) => x.k));
+        for (const r of rs) { const k = Math.floor(r.t / BUCKET_S); if (k > K - SPARK_N && k < K && !sp.has(k) && r.buyers > 0) (S.spark ??= []).push({ k, b: r.buyers }); }
+        S.spark?.sort((x, y) => x.k - y.k);
         S.fill = false;
       }
     }
@@ -843,6 +859,8 @@ export class Attention {
       startAt: start?.startAt ?? null, startSource: start?.source ?? null,
       minutes: fin(start?.startAt) ? Math.max(0, Math.floor((nowS - start.startAt) / 60)) : null,
       leader: best && total > 0 ? { mint: best.mint, symbol: best.symbol, share: r2(bestN / total) } : null,
+      // ends at the story's last closed bucket (the one `last` reads), not the clock's: a close runs seconds after its bucket ends
+      spark: S?.spark?.length ? sparkOf(S.spark, S.lastK >= nowK - 2 ? S.lastK : nowK - 1) : null,
     };
   }
 
