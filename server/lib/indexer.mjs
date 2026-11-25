@@ -117,6 +117,7 @@ export class Indexer {
     const tg = opts.trendGate ?? null;
     this.gateMode = tg?.mode === "on" || tg?.mode === "shadow" ? tg.mode : "off";
     this.gatePerHour = tg?.perHour ?? 60; this.gatePromoted = [];
+    this.wordBursts = opts.wordBursts ?? null; // lib/word-bursts.mjs: every launch's words, for the story gate
     this.gate = this.gateMode === "off" ? null : new TrendGate({ cfg: tg?.cfg ?? {}, onPass: (c, why) => this.#gatePass(c, why) }); this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
@@ -164,6 +165,7 @@ export class Indexer {
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
     if (this.gate) this.timers.push(setInterval(() => this.gate.sweep(), 60_000));
+    if (this.wordBursts) this.timers.push(setInterval(() => this.wordBursts.sweep(), 60_000));
     this.refreshQuoteUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshQuoteUsd().catch(() => {}), QUOTE_USD_MS));
     this.backfillPoolVq().then(() => this.refreshPricingPools()).catch(() => {}); // pool virtual quotes never read, then every pool that prices other coins (biggest families first)
@@ -951,6 +953,7 @@ export class Indexer {
    * (model.assetFamilies), so it joins the tree like a spawn. A depth ≥ 1 coin is a spawn and joins the tree.
    */
   onCreate(e, slot) {
+    this.wordBursts?.add(e);
     const assetQuoted = e.depth < 1 && !!e.quoteMint && e.quoteMint !== SOL_MINT;
     if (e.depth < 1 && !assetQuoted) { this.gate?.create(e, slot); return; }
     this.#insertCreate(e, slot);

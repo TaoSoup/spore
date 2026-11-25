@@ -132,6 +132,24 @@ export function baselineOf(rows, nowS) {
   return { ratio: median(ratios), n: ratios.length, firstAt, peak30 };
 }
 
+/**
+ * A story's 30-minute normal for the story gate (lib/story-gate.mjs lift): the median of its buyers summed over the 48
+ * whole 30-minute windows of the 24 h before the last 30 minutes (window j: buckets K-6j-5 .. K-6j for j = 1..48, a
+ * missing row a 0), counting only windows whose 6 buckets the site row shows were seen (a restart's hole is no quiet).
+ * `{ median, windows }`; median null under 12 windows (6 h). Same units as the last 30 minutes' sum (S.att.last30).
+ */
+export function baseline30Of(rows, K, seen) {
+  const byK = new Map();
+  for (const r of rows) byK.set(Math.floor(r.t / BUCKET_S), fin(r.buyers) ? r.buyers : 0);
+  const sums = [];
+  for (let j = 1; j <= 48; j++) {
+    let sum = 0, ok = true;
+    for (let k = K - 6 * j - 5; k <= K - 6 * j; k++) { if (!seen.has(k)) { ok = false; break; } sum += byK.get(k) ?? 0; }
+    if (ok) sums.push(sum);
+  }
+  return { median: sums.length >= 12 ? median(sums) : null, windows: sums.length };
+}
+
 /** The history gates: a normal from 12+ buckets, and the first buyers 6 h ago or more. */
 export function historyReady({ base, firstBuyersAt, nowS }) {
   return !!(base && base.ratio > 0 && base.n >= MIN_BASE_BUCKETS && fin(firstBuyersAt) && nowS - firstBuyersAt >= MIN_HISTORY_S);
@@ -636,11 +654,21 @@ export class Attention {
       if (S.fill || (h >= MIN_HOUR_BUYERS && fin(first) && nowS - first >= MIN_HISTORY_S && nowMs - S.baseAt >= BASE_REFRESH_MS)) due.push([S, h]);
     }
     due.sort((x, y) => y[1] - x[1]);
+    // the buckets the site row shows seen in the last 25 h, read once a close that has baselines due (the 30-min normal)
+    let seen24 = null;
+    const seenDay = () => {
+      if (seen24) return seen24;
+      seen24 = new Set();
+      try { for (const r of db.storyRows(SITE_KEY, T - 25 * 3600, 320)) if (!(r.flags & PARTIAL)) seen24.add(Math.floor(r.t / BUCKET_S)); } catch { /* none seen: no normal */ }
+      for (const k of this.seen) seen24.add(k);
+      return seen24;
+    };
     for (const [S] of due.slice(0, BASE_PER_CLOSE)) {
       yield st;
       let rs = [];
       try { rs = db.storyBaseRows(S.key, nowS - KEEP_S, SERIES_ROWS + 16); } catch { rs = []; }
       S.base = baselineOf(rs, nowS); S.baseAt = nowMs; this.stats.baselines++;
+      if (this.gate30) S.base30 = baseline30Of(rs, K, seenDay()); // only while the story gate runs (index.mjs sets it)
       if (S.base.peak30 > S.peak30) S.peak30 = S.base.peak30;
       if (S.fill) {
         const have = new Set(S.hist.map((x) => x.k));
@@ -814,6 +842,20 @@ export class Attention {
       minutes: fin(start?.startAt) ? Math.max(0, Math.floor((nowS - start.startAt) / 60)) : null,
       leader: best && total > 0 ? { mint: best.mint, symbol: best.symbol, share: r2(bestN / total) } : null,
     };
+  }
+
+  /**
+   * The story gate's lift inputs for `key` (lib/story-gate.mjs), from memory: `{ last30, base30, old }` (the buyers of its
+   * last 6 closed buckets summed, its 30-min normal or null, whether it is 6 h old or more), or null for a story this
+   * close has no fresh state for.
+   */
+  liftOf(key, nowS = this.#nowS()) {
+    const S = this.stories.get(key), att = S?.att;
+    if (!att || att.k < Math.floor(nowS / BUCKET_S) - 2) return null;
+    // `old`: first buyers 6 h ago or more, so a missing normal is unknown (not computed yet, or too few seen windows),
+    // never "no history"; a younger story is set against the floor
+    const first = S.start?.firstBuyersAt;
+    return { last30: att.last30, base30: S.base30?.median ?? null, old: !fin(first) || nowS - first >= MIN_HISTORY_S };
   }
 
   /**

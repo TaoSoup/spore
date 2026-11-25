@@ -281,6 +281,7 @@ export function healthOf({ model, indexer, hub, images, meta, metahost, treasury
     // The pump-amm stream (graduated coins' pool trades): its socket, and Buy/SellEvents seen, of tracked pools, stored.
     launchLog: snap.launchLog ?? null,
     trendGate: snap.trendGate ?? null,
+    wordBursts: model.wordBursts?.snapshot?.() ?? null,
     wsPools: snap.livePools ? { connected: snap.livePools.connected, subscribed: snap.livePools.subscribed, lastNotificationAgoMs: snap.livePools.lastNotificationAgoMs, lastError: snap.livePools.lastError ?? null, lastMessageAgoMs: snap.livePools.lastMessageAgoMs, connects: snap.livePools.connects, errors: snap.livePools.errors, bytes: snap.livePools.bytes, notifications: snap.livePools.notifications, skipped: snap.livePools.skipped, events: snap.livePools.events, tracked: snap.livePools.tracked, trades: snap.livePools.trades } : null,
     activity: model.activity ? { ...model.activity.size(), seededMs: model.activity.seededMs ?? null } : null,
     rpc: rpc?.snapshot?.() ?? snap.rpc ?? null, rpcLanes: rpc?.laneSnapshot?.() ?? null, rpcUser: rpc?.userSnapshot?.() ?? null, meta: meta?.snapshot?.() ?? meta?.stats ?? snap.meta ?? null, images: images?.snapshot?.() ?? images?.stats ?? null,

@@ -278,3 +278,12 @@ test("o-left. a card the server dropped, held on screen, keeps no distinct count
   const e = D.oneList(D.filterStories(held, "all", "all"), NOW).entries.find((x) => x.key === "post:p1")!;
   assert.deepEqual([e.left, e.distinct, e.buyers], [true, undefined, 70], "its rows' sum, not 60 over the new site count");
 });
+
+test("o-gate. a server with the story gate on: passing stories come first by their score, the rest rank by buyers as before", () => {
+  const g = (score: number, pass = true) => ({ pass, buyers30m: 20, lift: 4, inflowSol: 12, coins5: 2, word: null, score });
+  const b = body(
+    [post("p1", [row("A", 90), row("B", 80)]), post("p2", [row("C", 5), row("D", 5)], { gate: g(3) }), post("p3", [row("E", 4), row("F", 4)], { gate: g(9) }), post("p4", [row("G", 70), row("H", 1)], { gate: g(50, false) })],
+    [row("L1", 100)],
+  );
+  assert.deepEqual(keys(list(b)), ["post:p3", "post:p2", "post:p1", "loose:L1", "post:p4"], "p3 and p2 pass (score 9, then 3); then 170, 100 and 71 buyers; p4's failing gate counts for nothing");
+});

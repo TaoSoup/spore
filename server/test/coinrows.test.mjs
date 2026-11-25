@@ -614,3 +614,35 @@ test("stories with narrative tags: the snapshot offers coins with 10+ buyers, th
   } finally { await app.close(); }
   narr.stop(); w.close();
 });
+
+test("story gate: shadow records a passing story and leaves the body unchanged; on ranks passing stories first and the card carries gate", async () => {
+  const idAt = (s, n = 0) => String(((BigInt(s * 1000) - 1288834974657n) << 22n) + BigInt(n));
+  const T0 = K0 * B;
+  for (const mode of ["shadow", "on"]) {
+    const w = world();
+    const X = idAt(T0 - 600, 1);
+    const E = [0, 1, 2].map((i) => w.coin(mintN(290 + i), `G${i}`));
+    for (const m of E) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: null, twitter: `https://x.com/a/status/${X}`, telegram: null, website: null, fetchedAt: 1, ok: true });
+    for (let i = 0; i < 51; i++) w.trade(E[i % 3], `w${i}`, T0 + i, { usd: 20 });
+    const records = new Map([[X, { id: X, state: "ok", handle: "poster", text: "big news", flagged: false }]]);
+    const posts = { peek: (id) => records.get(id) ?? null, canQueue: () => "cached", want: () => "cached", state: () => "idle", snapshot: () => ({}), start() {}, stop() {} };
+    w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
+    w.rows.attachStoryGate({ mode, cfg: { minBuyers: 10, minInflowSol: 1 } });
+    w.model.attention.liftOf = (k) => (k === X ? { last30: 51, base30: null, old: false } : null); // a young story: the floor
+    w.clock.t = (T0 + 100) * 1000;
+    const b = await w.rows.stories("5m");
+    const rec = w.db.storyGateRecent(0);
+    assert.deepEqual(rec.map((r) => [r.key, r.mode, r.buyers, r.coins5, r.why.pass]), [[X, mode, 51, 3, true]], `${mode}: one record`);
+    assert.equal(rec[0].title, "@poster: big news");
+    const gate = b.cards[0].gate;
+    if (mode === "shadow") assert.equal(gate, undefined, "shadow: the body is unchanged");
+    else {
+      assert.deepEqual([gate.pass, gate.buyers30m, gate.lift, gate.coins5], [true, 51, 17, 3], "on: a young story, 51 against the floor of 3");
+      const h = await w.rows.stories("1h");
+      assert.deepEqual(h.cards[0].gate, gate, "another timeframe reuses the 5-minute verdict");
+      assert.equal(w.db.storyGateRecent(0).length, 1, "and records nothing of its own");
+    }
+    assert.equal(w.rows.snapshot().storyGate.passing, 1);
+    w.rows.stopStoryGate(); w.close();
+  }
+});

@@ -48,7 +48,9 @@ import { units } from "./pricing.mjs";
 import { SOL_MINT } from "./jupiter.mjs";
 import { imageProxyUrl } from "./meta.mjs";
 import { postOf } from "./narrative.mjs";
-import { groupStories } from "./stories.mjs";
+import { groupStories, listCards } from "./stories.mjs";
+import { storyGateGen } from "./story-gate.mjs";
+import { launchWords } from "./word-bursts.mjs";
 import { loadSubjects, TABLE_URL } from "./subjects.mjs";
 
 /** The timeframes a list can be asked over (s), in the order the snapshot keeps them. */
@@ -119,7 +121,34 @@ export class CoinRows {
   }
   /** `narr`: the narrative tagger (lib/narrtags.mjs) or null: the stories body then has narrative cards and the snapshot offers it the coins with buyers. */
   attach({ holders, narr } = {}) { if (holders !== undefined) this.holders = holders; if (narr !== undefined) this.narr = narr; return this; }
-  snapshot() { return { held: this.a.length - this.h, ...this.stats, holders: this.holders?.snapshot?.() ?? null }; }
+  /**
+   * The story gate (lib/story-gate.mjs; STORY_GATE in lib/config.mjs): `{ mode: "shadow" | "on", cfg }`. While it runs the
+   * stories view is also built once a minute with nobody asking, so the record (table story_gate) has no holes.
+   */
+  attachStoryGate(gate) {
+    this.storyGate = gate && (gate.mode === "shadow" || gate.mode === "on") ? gate : null;
+    this.gateStats = { built: 0, passing: 0, recorded: 0, lastMs: 0 };
+    clearInterval(this.gateTimer);
+    this.gateVals = null; // { at, vals: Map key → gate value } of the last 5-minute build
+    if (this.storyGate) { this.gateTimer = setInterval(() => { this.#gateTick().catch(() => {}); }, 60_000); this.gateTimer.unref?.(); }
+    return this;
+  }
+  stopStoryGate() { clearInterval(this.gateTimer); }
+  /**
+   * The gate's own build with nobody asking (once a minute): the 5-minute stories over the current snapshot, run apart
+   * from the served cache and in background mode: it reads stored tags and posts only (no tagger offer, no post fetch,
+   * no holder read), so it costs no paid call and changes nothing a visitor sees. Its verdicts are recorded and cached.
+   */
+  async #gateTick() {
+    if (this.gateBusy) return;
+    this.gateBusy = true;
+    try {
+      const wk = this.model.wakeups;
+      const wakes = wk?.storyWakes ? await wk.storyWakes("5m").catch(() => new Map()) : new Map();
+      await runSliced(this.#storyGen(await this.snap(), "5m", wakes, { background: true }));
+    } finally { this.gateBusy = false; }
+  }
+  snapshot() { return { held: this.a.length - this.h, ...this.stats, holders: this.holders?.snapshot?.() ?? null, storyGate: this.storyGate ? { mode: this.storyGate.mode, ...this.gateStats } : null }; }
 
   // ---------------------------------------------------------------- the feed
   /** One trade `{ mint, time, isBuy, valueUsd, user, priceUsd }` (live or the boot seed's): O(1) amortized. `seed`: counted apart. */
@@ -455,11 +484,11 @@ export class CoinRows {
    * flagged). Asking queues the text's fetch at low priority (lib/xposts.mjs: such asks stop at half its line and half
    * its day), so a post nobody opened a coin page for still gets its card a little later.
    */
-  #storyPost(id) {
+  #storyPost(id, { queue = true } = {}) {
     const n = this.model.wakeups?.narrative;
     if (!n?.postState) return null;
     try {
-      const s = n.postState(id, { low: true });
+      const s = n.postState(id, { low: true, mayQueue: () => queue });
       if (s.state !== "ok" || !s.handle || n.posts?.peek?.(id)?.flagged) return null;
       return { handle: s.handle, text: s.text ?? "" };
     } catch (e) { this.log.warn?.(`coinrows: post ${id}: ${e?.message ?? e}`); return null; }
@@ -495,8 +524,61 @@ export class CoinRows {
     return site.size;
   }
 
+  /**
+   * The story gate over every card of the grouping (not only the listed ones: a passing story must be able to rise into
+   * the list): one pass over the held trades of the last hour (lib/story-gate.mjs). Each pass is recorded once an hour per
+   * story (table story_gate). With mode "on" the cards are ranked again, passing stories first by their score, the rest
+   * as before, and each listed card carries `gate`; in shadow mode the body is unchanged.
+   */
+  *#storyGateGen(snap, tf, g) {
+    const t0 = performance.now(), model = this.model, att = model.attention, wb = model.wordBursts ?? null, cards = g.all ?? g.cards;
+    // one source of verdicts: the 5-minute build (the timer's, or a visitor's) computes and records them; the other
+    // timeframes reuse the last one (2 min at most) by story key, so a story passes or fails the same on every tab
+    if (tf !== "5m") {
+      const c = this.gateVals;
+      if (this.storyGate.mode === "on" && c && snap.nowS - c.at <= 120) this.#gateRank(g, cards, c.vals);
+      return;
+    }
+    let vals;
+    try {
+      vals = yield* storyGateGen({
+        cards, trades: this.a, from: this.h, end: this.a.length, nowS: snap.nowS, solUsd: model.solUsd, cfg: this.storyGate.cfg,
+        creatorOf: (m) => model.coins.get(m)?.creator ?? null,
+        liftOf: (k) => att?.liftOf?.(k, snap.nowS) ?? null,
+        wordsOf: (card) => { const w = new Set(); for (const r of card.coins ?? []) for (const x of launchWords(r.name, r.symbol)) w.add(x); return [...w]; },
+        creatorsOf: (w) => wb?.creators(w, snap.nowS) ?? 0,
+      });
+    } catch (e) { this.log.warn?.(`coinrows: story gate: ${e?.message ?? e}`); return; }
+    this.gateVals = { at: snap.nowS, vals };
+    const hour = Math.floor(snap.nowS / 3600) * 3600;
+    let passing = 0;
+    for (const card of cards) {
+      const v = vals.get(card.key);
+      if (!v?.pass) continue;
+      passing++;
+      // the title by the card's kind: a post or family card may carry its coins' shared narrative too
+      const title = card.kind === "narrative" ? card.subject?.title ?? card.narrative?.title ?? null
+        : card.kind === "post" ? (card.post ? `@${card.post.handle}: ${String(card.post.text ?? "").slice(0, 120)}` : card.narrative?.title ?? null)
+        : card.family ? `$${card.family.symbol ?? "?"} family` : card.narrative?.title ?? null;
+      try { if (model.db?.storyGatePut?.({ key: card.key, hour, at: snap.nowS, mode: this.storyGate.mode, title, v })) this.gateStats.recorded++; }
+      catch (e) { this.log.warn?.(`coinrows: story gate record: ${e?.code ?? e?.message ?? e}`); }
+    }
+    if (this.storyGate.mode === "on") this.#gateRank(g, cards, vals);
+    this.gateStats.built++; this.gateStats.passing = passing; this.gateStats.lastMs = r2(performance.now() - t0);
+  }
+  /** Mode "on": passing stories first by their score, the rest as before; the listed cards carry `gate`. */
+  #gateRank(g, cards, vals) {
+    const ranked = [...cards].sort((x, y) => {
+      const a = vals.get(x.key), b = vals.get(y.key);
+      return (b?.pass ? 1 : 0) - (a?.pass ? 1 : 0) || (a?.pass && b?.pass ? b.score - a.score : 0) || y.buyers5m - x.buyers5m || y.coinsN - x.coinsN || byMint(x.key, y.key);
+    });
+    const l = listCards(ranked);
+    g.cards = l.cards; g.themes = l.themes; g.hidden = { ...g.hidden, cards: l.hidden };
+    for (const card of g.cards) { const v = vals.get(card.key); if (v) card.gate = { pass: v.pass, buyers30m: v.buyers, lift: v.lift, inflowSol: v.inflowSol, coins5: v.coins5, word: v.word, score: v.score }; }
+  }
+
   /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
-  *#storyGen(snap, tf, wakes) {
+  *#storyGen(snap, tf, wakes, { background = false } = {}) {
     const model = this.model;
     const p = yield* this.#pickGen(snap, tf, { max: STORY_ROWS, listKey: `story:${tf}`, safety: false });
     const ids = new Map();
@@ -517,16 +599,17 @@ export class CoinRows {
       for (const r of p.rows) {
         if ((++n & 31) === 0) yield;
         try {
-          nt.offer(r.mint, snap.per.get(r.mint)?.tf[NF - 1].buyers ?? 0, { hot: true });
+          if (!background) nt.offer(r.mint, snap.per.get(r.mint)?.tf[NF - 1].buyers ?? 0, { hot: true });
           const t = nt.tagOf(r.mint);
           if (t) tags.set(r.mint, t);
         } catch (e) { this.log.warn?.(`coinrows: narrative tag ${r.mint}: ${e?.code ?? e?.name ?? "error"}`); }
       }
       yield;
     }
-    const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id), wakes, nowMs: p.at,
+    const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id, { queue: !background }), wakes, nowMs: p.at,
       tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined,
-      subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null });
+      subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null, keepAll: !!this.storyGate });
+    if (this.storyGate) yield* this.#storyGateGen(snap, tf, g);
     // Each card's buyers counted once: the distinct wallets with a $1+ buy in the timeframe (the snapshot's window) over
     // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One
     // pass over the held trades (a yield every 1024); the summed per-coin figures stay on the rows.
@@ -536,12 +619,12 @@ export class CoinRows {
     yield;
     // Only rows the body lists may queue holder reads, the cards' first; a dust row asks for none.
     const fill = (r, holders) => { const c = model.coins.get(r.mint); r.safety = c ? this.safetyOf(c, { holders }) : { devPct: null, top10Pct: null, sniperPct: null, state: "unknown" }; };
-    for (const card of g.cards) { yield; for (const r of card.coins) fill(r, true); }
+    for (const card of g.cards) { yield; for (const r of card.coins) fill(r, !background); }
     // Story attention (lib/attention.mjs): read from memory, one card a step (a card's open-bucket buyers are merged).
     const att = model.attention;
     if (att) for (const card of g.cards) { yield; try { card.attention = att.cardAttention(card, snap.nowS); } catch (e) { card.attention = null; this.log.warn?.(`coinrows: attention ${card.key}: ${e?.message ?? e}`); } }
     yield;
-    for (const r of g.loose) fill(r, true);
+    for (const r of g.loose) fill(r, !background);
     yield;
     for (const r of g.dust) fill(r, false);
     return { at: p.at, snap, body: { asOf: snap.nowS, tf, floor: p.floor, floor5m: p.floor5m, candidates: p.candidates, cards: g.cards, loose: g.loose, dust: g.dust, hidden: g.hidden, tagging, themes: g.themes, siteBuyers } };

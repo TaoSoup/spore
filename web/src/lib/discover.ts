@@ -1174,7 +1174,10 @@ export function oneList(shown: Pick<StoriesShown, "cards" | "loose">, nowS: numb
     raw.push({ key, card: c, rows, head: rows.length >= 2, ...t, ...(d != null ? { buyers: d, distinct: true } : null), left: c.left === true, moved: c.moved === true });
   }
   for (const r of shown.loose) raw.push({ key: `loose:${r.mint}`, card: null, rows: [r], head: false, ...tfTotals([r], nowS), left: r.left === true, moved: r.moved === true });
-  const ranked = raw.map((e, i) => ({ e, i })).sort((x, y) => y.e.buyers - x.e.buyers || y.e.coinsN - x.e.coinsN || x.i - y.i).map((x) => x.e);
+  // a server with the story gate on (STORY_GATE=on) marks the stories drawing real buyers far above their normal: those
+  // come first, by the gate's score; everything else ranks as before
+  const gateOf = (e: OneEntry) => (e.card?.gate?.pass && Number.isFinite(e.card.gate.score) ? e.card.gate.score : null);
+  const ranked = raw.map((e, i) => ({ e, i, g: gateOf(e) })).sort((x, y) => (y.g != null ? 1 : 0) - (x.g != null ? 1 : 0) || (x.g != null && y.g != null ? y.g - x.g : 0) || y.e.buyers - x.e.buyers || y.e.coinsN - x.e.coinsN || x.i - y.i).map((x) => x.e);
   const entries = hold && prev ? keepOrder(ranked, (e) => e.key, prev.keys) : ranked;
   return {
     entries,

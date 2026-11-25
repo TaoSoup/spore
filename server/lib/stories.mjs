@@ -147,7 +147,7 @@ export function totals(rows) {
  * family card has `narrative`: the one all its coins share, else null. `themes`: `[{ theme, cards }]` of the
  * narrative cards listed, most cards first.
  */
-export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null } = {}) {
+export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null, keepAll = false } = {}) {
   const posts = new Map(); // post id → { handle, text } | null, asked once
   const post = (id) => {
     if (id == null) return null;
@@ -277,8 +277,17 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   }
   cards.sort((x, y) => y.buyers5m - x.buyers5m || y.coinsN - x.coinsN || byMint(x.key, y.key));
   const sent = foldCopies(loose).slice(0, LOOSE_MAX);
-  const listed = cards.slice(0, CARDS_MAX), byTheme = new Map();
+  const l = listCards(cards);
+  return { cards: l.cards, ...(keepAll ? { all: cards } : {}), loose: sent, dust, themes: l.themes, hidden: { dust: dustN, cards: l.hidden, loose: loose.length - totals(sent).coinsN } };
+}
+
+/**
+ * The cards a body lists from a ranked list: the first CARDS_MAX, the themes of those listed, and how many were left
+ * out. The story gate (lib/story-gate.mjs, STORY_GATE=on) re-ranks the whole list and lists it again with this.
+ */
+export function listCards(ranked) {
+  const listed = ranked.slice(0, CARDS_MAX), byTheme = new Map();
   for (const c of listed) if (c.kind === "narrative") byTheme.set(c.narrative.theme, (byTheme.get(c.narrative.theme) ?? 0) + 1);
   const themes = [...byTheme].map(([theme, n]) => ({ theme, cards: n })).sort((x, y) => y.cards - x.cards || byMint(x.theme, y.theme));
-  return { cards: listed, loose: sent, dust, themes, hidden: { dust: dustN, cards: Math.max(0, cards.length - CARDS_MAX), loose: loose.length - totals(sent).coinsN } };
+  return { cards: listed, themes, hidden: Math.max(0, ranked.length - CARDS_MAX) };
 }

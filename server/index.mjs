@@ -3,6 +3,7 @@
 // production). No keys live here; the browser builds and signs every transaction itself.
 // Configuration is validated first (lib/config.mjs) so a bad deploy fails before it binds a port.
 import { LaunchLog } from "./lib/launch-log.mjs";
+import { WordBursts } from "./lib/word-bursts.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.mjs";
@@ -71,10 +72,16 @@ const images = new ImageCache(join(cfg.dataDir, "img"), { log, maxBytes: cfg.img
 // First sight: every image url the model learns (a metadata image, an asset icon) gets its 64 px thumbnail queued at once.
 model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
+// The story gate (lib/story-gate.mjs) and the word counts it reads (every launch, lib/word-bursts.mjs): off unless STORY_GATE is set.
+const wordBursts = cfg.storyGate.mode !== "off" ? new WordBursts({ cfg: { minCreators: cfg.storyGate.cfg.minWordCreators } }) : null;
+model.wordBursts = wordBursts;
+model.coinRows?.attachStoryGate?.(cfg.storyGate.mode !== "off" ? cfg.storyGate : null);
+if (model.attention) model.attention.gate30 = cfg.storyGate.mode !== "off";
+if (cfg.storyGate.mode !== "off") log.info(`story gate: ${cfg.storyGate.mode} (${cfg.storyGate.cfg.minBuyers} counted buyers, ${cfg.storyGate.cfg.minLift}x normal, ${cfg.storyGate.cfg.minInflowSol} SOL in 30 min; 2+ coins or ${cfg.storyGate.cfg.minWordCreators} same-word creators)`);
 const launchLog = cfg.launchLog ? new LaunchLog({ ...cfg.launchLog, log }) : null;
 if (cfg.trendGate.mode !== "off") log.info(`trend gate: ${cfg.trendGate.mode} (${cfg.trendGate.cfg.minCounted} counted buyers + ${cfg.trendGate.cfg.minInflowSol} SOL in ${cfg.trendGate.cfg.windowS} s, first ${cfg.trendGate.cfg.earlyAfterS} s not counted${cfg.trendGate.mode === "on" ? `, at most ${cfg.trendGate.perHour} promoted an hour` : ""})`);
 if (launchLog) log.info(`launch log: every curve launch and trade → ${cfg.launchLog.file} (kept ${cfg.launchLog.keepHours} h)`);
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog, trendGate: cfg.trendGate } });
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog, trendGate: cfg.trendGate, wordBursts } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });
@@ -213,7 +220,7 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); launchLog?.close(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  indexer.stop(); launchLog?.close(); model.coinRows?.stopStoryGate?.(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
   // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
   server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();

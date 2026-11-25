@@ -352,7 +352,12 @@ export type StoryCard = {
   /// distinct wallets with a $1+ buy over the timeframe across all the card's coins (copies included), each counted once (a newer server)
   buyers?: number | null;
   attention?: StoryAttention | null;
+  /// The story gate (a server with STORY_GATE=on; absent otherwise): over the last 30 min, its counted buyers, its lift
+  /// against its own normal, capped net inflow in SOL, coins with 5+ buyers, its busiest same-word launch burst. A passing
+  /// story is listed first, by `score` (lift x ln(1 + buyers)). Facts, never a forecast.
+  gate?: StoryGate | null;
 };
+export type StoryGate = { pass: boolean; buyers30m: number; lift: number; inflowSol: number; coins5: number; word: { word: string; creators: number } | null; score: number };
 /// Story attention (a newer server; absent on an older one): how many wallets the story draws now, as context, never a
 /// forecast. `phase` describes the last hour against the hour before and the story's own peak ("new": no normal yet,
 /// under 6 h of history, 12 baseline buckets or 10 buyers in the last hour). `buyers5m.last`: distinct wallets that

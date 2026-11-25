@@ -159,6 +159,13 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // slots, or in the first TREND_GATE_EARLY_S seconds, are not counted.
   const trendGate = { mode: oneOf("TREND_GATE", "off", ["off", "shadow", "on"]), perHour: num("TREND_GATE_PER_HOUR", 60, { min: 1, max: 10_000, integer: true }),
     cfg: { minCounted: num("TREND_GATE_BUYERS", 12, { min: 1, max: 1000, integer: true }), minInflowSol: num("TREND_GATE_SOL", 3, { min: 0, max: 10_000 }), windowS: num("TREND_GATE_WINDOW_S", 600, { min: 30, max: 3600, integer: true }), earlyAfterS: num("TREND_GATE_EARLY_S", 0, { min: 0, max: 600, integer: true }), earlySlots: num("TREND_GATE_EARLY_SLOTS", 3, { min: 0, max: 150, integer: true }) } };
+  // STORY_GATE=off|shadow|on (lib/story-gate.mjs, default off): which Discover stories are drawing real buyers now, over 30
+  // min: STORY_GATE_BUYERS counted buyers, STORY_GATE_LIFT times their normal (the median 30-min window of the prior 24 h,
+  // never below 3), STORY_GATE_SOL capped net inflow, and 2+ coins with 5+ buyers or STORY_GATE_WORD_CREATORS creators
+  // launching with one of its words in the hour. "shadow" records passes (table story_gate); "on" also lists passing
+  // stories first on Discover. Every launch's words are counted for it (lib/word-bursts.mjs).
+  const storyGate = { mode: oneOf("STORY_GATE", "off", ["off", "shadow", "on"]),
+    cfg: { minBuyers: num("STORY_GATE_BUYERS", 15, { min: 1, max: 10_000, integer: true }), minLift: num("STORY_GATE_LIFT", 3, { min: 0, max: 1000 }), minInflowSol: num("STORY_GATE_SOL", 10, { min: 0, max: 100_000 }), minWordCreators: num("STORY_GATE_WORD_CREATORS", 5, { min: 2, max: 1000, integer: true }) } };
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
   const jupApiKey = get("JUP_API_KEY", "");
@@ -255,5 +262,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, storyGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
 }
