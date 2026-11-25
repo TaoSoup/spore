@@ -59,3 +59,24 @@
   .tl-lead { grid-area: lead; }
   .tl-lead.none { display: none; }
 }
+
+/* the gates (rules being tested): a quiet accent pill on a passing story, its band tick brighter, an hour's coin passes folded */
+.tl-band-mark.gate { stroke: var(--ink); stroke-opacity: .95; stroke-width: 2; }
+.tl-gate-pill { flex: none; color: var(--accent); background: var(--accent-soft); }
+.tl-gates { display: grid; gap: 4px; min-width: 0; }
+.tl-gate-line { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: var(--fs-sm); }
+.tl-gate-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.tl-gate-num { flex: none; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); }
+.tl-gate-toggle { justify-self: start; font-size: var(--fs-xs); color: var(--muted); }
+.tl-gate-toggle:hover, .tl-gate-toggle:focus-visible { color: var(--ink); }
+.tl-gate-coins { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 16px; margin: 2px 0 4px; padding: 8px 12px; list-style: none; border: 1px dashed var(--line-soft); border-radius: var(--radius); font-size: var(--fs-xs); color: var(--muted); }
+.tl-gate-coins li { display: flex; gap: 8px; min-width: 0; white-space: nowrap; }
+.tl-gate-coins .dsc-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tl-gate-when { margin-left: auto; font-family: var(--mono); }
+@media (max-width: 680px) {
+  .tl-gate-num { display: none; }
+  /* the gate pill takes its own line under the title, so the title keeps its width */
+  .tl-title { flex-wrap: wrap; row-gap: 4px; }
+  .tl-title-text { flex: 1 1 60%; }
+  .tl-title .tl-gate-pill { order: 3; }
+}

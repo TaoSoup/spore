@@ -385,8 +385,17 @@ export type TimelineStory = {
   key: string; kind: "narrative" | "post" | "family" | "unknown"; title: string; theme?: string | null; handle?: string | null; url?: string | null; mint?: string;
   startAt: number; startSource: string; carried: boolean; firstT: number; lastT: number; peak: number; peakT: number; buyUsd: number; launches: number; coins: number;
   leader: { mint: string; symbol: string | null; name: string | null; image: string | null } | null; series: number[];
+  gate?: TimelineGate;
 };
-export type Timeline = { from: number; to: number; asOf: number; bucketS: number; min: number; site: { t: number; buyers: number }[]; stories: TimelineStory[]; listed: number; hidden: number; more: number };
+export type Timeline = { from: number; to: number; asOf: number; bucketS: number; min: number; site: { t: number; buyers: number }[]; stories: TimelineStory[]; listed: number; hidden: number; more: number;
+  /// the story gate's passes of stories that are not timeline rows (subject blocks), and the coin gate's passes (a newer server)
+  gateStories?: TimelineGateStory[]; gateCoins?: TimelineGateCoin[] };
+/// What the story gate measured when it passed a story (its pass with the highest lift in the window), and how often.
+export type TimelineGate = { passes: number; firstAt: number; best: { at: number; buyers: number; lift: number; inflowSol: number; coins5: number; word: string | null } };
+export type TimelineGateStory = TimelineGate & { key: string; title: string };
+/// A launch the coin gate passed: when, how many seconds after its launch, its ticker and market cap at the pass, and
+/// whether it was only recorded ("shadow"), added to the tree ("promoted") or over the hourly cap ("capped").
+export type TimelineGateCoin = { mint: string; at: number; secs: number | null; symbol: string | null; mcapUsd: number | null; outcome: "shadow" | "promoted" | "capped" };
 export type StorySeries = {
   key: string; asOf: number; bucketS: number; startAt: number | null; startSource: "post" | "wake" | "buyers" | null; firstBuyersAt: number | null;
   baseline: { ratio: number; buckets: number; ready: boolean } | null; buckets: StoryBucket[];

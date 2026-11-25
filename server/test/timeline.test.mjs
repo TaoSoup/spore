@@ -82,3 +82,30 @@ test("timeline db reads: the grouped pass without the site row and second filing
   assert.equal(db.timelineStarts([]).size, 0);
   db.close();
 });
+
+test("timeline gates: a listed story carries its story-gate passes (best = highest lift); passes of stories not listed come apart; coin-gate passes with seconds from launch", () => {
+  const src = fromRows([row("n:1", 2, 40), row("n:2", 3, 30)], T, T + 3600);
+  const storyPasses = [
+    { key: "n:1", at: T + 700, title: "one", buyers: 20, lift: 4, inflowSol: 12, coins5: 2, word: "x" },
+    { key: "n:1", at: T + 4000 - 3600 + 1800, title: "one", buyers: 25, lift: 9, inflowSol: 15, coins5: 3, word: "x" },
+    { key: "t:jensen", at: T + 900, title: "Jensen Huang", buyers: 25, lift: 5.3, inflowSol: 10, coins5: 2, word: "jensen" },
+    { key: "n:9", at: T - 10, title: "outside", buyers: 1, lift: 1, inflowSol: 1, coins5: 0, word: null },
+  ];
+  const coinPasses = [{ mint: "M1", at: T + 100, createdAt: T + 92, outcome: "shadow", symbol: "HUMAN", mcapUsd: 4270 }, { mint: "M2", at: T + 7200, createdAt: T, outcome: "shadow", symbol: "LATE", mcapUsd: 1 }];
+  const b = buildTimeline({ ...src, from: T, to: T + 3600, asOf: 0, storyPasses, coinPasses });
+  const n1 = b.stories.find((s) => s.key === "n:1");
+  assert.deepEqual([n1.gate.passes, n1.gate.firstAt, n1.gate.best.lift, n1.gate.best.buyers], [2, T + 700, 9, 25]);
+  assert.equal(b.stories.find((s) => s.key === "n:2").gate, undefined);
+  assert.deepEqual(b.gateStories.map((g) => [g.key, g.title, g.passes, g.best.lift]), [["t:jensen", "Jensen Huang", 1, 5.3]]);
+  assert.deepEqual(b.gateCoins, [{ mint: "M1", at: T + 100, secs: 8, symbol: "HUMAN", mcapUsd: 4270, outcome: "shadow" }]);
+});
+
+test("timeline gates: a story the gate passed is kept past the STORIES_MAX cut", () => {
+  const many = Array.from({ length: STORIES_MAX + 3 }, (_, i) => row(`k${i}`, 10 + (i % 150), 30));
+  many.push(row("old", 1, 30));
+  const src = fromRows(many, T, T + 200 * BUCKET_S);
+  const b = buildTimeline({ ...src, from: T, to: T + 200 * BUCKET_S, asOf: 0, storyPasses: [{ key: "old", at: T + 600, title: "old", buyers: 20, lift: 4, inflowSol: 12, coins5: 2, word: null }] });
+  assert.equal(b.stories.length, STORIES_MAX);
+  assert.ok(b.stories.some((s) => s.key === "old" && s.gate), "the oldest story would be cut, but it passed the gate");
+  assert.equal(b.gateStories.length, 0);
+});

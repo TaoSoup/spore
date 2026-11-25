@@ -28,7 +28,7 @@ export const listedKey = (k) => typeof k === "string" && k !== "*" && !k.startsW
  * - `siteRows`: the site row's buckets `{ t, buyers }`; `describe(key)`: `{ kind, title, ... }`; `coinOf(mint)`: `{ mint, symbol, name, image }` or null.
  * Returns `{ from, to, asOf, bucketS, min, site, stories, listed, hidden, more }`.
  */
-export function buildTimeline({ peaks, starts = () => new Map(), rowsOf = () => [], siteRows = [], from, to, min = MIN_DEFAULT, asOf, describe = () => null, coinOf = () => null }) {
+export function buildTimeline({ peaks, starts = () => new Map(), rowsOf = () => [], siteRows = [], from, to, min = MIN_DEFAULT, asOf, describe = () => null, coinOf = () => null, storyPasses = [], coinPasses = [] }) {
   const kept = peaks.filter((p) => listedKey(p.key) && p.peak >= min);
   const hidden = peaks.filter((p) => listedKey(p.key)).length - kept.length;
   const stored = starts(kept.map((p) => p.key));
@@ -41,7 +41,11 @@ export function buildTimeline({ peaks, starts = () => new Map(), rowsOf = () => 
     return { ...p, startAt, startSource: st?.source ?? "first-bucket", carried: startAt < from || (!st && p.firstT <= from) };
   });
   placed.sort((a, b) => b.startAt - a.startAt || b.peak - a.peak || (a.key < b.key ? -1 : 1));
-  const shown = placed.slice(0, STORIES_MAX);
+  // a story the story gate passed in the window is always kept; the cut takes the newest of the rest
+  const gated = new Set(storyPasses.filter((p) => p.at >= from && p.at < to).map((p) => p.key));
+  const keepG = placed.filter((p) => gated.has(p.key)), rest = placed.filter((p) => !gated.has(p.key));
+  const shown = keepG.length >= STORIES_MAX ? keepG : [...keepG, ...rest.slice(0, STORIES_MAX - keepG.length)];
+  shown.sort((a, b) => b.startAt - a.startAt || b.peak - a.peak || (a.key < b.key ? -1 : 1));
   const rows = new Map();
   for (const r of rowsOf(shown.map((p) => p.key))) {
     if (r.t < from || r.t >= to) continue;
@@ -73,7 +77,30 @@ export function buildTimeline({ peaks, starts = () => new Map(), rowsOf = () => 
     });
   }
   const site = siteRows.filter((r) => r.t >= from && r.t < to).sort((a, b) => a.t - b.t).map((r) => ({ t: r.t, buyers: r.buyers }));
-  return { from, to, asOf, bucketS: BUCKET_S, min, site, stories, listed: stories.length, hidden, more: Math.max(0, placed.length - STORIES_MAX) };
+  // The gates (lib/story-gate.mjs, lib/trend-gate.mjs), what they passed in the window: a listed story carries its passes
+  // (`gate`: how many hours it passed, the first, and the pass with the highest lift); a story the gate passed that is not
+  // a timeline row (a subject block, "t:...", files the same coins again) comes apart in `gateStories`; the coin gate's
+  // passes come in `gateCoins` (compact, oldest first).
+  const byKey = new Map();
+  for (const p of storyPasses) { if (p.at < from || p.at >= to) continue; let a = byKey.get(p.key); if (!a) byKey.set(p.key, a = []); a.push(p); }
+  const listedKeys = new Set();
+  for (const s of stories) {
+    listedKeys.add(s.key);
+    const a = byKey.get(s.key);
+    if (a) s.gate = gateOf(a);
+  }
+  const gateStories = [];
+  for (const [key, a] of byKey) if (!listedKeys.has(key)) gateStories.push({ key, title: a[0].title ?? key, ...gateOf(a) });
+  gateStories.sort((x, y) => x.firstAt - y.firstAt);
+  const gateCoins = coinPasses.filter((p) => p.at >= from && p.at < to).map((p) => ({ mint: p.mint, at: p.at, secs: Number.isFinite(p.createdAt) ? Math.max(0, p.at - p.createdAt) : null, symbol: p.symbol ?? null, mcapUsd: p.mcapUsd ?? null, outcome: p.outcome }));
+  return { from, to, asOf, bucketS: BUCKET_S, min, site, stories, listed: stories.length, hidden, more: Math.max(0, placed.length - STORIES_MAX), gateStories, gateCoins };
+}
+
+/** A story's gate passes in the window: `{ passes, firstAt, best: { at, buyers, lift, inflowSol, coins5, word } }` (best: the highest lift). */
+function gateOf(a) {
+  let best = a[0];
+  for (const p of a) if ((p.lift ?? 0) > (best.lift ?? 0)) best = p;
+  return { passes: a.length, firstAt: a[0].at, best: { at: best.at, buyers: best.buyers, lift: best.lift, inflowSol: best.inflowSol, coins5: best.coins5, word: best.word ?? null } };
 }
 
 /** `{ from, to, min }` of a request's query, or `{ error }`. `nowS`: the server's clock. A lone `from` covers 24 h from it. */

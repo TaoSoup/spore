@@ -16,9 +16,10 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEven
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { api, errorMessage, type Timeline as TimelineBody, type TimelineStory } from "../lib/api";
 import { count, usd } from "../lib/format";
+import type { TimelineGateCoin, TimelineGateStory } from "../lib/api";
 import { Logo } from "../components/Bits";
 import {
-  KIND_WORD, MIN_ITEMS, axisTicks, bandGeo, clock, dayParam, earlierDays, hourGroups, nearestSite, parseDay, parseMin, sparkPath, spanWords, titleOf, windowOf,
+  KIND_WORD, MIN_ITEMS, axisTicks, bandGeo, gateHours, gateWords, secsWords, clock, dayParam, earlierDays, hourGroups, nearestSite, parseDay, parseMin, sparkPath, spanWords, titleOf, windowOf,
   type DayKey, type MinKey,
 } from "../lib/timeline";
 import "../components/primitives.css";
@@ -41,8 +42,8 @@ function Seg<K extends string>({ label, items, value, onChange }: { label: strin
 
 export default function Timeline() {
   const [params, setParams] = useSearchParams();
-  const day = parseDay(params.get("day")), min = parseMin(params.get("min"));
-  const set = (k: "day" | "min", v: string) => { const p = new URLSearchParams(params); p.set(k, v); setParams(p, { replace: true }); };
+  const day = parseDay(params.get("day")), min = parseMin(params.get("min")), gateOnly = params.get("gate") === "1";
+  const set = (k: "day" | "min" | "gate", v: string | null) => { const p = new URLSearchParams(params); if (v == null) p.delete(k); else p.set(k, v); setParams(p, { replace: true }); };
   const [data, setData] = useState<TimelineBody | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -58,11 +59,15 @@ export default function Timeline() {
     let alive = true;
     const w = windowOf(day);
     setBusy(true); setError(null);
-    api.timeline(w.from, w.to, Number(min)).then((d) => { if (alive) { setData(d); setBusy(false); } }, (e) => { if (alive) { setError(errorMessage(e)); setBusy(false); } });
+    // "Gate passed" lists every story the gate passed: a pass needs 15+ buyers in 30 min, which the smallest size holds
+    api.timeline(w.from, w.to, gateOnly ? 5 : Number(min)).then((d) => { if (alive) { setData(d); setBusy(false); } }, (e) => { if (alive) { setError(errorMessage(e)); setBusy(false); } });
     return () => { alive = false; };
-  }, [day, min, tick]);
+  }, [day, min, gateOnly, tick]);
   const earlier = useMemo(() => earlierDays(), []);
-  const groups = useMemo(() => (data ? hourGroups(data.stories) : []), [data]);
+  const gates = useMemo(() => (data ? gateHours(data) : new Map<number, { coins: TimelineGateCoin[]; stories: TimelineGateStory[] }>()), [data]);
+  const hasGates = !!data && ((data.gateCoins?.length ?? 0) > 0 || (data.gateStories?.length ?? 0) > 0 || data.stories.some((s) => s.gate));
+  const shown = useMemo(() => (data ? (gateOnly ? data.stories.filter((s) => s.gate) : data.stories) : []), [data, gateOnly]);
+  const groups = useMemo(() => hourGroups(shown, gates.keys()), [shown, gates]);
   // a link to one story (#tl-…, a band tick or a shared address): its row exists only once the read is in, so the
   // jump is made then, once per address
   const { hash } = useLocation();
@@ -91,8 +96,9 @@ export default function Timeline() {
           </select>
         </div>
         <div className="dsc-ctl">
-          <span className="tl-ctl-label">Peak buyers / 5 min</span>
-          <Seg label="Smallest peak listed" items={MIN_ITEMS} value={min} onChange={(k: MinKey) => set("min", k)} />
+          <Seg label="Which stories" items={SHOW_ITEMS} value={gateOnly ? "gate" : "all"} onChange={(k) => set("gate", k === "gate" ? "1" : null)} />
+          {!gateOnly && <span className="tl-ctl-label">Peak buyers / 5 min</span>}
+          {!gateOnly && <Seg label="Smallest peak listed" items={MIN_ITEMS} value={min} onChange={(k: MinKey) => set("min", k)} />}
         </div>
       </div>
       {error && !data && <div className="dsc-empty">The story history could not be read just now ({error}).</div>}
@@ -100,24 +106,28 @@ export default function Timeline() {
       {data && (
         <div className={`tl-body${busy ? " stale" : ""}`} aria-busy={busy || undefined}>
           {error && <p className="dsc-stale-err">The last read failed ({error}); showing the one before.</p>}
-          <Band data={data} />
+          <Band data={gateOnly ? { ...data, stories: shown } : data} />
           <p className="tl-count">
-            <b>{count(data.listed)}</b> {data.listed === 1 ? "story" : "stories"} with {data.min}+ buyers in their busiest 5 minutes
-            {data.hidden > 0 && <span> · {count(data.hidden)} smaller not listed</span>}
+            {gateOnly ? <><b>{count(shown.length)}</b> {shown.length === 1 ? "story" : "stories"} the story gate passed</> : <><b>{count(data.listed)}</b> {data.listed === 1 ? "story" : "stories"} with {data.min}+ buyers in their busiest 5 minutes</>}
+            {!gateOnly && data.hidden > 0 && <span> · {count(data.hidden)} smaller not listed</span>}
             {data.more > 0 && <span> · {count(data.more)} more not shown (narrow the window)</span>}
+            {hasGates && <span> · {count(data.gateCoins?.length ?? 0)} launches passed the coin gate</span>}
           </p>
-          {groups.length === 0 ? (
-            <div className="dsc-empty">No story reached {data.min} buyers in 5 minutes in this window. {data.min > 5 && <button type="button" className="linkish dsc-link" onClick={() => set("min", "5")}>Show smaller ones</button>}</div>
-          ) : groups.map((g) => (
+          {shown.length === 0 && (
+            <div className="dsc-empty">{gateOnly ? "The story gate passed no story in this window." : <>No story reached {data.min} buyers in 5 minutes in this window. {data.min > 5 && <button type="button" className="linkish dsc-link" onClick={() => set("min", "5")}>Show smaller ones</button>}</>}</div>
+          )}
+          {groups.map((g) => (
             <section key={g.key} className="tl-hour" aria-label={g.label}>
-              <h2 className="tl-hour-h">{g.label}<span>{g.stories.length}</span></h2>
-              <ol className="tl-list">{g.stories.map((s) => <Row key={s.key} s={s} />)}</ol>
+              <h2 className="tl-hour-h">{g.label}{g.stories.length > 0 && <span>{g.stories.length}</span>}</h2>
+              {g.t != null && gates.get(g.t) && <GateHour g={gates.get(g.t)!} />}
+              {g.stories.length > 0 && <ol className="tl-list">{g.stories.map((s) => <Row key={s.key} s={s} />)}</ol>}
             </section>
           ))}
           <p className="dsc-note">
             From Spore's 5-minute attention series, kept 14 days and recorded only while the server runs: a gap means it was not watching, not that nothing happened.
             A story is one narrative (its title written by a language model, which can be wrong), one X post the coins link, or one family of coins.
             A peak counts the wallets that bought the story's coins in one 5-minute window. Nothing here says what a coin will do.
+            {hasGates && " The gates are rules being tested: the story gate marks stories drawing many real buyers far above their own normal over 30 minutes; the coin gate marks new launches whose first minutes drew real buyers. A pass is a measured fact, not a recommendation."}
           </p>
         </div>
       )}
@@ -126,6 +136,42 @@ export default function Timeline() {
 }
 
 const anchorOf = (key: string) => `tl-${key.replace(/[^A-Za-z0-9]/g, "-")}`;
+const SHOW_ITEMS = [
+  { key: "all", text: "All stories", title: "Every story, by size" },
+  { key: "gate", text: "Gate passed", title: "Only the stories the story gate passed" },
+] as const;
+
+/** An hour's gate passes: subject stories the story gate passed (they are not rows), and the coin gate's launches, folded. */
+function GateHour({ g }: { g: { coins: TimelineGateCoin[]; stories: TimelineGateStory[] } }) {
+  const [open, setOpen] = useState(false);
+  const n = g.coins.length, fast = g.coins.filter((c) => c.secs != null && c.secs < 60).length;
+  return (
+    <div className="tl-gates">
+      {g.stories.map((s) => (
+        <p key={s.key} className="tl-gate-line"><span className="dsc-pill sm tl-gate-pill">Story gate</span><span className="tl-gate-title" title={s.title}>{s.title}</span><span className="tl-gate-num">{gateWords(s)}</span></p>
+      ))}
+      {n > 0 && (
+        <>
+          <button type="button" className="linkish tl-gate-toggle" aria-expanded={open} onClick={() => setOpen((x) => !x)}>
+            {count(n)} {n === 1 ? "launch" : "launches"} passed the coin gate{fast > 0 ? ` · ${count(fast)} within a minute of launch` : ""} <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+          </button>
+          {open && (
+            <ul className="tl-gate-coins">
+              {g.coins.map((c) => (
+                <li key={c.mint}>
+                  <Link to={`/c/${c.mint}`} className="dsc-link">{c.symbol ? `$${c.symbol}` : c.mint.slice(0, 6)}</Link>
+                  <span>{c.mcapUsd != null ? usd(c.mcapUsd) : "—"}</span>
+                  <span title="Seconds from its launch to the pass">{secsWords(c.secs)}</span>
+                  <span className="tl-gate-when">{clock(c.at)}{c.outcome !== "shadow" ? ` · ${c.outcome}` : ""}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 function Band({ data }: { data: TimelineBody }) {
   const box = useRef<HTMLDivElement>(null);
@@ -158,9 +204,9 @@ function Band({ data }: { data: TimelineBody }) {
       </div>
       <div ref={box} className="tl-band-box" style={{ height: h }} onPointerMove={track} onPointerDown={track} onPointerLeave={() => setHot(null)}>
         <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img"
-          aria-label={`Buyers per 5 minutes on the whole site, ${clock(data.from)} to ${clock(data.to)}${peak.buyers ? `, busiest at ${clock(peak.t)} with ${peak.buyers}` : ""}; ${data.stories.length} story starts marked.`}>
+          aria-label={`Buyers per 5 minutes on the whole site, ${clock(data.from)} to ${clock(data.to)}${peak.buyers ? `, busiest at ${clock(peak.t)} with ${peak.buyers}` : ""}; ${g.marks.length} story starts marked.`}>
           {g.area && <path className="tl-band-area" d={g.area} />}
-          {g.marks.map((m) => <line key={m.key} className="tl-band-mark" x1={m.x} x2={m.x} y1={h} y2={h - m.len} vectorEffect="non-scaling-stroke" />)}
+          {g.marks.map((m) => <line key={m.key} className={`tl-band-mark${m.gate ? " gate" : ""}`} x1={m.x} x2={m.x} y1={h} y2={h - m.len} vectorEffect="non-scaling-stroke" />)}
           {p && <line className="tl-band-hot" x1={g.x(p.t)} x2={g.x(p.t)} y1={0} y2={h} vectorEffect="non-scaling-stroke" />}
         </svg>
         {/* the ticks as links over the band, for a pointer and a keyboard alike */}
@@ -185,6 +231,11 @@ function Row({ s }: { s: TimelineStory }) {
         <div className="tl-title">
           <span className={`dsc-pill sm tl-kind k-${s.kind}`}>{KIND_WORD[s.kind] ?? "Story"}</span>
           <span className="tl-title-text" title={title}>{title}</span>
+          {s.gate && (
+            <span className="dsc-pill sm tl-gate-pill" title={`The story gate passed it${s.gate.passes > 1 ? ` in ${s.gate.passes} hours` : ""}, first at ${clock(s.gate.firstAt)}: ${s.gate.best.buyers} counted buyers in 30 min, ${s.gate.best.lift}× its normal, ${s.gate.best.inflowSol} SOL in, ${s.gate.best.coins5} coins with 5+ buyers${s.gate.best.word ? `, "${s.gate.best.word}" launches` : ""}`}>
+              Gate · {gateWords(s.gate)}
+            </span>
+          )}
         </div>
         <div className="tl-sub">
           {s.kind === "post" && s.handle && (s.url ? <a href={s.url} target="_blank" rel="noopener noreferrer" className="dsc-link">@{s.handle}</a> : <span>@{s.handle}</span>)}

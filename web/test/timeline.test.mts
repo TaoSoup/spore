@@ -56,3 +56,16 @@ test("timeline view: hour groups newest first, carried stories last by peak; wor
   assert.deepEqual(L.nearestSite([{ t: 0, buyers: 1 }, { t: 300, buyers: 2 }], 320), { t: 300, buyers: 2 });
   assert.equal(L.nearestSite([{ t: 0, buyers: 1 }, { t: 900, buyers: 2 }], 500), null, "inside a gap: nothing recorded");
 });
+
+test("timeline view: gate passes by local hour; hours with only gate passes still get a group; words", () => {
+  const h = new Date(2026, 10, 25, 3).getTime() / 1000;
+  const coins = [{ mint: "A", at: h + 100, secs: 8, symbol: "A", mcapUsd: 4000, outcome: "shadow" as const }, { mint: "B", at: h + 3700, secs: 90, symbol: "B", mcapUsd: 9000, outcome: "promoted" as const }];
+  const g = L.gateHours({ gateCoins: coins, gateStories: [{ key: "t:j", title: "Jensen", passes: 1, firstAt: h + 200, best: { at: h + 200, buyers: 25, lift: 5.3, inflowSol: 10, coins5: 2, word: "jensen" } }] });
+  assert.deepEqual([...g.keys()].sort(), [h, h + 3600]);
+  assert.deepEqual(g.get(h)!.coins.map((c) => c.mint), ["A"]);
+  assert.equal(g.get(h)!.stories[0].key, "t:j");
+  const groups = L.hourGroups([story("s", h + 3700)], g.keys());
+  assert.deepEqual(groups.map((x) => [x.t, x.stories.length]), [[h + 3600, 1], [h, 0]]);
+  assert.equal(L.gateWords({ best: { lift: 5.3, buyers: 25 } }), "5.3× normal · 25 buyers");
+  assert.deepEqual([L.secsWords(8), L.secsWords(90), L.secsWords(3900), L.secsWords(null)], ["8 s", "2 min", "1 h 5 min", "—"]);
+});

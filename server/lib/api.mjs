@@ -781,7 +781,9 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
       return { kind: "unknown", title: key };
     };
     const coinOf = (mint) => { const { name, symbol } = model.nameOf(mint); return { mint, symbol, name, image: imageProxyUrl(model.metaFor({ mint })?.image ?? null) }; };
-    const body = buildTimeline({ peaks, starts, rowsOf, siteRows, from: q.from, to: q.to, min: q.min, asOf: nowS, describe, coinOf });
+    let storyPasses = [], coinPasses = [];
+    try { storyPasses = db.storyGateIn?.(q.from, q.to) ?? []; coinPasses = db.trendGateIn?.(q.from, q.to) ?? []; } catch (e) { log.warn(`timeline gates: ${e.message}`); }
+    const body = buildTimeline({ peaks, starts, rowsOf, siteRows, from: q.from, to: q.to, min: q.min, asOf: nowS, describe, coinOf, storyPasses, coinPasses });
     timelineCache.set(ck, { at: Date.now(), body });
     while (timelineCache.size > 64) timelineCache.delete(timelineCache.keys().next().value);
     sendCachedJson(req, res, body, { cacheControl: "public, max-age=60" });

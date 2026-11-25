@@ -142,7 +142,9 @@ CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
 -- The story gate (lib/story-gate.mjs): a story that passed, once per story per hour (the first pass of the hour), with
 -- what it measured (why: JSON) and the mode it ran in.
 CREATE TABLE IF NOT EXISTS story_gate (story_key TEXT NOT NULL, hour INTEGER NOT NULL, at INTEGER NOT NULL, mode TEXT NOT NULL, title TEXT, buyers INTEGER, lift REAL, inflow_sol REAL, coins5 INTEGER, word TEXT, why TEXT NOT NULL, PRIMARY KEY (story_key, hour)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS story_gate_at ON story_gate(at);
 CREATE TABLE IF NOT EXISTS trend_gate (mint TEXT PRIMARY KEY, at INTEGER NOT NULL, created_at INTEGER, outcome TEXT NOT NULL, symbol TEXT, name TEXT, mcap_usd REAL, why TEXT NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS trend_gate_at ON trend_gate(at);
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
@@ -370,6 +372,8 @@ export class Db {
       sniperFlow: p("SELECT COALESCE(SUM(CAST(base_amount AS REAL)), 0) AS amt FROM trades WHERE mint = ?1 AND time >= ?2 AND time <= ?3 AND is_buy = 1 AND user != ?4 AND (time <= ?5 OR slot = ?6)"),
       storyGatePut: p("INSERT OR IGNORE INTO story_gate (story_key, hour, at, mode, title, buyers, lift, inflow_sol, coins5, word, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
       storyGateRecent: p("SELECT story_key, hour, at, mode, title, buyers, lift, inflow_sol, coins5, word, why FROM story_gate WHERE at >= ? ORDER BY at DESC LIMIT ?"),
+      storyGateIn: p("SELECT story_key, at, title, buyers, lift, inflow_sol, coins5, word FROM story_gate WHERE at >= ? AND at < ? ORDER BY at LIMIT ?"),
+      trendGateIn: p("SELECT mint, at, created_at, outcome, symbol, mcap_usd FROM trend_gate WHERE at >= ? AND at < ? ORDER BY at LIMIT ?"),
       trendGatePut: p("INSERT OR IGNORE INTO trend_gate (mint, at, created_at, outcome, symbol, name, mcap_usd, why) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
       trendGateRecent: p("SELECT mint, at, created_at, outcome, symbol, name, mcap_usd, why FROM trend_gate WHERE at >= ? ORDER BY at DESC LIMIT ?"),
       // The first whole record wins: a late print in a coin's window seen after it was written must not replace it.
@@ -629,6 +633,10 @@ export class Db {
   storyGatePut({ key, hour, at, mode, title = null, v }) { return Number(this.q.storyGatePut.run(key, hour, at, mode, title, v.buyers, v.lift, v.inflowSol, v.coins5, v.word?.word ?? null, JSON.stringify(v)).changes) > 0; }
   /** The story gate's passes since `since` (unix s), newest first. */
   storyGateRecent(since, limit = 200) { return this.q.storyGateRecent.all(since, limit).map((x) => ({ key: x.story_key, hour: x.hour, at: x.at, mode: x.mode, title: x.title, buyers: x.buyers, lift: x.lift, inflowSol: x.inflow_sol, coins5: x.coins5, word: x.word, why: JSON.parse(x.why) })); }
+  /** The story gate's passes with `from <= at < to`, oldest first (the story timeline). */
+  storyGateIn(from, to, limit = 5000) { return this.q.storyGateIn.all(from, to, limit).map((x) => ({ key: x.story_key, at: x.at, title: x.title, buyers: x.buyers, lift: x.lift, inflowSol: x.inflow_sol, coins5: x.coins5, word: x.word })); }
+  /** The trending gate's passes with `from <= at < to`, oldest first (the story timeline). */
+  trendGateIn(from, to, limit = 5000) { return this.q.trendGateIn.all(from, to, limit).map((x) => ({ mint: x.mint, at: x.at, createdAt: x.created_at, outcome: x.outcome, symbol: x.symbol, mcapUsd: x.mcap_usd })); }
   /** One pass of the trending gate (lib/trend-gate.mjs); false when the mint was already recorded. */
   trendGatePut({ mint, at, createdAt = null, outcome, symbol = null, name = null, mcapUsd = null, why }) { return Number(this.q.trendGatePut.run(mint, at, createdAt, outcome, symbol, name, mcapUsd, JSON.stringify(why ?? {})).changes) > 0; }
   /** The gate's passes since `since` (unix s), newest first. */

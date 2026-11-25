@@ -1,6 +1,6 @@
 // The story timeline page's view logic (pages/Timeline.tsx, GET /api/timeline): the day windows in the reader's own
 // time, the hour groups, the words and the chart geometry. No DOM, no network.
-import type { Timeline, TimelineStory } from "./api";
+import type { Timeline, TimelineGateCoin, TimelineGateStory, TimelineStory } from "./api";
 
 export const BUCKET_S = 300;
 export type DayKey = "24h" | "today" | "yesterday" | `d:${string}`;
@@ -59,17 +59,39 @@ export const clock = (t: number) => new Date(t * 1000).toLocaleTimeString("en-GB
  * repeated hour of a daylight-saving fall-back night into one). */
 const hourOf = (t: number) => { const off = -new Date(t * 1000).getTimezoneOffset() * 60; return t - ((((t + off) % 3600) + 3600) % 3600); };
 
-/** Stories by the local hour they started in, newest hour first; stories that started before the window go last, apart. */
-export function hourGroups(stories: readonly TimelineStory[]): { key: string; label: string; stories: TimelineStory[] }[] {
+/**
+ * Stories by the local hour they started in, newest hour first; stories that started before the window go last, apart.
+ * `alsoHours`: hour starts with something else to show (the gates' passes), listed even with no story of their own.
+ */
+export function hourGroups(stories: readonly TimelineStory[], alsoHours: Iterable<number> = []): { key: string; t: number | null; label: string; stories: TimelineStory[] }[] {
   const by = new Map<number, TimelineStory[]>(), before: TimelineStory[] = [];
   for (const s of stories) {
     if (s.carried) { before.push(s); continue; }
     const h = hourOf(s.startAt);
     let a = by.get(h); if (!a) by.set(h, a = []); a.push(s);
   }
-  const out = [...by].sort((a, b) => b[0] - a[0]).map(([h, a]) => ({ key: String(h), label: `${clock(h)} – ${clock(h + 3600)}`, stories: a }));
-  if (before.length) out.push({ key: "before", label: "Started earlier, still bought in this window", stories: before.sort((a, b) => b.peak - a.peak) });
+  for (const h of alsoHours) if (!by.has(h)) by.set(h, []);
+  const out: { key: string; t: number | null; label: string; stories: TimelineStory[] }[] = [...by].sort((a, b) => b[0] - a[0]).map(([h, a]) => ({ key: String(h), t: h, label: `${clock(h)} – ${clock(h + 3600)}`, stories: a }));
+  if (before.length) out.push({ key: "before", t: null, label: "Started earlier, still bought in this window", stories: before.sort((a, b) => b.peak - a.peak) });
   return out;
+}
+/** The gates' passes by the local hour they happened in: the coin gate's launches and the story gate's passes of stories that are not rows. */
+export function gateHours(t: Pick<Timeline, "gateCoins" | "gateStories">): Map<number, { coins: TimelineGateCoin[]; stories: TimelineGateStory[] }> {
+  const out = new Map<number, { coins: TimelineGateCoin[]; stories: TimelineGateStory[] }>();
+  const at = (h: number) => { let x = out.get(h); if (!x) out.set(h, x = { coins: [], stories: [] }); return x; };
+  for (const c of t.gateCoins ?? []) at(hourOf(c.at)).coins.push(c);
+  for (const s of t.gateStories ?? []) at(hourOf(s.firstAt)).stories.push(s);
+  for (const x of out.values()) x.coins.sort((a, b) => b.at - a.at);
+  return out;
+}
+/** "9× normal · 25 buyers": a story gate pass in a few words. */
+export const gateWords = (g: { best: { lift: number; buyers: number } }) => `${g.best.lift}× normal · ${g.best.buyers} buyers`;
+/** "8 s", "3 min", "1 h 5 min": time from a launch to its gate pass. */
+export function secsWords(s: number | null): string {
+  if (s == null || !Number.isFinite(s)) return "—";
+  if (s < 60) return `${Math.round(s)} s`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
 
 /** "2 h 10 m", "35 m", "5 m": how long a story had stored buckets in the window (first to last bucket, inclusive). */
@@ -106,7 +128,7 @@ export function bandGeo(t: Pick<Timeline, "from" | "to" | "site" | "stories">, w
     i = j + 1;
   }
   const peakMax = Math.max(1, ...t.stories.map((s) => s.peak));
-  const marks = t.stories.filter((s) => !s.carried).map((s) => ({ key: s.key, x: x(s.startAt), len: 6 + Math.sqrt(s.peak / peakMax) * (h * 0.45) }));
+  const marks = t.stories.filter((s) => !s.carried).map((s) => ({ key: s.key, x: x(s.startAt), len: 6 + Math.sqrt(s.peak / peakMax) * (h * 0.45), gate: !!s.gate }));
   return { area, marks, max, x, w, h };
 }
 /** Labels along the band: whole local hours every `step` hours (3 for a day, 1 for a few hours), as `{ x: 0-1, text }`; a window over a day boundary names the day at midnight. */
