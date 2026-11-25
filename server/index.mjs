@@ -73,7 +73,7 @@ model.onImage = (url) => images.enqueueThumb(url);
 const meta = new MetaFetcher(model, { log, concurrency: 6 });
 const launchLog = cfg.launchLog ? new LaunchLog({ ...cfg.launchLog, log }) : null;
 if (launchLog) log.info(`launch log: every curve launch and trade → ${cfg.launchLog.file} (kept ${cfg.launchLog.keepHours} h)`);
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog } });
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });
@@ -143,7 +143,7 @@ const app = createApp({
   agents: { registry: agentRegistry, runner: agentRunner, mode: cfg.agents.mode, cooldownMin: cfg.agents.cooldownMin, dataDir: cfg.dataDir, vault: agentVault, live: liveAgents, briefs: agentBriefs },
 });
 
-const server = app.listen(cfg.port, () => log.info(`spore api on :${cfg.port} → ${redact(cfg.rpcUrl)} (ws ${redact(cfg.wsUrl)}) data ${cfg.dataDir}${cfg.backfill ? (Number.isFinite(cfg.backfillLimit) ? ` backfill limit ${cfg.backfillLimit}` : "") : " backfill off"} mode ${cfg.show} agents ${cfg.agents.mode} fee ${cfg.launchFeeSol} SOL meta ${cfg.pagesDomain} trust-proxy ${JSON.stringify(cfg.trustProxy)}`));
+const server = app.listen(cfg.port, () => log.info(`spore api on :${cfg.port} → ${redact(cfg.rpcUrl)} (ws ${cfg.wsHelius ? `helius curve stream (budget ${Math.round(cfg.wsHelius.budgetBytes / 1e6)} MB), else ` : ""}${redact(cfg.wsUrl)}) data ${cfg.dataDir}${cfg.backfill ? (Number.isFinite(cfg.backfillLimit) ? ` backfill limit ${cfg.backfillLimit}` : "") : " backfill off"} mode ${cfg.show} agents ${cfg.agents.mode} fee ${cfg.launchFeeSol} SOL meta ${cfg.pagesDomain} trust-proxy ${JSON.stringify(cfg.trustProxy)}`));
 server.on("error", (e) => { log.error(`listen :${cfg.port} failed: ${e.message}`); process.exit(1); });
 // Longer than a typical proxy's upstream keep-alive (nginx 60 s) so the proxy never reuses a socket we just closed.
 server.keepAliveTimeout = 65_000;

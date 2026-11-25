@@ -19,8 +19,11 @@
 // proves no delivery: the subscribe request may be answered late, refused (the socket then stays open and silent until
 // the watchdog reopens it), or the provider may start sending a while later, and all of that is still the gap.
 export class LogsSubscriber {
-  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000, name = "live", mustInclude = null, onGap = null, resumeAt = 0 }) {
-    this.wsUrl = wsUrl; this.programId = programId; this.onLogs = onLogs; this.onConnect = onConnect; this.log = log; this.staleMs = staleMs;
+  constructor({ wsUrl, programId, onLogs, onConnect, log = console, staleMs = 60_000, name = "live", mustInclude = null, onGap = null, resumeAt = 0, fallbackUrl = null, budgetBytes = Infinity, meteredBytes = 0 }) {
+    this.wsUrl = wsUrl;
+    // A metered socket (wsUrl, e.g. Helius) with a data budget: past budgetBytes received on it, fallbackUrl for good.
+    this.fallbackUrl = fallbackUrl; this.budgetBytes = budgetBytes; this.meteredBytes = meteredBytes;
+    this.overBudget = !!fallbackUrl && meteredBytes >= budgetBytes; this.usingMetered = false; this.programId = programId; this.onLogs = onLogs; this.onConnect = onConnect; this.log = log; this.staleMs = staleMs;
     this.name = name; this.mustInclude = mustInclude;
     this.onGap = onGap; this.resumeAt = resumeAt; // resumeAt: ms, 0 = unknown (no gap for the first socket)
     this.gapConnects = 0;         // the `connects` count whose first notification was seen (onGap fired or had nothing to report)
@@ -28,7 +31,7 @@ export class LogsSubscriber {
     this.openedAt = 0;            // when the socket in use opened (0: none opened since the last reconnect was scheduled)
     this.subscribed = false;      // the provider acknowledged the subscription on this socket (or a notification arrived)
     this.lastNotificationAt = 0;  // the last logsNotification parsed: `connected` only says the socket is open
-    this.stats = { connects: 0, messages: 0, notifications: 0, skipped: 0, errors: 0, lastError: null };
+    this.stats = { connects: 0, messages: 0, notifications: 0, skipped: 0, errors: 0, lastError: null, bytes: 0 };
     this.watchdog = setInterval(() => this.#checkStale(), 10_000); this.watchdog.unref();
   }
 
@@ -39,7 +42,9 @@ export class LogsSubscriber {
   #connect() {
     if (this.stopped) return;
     let ws;
-    try { ws = new WebSocket(this.wsUrl); } catch (e) { this.#failed(e); return; }
+    const metered = !!this.fallbackUrl && !this.overBudget;
+    try { ws = new WebSocket(this.fallbackUrl && this.overBudget ? this.fallbackUrl : this.wsUrl); } catch (e) { this.#failed(e); return; }
+    this.usingMetered = metered;
     this.ws = ws; this.subscribed = false;
     ws.onopen = () => {
       this.stats.connects++; this.connectedAt = Date.now(); this.lastMessageAt = Date.now(); this.openedAt = Date.now();
@@ -50,6 +55,11 @@ export class LogsSubscriber {
     ws.onmessage = (ev) => {
       this.lastMessageAt = Date.now(); this.stats.messages++;
       const text = typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8");
+      this.stats.bytes += text.length;
+      if (this.usingMetered && ws === this.ws) {
+        this.meteredBytes += text.length;
+        if (this.meteredBytes >= this.budgetBytes) { this.overBudget = true; this.usingMetered = false; this.log.warn?.(`${this.name}: metered socket budget used (${Math.round(this.meteredBytes / 1e6)} MB), back to the fallback socket`); this.#close(); this.#reconnect(); return; }
+      }
       if (!this.subscribed && text.length < 1024 && text.includes('"id":1')) {
         let r = null;
         try { r = JSON.parse(text); } catch { /* not the reply */ }
@@ -76,7 +86,7 @@ export class LogsSubscriber {
       this.stats.notifications++; this.subscribed = true; this.lastNotificationAt = now;
       try { this.onLogs({ slot, signature: v.signature, err: v.err, logs: v.logs }); } catch (e) { this.stats.errors++; this.stats.lastError = e.message; }
     };
-    ws.onerror = (ev) => { this.stats.errors++; this.stats.lastError = ev?.message ?? "socket error"; };
+    ws.onerror = (ev) => { this.stats.errors++; this.stats.lastError = String(ev?.message ?? "socket error").replace(/(api[-_]?key=)[^&s]+/gi, "$1…"); };
     ws.onclose = () => { if (this.ws === ws) { this.ws = null; this.#reconnect(); } };
   }
   #failed(e) { this.stats.errors++; this.stats.lastError = e.message; this.#reconnect(); }
@@ -98,7 +108,7 @@ export class LogsSubscriber {
   }
   #close() { const ws = this.ws; this.ws = null; try { ws?.close(); } catch { /* already closed */ } }
 
-  snapshot() { return { ...this.stats, connected: this.connected, subscribed: this.subscribed, lastNotificationAgoMs: this.lastNotificationAt ? Date.now() - this.lastNotificationAt : null, lastMessageAgoMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null, backoffMs: this.backoffMs, reconnecting: !!this.reconnectTimer }; }
+  snapshot() { return { ...this.stats, connected: this.connected, subscribed: this.subscribed, lastNotificationAgoMs: this.lastNotificationAt ? Date.now() - this.lastNotificationAt : null, lastMessageAgoMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null, backoffMs: this.backoffMs, reconnecting: !!this.reconnectTimer, ...(this.fallbackUrl ? { metered: this.usingMetered, meteredBytes: this.meteredBytes, budgetBytes: this.budgetBytes, overBudget: this.overBudget } : {}) }; }
 }
 
 /** Full jitter: a uniform delay in [base/2, base]. */

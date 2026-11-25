@@ -81,3 +81,33 @@ test("live: onGap fires once at the first notification of each new socket with [
     plain.stop();
   } finally { globalThis.WebSocket = Real; }
 });
+
+test("live: a metered socket counts the bytes it receives and moves to the fallback socket for good past its budget", () => {
+  const Real = globalThis.WebSocket;
+  const { Fake, sockets } = fakeSockets();
+  globalThis.WebSocket = Fake;
+  try {
+    const warns = [];
+    const sub = new LogsSubscriber({ wsUrl: "wss://metered.example/?api-key=SECRET", fallbackUrl: "wss://free.example", budgetBytes: 1000, meteredBytes: 0, programId: "P", onLogs() {}, log: { info() {}, warn: (m) => warns.push(m) } }).start();
+    assert.equal(sockets[0].url, "wss://metered.example/?api-key=SECRET");
+    sockets[0].open();
+    const n = note();
+    sockets[0].onmessage({ data: n });
+    assert.equal(sub.meteredBytes, n.length);
+    assert.equal(sub.snapshot().metered, true);
+    while (!sub.overBudget) sockets[0].onmessage({ data: n });
+    assert.ok(sub.meteredBytes >= 1000);
+    assert.match(warns.join("\n"), /budget used/);
+    assert.ok(!warns.join("\n").includes("SECRET"), "the key is never logged");
+    clearTimeout(sub.reconnectTimer); sub.reconnectTimer = null; sub.start();
+    assert.equal(sockets.at(-1).url, "wss://free.example");
+    const before = sub.meteredBytes;
+    sockets.at(-1).open(); sockets.at(-1).onmessage({ data: n });
+    assert.equal(sub.meteredBytes, before, "the fallback socket is not metered");
+    assert.equal(sub.snapshot().overBudget, true);
+    // a restart that starts over budget opens the fallback at once
+    const sub2 = new LogsSubscriber({ wsUrl: "wss://metered.example", fallbackUrl: "wss://free.example", budgetBytes: 1000, meteredBytes: 5000, programId: "P", onLogs() {}, log: { info() {}, warn() {} } }).start();
+    assert.equal(sockets.at(-1).url, "wss://free.example");
+    sub.stop(); sub2.stop();
+  } finally { globalThis.WebSocket = Real; }
+});

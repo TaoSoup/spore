@@ -143,6 +143,11 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   if (narrTags.on && env.ANTHROPIC_CUSTOM_HEADERS) errors.push("ANTHROPIC_CUSTOM_HEADERS is set in the environment: unset it to run with NARRATIVES=on (its headers would go out with every narrative request)");
   const createdAtProbe = bool("CREATED_AT_PROBE", true);
   const livePools = bool("LIVE_POOLS", true);
+  // WS_HELIUS=1: the curve stream (new launches and curve trades, about 0.3 MB/s) uses RPC_USER_URL's WebSocket instead of
+  // WS_URL, because the public socket drops for long stretches. Helius meters sockets by data (2 credits per 0.1 MB), so
+  // the stream counts what it receives and goes back to WS_URL for good once WS_HELIUS_MB have arrived (kept across
+  // restarts in kv "wsMetered"; delete that row to start a new budget). The pool stream (about 1 MB/s) stays on WS_URL.
+  const wsHelius = bool("WS_HELIUS", false) && rpcUser ? { url: deriveWsUrl(rpcUser.url), budgetBytes: num("WS_HELIUS_MB", 20_000, { min: 1 }) * 1e6 } : null;
   // LAUNCH_LOG=<file>: record every curve launch and trade the live stream delivers, tracked or not, in that sqlite file
   // (lib/launch-log.mjs), kept LAUNCH_LOG_HOURS; measurement for the Discover trending gate. Off when empty.
   const launchLog = get("LAUNCH_LOG", "") ? { file: get("LAUNCH_LOG", ""), keepHours: num("LAUNCH_LOG_HOURS", 72, { min: 1 }) } : null;
@@ -242,5 +247,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, launchLog, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags };
 }

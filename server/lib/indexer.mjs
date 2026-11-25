@@ -108,7 +108,7 @@ export class Indexer {
   #listed = null; #listedFrom = [];
   constructor({ rpc, model, meta, hub, log = console, opts = {} }) {
     this.rpc = rpc; this.model = model; this.meta = meta; this.hub = hub; this.log = log;
-    this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, createdAtProbe: true,
+    this.opts = { backfill: true, backfillLimit: Infinity, refreshMs: 30_000, fullRefreshMs: 20 * 60_000, wsUrl: null, wsHelius: null, createdAtProbe: true,
       livePools: true, mintCatchupFirstMs: MINT_CATCHUP_FIRST_MS, mintCatchupMs: MINT_CATCHUP_MS, mintCatchupMax: MINT_CATCHUP_MAX, stageSliceMs: STAGE_SLICE_MS, ...opts };
     this.live = null; this.livePools = null; this.launchLog = opts.launchLog ?? null; this.timers = []; this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
@@ -146,10 +146,14 @@ export class Indexer {
     // nothing (a reconnect; since the last process was alive, for the first socket) and reads those trades back later.
     const fill = this.model.tradeFill;
     const gaps = fill ? { resumeAt: fill.resumeAt, onGap: (a, b) => fill.addGap(a, b) } : {};
-    this.live = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...gaps,
+    // WS_HELIUS (cfg.wsHelius): the curve stream on the metered socket within its data budget, kept in kv across restarts.
+    const wh = this.opts.wsHelius;
+    const metered = wh ? { wsUrl: wh.url, fallbackUrl: this.opts.wsUrl, budgetBytes: wh.budgetBytes, meteredBytes: Number(this.model.db?.kvGet?.("wsMetered", null)?.bytes) || 0 } : { wsUrl: this.opts.wsUrl };
+    this.live = new LogsSubscriber({ ...metered, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n), onConnect: () => { this.expectSweep = true; this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
     if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n, POOL_EVENT_PROGRAMS) }).start();
+    if (wh) this.timers.push(setInterval(() => { try { const m = this.model.db?.kvGet?.("wsMetered", null); this.model.db?.kvSet?.("wsMetered", { since: m?.since ?? Date.now(), bytes: this.live.meteredBytes, at: Date.now() }); } catch (e) { this.log.warn(`wsMetered: ${e.message}`); } }, 60_000));
     this.refreshSolUsd().catch(() => {});
     this.timers.push(setInterval(() => this.refreshSolUsd().catch(() => {}), 60_000));
     this.refreshQuoteUsd().catch(() => {});
