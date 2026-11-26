@@ -556,3 +556,27 @@ test("logo warm list: warmImageUrlsAsync lists what warmImageUrls lists, in the 
   assert.deepEqual(urls, model.warmImageUrls(60, true));
   assert.ok(assetKidsOf.length > 0);
 });
+
+test("name waves: the evidence pass over 250,000 held trades and 5,000 watched coins gives the loop turns, each within the slice budget", async () => {
+  const { NameWaves } = await import("../lib/waves.mjs");
+  const { SLICE_MS } = await import("../lib/sliced.mjs");
+  const db = new Db(":memory:");
+  const nowS = 1_795_000_000;
+  const trades = [];
+  for (let i = 0; i < 250_000; i++) trades.push({ m: `P${i % 6000}`, t: nowS - 600, b: i % 3 !== 0, u: `U${i % 40_000}`, v: 2 + (i % 7), p: 1, s: i });
+  const model = { get: (m) => ({ mint: m, tracked: true, creator: "curve" }), metaFor: () => null, coinRows: { a: trades, h: 0 } };
+  const w = new NameWaves({ db, model, now: () => nowS * 1000, log: quiet, cfg: { tickMs: 1e9, evidenceMs: 1e9, trimEveryMs: 1e9 } });
+  w.started = true; // timers off: the pass is run by hand
+  w.waves.set("w:word-x-20261118", { key: "w:word-x-20261118", feature: "x", formedT: nowS, pending: 5000, members: 0, unconfirmed: 0, mem: [] });
+  for (let i = 0; i < 5000; i++) w.pending.set(`P${i}`, { mint: `P${i}`, t: nowS - 600, L: null, creator: `C${i}`, cands: [{ key: "w:word-x-20261118", r: 0.2, how: "w" }], until: nowS + 3600 });
+  let ranMid = false, done = false;
+  setImmediate(() => { ranMid = !done; });
+  const r = await w.evidencePass();
+  done = true;
+  assert.equal(ranMid, true, "a setImmediate queued before the pass ran before it ended");
+  assert.ok(r.slices > 5, `${r.slices} turns`);
+  assert.ok(r.maxStepMs < SLICE_MS * 2, `longest step ${r.maxStepMs.toFixed(2)} ms (${r.maxStepAt})`);
+  assert.equal(w.stats.evidence.watched, 5000);
+  assert.equal(w.stats.evidence.trades, 250_000);
+  db.close();
+});

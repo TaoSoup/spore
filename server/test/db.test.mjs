@@ -227,3 +227,37 @@ test("chart pages: tradesRange is [from, to) in (time, slot, rowid) order; trade
   assert.doesNotMatch(db.q.histDeep.sourceSQL, /(^|[^_])length\(/);
   db.close();
 });
+
+test("name waves: the tables exist; counts, hours, launches, waves, coins, candidacies, hours and tests round-trip; trims go oldest first in chunks; a pending coin is decided once", () => {
+  const db = new Db(":memory:");
+  const tables = new Set(db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
+  for (const t of ["name_hours", "name_counts", "wave_launches", "waves", "wave_coins", "wave_cands", "wave_hours", "wave_tests"]) assert.ok(tables.has(t), t);
+  assert.equal(db.nameCountsPut([[10, "veto", 3, 4, 4], [10, "veto", 9, 9, 9], [11, "cat", 1, 1, 0]]), 2, "insert-only");
+  assert.equal(db.nameHourPut({ h: 10, launches: 150, creators: 90, partial: 0 }), true);
+  assert.equal(db.nameHourPut({ h: 10, launches: 1, creators: 1, partial: 1 }), false, "an hour row is written once");
+  assert.deepEqual(db.nameHoursIn(0, 20).map((r) => [r.h, r.partial, r.src]), [[10, 0, 0]]);
+  db.waveLaunchesPut([[100, "M1", 100_000, "C1", "Mr Veto", "VETO", "veto:w", 5], [200, "M2", 200_000, "C2", "Veto Cat", "", "veto:w,cat:w", 5]]);
+  assert.deepEqual(db.waveLaunchesSince(150).map((r) => [r.mint, r.feats, r.seen, r.bh]), [["M2", "veto:w,cat:w", 200_000, 5]]);
+  assert.equal(db.wavePut({ key: "w:word-veto-20261118", feature: "veto", kind: "word", v: 1, formedT: 100, formedAt: 100, win: 21600, n: 5, ctx: 4, e: 0.01, r: 0.002, tail: 1e-9, share0: 1e-6, cMissing: false, cBase: 2, why: { a: 1 } }), true);
+  db.waveUpdate({ key: "w:word-veto-20261118", lastT: 300, members: 7, why: { a: 2 } });
+  assert.deepEqual(db.wavesOpen().map((w) => [w.key, w.members, w.lastT, w.cMissing, w.why.a]), [["w:word-veto-20261118", 7, 300, false, 2]]);
+  db.waveUpdate({ key: "w:word-veto-20261118", lastT: 300, endedT: 400, members: 7, why: {} });
+  assert.deepEqual([db.wavesOpen().length, db.wavesRecent(350).length, db.wavesRecent(500).length], [0, 1, 0]);
+  assert.equal(db.waveCoinPut({ mint: "M1", t: 100, reason: "pending", cands: [{ key: "k", r: 0.2, how: "w" }] }), true);
+  assert.equal(db.waveCoinPut({ mint: "M1", t: 100, reason: "lexical", waveKey: "other" }), false, "a coin's first row stands");
+  assert.equal(db.waveCoinCands("M1", [{ key: "k" }, { key: "k2" }]), true);
+  assert.equal(db.waveCoinsPending()[0].cands.length, 2);
+  assert.equal(db.waveCoinDecide({ mint: "M1", waveKey: "k", reason: "tag", why: { held: 1 } }), true);
+  assert.equal(db.waveCoinDecide({ mint: "M1", waveKey: "k2", reason: "post" }), false, "decided once");
+  assert.deepEqual([db.waveCoinGet("M1").wave_key, db.waveCoinGet("M1").reason, db.waveCoinsPending().length], ["k", "tag", 0]);
+  assert.equal(db.waveCandPut("M1", "k", 0.2, "w", 100), true); assert.equal(db.waveCandPut("M1", "k", 0.3, "w", 100), false);
+  assert.equal(db.waveHourPut({ h: 10, key: "k", n6: 5, members: 3 }), true);
+  assert.equal(db.waveTestPut({ h: 10, feature: "veto", v: 1, n: 5, fail: "ctx", cMissing: true }), true);
+  for (let i = 0; i < 5; i++) db.waveCoinPut({ mint: `old${i}`, t: i, reason: "lexical", waveKey: "k" });
+  const steps = [];
+  for (let n; (n = db.waveCoinsTrim(50, 2)) > 0;) steps.push(n);
+  assert.deepEqual(steps, [2, 2, 1]);
+  assert.equal(db.nameCountsTrim(11, 10), 1); assert.equal(db.nameHoursTrim(11, 10), 1);
+  assert.equal(db.waveLaunchesTrim(150, 10), 1); assert.equal(db.waveCandsTrim(150, 10), 1); assert.equal(db.waveHoursTrim(11, 10), 1); assert.equal(db.waveTestsTrim(11, 10), 1); assert.equal(db.wavesTrim(500, 10), 1);
+  db.close();
+});

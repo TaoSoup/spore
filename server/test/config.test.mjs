@@ -165,3 +165,15 @@ test("narrative tags config: off by default with its own names; the key only fro
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("name waves config: off by default; shadow accepted; on refused with the reason; keep days within 7-90; the bootstrap a switch", () => {
+  const dir = tmp();
+  try {
+    const base = { DATA_DIR: join(dir, "data"), META_DIR: join(dir, "meta") };
+    assert.deepEqual(loadConfig(base, { here: dir }).waves, { mode: "off", keepDays: 30, bootstrap: true });
+    assert.deepEqual(loadConfig({ ...base, WAVES: "shadow", WAVES_KEEP_DAYS: "45", WAVES_BOOTSTRAP: "0" }, { here: dir }).waves, { mode: "shadow", keepDays: 45, bootstrap: false });
+    assert.throws(() => loadConfig({ ...base, WAVES: "on" }, { here: dir }), /WAVES="on" is not available yet/);
+    assert.throws(() => loadConfig({ ...base, WAVES: "yes", WAVES_KEEP_DAYS: "6" }, { here: dir }), (e) => e.message.includes('WAVES="yes" must be one of off, shadow') && e.message.includes('WAVES_KEEP_DAYS="6" must be an integer ≥ 7 ≤ 90'));
+    assert.throws(() => loadConfig({ ...base, WAVES_KEEP_DAYS: "91" }, { here: dir }), /WAVES_KEEP_DAYS/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

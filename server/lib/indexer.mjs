@@ -118,6 +118,7 @@ export class Indexer {
     this.gateMode = tg?.mode === "on" || tg?.mode === "shadow" ? tg.mode : "off";
     this.gatePerHour = tg?.perHour ?? 60; this.gatePromoted = [];
     this.wordBursts = opts.wordBursts ?? null; // lib/word-bursts.mjs: every launch's words, for the story gate
+    this.waves = opts.waves ?? null; // lib/waves.mjs (WAVES=shadow): every launch's name features, recorded only
     this.gate = this.gateMode === "off" ? null : new TrendGate({ cfg: tg?.cfg ?? {}, onPass: (c, why) => this.#gatePass(c, why) }); this.stopped = false;
     this.globalRaw = null; this.quoteControlRaw = null; this.globalAt = 0;
     // `cursor` comes back from the db on the first refresh with a non-empty list (#restoreCursor).
@@ -157,7 +158,7 @@ export class Indexer {
     // WS_HELIUS (cfg.wsHelius): the curve stream on the metered socket within its data budget, kept in kv across restarts.
     const wh = this.opts.wsHelius;
     const metered = wh ? { wsUrl: wh.url, fallbackUrl: this.opts.wsUrl, budgetBytes: wh.budgetBytes, meteredBytes: Number(this.model.db?.kvGet?.("wsMetered", null)?.bytes) || 0 } : { wsUrl: this.opts.wsUrl };
-    this.live = new LogsSubscriber({ ...metered, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...gaps,
+    this.live = new LogsSubscriber({ ...metered, programId: PUMP_PROGRAM_ID.toBase58(), log: this.log, mustInclude: EVENT_MARK, ...this.curveGaps(),
       onLogs: (n) => this.onLogs(n), onConnect: () => { this.expectSweep = true; this.refresh({ reason: "reconnect" }).catch(() => {}); } }).start();
     if (this.opts.livePools) this.livePools = new LogsSubscriber({ wsUrl: this.opts.wsUrl, programId: PUMP_AMM_PROGRAM_ID.toBase58(), name: "live (pools)", log: this.log, mustInclude: EVENT_MARK, ...gaps,
       onLogs: (n) => this.onLogs(n, POOL_EVENT_PROGRAMS) }).start();
@@ -180,6 +181,17 @@ export class Indexer {
     else { this.model.setBackfill({ done: true, ...this.model.db.backfillStats() }); this.state.phase = "live"; }
   }
   stop() { this.stopped = true; this.live?.stop(); this.livePools?.stop(); for (const t of this.timers) clearInterval(t); }
+  /**
+   * The curve stream's gap report: the trade fill's (when the server runs one) and the name waves' (lib/waves.mjs: an
+   * hour the stream was silent in is partial in their counts). Launches come only from this stream, so the pool stream
+   * keeps the fill's report alone. Without a fill `resumeAt` is 0 and a first socket reports nothing: the waves count the
+   * restart hour as partial anyway.
+   */
+  curveGaps() {
+    const fill = this.model.tradeFill;
+    if (!fill && !this.waves) return {};
+    return { resumeAt: fill?.resumeAt ?? 0, onGap: (a, b) => { fill?.addGap(a, b); this.waves?.gap(a, b); } };
+  }
 
   snapshot() { return { ...this.state, backfill: this.model.backfill, rpc: this.rpc.snapshot(), live: this.live?.snapshot() ?? null, livePools: this.livePools ? { ...this.livePools.snapshot(), ...this.poolStats } : null, meta: this.meta?.snapshot?.() ?? this.meta?.stats ?? null, launchLog: this.launchLog?.snapshot() ?? null, trendGate: this.gate ? { mode: this.gateMode, perHour: this.gatePerHour, promotedLastHour: this.gatePromoted.filter((t) => nowS() - t <= 3600).length, ...this.gate.snapshot() } : null }; }
 
@@ -954,6 +966,7 @@ export class Indexer {
    */
   onCreate(e, slot) {
     this.wordBursts?.add(e);
+    this.waves?.add(e, slot); // every launch, the dropped SOL ones included; never throws
     const assetQuoted = e.depth < 1 && !!e.quoteMint && e.quoteMint !== SOL_MINT;
     if (e.depth < 1 && !assetQuoted) { this.gate?.create(e, slot); return; }
     this.#insertCreate(e, slot);

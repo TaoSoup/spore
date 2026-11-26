@@ -4,6 +4,8 @@
 // Configuration is validated first (lib/config.mjs) so a bad deploy fails before it binds a port.
 import { LaunchLog } from "./lib/launch-log.mjs";
 import { WordBursts } from "./lib/word-bursts.mjs";
+import { NameCounts } from "./lib/name-counts.mjs";
+import { NameWaves } from "./lib/waves.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./lib/config.mjs";
@@ -82,7 +84,14 @@ if (cfg.storyGate.mode !== "off") log.info(`story gate: ${cfg.storyGate.mode} ($
 const launchLog = cfg.launchLog ? new LaunchLog({ ...cfg.launchLog, log }) : null;
 if (cfg.trendGate.mode !== "off") log.info(`trend gate: ${cfg.trendGate.mode} (${cfg.trendGate.cfg.minCounted} counted buyers + ${cfg.trendGate.cfg.minInflowSol} SOL in ${cfg.trendGate.cfg.windowS} s, first ${cfg.trendGate.cfg.earlyAfterS} s not counted${cfg.trendGate.mode === "on" ? `, at most ${cfg.trendGate.perHour} promoted an hour` : ""})`);
 if (launchLog) log.info(`launch log: every curve launch and trade → ${cfg.launchLog.file} (kept ${cfg.launchLog.keepHours} h)`);
-const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog, trendGate: cfg.trendGate, wordBursts } });
+// Name waves (lib/waves.mjs, WAVES=shadow): every launch's name features counted per hour (lib/name-counts.mjs, its
+// baseline read in a worker) and the waves they form recorded in their own tables. Nothing reaches a card, the page or a
+// model. With WAVES=off nothing is constructed and no timer runs.
+const nameCounts = cfg.waves.mode !== "off" ? new NameCounts({ db, file: join(cfg.dataDir, "spore.sqlite"), launchLogFile: cfg.waves.bootstrap ? cfg.launchLog?.file ?? null : null, keepDays: cfg.waves.keepDays, log }) : null;
+const waves = nameCounts ? new NameWaves({ db, model, counts: nameCounts, flag: (text) => flagText(text), log }) : null;
+model.waves = waves; // health
+if (waves) log.info(`name waves: shadow (counts kept ${cfg.waves.keepDays} days${nameCounts.launchLogFile ? `, bootstrap from ${cfg.launchLog.file} once` : ""})`);
+const indexer = new Indexer({ rpc, model, meta, hub, log, opts: { backfill: cfg.backfill, backfillLimit: cfg.backfillLimit, refreshMs: cfg.refreshMs, fullRefreshMs: cfg.fullRefreshMs, wsUrl: cfg.wsUrl, wsHelius: cfg.wsHelius, createdAtProbe: cfg.createdAtProbe, livePools: cfg.livePools, launchLog, trendGate: cfg.trendGate, wordBursts, waves } });
 // Partner keys for /v1 (DESIGN §12): verified per request, usage counters written every 30 s.
 const apiKeys = new ApiKeys(db, { log }).start();
 const treasury = new Treasury({ model, rpc, platformWallet: cfg.platformWallet, ttlMs: cfg.treasuryTtlMs, log });
@@ -148,6 +157,10 @@ const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, 
 // Post lines (lib/post-lines.mjs): only with POST_LINES=on beside a running tagger. One model-written "subject: what
 // happened" line per starting post on Discover, on the tagger's model, key file and day's spend (one cap for both).
 const postLines = narrTags?.on && cfg.postLines.on ? new PostLines({ db, cfg: cfg.narrTags, on: true, log }) : null;
+// The waves' evidence reads stored data only: the quoted post (XPosts.linkOf), the tag (NarrTags.tagOf), the trend gate's
+// wallets of launches it watches. Started before the indexer, so the restored launches are in place for the first create.
+waves?.attach({ posts: narrative?.posts ?? null, narr: narrTags ?? null, gate: indexer.gate ?? null });
+waves?.start();
 const app = createApp({
   model, indexer, rpc, hub, images, meta, metahost, treasury, metaDir: cfg.metaDir, platformWallet: cfg.platformWallet, splitBps: cfg.splitBps, launchFeeSol: cfg.launchFeeSol,
   distDir: cfg.distDir, origins: cfg.origins, log, rates: cfg.rates, trustProxy: cfg.trustProxy, hsts: cfg.hsts, logSample: cfg.logSample, pagesDomain: cfg.pagesDomain, cspConnect: cfg.cspConnect,
@@ -225,9 +238,10 @@ function shutdown(signal) {
   stopping = true;
   log.info(`shutting down (${signal})`);
   clearInterval(imageSweep); clearInterval(imageWarm); clearTimeout(imageWarmFirst); clearInterval(checkpoint); if (metaGc) clearInterval(metaGc); images.close();
-  indexer.stop(); launchLog?.close(); model.coinRows?.stopStoryGate?.(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); postLines?.stop(); storyGroups?.stop(); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
-  // the checkpoint worker ends first (its pass done, its connection closed), so the closing TRUNCATE runs alone
-  server.close(async () => { try { rpc.close(); apiKeys.flush(); await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
+  indexer.stop(); launchLog?.close(); model.coinRows?.stopStoryGate?.(); pnl.stop(); tradeFill.stop(); chartHistory?.stop(); narrative?.stop(); narrTags?.stop(); postLines?.stop(); storyGroups?.stop(); const wavesDone = waves?.stop()?.catch?.(() => {}); model.wakeups.stop(); model.attention.stop(); holders?.stop(); meta.stop(); agentRunner.stop(); clearInterval(liveTimer); liveAgents?.stop(); stopReconciler(); hub.close(); app.locals.v1?.close(); apiKeys.stop(); imgWork.close();
+  // the name-baseline worker (its read snapshot held through a baseline query) and the checkpoint worker end first, so
+  // the closing TRUNCATE runs alone
+  server.close(async () => { try { rpc.close(); apiKeys.flush(); await wavesDone; await checkpointer.stop(); db.close(); } catch { /* already closed */ } log.info("bye"); process.exit(process.exitCode ?? 0); });
   server.closeIdleConnections?.();
   setTimeout(() => server.closeAllConnections?.(), 2_000).unref();
   setTimeout(() => { log.warn("forced exit"); try { apiKeys.flush(); checkpointer.stop(); db.close(); } catch { /* ignore */ } process.exit(process.exitCode ?? 0); }, 8_000).unref();

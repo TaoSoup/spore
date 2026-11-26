@@ -170,6 +170,14 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   // stories first on Discover. Every launch's words are counted for it (lib/word-bursts.mjs).
   const storyGate = { mode: oneOf("STORY_GATE", "off", ["off", "shadow", "on"]),
     cfg: { minBuyers: num("STORY_GATE_BUYERS", 15, { min: 1, max: 10_000, integer: true }), minLift: num("STORY_GATE_LIFT", 3, { min: 0, max: 1000 }), minInflowSol: num("STORY_GATE_SOL", 10, { min: 0, max: 100_000 }), minWordCreators: num("STORY_GATE_WORD_CREATORS", 5, { min: 2, max: 1000, integer: true }) } };
+  // WAVES=off|shadow (lib/waves.mjs, lib/name-counts.mjs; default off): count every launch's name features per hour and
+  // record "name waves" (a feature launched by far more creators than its own 30-day share predicts) with their member
+  // coins in their own tables. Shadow only: nothing reaches a card, the page or a model; "on" is refused until cards
+  // exist. WAVES_KEEP_DAYS (7-90, default 30): how long the hourly feature counts are kept (the baseline reads 30 days).
+  // WAVES_BOOTSTRAP (default 1): once, seed the counts from the LAUNCH_LOG file's complete hours, if one is set.
+  const wavesRaw = get("WAVES", "off");
+  if (wavesRaw === "on") errors.push('WAVES="on" is not available yet: name waves are recorded in shadow only (WAVES=shadow) until their cards exist');
+  const waves = { mode: wavesRaw === "on" ? "off" : oneOf("WAVES", "off", ["off", "shadow"]), keepDays: num("WAVES_KEEP_DAYS", 30, { min: 7, max: 90, integer: true }), bootstrap: bool("WAVES_BOOTSTRAP", true) };
   // Jupiter /build for coins priced in a listed asset with no pump SOL pool (lib/jupiter.mjs). JUP_API_KEY is optional
   // (a free key from developers.jup.ag lifts 0.5 to 1 request/s); it is never logged or sent to the browser.
   const jupApiKey = get("JUP_API_KEY", "");
@@ -266,5 +274,5 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
   };
 
   if (errors.length) throw new Error(`invalid configuration:\n  - ${errors.join("\n  - ")}\nSee deploy/env.example for every variable.`);
-  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, storyGate, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags, postLines };
+  return { agents, llm, port, rpcUrl, wsUrl, dataDir, platformWallet, splitBps, platformMinBps, launchFeeSol, refreshMs, fullRefreshMs, backfill, backfillLimit, concurrency, rpcRps, rpcApiRps, rpcProxyRps, rpcUser, wsHelius, launchLog, trendGate, storyGate, waves, createdAtProbe, livePools, origins, show, pagesDomain, pagesProject, metaDir, trustProxy, hsts, logSample, rates, cspConnect, treasuryTtlMs, sseMaxClients, ssePerIp, uploadQuota, metaGcHours, imgCacheBytes, imgThumbBytes, distDir, publicUrl, v1Limits, jupiter, pnl, fill, history, narrative, holders, narrTags, postLines };
 }

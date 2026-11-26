@@ -187,3 +187,10 @@ test("isMint", () => {
   assert.equal(isMint("0OIl"), false);
   assert.equal(isMint(""), false);
 });
+
+test("GET /api/health: waves is null when WAVES is off, the waves' snapshot when it runs", async () => {
+  assert.equal((await get("/api/health")).body.waves, null);
+  model.waves = { snapshot: () => ({ mode: "shadow", launches: 3 }) };
+  try { assert.deepEqual((await get("/api/health")).body.waves, { mode: "shadow", launches: 3 }); }
+  finally { model.waves = null; }
+});

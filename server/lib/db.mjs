@@ -213,6 +213,35 @@ CREATE TABLE IF NOT EXISTS event_buckets (
   pre_coins INTEGER NOT NULL, new_coins INTEGER NOT NULL, site_buyers INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (event_id, t)
 ) WITHOUT ROWID;
+-- Name waves, shadow only (lib/name-counts.mjs, lib/waves.mjs; WAVES=shadow). Times are unix s, h = floor(t / 3600).
+-- name_hours: one row per hour the counter closed (partial: 1 process start, 2 stream gap or silence, 4 thin, 16 rows
+-- dropped; src 0 live, 1 bootstrap from the launch log); name_counts: per clean hour and feature its distinct creators,
+-- launches and whole-word carriers (insert-only; readers join on name_hours.partial = 0, so an orphan row is never read).
+CREATE TABLE IF NOT EXISTS name_hours (h INTEGER PRIMARY KEY, launches INTEGER NOT NULL, creators INTEGER NOT NULL, non_ascii INTEGER NOT NULL DEFAULT 0, partial INTEGER NOT NULL, gap_s INTEGER NOT NULL DEFAULT 0, src INTEGER NOT NULL DEFAULT 0, feats INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS name_counts (h INTEGER NOT NULL, feature TEXT NOT NULL, creators INTEGER NOT NULL, launches INTEGER NOT NULL, whole INTEGER NOT NULL, PRIMARY KEY (h, feature)) WITHOUT ROWID;
+-- wave_launches: every launch with its features as counted, its arrival time (seen, ms) and the baseline hour (bh)
+-- whose vocabulary split it; waves: one row per wave key with every input of its formation; wave_coins: one row per coin
+-- that became a candidate (its home is set once); wave_cands: every (coin, wave) candidacy and association, insert-only;
+-- wave_hours: each open wave per closed hour; wave_tests: near misses, one per feature per hour.
+CREATE TABLE IF NOT EXISTS wave_launches (t INTEGER NOT NULL, mint TEXT NOT NULL, seen INTEGER NOT NULL, creator TEXT, name TEXT, symbol TEXT, feats TEXT NOT NULL, bh INTEGER, PRIMARY KEY (t, mint)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS waves (
+  key TEXT PRIMARY KEY, feature TEXT NOT NULL, kind TEXT NOT NULL, v INTEGER NOT NULL, formed_t INTEGER NOT NULL, formed_at INTEGER NOT NULL,
+  win INTEGER NOT NULL, n INTEGER NOT NULL, ctx INTEGER NOT NULL, e REAL NOT NULL, r REAL, tail REAL, share0 REAL NOT NULL, c_base INTEGER, c_missing INTEGER,
+  base_n INTEGER, base_hours INTEGER, base_h INTEGER, n_win INTEGER, last_t INTEGER, ended_t INTEGER, reopens INTEGER NOT NULL DEFAULT 0,
+  members INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0, unconfirmed INTEGER NOT NULL DEFAULT 0, why TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS waves_feature ON waves(feature);
+CREATE TABLE IF NOT EXISTS wave_coins (
+  mint TEXT PRIMARY KEY, t INTEGER NOT NULL, at INTEGER NOT NULL, wave_key TEXT, reason TEXT NOT NULL, r REAL, decided_at INTEGER, tracked INTEGER,
+  how TEXT, name TEXT, symbol TEXT, creator TEXT, bh INTEGER, cands TEXT, why TEXT
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS wave_coins_key ON wave_coins(wave_key, t);
+CREATE INDEX IF NOT EXISTS wave_coins_t ON wave_coins(t);
+CREATE INDEX IF NOT EXISTS wave_coins_pending ON wave_coins(t) WHERE reason = 'pending';
+CREATE TABLE IF NOT EXISTS wave_cands (mint TEXT NOT NULL, key TEXT NOT NULL, r REAL, how TEXT, t INTEGER NOT NULL, PRIMARY KEY (mint, key)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS wave_cands_t ON wave_cands(t);
+CREATE TABLE IF NOT EXISTS wave_hours (h INTEGER NOT NULL, key TEXT NOT NULL, n6 INTEGER, n24 INTEGER, all6 INTEGER, all24 INTEGER, e6 REAL, e24 REAL, members INTEGER, pending INTEGER, unconfirmed INTEGER, PRIMARY KEY (h, key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS wave_tests (h INTEGER NOT NULL, feature TEXT NOT NULL, v INTEGER NOT NULL, win INTEGER, n INTEGER, ctx INTEGER, e REAL, c_base INTEGER, c_missing INTEGER, tail REAL, fail TEXT, PRIMARY KEY (h, feature)) WITHOUT ROWID;
 `;
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -319,6 +348,16 @@ export class Db {
     // server saw whole (`cov_1h` / `cov_6h`, added when absent; kept 90 days); per coin per UTC day
     // ('YYYY-MM-DD') its high, low and close USD price, buyers, buys, trades and volume (never trimmed); and per
     // pre-registered event (server/prereg/events.json) the buyers of its matching coins per 5 minutes (never trimmed).
+    // `name_hours`, `name_counts`, `wave_launches`, `waves`, `wave_coins`, `wave_cands`, `wave_hours` and `wave_tests`
+    // (name waves, lib/name-counts.mjs and lib/waves.mjs, recorded with WAVES=shadow only and read by nothing on a page)
+    // are new tables only too: per closed hour the launches, distinct creators and whether the hour was seen whole, and
+    // per clean hour each name feature's creators, launches and whole-word carriers (the 30-day baseline and the known-
+    // token vocabulary; kept WAVES_KEEP_DAYS); every launch with its features as counted, when it arrived and which
+    // baseline split it (kept 26 h, for restarts); every wave formed with each input of its test (n, contexts, expected
+    // count, the baseline's prior for the feature, tail, window, rules version) and its hourly state; every coin that
+    // became a candidate of a wave with its home (set once: reason lexical, post, tag or buyers; pending; unconfirmed);
+    // every candidacy and association of a coin with a wave, a home or not (wave_cands: how 'w'/'p'/'s', 'companion',
+    // 'post-x'); and near misses. All kept 90 days. Written in small buffered transactions, never one per launch.
     if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped"))this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
@@ -577,6 +616,35 @@ export class Db {
       coinDaysOf: p("SELECT day, high_usd, low_usd, close_usd, close_t, buyers, buys, trades, volume_usd FROM coin_days WHERE mint = ? AND day >= ? ORDER BY day ASC"),
       eventBucketPut: p(`INSERT OR REPLACE INTO event_buckets (event_id, t, buyers, pre_buyers, new_buyers, pre_coins, new_coins, site_buyers, flags)
         VALUES (:id, :t, :buyers, :preBuyers, :newBuyers, :preCoins, :newCoins, :siteBuyers, :flags)`),
+      // Name waves (lib/name-counts.mjs, lib/waves.mjs): insert-only rows, time-first keys, trims oldest first in chunks.
+      nameCountPut: p("INSERT OR IGNORE INTO name_counts (h, feature, creators, launches, whole) VALUES (?, ?, ?, ?, ?)"),
+      nameHourPut: p("INSERT OR IGNORE INTO name_hours (h, launches, creators, non_ascii, partial, gap_s, src, feats, at) VALUES (:h, :launches, :creators, :nonAscii, :partial, :gapS, :src, :feats, :at)"),
+      nameHoursIn: p("SELECT h, launches, creators, non_ascii, partial, gap_s, src, feats, at FROM name_hours WHERE h >= ? AND h < ? ORDER BY h"),
+      nameCountsTrim: p("DELETE FROM name_counts WHERE (h, feature) IN (SELECT h, feature FROM name_counts WHERE h < ? ORDER BY h LIMIT ?)"),
+      nameHoursTrim: p("DELETE FROM name_hours WHERE h IN (SELECT h FROM name_hours WHERE h < ? ORDER BY h LIMIT ?)"),
+      waveLaunchPut: p("INSERT OR IGNORE INTO wave_launches (t, mint, seen, creator, name, symbol, feats, bh) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
+      waveLaunchesSince: p("SELECT t, mint, seen, creator, name, symbol, feats, bh FROM wave_launches WHERE t >= ? ORDER BY t LIMIT ?"),
+      waveLaunchesTrim: p("DELETE FROM wave_launches WHERE (t, mint) IN (SELECT t, mint FROM wave_launches WHERE t < ? ORDER BY t LIMIT ?)"),
+      wavePut: p(`INSERT OR IGNORE INTO waves (key, feature, kind, v, formed_t, formed_at, win, n, ctx, e, r, tail, share0, c_base, c_missing, base_n, base_hours, base_h, n_win, last_t, ended_t, reopens, members, pending, unconfirmed, why)
+        VALUES (:key, :feature, :kind, :v, :formedT, :formedAt, :win, :n, :ctx, :e, :r, :tail, :share0, :cBase, :cMissing, :baseN, :baseHours, :baseH, :nWin, :lastT, :endedT, :reopens, :members, :pending, :unconfirmed, :why)`),
+      waveUpdate: p("UPDATE waves SET last_t = :lastT, ended_t = :endedT, reopens = :reopens, members = :members, pending = :pending, unconfirmed = :unconfirmed, why = :why WHERE key = :key"),
+      wavesOpen: p("SELECT * FROM waves WHERE ended_t IS NULL"),
+      wavesRecent: p("SELECT * FROM waves WHERE ended_t IS NOT NULL AND ended_t >= ?"),
+      wavesTrim: p("DELETE FROM waves WHERE key IN (SELECT key FROM waves WHERE ended_t IS NOT NULL AND ended_t < ? LIMIT ?)"),
+      waveCoinPut: p(`INSERT OR IGNORE INTO wave_coins (mint, t, at, wave_key, reason, r, decided_at, tracked, how, name, symbol, creator, bh, cands, why)
+        VALUES (:mint, :t, :at, :waveKey, :reason, :r, :decidedAt, :tracked, :how, :name, :symbol, :creator, :bh, :cands, :why)`),
+      waveCoinDecide: p("UPDATE wave_coins SET wave_key = :waveKey, reason = :reason, r = :r, decided_at = :decidedAt, how = COALESCE(:how, how), tracked = COALESCE(:tracked, tracked), cands = COALESCE(:cands, cands), why = :why WHERE mint = :mint AND reason = 'pending'"),
+      waveCoinCands: p("UPDATE wave_coins SET cands = ? WHERE mint = ? AND reason = 'pending'"),
+      waveCoinsPending: p("SELECT mint, t, at, how, name, symbol, creator, bh, cands, tracked FROM wave_coins WHERE reason = 'pending' ORDER BY t LIMIT ?"),
+      waveCoinsSince: p("SELECT mint, wave_key, reason FROM wave_coins WHERE t >= ?"),
+      waveCoinGet: p("SELECT * FROM wave_coins WHERE mint = ?"),
+      waveCoinsTrim: p("DELETE FROM wave_coins WHERE mint IN (SELECT mint FROM wave_coins WHERE t < ? ORDER BY t LIMIT ?)"),
+      waveCandPut: p("INSERT OR IGNORE INTO wave_cands (mint, key, r, how, t) VALUES (?, ?, ?, ?, ?)"),
+      waveCandsTrim: p("DELETE FROM wave_cands WHERE (mint, key) IN (SELECT mint, key FROM wave_cands WHERE t < ? ORDER BY t LIMIT ?)"),
+      waveHourPut: p("INSERT OR IGNORE INTO wave_hours (h, key, n6, n24, all6, all24, e6, e24, members, pending, unconfirmed) VALUES (:h, :key, :n6, :n24, :all6, :all24, :e6, :e24, :members, :pending, :unconfirmed)"),
+      waveHoursTrim: p("DELETE FROM wave_hours WHERE (h, key) IN (SELECT h, key FROM wave_hours WHERE h < ? ORDER BY h LIMIT ?)"),
+      waveTestPut: p("INSERT OR IGNORE INTO wave_tests (h, feature, v, win, n, ctx, e, c_base, c_missing, tail, fail) VALUES (:h, :feature, :v, :win, :n, :ctx, :e, :cBase, :cMissing, :tail, :fail)"),
+      waveTestsTrim: p("DELETE FROM wave_tests WHERE (h, feature) IN (SELECT h, feature FROM wave_tests WHERE h < ? ORDER BY h LIMIT ?)"),
     };
   }
 
@@ -1010,6 +1078,52 @@ export class Db {
     if (!rows.length) return;
     this.transaction(() => { for (const r of rows) this.q.eventBucketPut.run({ id: r.id, t: r.t, buyers: r.buyers, preBuyers: r.preBuyers, newBuyers: r.newBuyers, preCoins: r.preCoins, newCoins: r.newCoins, siteBuyers: r.siteBuyers, flags: r.flags ?? 0 }); });
   }
+
+  // ---------------------------------------------------------------- name waves (lib/name-counts.mjs, lib/waves.mjs)
+  // Single-row writers are called inside the caller's own transaction (one per flush); the plural ones open their own.
+  /** `rows`: `[[h, feature, creators, launches, whole]]`, one transaction. Returns rows inserted. */
+  nameCountsPut(rows) { let n = 0; if (rows.length) this.transaction(() => { for (const r of rows) n += Number(this.q.nameCountPut.run(r[0], r[1], r[2], r[3], r[4]).changes); }); return n; }
+  /** One closed hour (`{ h, launches, creators, nonAscii, partial, gapS, src, feats, at }`); false when the hour is already there. */
+  nameHourPut(r) { return Number(this.q.nameHourPut.run({ h: r.h, launches: r.launches, creators: r.creators, nonAscii: r.nonAscii ?? 0, partial: r.partial ?? 0, gapS: r.gapS ?? 0, src: r.src ?? 0, feats: r.feats ?? 0, at: r.at ?? now() }).changes) > 0; }
+  nameHoursIn(fromH, toH) { return this.q.nameHoursIn.all(fromH, toH).map((x) => ({ h: x.h, launches: x.launches, creators: x.creators, nonAscii: x.non_ascii, partial: x.partial, gapS: x.gap_s, src: x.src, feats: x.feats, at: x.at })); }
+  nameCountsTrim(cutH, limit) { return Number(this.q.nameCountsTrim.run(cutH, limit).changes); }
+  nameHoursTrim(cutH, limit) { return Number(this.q.nameHoursTrim.run(cutH, limit).changes); }
+  /** `[t, mint, seen, creator, name, symbol, feats, bh]` */
+  waveLaunchPut(r) { return Number(this.q.waveLaunchPut.run(r[0], r[1], r[2], r[3] ?? null, r[4] ?? null, r[5] ?? null, r[6] ?? "", r[7] ?? null).changes) > 0; }
+  waveLaunchesPut(rows) { let n = 0; if (rows.length) this.transaction(() => { for (const r of rows) n += this.waveLaunchPut(r) ? 1 : 0; }); return n; }
+  waveLaunchesSince(t, limit = 200_000) { return this.q.waveLaunchesSince.all(t, limit); }
+  waveLaunchesTrim(cutT, limit) { return Number(this.q.waveLaunchesTrim.run(cutT, limit).changes); }
+  wavePut(w) {
+    return Number(this.q.wavePut.run({ key: w.key, feature: w.feature, kind: w.kind, v: w.v, formedT: w.formedT, formedAt: w.formedAt, win: w.win, n: w.n, ctx: w.ctx, e: w.e, r: w.r ?? null, tail: w.tail ?? null, share0: w.share0,
+      cBase: w.cBase ?? null, cMissing: w.cMissing == null ? null : w.cMissing ? 1 : 0, baseN: w.baseN ?? null, baseHours: w.baseHours ?? null, baseH: w.baseH ?? null, nWin: w.nWin ?? null, lastT: w.lastT ?? null, endedT: w.endedT ?? null,
+      reopens: w.reopens ?? 0, members: w.members ?? 0, pending: w.pending ?? 0, unconfirmed: w.unconfirmed ?? 0, why: JSON.stringify(w.why ?? {}) }).changes) > 0;
+  }
+  waveUpdate(w) { return Number(this.q.waveUpdate.run({ key: w.key, lastT: w.lastT ?? null, endedT: w.endedT ?? null, reopens: w.reopens ?? 0, members: w.members ?? 0, pending: w.pending ?? 0, unconfirmed: w.unconfirmed ?? 0, why: JSON.stringify(w.why ?? {}) }).changes) > 0; }
+  #waveRow(x) { return { key: x.key, feature: x.feature, kind: x.kind, v: x.v, formedT: x.formed_t, formedAt: x.formed_at, win: x.win, n: x.n, ctx: x.ctx, e: x.e, r: x.r, tail: x.tail, share0: x.share0, cBase: x.c_base, cMissing: x.c_missing == null ? null : !!x.c_missing, baseN: x.base_n, baseHours: x.base_hours, baseH: x.base_h, nWin: x.n_win, lastT: x.last_t, endedT: x.ended_t, reopens: x.reopens, members: x.members, pending: x.pending, unconfirmed: x.unconfirmed, why: JSON.parse(x.why) }; }
+  wavesOpen() { return this.q.wavesOpen.all().map((x) => this.#waveRow(x)); }
+  /** Waves that ended at or after `sinceT` (unix s). */
+  wavesRecent(sinceT) { return this.q.wavesRecent.all(sinceT).map((x) => this.#waveRow(x)); }
+  wavesTrim(cutT, limit) { return Number(this.q.wavesTrim.run(cutT, limit).changes); }
+  /** INSERT OR IGNORE: a coin's first row stands. Returns whether it was written. */
+  waveCoinPut(c) {
+    return Number(this.q.waveCoinPut.run({ mint: c.mint, t: c.t, at: c.at ?? now(), waveKey: c.waveKey ?? null, reason: c.reason, r: c.r ?? null, decidedAt: c.decidedAt ?? null, tracked: c.tracked == null ? null : c.tracked ? 1 : 0, how: c.how ?? null,
+      name: c.name ?? null, symbol: c.symbol ?? null, creator: c.creator ?? null, bh: c.bh ?? null, cands: c.cands ? JSON.stringify(c.cands) : null, why: c.why ? JSON.stringify(c.why) : null }).changes) > 0;
+  }
+  /** Decides a pending coin once (a home, or `waveKey` null with reason 'unconfirmed'); false when it was not pending. */
+  waveCoinDecide(d) {
+    return Number(this.q.waveCoinDecide.run({ mint: d.mint, waveKey: d.waveKey ?? null, reason: d.reason, r: d.r ?? null, decidedAt: d.decidedAt ?? now(), how: d.how ?? null, tracked: d.tracked == null ? null : d.tracked ? 1 : 0, cands: d.cands ? JSON.stringify(d.cands) : null, why: d.why ? JSON.stringify(d.why) : null }).changes) > 0;
+  }
+  waveCoinCands(mint, cands) { return Number(this.q.waveCoinCands.run(JSON.stringify(cands ?? []), mint).changes) > 0; }
+  waveCoinsPending(limit = 10_000) { return this.q.waveCoinsPending.all(limit).map((x) => ({ mint: x.mint, t: x.t, at: x.at, how: x.how, name: x.name, symbol: x.symbol, creator: x.creator, bh: x.bh, tracked: x.tracked, cands: x.cands ? JSON.parse(x.cands) : [] })); }
+  waveCoinsSince(t) { return this.q.waveCoinsSince.all(t).map((x) => ({ mint: x.mint, waveKey: x.wave_key, reason: x.reason })); }
+  waveCoinGet(mint) { const x = this.q.waveCoinGet.get(mint); return x ? { ...x, cands: x.cands ? JSON.parse(x.cands) : null, why: x.why ? JSON.parse(x.why) : null } : null; }
+  waveCoinsTrim(cutT, limit) { return Number(this.q.waveCoinsTrim.run(cutT, limit).changes); }
+  waveCandPut(mint, key, r, how, t) { return Number(this.q.waveCandPut.run(mint, key, r ?? null, how ?? null, t).changes) > 0; }
+  waveCandsTrim(cutT, limit) { return Number(this.q.waveCandsTrim.run(cutT, limit).changes); }
+  waveHourPut(r) { return Number(this.q.waveHourPut.run({ h: r.h, key: r.key, n6: r.n6 ?? null, n24: r.n24 ?? null, all6: r.all6 ?? null, all24: r.all24 ?? null, e6: r.e6 ?? null, e24: r.e24 ?? null, members: r.members ?? 0, pending: r.pending ?? 0, unconfirmed: r.unconfirmed ?? 0 }).changes) > 0; }
+  waveHoursTrim(cutH, limit) { return Number(this.q.waveHoursTrim.run(cutH, limit).changes); }
+  waveTestPut(r) { return Number(this.q.waveTestPut.run({ h: r.h, feature: r.feature, v: r.v, win: r.win ?? null, n: r.n ?? null, ctx: r.ctx ?? null, e: r.e ?? null, cBase: r.cBase ?? null, cMissing: r.cMissing == null ? null : r.cMissing ? 1 : 0, tail: r.tail ?? null, fail: r.fail ?? null }).changes) > 0; }
+  waveTestsTrim(cutH, limit) { return Number(this.q.waveTestsTrim.run(cutH, limit).changes); }
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }
