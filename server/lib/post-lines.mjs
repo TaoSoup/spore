@@ -18,8 +18,8 @@
 //   as a word). For those cards, and for a post the model answered "thin" for, the server writes the line itself
 //   (serverLine, no model, no "AI" chip): the poster's own words in quote marks when they are not noise, hold no
 //   prediction, promise of gain or call to buy (QUOTE_REFUSE) and pass the block list and the hype and price checks,
-//   "Post is only a link to an article on X" / "Post is only a link" / "Post is only a picture" for a post without
-//   words, or a counted sentence over the card's coins ("3 of 4 coins are named Ansem; 2 launched under $Slingoor").
+//   or a counted sentence over the card's coins ("3 of 4 coins are named Ansem; 2 launched under $Slingoor"), also for
+//   a post without words (only a link or a picture: it never heads a card; a website link may add "the post links to <host>").
 //   A single coin (one row, with or without copies folded under it) with nothing to say gets no line at all. A post
 //   whose link is not read yet (never tried, or failed with a retry scheduled) waits for it, at most LINK_WAIT_MS.
 // - Posts go out in batches of BATCH per request, when BATCH wait or the oldest has waited FILL_WAIT_MS, at most
@@ -95,8 +95,6 @@ const REASK_STATES = new Set(["ok", "thin", "rejected"]);
 export const LINE_RULES_VERSION = 3, LINE_RULES_KEY = "post_lines_rules_version";
 /** The chip codes a line can carry (the page words them). Set by the server only, never by the model. */
 export const CHIPS = Object.freeze(["ai", "via_quoted", "names_quoted", "names_chain", "mismatch", "no_post", "ai_group"]);
-/** What the server says for a post without words (serverLine). */
-export const ONLY_ARTICLE = "Post is only a link to an article on X", ONLY_LINK = "Post is only a link", ONLY_PICTURE = "Post is only a picture", NO_WORDS = "Post has no words";
 
 const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
 
@@ -456,11 +454,10 @@ function leadSubject(coins, flag) {
  * - a post whose words may be quoted (QUOTE_MIN_WORDS or more; when THIN_WORDS or fewer, not noise; the whole post
  *   has no prediction, promise of gain or call to buy, QUOTE_REFUSE; the shown part passes the block list and the hype
  *   and price checks): the poster's words, cut to QUOTE_MAX, `quote` true;
- * - a post without words, on a card of two or more rows: ONLY_ARTICLE, ONLY_PICTURE, ONLY_LINK or NO_WORDS; a link
- *   to a website names its host when `linkHost` is given ("Post is only a link to ansemmas.fun and a picture");
- * - otherwise, two or more rows: a counted sentence, "3 of 4 coins are named Ansem; 2 launched under $Slingoor"
+ * - otherwise, two or more rows (a post without words included: a link or a picture never heads a card): a counted sentence, "3 of 4 coins are named Ansem; 2 launched under $Slingoor"
  *   (the shared word and the commonest parent, each only when the block list lets it through), else "4 coins; 2
- *   launched under $P" under the title, the family's ticker or the first coin's name. It carries `n`, the number of
+ *   launched under $P" under the title, the family's ticker or the first coin's name; for a post that is only a link to a
+ *   website, "; the post links to <host>" is added when `linkHost` is a label that may be shown and the whole fits HAPPENED_MAX. It carries `n`, the number of
  *   coins it counted (copies included), so the page can tell when it shows another number of coins;
  * - a single row: null. A coin with copies folded under it is one row and a single coin: a copy has the same ticker by
  *   definition, so "Both coins are named X" would say nothing, and the page draws no header over one row.
@@ -499,15 +496,16 @@ export function serverLine(c, { flag = flagText } = {}) {
   if (!c?.post) return counted(true);
   const say = postText(c.post.text), wc = countWords(say);
   if (wc === 0) {
+    // A post without words (only a link or a picture) says nothing about the story, so it never heads a card of
+    // several rows (Nov 26: "Post is only a picture" over 15 coins that shared one picture post): the counted sentence
+    // does, and the post stays one tap away. A website link adds where it points when it fits ("...; the post links to
+    // ansemmas.fun"): the host is a label, never read, and only a plain host name the block list lets through.
     if (!many) return null;
-    const subject = leadSubject(coins, flag) || sharedWord(coins, flag)?.word || "";
-    if (!subject) return null;
-    const pic = /(?<![\p{L}\p{N}.])pic\.(?:twitter|x)\.com\//iu.test(String(c.post.text ?? "")), link = /https?:\/\/|(?<![\p{L}\p{N}.])t\.co\//iu.test(String(c.post.text ?? ""));
-    // A website link says where it points ("Post is only a link to ansemmas.fun"): the host is a label, never read,
-    // and only when it is a plain host name the block list lets through; else the plain ONLY_LINK.
+    const line = counted(false);
+    if (!line) return null;
     const host = c.linkKind === "website" ? siteLabel(c.linkHost, flag) : "";
-    const happened = c.linkKind === "article" ? ONLY_ARTICLE : c.linkKind === "picture" || (pic && !link) ? ONLY_PICTURE : host ? `${ONLY_LINK} to ${host}${pic ? " and a picture" : ""}` : link || c.linkKind ? ONLY_LINK : NO_WORDS;
-    return mk(subject, happened);
+    const more = host ? `${line.happened}; the post links to ${host}` : "";
+    return more && [...more].length <= HAPPENED_MAX ? { ...line, happened: more } : line;
   }
   const shown = cutTo(say, QUOTE_MAX);
   let clean = false;

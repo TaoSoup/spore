@@ -595,7 +595,7 @@ export class CoinRows {
     const model = this.model, post = card.post?.id ? card.post : null;
     // The card's coins, the one that links the shown post first; for the counted sentence every coin, copies included.
     // `ordered` are the rows the page draws: a coin with copies folded under it is ONE row, and a card of one row is a
-    // single coin (no counted sentence, no "Post is only ..." header: the page draws it as a plain row).
+    // single coin (no counted sentence: the page draws it as a plain row).
     const lead = (post ? card.coins?.find((r) => ids.get(r.mint) === post.id) : null) ?? card.coins?.[0] ?? null;
     const ordered = lead ? [lead, ...(card.coins ?? []).filter((r) => r !== lead)] : [];
     const all = [];
@@ -703,11 +703,11 @@ export class CoinRows {
     //   carried only by that coin's card. A line that says "Quoted post" is carried only while that quoted post can
     //   be shown. A post settled before its link could be read is offered once more when the quoted post is there.
     // - A card the model is not asked about (a few words and no readable quoted post), one it found nothing stated in,
-    //   or one whose line failed the checks: the server's own line (serverLine: the poster's words in quote marks, "Post
-    //   is only a link", a counted sentence), or `line: null` when there is nothing to say (the page then draws a plain row).
+    //   or one whose line failed the checks: the server's own line (serverLine: the poster's words in quote marks, else a
+    //   counted sentence, also for a post that is only a link or a picture), or `line: null` when there is nothing to say (the page then draws a plain row).
     // - A card without a post, two rows or more: the counted sentence, kept while the card's coin count stays (an hour at most).
     // - A card of ONE row (a coin, with or without copies folded under it) is a single coin: it never gets a counted
-    //   sentence or a "Post is only ..." header, only a model's line or the poster's quoted words.
+    //   sentence, only a model's line or the poster's quoted words.
     // Without `line` the card is as before (the page falls back to the poster's words): not decided yet.
     const pl = this.lines?.on && !background ? this.lines : null;
     if (pl) {

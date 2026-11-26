@@ -1,7 +1,7 @@
 // The Discover subject line (web/src/lib/discover.ts subjectLine and its helpers): "Subject: what happened" for a single
 // coin's card and a story's header. The server's model-written line with its chips (where the sentence came from, the
-// quoted post's age, a post that does not name the coin), the lines the server writes itself (a quote, "Post is only a
-// link", a counted sentence), no line at all for a single coin with nothing to say, the fallback while a line is
+// quoted post's age, a post that does not name the coin), the lines the server writes itself (a quote, a counted
+// sentence, also over a post without words), no line at all for a single coin with nothing to say, the fallback while a line is
 // pending, a story without a post, sentence case, the age chips, the tones, and the quote cut at 80 characters; a
 // counted sentence against the coins shown (a size pill), one row as a single coin, and the markup itself
 // (components/DiscoverLine.tsx rendered to a string: the chips, the opened body's two posts, the plain row's link).
@@ -16,7 +16,7 @@ const post = (o: Partial<NonNullable<StoryCard["post"]>> = {}) => ({ id: ID, han
 const row = (o: Partial<StoryRow> = {}): StoryRow => ({ mint: "M1", name: "Job Title", symbol: "JOB", ...o } as StoryRow);
 const card = (o: Partial<StoryCard> = {}): StoryCard => ({ kind: "post", key: ID, post: null, family: null, buyers5m: 0, coinsN: 1, coins: [row()], ...o });
 const line = (o: Partial<NonNullable<StoryCard["line"]>> = {}) => ({ subject: "X profiles", happened: "Users can now add employment history and job title", kind: "event" as const, by: "model" as const, quote: false, chips: ["ai" as const], ...o });
-const own = (o: Partial<NonNullable<StoryCard["line"]>> = {}) => ({ subject: "PVE", happened: "Post is only a link to an article on X", kind: "thin" as const, by: "server" as const, quote: false, chips: [], ...o });
+const own = (o: Partial<NonNullable<StoryCard["line"]>> = {}) => ({ subject: "PVE", happened: "2 coins; 1 launched under $PUMP", kind: "thin" as const, by: "server" as const, quote: false, chips: [], ...o });
 const quoted = (o: Partial<NonNullable<StoryCard["quoted"]>> = {}) => ({ id: QID, handle: "gwrldmedia", text: "IShowSpeed wants to team up with Elon Musk. pic.twitter.com/LOz", at: NOW - 400 * DAY, url: "x", ...o });
 const texts = (L: { chips: { text: string }[] }) => L.chips.map((c) => c.text);
 
@@ -76,9 +76,9 @@ test("2. the chips say where a model's line came from; they are facts about our 
 });
 
 test("3. a line the server wrote itself: light, no AI badge; the poster's words in quote marks; \"AI group\" and \"no post\" as chips", () => {
-  const L = D.subjectLine(card({ coinsN: 2, post: post({ handle: "a1lon9", text: "https://t.co/oAQHWDkJWU" }), line: own() }), NOW, true, { coinsN: 2 })!;
-  assert.deepEqual([L.subject, L.happened, L.auto, L.badge, L.quote, L.tone, L.chips], ["PVE", "Post is only a link to an article on X", false, null, false, "light", []]);
-  assert.deepEqual([L.who, !!L.href, L.words], ["@a1lon9", true, "https://t.co/oAQHWDkJWU"], "Open post stays one tap away");
+  const L = D.subjectLine(card({ coinsN: 2, post: post({ handle: "a1lon9", text: "https://t.co/oAQHWDkJWU" }), line: own({ n: 2 }) }), NOW, true, { coinsN: 2 })!;
+  assert.deepEqual([L.subject, L.happened, L.auto, L.badge, L.quote, L.tone, L.chips], ["PVE", "2 coins; 1 launched under $PUMP", false, null, false, "light", []]);
+  assert.deepEqual([L.who, !!L.href, L.words], ["@a1lon9", true, null], "Open post stays one tap away; a bare link is no words of the poster");
   // a quote
   const Q = D.subjectLine(card({ post: post({ text: "the bears are done for this week" }), line: own({ subject: "The White Bull", happened: "the bears are done for this week", quote: true }) }), NOW)!;
   assert.deepEqual([Q.subject, Q.happened, Q.quote, Q.auto, Q.badge, Q.tone], ["The White Bull", "the bears are done for this week", true, false, null, "normal"]);
@@ -209,9 +209,10 @@ test("9. a counted sentence never disagrees with the coins shown beside it: unde
   assert.deepEqual([cut.subject, cut.happened, cut.quote, cut.tone, !!cut.href], ["ZeroSumEnjoyer", "2 coins", false, "light", true], "the post stays one tap away");
   assert.equal(D.subjectLine(fee, NOW, true, { row: row(), coinsN: 1 }), null);
   assert.ok(D.cardPostHref(fee)?.includes(ID), "and its plain row keeps the link to the post");
-  // "Post is only a link" counts nothing: shown over any number of rows, but one row is a plain row
-  const pve = card({ coinsN: 3, post: post({ text: "https://t.co/oAQHWDkJWU" }), line: own() });
-  assert.equal(D.subjectLine(pve, NOW, true, { coinsN: 2 })!.happened, "Post is only a link to an article on X");
+  // a post that is only a link gets the counted sentence: its own count when the card shows 2, "3 coins" over 3, one row is a plain row
+  const pve = card({ coinsN: 3, post: post({ text: "https://t.co/oAQHWDkJWU" }), line: own({ n: 2 }) });
+  assert.equal(D.subjectLine(pve, NOW, true, { coinsN: 2 })!.happened, "2 coins; 1 launched under $PUMP");
+  assert.equal(D.subjectLine(pve, NOW, true, { coinsN: 3 })!.happened, "3 coins");
   assert.equal(D.subjectLine(pve, NOW, true, { row: row(), coinsN: 1 }), null);
   // the poster's words in quote marks are no header sentence: a single row keeps them
   const q = card({ coinsN: 2, post: post({ text: "the bears are done for this week" }), line: own({ subject: "The White Bull", happened: "the bears are done for this week", quote: true }) });

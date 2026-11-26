@@ -349,7 +349,7 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: number };
 /// A card's "subject: what happened" line (a server with POST_LINES=on). `by` "model": written by a language model from
 /// the card's post and the post it quotes, and checked by the server; it can be wrong. `by` "server": written by the
-/// server itself, no model (the poster's own words when `quote` is set, "Post is only a link", a counted sentence over
+/// server itself, no model (the poster's own words when `quote` is set, else a counted sentence over
 /// the card's coins). `kind`: what the post is ("event", an attributed "claim" or "pitch", "personal", "mismatch" for a
 /// post about something else than the coin; every server line is "thin"). `chips`: codes the server sets, never the
 /// model: "ai", "via_quoted" (the sentence is the quoted post's), "names_quoted" / "names_chain" (a name comes from the

@@ -2,7 +2,7 @@
 // passes; grounding in the card's own words; money figures; "Poster says" and "Quoted post says" in both tenses; a
 // subject that is what the poster does; a sentence about the post itself; "Quoted post" without a quoted post), the
 // reply reader, the request (cards as data, the quoted and the chain post, the schema, no temperature), when the model
-// is not asked at all, the lines the server writes itself (quotes, "Post is only a link", counted sentences, nothing for
+// is not asked at all, the lines the server writes itself (quotes, counted sentences also for a post without words, nothing for
 // a single coin; a blocked coin name is never repeated), the chips, the spend shared with the tagger (a spent ledger
 // blocks requests), batching (6 cards, or the oldest waited 20 s; 2 requests a minute), the re-ask-alone-then-reject
 // flow (with the reason as a hint), that one failing post cannot hold up the line, that a card with an instruction-like
@@ -14,7 +14,7 @@
 // model provider.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, ONLY_ARTICLE, ONLY_LINK, ONLY_PICTURE, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules } from "../lib/post-lines.mjs";
+import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules } from "../lib/post-lines.mjs";
 import { DEFAULT_MODEL, GAVE_UP, userText } from "../lib/narrtags.mjs";
 import { LINK_RETRY_S } from "../lib/xposts.mjs";
 import { loadConfig } from "../lib/config.mjs";
@@ -517,7 +517,7 @@ test("a thin answer: nothing is stated, so no sentence is kept and the post is n
   assert.deepEqual(results.map((r) => [r.id, r.state, r.line, r.reasons]), [[id(1), "thin", null, []]]);
 });
 
-test("the server's own lines: a quote, \"Post is only a link\", a counted sentence, and nothing at all for a single coin with nothing to say", () => {
+test("the server's own lines: a quote, a counted sentence (also for a post that is only a link or a picture), and nothing at all for a single coin with nothing to say", () => {
   const flag = (t) => /badword/i.test(t);
   const sl = (c) => serverLine(c, { flag });
   const one = [{ name: "The White Bull", symbol: "Slingoor" }];
@@ -553,7 +553,7 @@ test("the server's own lines: a quote, \"Post is only a link\", a counted senten
   // a script written without spaces: a sentence is quoted (two characters count as a word), two characters are not
   assert.equal(sl({ post: { text: "黄仁勋在中国电视上被做成了动物角色" }, coins: one })?.quote, true);
   assert.equal(sl({ post: { text: "你好" }, coins: one }), null);
-  // ONE row is a single coin, with or without copies folded under it: no counted sentence and no "Post is only ..."
+  // ONE row is a single coin, with or without copies folded under it: no counted sentence
   // header (a copy has the same ticker by definition; the page draws no header over one row); a quote stays
   const copy = [{ name: "WHITED", symbol: "WHITED", parent: "Slingoor" }, { name: "WHITED", symbol: "WHITED", parent: "Slingoor" }];
   assert.equal(sl({ post: null, coins: copy, rows: 1, familySymbol: "Slingoor" }), null, "no post");
@@ -562,22 +562,32 @@ test("the server's own lines: a quote, \"Post is only a link\", a counted senten
   assert.deepEqual(sl({ post: { text: "the bears are done for this week" }, coins: [...one, ...one], rows: 1 }), { subject: "$Slingoor", happened: "the bears are done for this week", kind: "thin", by: "server", quote: true, chips: [] });
   assert.deepEqual(sl({ post: null, coins: [...copy, { name: "Whited Two", symbol: "W2", parent: "Slingoor" }], rows: 2 }), { subject: "Whited", happened: "All 3 coins are named Whited; all launched under $Slingoor", kind: "thin", by: "server", quote: false, chips: ["no_post"], n: 3 }, "two rows: the sentence counts every coin, copies included, and says how many it counted");
   assert.equal(sl({ post: null, coins: copy }).happened, "Both coins are named Whited; all launched under $Slingoor", "without `rows` every coin is a row");
-  // a post without words on a card of two coins: what the link is, under the lead coin's name
+  // a post without words on a card of two coins: never its header (Nov 26: "Post is only a picture" over 15 coins);
+  // the counted sentence, no "no post" chip (the post stays one tap away); a website link adds its host when it fits
   const two = [{ name: "PVE", symbol: "PVE", parent: "PUMP" }, { name: "safe inu", symbol: "SI", parent: "PVE" }];
-  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", coins: two }), { subject: "$PVE", happened: ONLY_ARTICLE, kind: "thin", by: "server", quote: false, chips: [] });
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", coins: two }).happened, ONLY_LINK);
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: null, coins: two }).happened, ONLY_LINK, "a link not read yet");
-  // a website link names its host (a label, never read); "www." off; a picture beside it is said; a host that is not a
-  // plain host name, too long, or flagged by the block list leaves the plain ONLY_LINK
-  assert.equal(sl({ post: { text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" }, linkKind: "website", linkHost: "ansemmas.fun", coins: two }).happened, "Post is only a link to ansemmas.fun and a picture");
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: "WWW.Example.com", coins: two }).happened, "Post is only a link to example.com");
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: `www.${"x".repeat(36)}.com`, coins: two }).happened, `Post is only a link to ${"x".repeat(36)}.com`, "40 characters once www. is off");
-  for (const bad of ["localhost", "a b.com", `${"x".repeat(37)}.com`, "", null, "evil..com", "1.2.3.4", "xn--80ak6aa92e.com", "shop.xn--p1ai", "elonmas.fun", "my-nvidia.io"]) assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: bad, coins: two }).happened, ONLY_LINK, String(bad));
-  assert.equal(serverLine({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: "badword.fun", coins: two }, { flag: (t) => /badword/.test(t) }).happened, ONLY_LINK, "the block list reads the host");
-  for (const split of ["bad-word.fun", "bad.word.fun"]) assert.equal(serverLine({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: split, coins: two }, { flag: (t) => /badword/.test(t) }).happened, ONLY_LINK, `a blocked word split across labels: ${split}`);
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", linkHost: "x.com", coins: two }).happened, ONLY_ARTICLE, "only a website names its host");
-  assert.equal(sl({ post: { text: "pic.twitter.com/NOfAoq90Wx" }, linkKind: "picture", coins: two }).happened, ONLY_PICTURE);
-  assert.deepEqual([ONLY_ARTICLE, ONLY_LINK, ONLY_PICTURE], ["Post is only a link to an article on X", "Post is only a link", "Post is only a picture"]);
+  const plain = { subject: "$PVE", happened: "2 coins; 1 launched under $PUMP", kind: "thin", by: "server", quote: false, chips: [], n: 2 };
+  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", coins: two }), plain);
+  assert.deepEqual(sl({ post: { text: "pic.twitter.com/NOfAoq90Wx" }, linkKind: "picture", coins: two }), plain);
+  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: null, coins: two }), plain, "a link not read yet");
+  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", coins: two }), plain, "a website with no host label");
+  const veto = [{ name: "vetocat", symbol: "vetocat", parent: "DJT" }, { name: "Veto Corleone", symbol: "VETO", parent: "DJT" }, { name: "Mr Veto", symbol: "VETO", parent: "DJT" }, { name: "Brando", symbol: "Brando", parent: "DJT" }];
+  assert.deepEqual(sl({ post: { text: "pic.twitter.com/t6ymnlwE8D" }, linkKind: "picture", coins: veto }), { subject: "Veto", happened: "2 of 4 coins are named Veto; all launched under $DJT", kind: "thin", by: "server", quote: false, chips: [], n: 4 }, "the shared word and parent, as for a card with no post");
+  assert.equal(sl({ post: { text: "pic.twitter.com/t6ymnlwE8D" }, linkKind: "picture", coins: veto, rows: 1 }), null, "one row: no header at all");
+  // a website link names its host (a label, never read); "www." off; a host that is not a plain host name, too long,
+  // or flagged by the block list adds nothing
+  const bare = [{ name: "Alpha", symbol: "ALP" }, { name: "Beta", symbol: "BET" }];
+  const site = (linkHost, f) => serverLine({ post: { text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" }, linkKind: "website", linkHost, coins: bare }, { flag: f ?? flag }).happened;
+  assert.equal(site("ansemmas.fun"), "2 coins; the post links to ansemmas.fun");
+  assert.equal(site("WWW.Example.com"), "2 coins; the post links to example.com");
+  assert.equal(site(`www.${"x".repeat(36)}.com`), `2 coins; the post links to ${"x".repeat(36)}.com`, "40 characters once www. is off");
+  for (const bad of ["localhost", "a b.com", `${"x".repeat(37)}.com`, "", null, "evil..com", "1.2.3.4", "xn--80ak6aa92e.com", "shop.xn--p1ai", "elonmas.fun", "my-nvidia.io"]) assert.equal(site(bad), "2 coins", String(bad));
+  assert.equal(site("badword.fun", (t) => /badword/.test(t)), "2 coins", "the block list reads the host");
+  for (const split of ["bad-word.fun", "bad.word.fun"]) assert.equal(site(split, (t) => /badword/.test(t)), "2 coins", `a blocked word split across labels: ${split}`);
+  assert.equal(serverLine({ post: { text: "https://t.co/x" }, linkKind: "website", linkHost: `${"x".repeat(36)}.com`, coins: two }, { flag }).happened, plain.happened, "left off when the whole would pass HAPPENED_MAX (91 characters)");
+  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", linkHost: "x.com", coins: two }).happened, plain.happened, "only a website names its host");
+  const long = Array.from({ length: 12 }, (_, i) => ({ name: `Coin${i} Extraordinarily`, symbol: `C${i}`, parent: `Parentfamilyticker${i % 2}` }));
+  const longLine = serverLine({ post: { text: "https://t.co/x" }, linkKind: "website", linkHost: `${"y".repeat(36)}.com`, coins: long }, { flag }).happened;
+  assert.ok([...longLine].length <= HAPPENED_MAX && !longLine.includes("links to"), `the host is left off when the whole would pass HAPPENED_MAX: ${longLine}`);
   // no post, several coins: counted over EVERY coin; the shared word and the commonest parent
   const ansem = [{ name: "Badword Stealing Money", symbol: "ANSEM", parent: "Slingoor" }, { name: "The Black Badword", symbol: "ANSEM ", parent: "Slingoor" }, { name: "hacked", symbol: "hacked", parent: null }, { name: "Ansem Wasted", symbol: "ANSEM", parent: "WASTED" }];
   const counted = sl({ post: null, coins: ansem, title: "ansem hacked black bull rug", titleAi: true, grouped: true });

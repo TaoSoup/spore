@@ -1413,8 +1413,8 @@ function quotedView(card: Pick<StoryCard, "quoted"> | null | undefined, nowS: nu
 ///    "post does not name this coin". `tone` "personal" for a post about an illness, a death or family.
 /// 2. a line the server wrote itself (`by` "server", with or without a post): light, no "AI" badge; `quote` when it is
 ///    the poster's own words (drawn in quote marks); chips "AI group" (a model grouped these coins, or named the
-///    subject) and "no post". Its subject is put in sentence case. Its other sentences (a counted one, "Post is only a
-///    link") are a story's header: an entry drawn as ONE row (`o.row`) is a single coin and gets null, a plain row.
+///    subject) and "no post". Its subject is put in sentence case. Its other sentences (a counted one, also over a
+///    post without words) are a story's header: an entry drawn as ONE row (`o.row`) is a single coin and gets null, a plain row.
 ///    A counted sentence says how many coins it counted (`n`): when the entry shows another number of them (a size
 ///    pill cut the card, a row left the read) the page counts what it shows under the same subject ("2 coins"), so
 ///    the sentence never disagrees with the count beside it; the poster's words are not quoted in its place (the
@@ -1452,7 +1452,7 @@ export function subjectLine(card: StoryCard | null | undefined, nowS: number, na
   let meta = {};
   if (card?.post) {
     const h = storyHead(card, nowS), old = oldChip(card.post.at, nowS);
-    meta = { who: h.who.startsWith("@") ? h.who : null, when: old ? "" : h.when, old, href: h.href, words: h.text || null, quoted: quotedView(card, nowS) };
+    meta = { who: h.who.startsWith("@") ? h.who : null, when: old ? "" : h.when, old, href: h.href, words: cleanSay(h.text) ? h.text : null, quoted: quotedView(card, nowS) };
     if (l && l.by === "model") return { ...base, ...meta, subject: l.subject, happened: l.happened, auto: true, badge: { text: AI_BADGE, title: AI_BADGE_TITLE }, tone: l.kind === "personal" ? "personal" : "normal", chips: lineChips(l.chips, card, nowS) };
   }
   const f = card?.family && typeof card.family.mint === "string" ? card.family : null;
