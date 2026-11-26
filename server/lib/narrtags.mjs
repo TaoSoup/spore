@@ -113,6 +113,16 @@ export function cleanText(s, max) {
   return [...t].slice(0, max).join("").trim();
 }
 const X_HOSTS = new Set(["x.com", "twitter.com", "mobile.x.com", "mobile.twitter.com", "m.twitter.com"]);
+// Links as the embed text writes them: a URL (also one glued to the word before it: "Sending 10%https://t.co/x"), a
+// bare www. address, a t.co or pic.twitter.com address without a scheme.
+const URL_RE = /https?:\/\/\S+|(?<![\p{L}\p{N}@.])www\.\S+|(?<![\p{L}\p{N}.])(?:pic\.(?:twitter|x)\.com|t\.co)\/\S+/giu;
+/** A post's own words: its text without links (their codes carry letters and digits that are no part of what was said). */
+export function sayText(text) {
+  return typeof text === "string" ? text.replace(URL_RE, " ").replace(/[ \t]+/g, " ").trim() : "";
+}
+/** Whether a post says anything of its own: a letter or digit left once its links are out. A post that is only a link
+ * or a picture ("https://t.co/x pic.twitter.com/y") is no text: the coin is treated as one without a post. */
+export const postSays = (text) => /[\p{L}\p{N}]/u.test(sayText(text));
 function urlOf(s) {
   if (typeof s !== "string") return null;
   const t = s.trim();
@@ -248,7 +258,7 @@ export function siteText(link) {
   return /^(?:search: .|#.)/.test(x) ? x : siteWords(link);
 }
 export function hasOwnText(d) {
-  if (descText(d?.description) || cleanText(d?.post?.text, CAPS.postText)) return true;
+  if (descText(d?.description) || (postSays(d?.post?.text) && cleanText(d?.post?.text, CAPS.postText))) return true;
   const site = siteText(d?.website);
   if (/^(?:search: .|#.)/.test(site)) return true; // an X search or hashtag as the website says what the coin is about
   if (site && !BARE_HOSTS.has(site.split(" ")[0])) return true;
@@ -306,7 +316,7 @@ export function coinBlock(d, n) {
   put("description", descText(d?.description));
   put("site", siteText(d?.website));
   put("x", xWords(d?.twitter));
-  const text = cleanText(d?.post?.text, CAPS.postText);
+  const text = postSays(d?.post?.text) ? cleanText(d?.post?.text, CAPS.postText) : "";
   if (text) o.post = { by: cleanText(d.post.handle, CAPS.postBy), text };
   if (d?.parent) {
     put("paired_with", cleanText([cleanText(d.parent.name, CAPS.name), d.parent.symbol ? `(${cleanText(d.parent.symbol, CAPS.symbol)})` : ""].filter(Boolean).join(" "), CAPS.pair));
@@ -692,7 +702,7 @@ export class TagEngine {
           }
         }
         if (id != null) { this.store.narrTouch(id, nowS); filed.set(id, (filed.get(id) ?? 0) + 1); }
-        this.store.tagSet({ mint: c.mint, narrativeId: id, at: nowS, model: this.model, asks: (c.asks ?? 0) + 1, hadPost: !!c.post?.text, bare: !c.post?.text && !descText(c.description) });
+        this.store.tagSet({ mint: c.mint, narrativeId: id, at: nowS, model: this.model, asks: (c.asks ?? 0) + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !descText(c.description) });
         done.set(c.mint, id);
       });
       for (const [id, title] of wider) { if (this.#retitle(id, title, filed.get(id) ?? 0)) { count.retitled++; retitled.push(id); this.snap = null; } else count.refused++; }
@@ -944,7 +954,7 @@ export class NarrTags {
         // A given-up row past GAVE_UP_S counts as never asked.
         const prior = r && r.model !== GAVE_UP ? r : null;
         if (!prior && !d.hasMeta && t - at < META_WAIT_MS) continue; // its metadata is still being fetched
-        if (prior) { if (!d.post && !(prior.bare && d.description)) { drop(); prior.chk = t; continue; } this.stats.rechecked++; }
+        if (prior) { if (!postSays(d.post?.text) && !(prior.bare && d.description)) { drop(); prior.chk = t; continue; } this.stats.rechecked++; }
         if (level == null) { level = a; limit = BATCH_BY_ATTEMPT[Math.min(a, BATCH_BY_ATTEMPT.length - 1)]; }
         const seen = isHot ? this.hotSeen.get(mint) ?? t : null;
         drop();
@@ -1008,7 +1018,7 @@ export class NarrTags {
             this.flight.delete(c.mint);
             const id = r.done.get(c.mint), had = this.cache.get(c.mint);
             if (!had) { if (id != null) this.counts.tagged++; else this.counts.none++; } else if (id != null && had.id == null) { this.counts.tagged++; this.counts.none = Math.max(0, this.counts.none - 1); }
-            this.#remember(c.mint, { id, asks: c.asks + 1, hadPost: !!c.post?.text, bare: !c.post?.text && !c.description, model: this.modelId, at: Math.floor(this.now() / 1000), chk: this.now() });
+            this.#remember(c.mint, { id, asks: c.asks + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !c.description, model: this.modelId, at: Math.floor(this.now() / 1000), chk: this.now() });
             this.attempts.delete(c.mint);
             if (id != null) this.#noteNew(id, c.mint, this.model.coins.get(c.mint)?.createdAt ?? null);
           }

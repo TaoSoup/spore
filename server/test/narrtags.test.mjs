@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   NarrTags, TagEngine, MemoryTagStore, THEMES, PRICES, DEFAULT_MODEL, BATCH, MAX_ATTEMPTS, GAVE_UP, GAVE_UP_S, BAD_RUN_PAUSE, HOT_MAX, HOT_STALE_MS, MAX_WAITING, API_BASE_URL, PER_MIN, PAUSE_MS, PAUSE_MAX_MS, PAUSE_CONFIG_MS, OUT_BASE, OUT_PER_COIN, CAPS, TITLE_MAX, NEW_S, RECHECK_MS, META_WAIT_MS, FILL_WAIT_MS,
-  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA, userText, PAGE_MIN_BUYERS } from "../lib/narrtags.mjs";
+  cleanTitle, titleKey, cleanText, siteWords, xWords, coinBlock, stripBoilerplate, descText, hasOwnText, titleFitsName, saysSubject, stemWord, applyTagRules, RULES_VERSION, RULES_KEY, buildRequest, estimateInputTokens, priceOf, costOf, readReply, classifyError, anthropicClientFactory, SYSTEM_TEXT, REPLY_SCHEMA, userText, PAGE_MIN_BUYERS, postSays } from "../lib/narrtags.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
 import { fakeClock, T0 } from "./helpers/chain.mjs";
@@ -1085,4 +1085,32 @@ test("the story list goes out as its own cached block (the same bytes while the 
   assert.equal(cb[1].cache_control, undefined);
   assert.equal(userText(b.messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | fiona the hippo\n2 | ai | ai bubble popping\n3 | gaming | gta 6");
   assert.equal(typeof buildRequest({ coins: [coin("a")], narratives: snap }).messages[0].content, "string", "without fresh: one plain string as before");
+});
+
+test("a post that is only a link or a picture is no text: the coin is sent as no_text, without the post", () => {
+  const empty = { name: "Ansemmas", symbol: "Ansemmas", post: { handle: "Ansemmas", text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" } };
+  assert.equal(hasOwnText(empty), false);
+  assert.deepEqual(coinBlock(empty, 1), { n: 1, name: "Ansemmas", symbol: "Ansemmas", no_text: true });
+  const said = { ...empty, post: { handle: "Ansemmas", text: "merry ansemmas https://t.co/XuCyuPCzYc" } };
+  assert.equal(hasOwnText(said), true);
+  assert.deepEqual(coinBlock(said, 1).post, { by: "Ansemmas", text: "merry ansemmas https://t.co/XuCyuPCzYc" }, "a post with words goes as it is, links in");
+  assert.deepEqual([postSays("https://t.co/a"), postSays("pic.twitter.com/b"), postSays("  "), postSays(null), postSays("gm https://t.co/a"), postSays("日本")], [false, false, false, false, true, true]);
+});
+
+test("a coin whose linked post is only a link is answered once like a coin without a post: stored as no post, not asked again with the same block", async () => {
+  const model = fakeModel(), POST = "1700000000000000009";
+  model.add("a", { twitter: `https://x.com/who/status/${POST}`, description: null });
+  const stored = new Map([[POST, { id: POST, state: "ok", handle: "who", text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN", flagged: false }]]);
+  const posts = { peek: (id) => stored.get(id) ?? null };
+  const client = fakeClient((req) => reply(sentCoins(req).map((c) => none(c.n))));
+  const { t, db, clock } = tagger({ model, posts, client });
+  t.offer("a", 15, { hot: true });
+  await t.pump();
+  assert.deepEqual([client.calls.length, sentCoins(client.calls[0].req)[0].post, sentCoins(client.calls[0].req)[0].no_text], [1, undefined, true], "sent without the post, marked no_text");
+  assert.deepEqual([db.tagGet("a").hadPost, db.tagGet("a").bare], [false, true]);
+  clock.t += RECHECK_MS;
+  t.offer("a", 15, { hot: true });
+  await t.pump();
+  assert.equal(client.calls.length, 1, "nothing new: looked at, not asked");
+  t.stop(); db.close();
 });

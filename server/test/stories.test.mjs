@@ -308,3 +308,14 @@ test("by name (rule 2d): an untagged loose coin named by exactly one narrative c
   const jc = cp.cards.find((c) => c.key === "n:31");
   assert.deepEqual(jc.coins.map((c) => [c.mint, (c.copies ?? []).map((x) => x.mint)]), [["j1", ["j1b"]], ["j2", []], ["new", []]]);
 });
+
+test("narrative cards: a post that is only a link or a picture never leads the card; the next post with words does, else none", () => {
+  const rows = [row("a", { buyers5m: 30 }), row("b", { buyers5m: 20 }), row("c", { buyers5m: 5 })];
+  const posts = { 1: { handle: "empty", text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" }, 2: { handle: "said", text: "Merry Dogemas, tag a business https://t.co/x" } };
+  const card = (links) => groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: (id) => posts[id] ?? null, nowMs: NOW_MS, tagOf: tagsOf({ a: AI, b: AI, c: AI }) }).cards[0];
+  const p = card({ a: "1", c: "2" }).post;
+  assert.deepEqual([p.id, p.handle], ["2", "said"], "the most-bought coin's post has no words: the next one that has words");
+  assert.equal(card({ a: "1", b: "1" }).post, null, "only wordless posts: the card has no post (its counted line says more)");
+  posts[3] = { handle: "quoter", text: "https://t.co/Ab12", quotes: true };
+  assert.equal(card({ a: "3", c: "2" }).post.id, "3", "a wordless post that quotes a post with words may lead (the card gets the quoted line)");
+});

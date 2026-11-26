@@ -567,6 +567,15 @@ test("the server's own lines: a quote, \"Post is only a link\", a counted senten
   assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", coins: two }), { subject: "$PVE", happened: ONLY_ARTICLE, kind: "thin", by: "server", quote: false, chips: [] });
   assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", coins: two }).happened, ONLY_LINK);
   assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: null, coins: two }).happened, ONLY_LINK, "a link not read yet");
+  // a website link names its host (a label, never read); "www." off; a picture beside it is said; a host that is not a
+  // plain host name, too long, or flagged by the block list leaves the plain ONLY_LINK
+  assert.equal(sl({ post: { text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" }, linkKind: "website", linkHost: "ansemmas.fun", coins: two }).happened, "Post is only a link to ansemmas.fun and a picture");
+  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: "WWW.Example.com", coins: two }).happened, "Post is only a link to example.com");
+  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: `www.${"x".repeat(36)}.com`, coins: two }).happened, `Post is only a link to ${"x".repeat(36)}.com`, "40 characters once www. is off");
+  for (const bad of ["localhost", "a b.com", `${"x".repeat(37)}.com`, "", null, "evil..com", "1.2.3.4", "xn--80ak6aa92e.com", "shop.xn--p1ai", "elonmas.fun", "my-nvidia.io"]) assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: bad, coins: two }).happened, ONLY_LINK, String(bad));
+  assert.equal(serverLine({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: "badword.fun", coins: two }, { flag: (t) => /badword/.test(t) }).happened, ONLY_LINK, "the block list reads the host");
+  for (const split of ["bad-word.fun", "bad.word.fun"]) assert.equal(serverLine({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", linkHost: split, coins: two }, { flag: (t) => /badword/.test(t) }).happened, ONLY_LINK, `a blocked word split across labels: ${split}`);
+  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", linkHost: "x.com", coins: two }).happened, ONLY_ARTICLE, "only a website names its host");
   assert.equal(sl({ post: { text: "pic.twitter.com/NOfAoq90Wx" }, linkKind: "picture", coins: two }).happened, ONLY_PICTURE);
   assert.deepEqual([ONLY_ARTICLE, ONLY_LINK, ONLY_PICTURE], ["Post is only a link to an article on X", "Post is only a link", "Post is only a picture"]);
   // no post, several coins: counted over EVERY coin; the shared word and the commonest parent

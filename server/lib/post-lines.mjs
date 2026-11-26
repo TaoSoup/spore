@@ -54,8 +54,10 @@
 // - The key lives only inside the client (lib/narrtags.mjs anthropicClientFactory); failures are named by class
 //   ("rate_limited", "auth", ...), never by a provider's or the SDK's own words.
 import { accessSync, constants as FS } from "node:fs";
-import { DEFAULT_MODEL, PAUSE_MS, PAUSE_MAX_MS, PAUSE_CONFIG_MS, BAD_RUN_PAUSE, GAVE_UP, GAVE_UP_S, cleanText, descText, priceOf, costOf, classifyError, estimateInputTokens, anthropicClientFactory } from "./narrtags.mjs";
+import { DEFAULT_MODEL, PAUSE_MS, PAUSE_MAX_MS, PAUSE_CONFIG_MS, BAD_RUN_PAUSE, GAVE_UP, GAVE_UP_S, cleanText, descText, sayText, priceOf, costOf, classifyError, estimateInputTokens, anthropicClientFactory } from "./narrtags.mjs";
 import { flagText } from "./narrative.mjs";
+import { namedEntity } from "./agents/blocklist.mjs";
+export { sayText };
 
 /** What a line can be. Fixed here; the model picks from this list and anything else fails the checks. "thin": nothing is stated, no sentence is kept. */
 export const KINDS = Object.freeze(["event", "claim", "pitch", "personal", "mismatch", "thin"]);
@@ -99,13 +101,6 @@ export const ONLY_ARTICLE = "Post is only a link to an article on X", ONLY_LINK 
 const dayOf = (ms) => new Date(ms).toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------- texts
-// Links as the embed text writes them: a URL (also one glued to the word before it: "Sending 10%https://t.co/x"), a
-// bare www. address, a t.co or pic.twitter.com address without a scheme.
-const URL_RE = /https?:\/\/\S+|(?<![\p{L}\p{N}@.])www\.\S+|(?<![\p{L}\p{N}.])(?:pic\.(?:twitter|x)\.com|t\.co)\/\S+/giu;
-/** A post's own words: its text without links (their codes carry letters and digits that are no part of what was said). */
-export function sayText(text) {
-  return typeof text === "string" ? text.replace(URL_RE, " ").replace(/[ \t]+/g, " ").trim() : "";
-}
 /** The post's text as the model reads it (and as the checks read it): without links, one clean line, capped. */
 export const postText = (text, max = CAPS.text) => cleanText(sayText(text), max);
 const len = (s) => [...s].length;
@@ -453,7 +448,7 @@ function leadSubject(coins, flag) {
 /**
  * The line the server writes itself for a card (no model, no "AI" chip), or null when the card gets no line at all
  * (a single coin with nothing to say keeps its plain row). `c`: `{ post: { text } | null, linkKind ("post", "article",
- * "website", "picture" or null: what the post's link leads to), coins: [{ name, symbol, parent }] (EVERY coin of the
+ * "website", "picture" or null: what the post's link leads to), linkHost (a website link's host, or null), coins: [{ name, symbol, parent }] (EVERY coin of the
  * card, copies included, the lead first), rows (how many rows the page draws the card as: its coins without the
  * copies folded under them; left out, every coin is a row), title (the tagger's or the subjects table's title, or
  * null), titleAi (the title is a model's), grouped (a model grouped these coins: a narrative card), familySymbol }`.
@@ -461,7 +456,8 @@ function leadSubject(coins, flag) {
  * - a post whose words may be quoted (QUOTE_MIN_WORDS or more; when THIN_WORDS or fewer, not noise; the whole post
  *   has no prediction, promise of gain or call to buy, QUOTE_REFUSE; the shown part passes the block list and the hype
  *   and price checks): the poster's words, cut to QUOTE_MAX, `quote` true;
- * - a post without words, on a card of two or more rows: ONLY_ARTICLE, ONLY_PICTURE, ONLY_LINK or NO_WORDS;
+ * - a post without words, on a card of two or more rows: ONLY_ARTICLE, ONLY_PICTURE, ONLY_LINK or NO_WORDS; a link
+ *   to a website names its host when `linkHost` is given ("Post is only a link to ansemmas.fun and a picture");
  * - otherwise, two or more rows: a counted sentence, "3 of 4 coins are named Ansem; 2 launched under $Slingoor"
  *   (the shared word and the commonest parent, each only when the block list lets it through), else "4 coins; 2
  *   launched under $P" under the title, the family's ticker or the first coin's name. It carries `n`, the number of
@@ -471,6 +467,18 @@ function leadSubject(coins, flag) {
  * Chips: "ai_group" when a model grouped the coins or the subject is a model's title; "no_post" without a post. Coin
  * names are never repeated beyond the one shared word, and nothing here says anything about a price. Pure.
  */
+/** A website's host as a label for a server line: lower case, "www." off, a plain host name of at most SITE_LABEL_MAX
+ * characters with a top-level label of letters (no IP address), no punycode label ("xn--": a look-alike in another
+ * script), that the block list lets through read whole and with its dots and hyphens taken out (a blocked word split
+ * across labels), and that names no person or brand (a stranger's domain in the server's own voice must not read as
+ * one of theirs); "" otherwise. */
+export const SITE_LABEL_MAX = 40;
+function siteLabel(host, flag) {
+  const h = typeof host === "string" ? host.trim().toLowerCase().replace(/^www\./, "") : "";
+  if (!h || h.length > SITE_LABEL_MAX || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/.test(h)) return "";
+  if (h.split(".").some((l) => l.startsWith("xn--"))) return "";
+  try { return flag(h) || flag(h.replace(/[.-]/g, "")) || namedEntity(h.replace(/[.-]/g, " ")) || namedEntity(h.replace(/[.-]/g, ""), { symbol: true }) ? "" : h; } catch { return ""; }
+}
 export function serverLine(c, { flag = flagText } = {}) {
   const coins = Array.isArray(c?.coins) ? c.coins : [], n = coins.length;
   const rows = Number.isInteger(c?.rows) && c.rows >= 0 ? Math.min(c.rows, n) : n, many = rows >= 2;
@@ -495,7 +503,10 @@ export function serverLine(c, { flag = flagText } = {}) {
     const subject = leadSubject(coins, flag) || sharedWord(coins, flag)?.word || "";
     if (!subject) return null;
     const pic = /(?<![\p{L}\p{N}.])pic\.(?:twitter|x)\.com\//iu.test(String(c.post.text ?? "")), link = /https?:\/\/|(?<![\p{L}\p{N}.])t\.co\//iu.test(String(c.post.text ?? ""));
-    const happened = c.linkKind === "article" ? ONLY_ARTICLE : c.linkKind === "picture" || (pic && !link) ? ONLY_PICTURE : link || c.linkKind ? ONLY_LINK : NO_WORDS;
+    // A website link says where it points ("Post is only a link to ansemmas.fun"): the host is a label, never read,
+    // and only when it is a plain host name the block list lets through; else the plain ONLY_LINK.
+    const host = c.linkKind === "website" ? siteLabel(c.linkHost, flag) : "";
+    const happened = c.linkKind === "article" ? ONLY_ARTICLE : c.linkKind === "picture" || (pic && !link) ? ONLY_PICTURE : host ? `${ONLY_LINK} to ${host}${pic ? " and a picture" : ""}` : link || c.linkKind ? ONLY_LINK : NO_WORDS;
     return mk(subject, happened);
   }
   const shown = cutTo(say, QUOTE_MAX);

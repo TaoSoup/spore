@@ -20,6 +20,7 @@
 import { PAPER_RATIO, TINY_USD, byMint } from "./rowshared.mjs";
 import { postTime, postUrl } from "./narrative.mjs";
 import { titleFitsName } from "./narrtags.mjs";
+import { wordCount } from "./post-lines.mjs";
 
 /** Cards, loose rows and dust rows a body lists at most. */
 export const CARDS_MAX = 20, LOOSE_MAX = 30, DUST_MAX = 30;
@@ -154,7 +155,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     if (id == null) return null;
     if (posts.has(id)) return posts.get(id);
     let p = null;
-    try { const v = postOf(id); p = v && typeof v.handle === "string" && v.handle && typeof v.text === "string" ? { handle: v.handle, text: v.text } : null; } catch { p = null; }
+    try { const v = postOf(id); p = v && typeof v.handle === "string" && v.handle && typeof v.text === "string" ? { handle: v.handle, text: v.text, ...(v.quotes === true ? { quotes: true } : null) } : null; } catch { p = null; }
     posts.set(id, p);
     return p;
   };
@@ -262,11 +263,15 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       ...(one === undefined ? null : { narrative: one }),
     });
   }
-  // The post shown: of the coins that link a post that may be shown, the one with the most 5-minute buyers (then the mint).
+  // The post shown: of the coins that link a post that may be shown AND has words of its own (links and pictures
+  // aside) or quotes a post that has (postOf's `quotes`), the one with the most 5-minute buyers (then the mint). A post
+  // that is only a link or a picture never leads a grouped card: it says nothing about the story, and the card's
+  // counted line says more.
   const bestPost = (b) => {
     for (const r of [...b].sort((x, y) => (y.buyers5m ?? 0) - (x.buyers5m ?? 0) || byMint(x.mint, y.mint))) {
       const own = postIdOf(r) ?? null;
-      if (own != null && post(own)) { const p = post(own); return { id: own, handle: p.handle, text: p.text, at: postTime(own, nowMs), url: postUrl(own) }; }
+      const p = own != null ? post(own) : null;
+      if (p && (wordCount(p.text) > 0 || p.quotes === true)) return { id: own, handle: p.handle, text: p.text, at: postTime(own, nowMs), url: postUrl(own) };
     }
     return null;
   };

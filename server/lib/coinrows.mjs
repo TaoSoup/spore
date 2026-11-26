@@ -495,7 +495,11 @@ export class CoinRows {
     try {
       const s = n.postState(id, { low: true, mayQueue: () => queue });
       if (s.state !== "ok" || !s.handle || n.posts?.peek?.(id)?.flagged) return null;
-      return { handle: s.handle, text: s.text ?? "" };
+      // A post without words of its own may still lead a grouped card when its link is a post that has words (the
+      // card then gets "Quoted post says ..."): read from what is stored, never queued.
+      let quotes = false;
+      if (wordCount(s.text) === 0) { try { quotes = wordCount(n.posts?.quoteOf?.(id, { queue: false })?.quoted?.text) > 0; } catch { quotes = false; } }
+      return { handle: s.handle, text: s.text ?? "", ...(quotes ? { quotes: true } : null) };
     } catch (e) { this.log.warn?.(`coinrows: post ${id}: ${e?.message ?? e}`); return null; }
   }
 
@@ -604,7 +608,7 @@ export class CoinRows {
       }
     }
     const title = card.subject?.title ?? card.narrative?.title ?? null;
-    const own = (linkKind) => serverLine({ post, linkKind, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject, familySymbol: card.family?.symbol ?? null });
+    const own = (linkKind, linkHost = null) => serverLine({ post, linkKind, linkHost, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject, familySymbol: card.family?.symbol ?? null });
     if (!post) {
       if (ordered.length < 2) return; // a single row with no post: no line, and no field
       const key = `${tf}:${card.key}`, hit = this.counted.get(key);
@@ -648,7 +652,7 @@ export class CoinRows {
       // the server's line now, so "Sending 10%" is never shown as a story meanwhile. A longer post waits with no field.
       mine = r === "server" || (r != null && r !== "known" && wordCount(post.text) <= THIN_WORDS);
     }
-    if (mine) card.line = own(q?.kind ?? null);
+    if (mine) card.line = own(q?.kind ?? null, q?.host ?? null);
   }
 
   /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
