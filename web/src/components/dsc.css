@@ -358,6 +358,10 @@ summary.dsc-ln-sum:hover .dsc-ln-h { text-decoration: underline; text-decoration
 .dsc-ln-m { flex: none; display: inline-flex; align-items: baseline; gap: 8px; max-width: 46%; min-width: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); white-space: nowrap; }
 .dsc-ln-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .dsc-ln-ai, .dsc-ln-old { flex: none; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; font-size: 10px; line-height: 14px; }
+/* the chips: facts about our own data (where the sentence came from, a model's grouping, no post), small and muted;
+   they wrap under each other on the right instead of pushing the sentence */
+.dsc-ln-m:has(.dsc-ln-chip) { flex-wrap: wrap; justify-content: flex-end; row-gap: 3px; white-space: normal; }
+.dsc-ln-chip { flex: none; max-width: 100%; padding: 0 4px; border: 1px solid var(--line-soft); border-radius: 4px; font-size: 10px; line-height: 14px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dsc-ln-old { border-color: var(--line-soft); font-family: var(--mono); }
 .dsc-ln-when { flex: none; font-family: var(--mono); }
 /* the little mark that says the line opens: turned when it is open */
@@ -367,6 +371,10 @@ summary.dsc-ln-sum .dsc-ln-m::after { content: "\203A"; flex: none; align-self: 
 .dsc-ln-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(255,255,255,.02); }
 .dsc-ln-words { margin: 0; font-size: var(--fs-sm); line-height: 19px; color: var(--ink-2); overflow-wrap: anywhere; }
 .dsc-ln-nowords { color: var(--muted); }
+/* the opened body with two posts: the starting post and the post it quotes, each under who wrote it */
+.dsc-ln-post { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; min-width: 0; }
+.dsc-ln-post + .dsc-ln-post { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+.dsc-ln-by { margin: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); overflow-wrap: anywhere; }
 .dsc-ln-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin: 0; font-size: var(--fs-2xs); line-height: 16px; color: var(--muted); }
 .dsc-ln-foot .dsc-link { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-2xs); }
 /* a story header's line is a touch larger on a wide screen */
@@ -385,6 +393,7 @@ summary.dsc-ln-sum .dsc-ln-m::after { content: "\203A"; flex: none; align-self: 
   /* a line with nothing to open (no post) has no second place to be read in full: three lines here too */
   div.dsc-ln .dsc-ln-t { -webkit-line-clamp: 3; }
   .dsc-ln-m { max-width: 100%; }
+  .dsc-ln-m:has(.dsc-ln-chip) { justify-content: flex-start; }
   .dsc-solo { --dsc-bx: 6px; }
   .dsc-solo > .dsc-ln { padding: 6px 4px 5px; }
 }

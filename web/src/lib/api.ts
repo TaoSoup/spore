@@ -347,15 +347,26 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 /// narratives of one subject (the server's subjects table: Jensen Huang, say), `narrative.title` the subject's, its
 /// narratives in `subject.angles`, most 5-minute buyers first.
 export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: number };
-/// A card's "subject: what happened" line (a server with POST_LINES=on): written by a language model from the card's
-/// post alone and checked by the server; it can be wrong. `kind`: what the post is ("event", an attributed "claim" or
-/// "pitch", "personal", "none" for a post that names no event, "mismatch" for a post about something else than the coin).
-export type PostLineKind = "event" | "claim" | "pitch" | "personal" | "none" | "mismatch";
-export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind };
+/// A card's "subject: what happened" line (a server with POST_LINES=on). `by` "model": written by a language model from
+/// the card's post and the post it quotes, and checked by the server; it can be wrong. `by` "server": written by the
+/// server itself, no model (the poster's own words when `quote` is set, "Post is only a link", a counted sentence over
+/// the card's coins). `kind`: what the post is ("event", an attributed "claim" or "pitch", "personal", "mismatch" for a
+/// post about something else than the coin; every server line is "thin"). `chips`: codes the server sets, never the
+/// model: "ai", "via_quoted" (the sentence is the quoted post's), "names_quoted" / "names_chain" (a name comes from the
+/// quoted post, or from the post that one quotes), "mismatch", "no_post", "ai_group" (a model grouped these coins).
+/// `n`: on a counted sentence, how many coins the server counted (copies included), so the page can tell when it shows
+/// another number of them (a size pill, a row that left) and count for itself.
+export type PostLineKind = "event" | "claim" | "pitch" | "personal" | "mismatch" | "thin";
+export type LineChip = "ai" | "via_quoted" | "names_quoted" | "names_chain" | "mismatch" | "no_post" | "ai_group";
+export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind; by?: "model" | "server"; quote?: boolean; chips?: LineChip[]; n?: number | null };
+/// The post a card's post quotes, when the server could read it, and (`chain`) the post that one quotes when a name in the line comes from it.
+export type StoryQuoted = { id: string; handle: string | null; text: string | null; at: number | null; url?: string };
 export type StoryCard = {
   kind: "post" | "family" | "narrative"; key: string; post: StoryPost | null; family: StoryFamily | null; buyers5m: number; coinsN: number; coins: StoryRow[];
-  /// absent until the server has a checked line for the card's post (and always without POST_LINES)
-  line?: StoryPostLine;
+  /// absent until the server has decided the card's line (and always without POST_LINES); null: nothing to say (a
+  /// single coin then shows as a plain row)
+  line?: StoryPostLine | null;
+  quoted?: StoryQuoted | null; chain?: Pick<StoryQuoted, "id" | "handle" | "at" | "url"> | null;
   narrative?: (NarrativeRef & { newCoins1h?: number }) | null; newN?: number; olderN?: number;
   subject?: { key: string; title: string; angles: StoryAngle[] } | null;
   /// distinct wallets with a $1+ buy over the timeframe across all the card's coins (copies included), each counted once (a newer server)

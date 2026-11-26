@@ -3,7 +3,7 @@
 // (GET /api/discover, `Discover` in lib/api.ts; SSE `wake`), as words, a sparkline and an order. Pure: no DOM, no
 // network, no storage (test/discover.test.mts). Every line says what is measured ("buying 14x its normal", "170 buyers
 // in 5 min"), never why, never what a coin will do, and a linked post is only what coincided.
-import type { CoinRow, CoinSafety, DiscoverOne, DustReason, NarrativeRef, PostLineKind, Stories, StoryCard, StoryCopy, StoryPostLine, StoryRow, StoryTheme, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
+import type { CoinRow, CoinSafety, DiscoverOne, DustReason, LineChip, NarrativeRef, PostLineKind, Stories, StoryCard, StoryCopy, StoryPostLine, StoryRow, StoryTheme, Tf, Trade, TrendRow, WakeCoin, WakeEvent, WakeFamily, WakePost } from "./api";
 import { compact, count, plural, short, usd } from "./format";
 import { postHandle, postText, safePostUrl } from "./narrative";
 import { MAX_PRESET_COUNT } from "./trade-settings";
@@ -1304,11 +1304,21 @@ export function coinStory(card: Pick<StoryCard, "kind" | "post" | "family"> | nu
 export const LINE_OLD_S = 7 * 86_400;
 /// A quoted post is cut to this many characters (the last one an ellipsis when it was longer).
 export const LINE_QUOTE_MAX = 80;
-export const LINE_KINDS: readonly PostLineKind[] = ["event", "claim", "pitch", "personal", "none", "mismatch"];
+export const LINE_KINDS: readonly PostLineKind[] = ["event", "claim", "pitch", "personal", "mismatch", "thin"];
+export const LINE_CHIPS: readonly LineChip[] = ["ai", "via_quoted", "names_quoted", "names_chain", "mismatch", "no_post", "ai_group"];
 export const AI_BADGE = "AI";
 export const AI_BADGE_TITLE = "Written by a model from the post. It can be wrong.";
-export const AI_TITLE_BADGE = "AI title";
-export const AI_TITLE_BADGE_TITLE = "Title written by a language model from the coins' public text. It can be wrong.";
+export const AI_GROUP_CHIP = "AI group";
+export const AI_GROUP_TITLE = "A model grouped these coins. It can be wrong";
+export const NO_POST_CHIP = "no post";
+export const NO_POST_TITLE = "No coin of this story links a starting post";
+export const MISMATCH_CHIP = "post does not name this coin";
+export const MISMATCH_TITLE = "The post is about something other than what this coin is named after";
+export const VIA_QUOTED_TITLE = "The sentence is written from the post that the starting post quotes";
+export const NAMES_QUOTED_CHIP = "names from quoted post";
+export const NAMES_QUOTED_TITLE = "A name in the sentence is written in the quoted post, not in the starting post";
+export const NAMES_CHAIN_TITLE = "A name in the sentence is written in a post that the quoted post itself quotes";
+export const QUOTED_AGE_TITLE = "How old the quoted post is";
 export const LINE_NOTE = "Summary written by a model. It can be wrong.";
 export const NO_POST_TEXT = "Linked post has no text";
 
@@ -1332,6 +1342,14 @@ export function oldChip(at: number | null | undefined, nowS: number): string | n
   const mo = Math.floor(d / 30.44);
   return mo < 24 ? `${mo} mo old` : `${Math.floor(d / 365.25)} y old`;
 }
+/// The age chip of a quoted post a line drew on, older than LINE_OLD_S: "quoted post 18 d old" (under 60 days),
+/// "quoted post 5 mo old" (up to a year), then its year: "quoted post from 2024". null for a newer one or an unknown time.
+export function quotedChip(at: number | null | undefined, nowS: number): string | null {
+  if (!finite(at) || nowS - at <= LINE_OLD_S) return null;
+  const d = Math.floor((nowS - at) / 86_400);
+  if (d < 60) return `quoted post ${d} d old`;
+  return d <= 365 ? `quoted post ${Math.floor(d / 30.44)} mo old` : `quoted post from ${new Date(at * 1000).getUTCFullYear()}`;
+}
 /// The poster's words for a quoted line: links cut (cleanSay), at most LINE_QUOTE_MAX characters; null for no words.
 export function quoteCut(text: string | null | undefined, max = LINE_QUOTE_MAX): string | null {
   const t = cleanSay(text);
@@ -1339,59 +1357,127 @@ export function quoteCut(text: string | null | undefined, max = LINE_QUOTE_MAX):
   const cs = [...t];
   return cs.length > max ? `${cs.slice(0, max - 1).join("").trimEnd()}…` : t;
 }
-/// A usable line of a card: both texts and a known kind; null otherwise (an older server, a damaged body).
-export function lineOf(card: { line?: unknown } | null | undefined): StoryPostLine | null {
+/// A usable line of a card: both texts and a known kind, with who wrote it (`by`: "server" only when the body says so),
+/// whether it is the poster's own words (`quote`: a server line's), the chip codes we know and, on a server's counted
+/// sentence, how many coins it counted (`n`, else null); null otherwise (an older server, a damaged body, `line: null`).
+export function lineOf(card: { line?: unknown } | null | undefined): (Required<Omit<StoryPostLine, "n">> & { n: number | null }) | null {
   const l = card && typeof card === "object" ? (card.line as Partial<StoryPostLine> | null | undefined) : null;
   if (!l || typeof l !== "object" || typeof l.subject !== "string" || typeof l.happened !== "string" || !LINE_KINDS.includes(l.kind as PostLineKind)) return null;
   const subject = plainText(l.subject), happened = plainText(l.happened);
-  return subject && happened ? { subject, happened, kind: l.kind as PostLineKind } : null;
+  if (!subject || !happened) return null;
+  const by = l.by === "server" ? "server" : "model";
+  const chips = Array.isArray(l.chips) ? LINE_CHIPS.filter((c) => (l.chips as unknown[]).includes(c)) : [];
+  const n = by === "server" && typeof l.n === "number" && Number.isInteger(l.n) && l.n > 0 ? l.n : null;
+  return { subject, happened, kind: l.kind as PostLineKind, by, quote: by === "server" && l.quote === true, chips, n };
+}
+/// The post a card shows, on x.com (rebuilt from its id); null without one. A single coin with no line keeps this link on its row.
+export const cardPostHref = (card: Pick<StoryCard, "post"> | null | undefined): string | null => (card?.post ? safePostUrl(card.post.id) : null);
+/// Whether the server decided that a card has nothing to say (`line: null`): a single coin then shows as a plain row.
+export const lineDecidedNone = (card: { line?: unknown } | null | undefined): boolean => !!card && typeof card === "object" && "line" in card && card.line === null;
+
+const HANDLE_OK = /^[A-Za-z0-9_]{1,15}$/;
+/// The small muted chips beside a line: where the sentence came from and what kind of grouping it sits on. The server
+/// sends codes; the words are ours. `quoted` / `chain`: the card's quoted post and the post that one quotes.
+function lineChips(codes: readonly LineChip[], card: Pick<StoryCard, "quoted" | "chain"> | null | undefined, nowS: number): LineChipView[] {
+  const out: LineChipView[] = [], has = (c: LineChip) => codes.includes(c);
+  const q = card?.quoted && typeof card.quoted === "object" ? card.quoted : null, ch = card?.chain && typeof card.chain === "object" ? card.chain : null;
+  const at = (h: unknown) => (typeof h === "string" && HANDLE_OK.test(h) ? `@${h}` : null);
+  if (has("via_quoted")) out.push({ text: ["via quoted post", at(q?.handle)].filter(Boolean).join(" "), title: VIA_QUOTED_TITLE });
+  if (has("names_quoted")) out.push({ text: NAMES_QUOTED_CHIP, title: NAMES_QUOTED_TITLE });
+  if (has("names_chain")) {
+    const who = at(ch?.handle), chAt = ch?.at, year = finite(chAt) ? new Date(chAt * 1000).getUTCFullYear() : null;
+    out.push({ text: who ? `names from ${who} (2 hops${year ? `, ${year}` : ""})` : "names from an earlier post", title: NAMES_CHAIN_TITLE });
+  }
+  const age = has("via_quoted") || has("names_quoted") ? quotedChip(q?.at, nowS) : null;
+  if (age) out.push({ text: age, title: QUOTED_AGE_TITLE });
+  if (has("mismatch")) out.push({ text: MISMATCH_CHIP, title: MISMATCH_TITLE });
+  if (has("ai_group")) out.push({ text: AI_GROUP_CHIP, title: AI_GROUP_TITLE });
+  if (has("no_post")) out.push({ text: NO_POST_CHIP, title: NO_POST_TITLE });
+  return out;
+}
+/// The quoted post of a card as the opened line shows it: who, how long ago (or its age chip), its words, its link on
+/// x.com (rebuilt from the id); null without one.
+function quotedView(card: Pick<StoryCard, "quoted"> | null | undefined, nowS: number): QuotedView | null {
+  const q = card?.quoted;
+  if (!q || typeof q !== "object" || typeof q.id !== "string") return null;
+  const h = storyHead({ kind: "post", post: { id: q.id, handle: q.handle ?? null, text: q.text ?? null, at: finite(q.at) ? q.at : null, url: "" }, family: null }, nowS), old = oldChip(q.at, nowS);
+  if (!h.href && !h.text) return null;
+  return { who: h.who.startsWith("@") ? h.who : null, when: old ? "" : h.when, old, href: h.href, words: h.text || null };
 }
 
-/// The one line a card or a story header leads with: a short `subject` and `happened`, what it says about it.
-/// In order (the fallbacks):
-/// 1. the card has a post and the server's model-written line for it: that line; `auto` (the "AI" badge and the note).
-///    `tone` "personal" for a post about an illness, a death or family (the subject is drawn quieter), "light" for a
-///    post that names no event (the sentence is drawn in a normal weight).
-/// 2. no post but a narrative title (a narrative card, a card whose coins share one, or a loose coin's own tag while
-///    narratives are shown): the title in sentence case and "No starting post. 3 coins grouped by a model"; badge
-///    "AI title" (none for a subject block: its title is from the server's own table); light.
-/// 3. no post and no title (a family): the parent's ticker and "Launched under $PARENT. No starting post"; no badge.
-/// 4. a post but no line (the model is off, has not answered yet, or its line failed the server's checks): the
+/// The one line a card or a story header leads with: a short `subject` and `happened`, what it says about it; null
+/// when there is nothing to say (the entry is then a plain row). In order:
+/// 1. the server's model-written line for the card's post (`by` "model"): that line; `auto` (the "AI" badge and the
+///    note) and its chips: "via quoted post @handle" when the sentence is the quoted post's, "names from quoted post",
+///    the quoted post's age once it is over a week old ("quoted post 5 mo old", past a year "quoted post from 2024"),
+///    "post does not name this coin". `tone` "personal" for a post about an illness, a death or family.
+/// 2. a line the server wrote itself (`by` "server", with or without a post): light, no "AI" badge; `quote` when it is
+///    the poster's own words (drawn in quote marks); chips "AI group" (a model grouped these coins, or named the
+///    subject) and "no post". Its subject is put in sentence case. Its other sentences (a counted one, "Post is only a
+///    link") are a story's header: an entry drawn as ONE row (`o.row`) is a single coin and gets null, a plain row.
+///    A counted sentence says how many coins it counted (`n`): when the entry shows another number of them (a size
+///    pill cut the card, a row left the read) the page counts what it shows under the same subject ("2 coins"), so
+///    the sentence never disagrees with the count beside it; the poster's words are not quoted in its place (the
+///    server chose not to quote them).
+/// 3. a single coin with no line (the server decided there is nothing to say, or it has no post): null, a plain row.
+///    One row is a single coin whether or not copies are folded under it.
+/// 4. a post whose line is not decided yet (the model is off or has not answered: the body has no `line` field): the
 ///    narrative's title or the coin's name as the subject, and the first LINE_QUOTE_MAX characters of the poster's own
-///    words, `quote` (drawn in quote marks, quieter). No "AI" badge: the sentence is the poster's text. But a subject
-///    that is a model's title says so, as in 2: badge "AI title" (none for a subject block), `auto` still false (the
-///    body's note is about a model-written summary, and there is none). A story's header over several coins with no
-///    title has no one coin to name (the server's first coin is not the first row drawn, and changes between reads):
-///    its subject is "Linked post".
+///    words, `quote`. No "AI" badge: the sentence is the poster's text. A subject that is a model's title carries the
+///    "AI group" chip (none for a subject block: its title is from the server's own table). A story's header over
+///    several coins with no title has no one coin to name: its subject is "Linked post".
+/// 5. a story of two or more coins with no post and no server line (an older server, or the lines are off): the title
+///    in sentence case (chip "AI group" for a model's), else the parent's ticker, and how many coins it has ("3 coins",
+///    "3 coins launched under $FAM" for a family); chip "no post".
 /// `who` "@handle", `when` "1 h ago" ("" for an old post, which has `old` "18 d old" instead), `href` the post on x.com
-/// (rebuilt from the id), `words` the poster's own words in full (the hover title and the opened body). null when
-/// there is nothing to say (a loose coin with no story). Every text is a stranger's or a model's: drawn as text, never
-/// as markup, and none of it says anything about a coin's price.
+/// (rebuilt from the id), `words` the poster's own words in full (the hover title and the opened body), `quoted` the
+/// same of the post it quotes. Every text is a stranger's or a model's: drawn as text, never as markup, and none of it
+/// says anything about a coin's price.
+export type LineChipView = { text: string; title: string };
+export type QuotedView = { who: string | null; when: string; old: string | null; href: string | null; words: string | null };
 export type SubjectLine = {
   subject: string; happened: string; auto: boolean; badge: { text: string; title: string } | null; tone: "normal" | "personal" | "light"; quote: boolean;
+  chips: LineChipView[];
   who: string | null; when: string; old: string | null; href: string | null; words: string | null;
+  quoted: QuotedView | null;
 };
 export function subjectLine(card: StoryCard | null | undefined, nowS: number, nar = true, o: { row?: (Pick<StoryRow, "name" | "symbol"> & { narrative?: unknown }) | null; coinsN?: number } = {}): SubjectLine | null {
   const row = o.row ?? card?.coins?.[0] ?? null;
   const n = card?.kind === "narrative" ? narrativeOf(card) : nar ? narrativeOf(card) ?? (card ? null : narrativeOf(row)) : null;
   const title = n ? sentenceCase(card?.subject?.title ?? n.title) : "";
-  const base = { auto: false, badge: null, tone: "normal" as const, quote: false, who: null, when: "", old: null, href: null, words: null };
+  const coins = whole(o.coinsN ?? card?.coinsN ?? 1), many = !o.row && coins >= 2;
+  const base = { auto: false, badge: null, tone: "normal" as const, quote: false, chips: [] as LineChipView[], who: null, when: "", old: null, href: null, words: null, quoted: null };
+  const aiGroup = { text: AI_GROUP_CHIP, title: AI_GROUP_TITLE }, noPost = { text: NO_POST_CHIP, title: NO_POST_TITLE };
+  const l = lineOf(card);
+  let meta = {};
   if (card?.post) {
     const h = storyHead(card, nowS), old = oldChip(card.post.at, nowS);
-    const meta = { who: h.who.startsWith("@") ? h.who : null, when: old ? "" : h.when, old, href: h.href, words: h.text || null };
-    const l = lineOf(card);
-    if (l) return { ...base, ...meta, subject: l.subject, happened: l.happened, auto: true, badge: { text: AI_BADGE, title: AI_BADGE_TITLE }, tone: l.kind === "personal" ? "personal" : l.kind === "none" ? "light" : "normal" };
-    const say = quoteCut(h.text);
-    const many = !o.row && whole(o.coinsN ?? card.coinsN ?? 1) >= 2;
-    const subject = title || (row && !many ? plainText(String(row.name ?? "")) || (row.symbol ? `$${plainText(String(row.symbol))}` : "") : "") || "Linked post";
-    return { ...base, ...meta, subject, happened: say ?? NO_POST_TEXT, quote: !!say, tone: say ? "normal" : "light", badge: title && !card.subject ? { text: AI_TITLE_BADGE, title: AI_TITLE_BADGE_TITLE } : null };
-  }
-  if (title) {
-    const c = whole(o.coinsN ?? card?.coinsN ?? 1);
-    return { ...base, subject: title, happened: c >= 2 ? `No starting post. ${plural(c, "coin")} grouped by a model` : "No starting post. Story named by a model", badge: card?.subject ? null : { text: AI_TITLE_BADGE, title: AI_TITLE_BADGE_TITLE }, tone: "light" };
+    meta = { who: h.who.startsWith("@") ? h.who : null, when: old ? "" : h.when, old, href: h.href, words: h.text || null, quoted: quotedView(card, nowS) };
+    if (l && l.by === "model") return { ...base, ...meta, subject: l.subject, happened: l.happened, auto: true, badge: { text: AI_BADGE, title: AI_BADGE_TITLE }, tone: l.kind === "personal" ? "personal" : "normal", chips: lineChips(l.chips, card, nowS) };
   }
   const f = card?.family && typeof card.family.mint === "string" ? card.family : null;
-  if (f) return { ...base, subject: f.symbol ? plainText(String(f.symbol)) || short(f.mint) : short(f.mint), happened: `Launched under ${famLabel(f)}. No starting post`, tone: "light" };
+  // a line the server wrote itself: its own sentence, or the poster's words in quote marks
+  if (l && l.by === "server") {
+    const own = { ...base, ...meta, subject: sentenceCase(l.subject) || l.subject, chips: lineChips(l.chips, card, nowS) };
+    if (l.quote) return { ...own, happened: l.happened, quote: true };
+    // its other sentences are a story's header: an entry drawn as one row is a single coin and keeps its plain row
+    if (o.row) return null;
+    // counted over another number of coins than the entry shows: the page counts what it shows, under the same subject
+    if (l.n != null && l.n !== coins) return { ...own, happened: card?.kind === "family" && f ? `${plural(coins, "coin")} launched under ${famLabel(f)}` : plural(coins, "coin"), tone: "light" };
+    return { ...own, happened: l.happened, tone: "light" };
+  }
+  if (card?.post) {
+    // decided, and nothing to say: a single coin is a plain row; a story still needs a header (the poster's words)
+    if (lineDecidedNone(card) && !many) return null;
+    const h = storyHead(card, nowS);
+    const say = quoteCut(h.text);
+    const subject = title || (row && !many ? plainText(String(row.name ?? "")) || (row.symbol ? `$${plainText(String(row.symbol))}` : "") : "") || "Linked post";
+    return { ...base, ...meta, subject, happened: say ?? NO_POST_TEXT, quote: !!say, tone: say ? "normal" : "light", chips: title && !card.subject ? [aiGroup] : [] };
+  }
+  // no post: a single coin (one row, with or without copies under it) has no line; a story is named and counted
+  if (!card || !many) return null;
+  if (title) return { ...base, subject: title, happened: card.kind === "family" && f ? `${plural(coins, "coin")} launched under ${famLabel(f)}` : plural(coins, "coin"), tone: "light", chips: [...(card.subject ? [] : [aiGroup]), noPost] };
+  if (f) return { ...base, subject: f.symbol ? plainText(String(f.symbol)) || short(f.mint) : short(f.mint), happened: `${plural(coins, "coin")} launched under ${famLabel(f)}`, tone: "light", chips: [noPost] };
   return null;
 }
 

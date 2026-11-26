@@ -9,7 +9,7 @@
 //   to the post on x.com, rebuilt from the id), a post story's words after it, or a family's "waking up · 12 min"
 //   (lib/discover.ts storyHeader). The three coins with the most buyers show; the rest wait behind "+N more coins", which opens in place. A
 //   narrative story lists its new coins (created in the last hour, a small "new" pill) first, then the older ones.
-// - The subject line (lib/discover.ts subjectLine, SubjectLineBlock below) leads every story header and every single
+// - The subject line (lib/discover.ts subjectLine, components/DiscoverLine.tsx SubjectLineBlock) leads every story header and every single
 //   coin that has a story: "Subject: what happened", the subject in the accent, the sentence in ink. With a server
 //   that writes post lines (POST_LINES=on) it is a language model's summary of the starting post, marked "AI"; the
 //   poster's own words are its hover title and open under it on a click or tap, with a link to the post. Without one
@@ -53,16 +53,17 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useConnection } from "@solana/wallet-adapter-react";
 import { api, errorMessage, pumpUrl, type Coin, type CoinSafety, type CoinSpark, type Stories, type Tf } from "../lib/api";
 import {
-  AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, MINT_PREFIX_TITLE, MODEL_NOTE, MOVED_PILL, MOVED_TITLE, NEW_ROW_PILL, NEW_ROW_TITLE, REGROUPED_PILL, REGROUPED_TITLE,
+  AGO_TICK_MS, ALERT_LABEL, ALERT_TITLE, ALL_THEMES, COPIES_TITLE, DISCOVER_POLL_MS, DUST_NOTE, FOOT_NOTE, GRAD_TITLE, LEFT_PILL, LIQ_TITLE, MINT_PREFIX_TITLE, MODEL_NOTE, REGROUPED_PILL, REGROUPED_TITLE,
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
-  activeTheme, angleLine, buyLabel, shareOf, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinTag, copiesMark, copiesOf, copyFacts, dustChip, dustLine, emptyFiltered, emptyTrending, filterStories,
-  listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativeTitle, narrativesOn, normSym, oneList, pageEntries, parentTag, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
-  closeShrunk, showMore, sparkGeo, storiesView, storyHeader, storyMints, storySplit, subjectLine, themeLabel, themePills, LINE_NOTE, NO_POST_TEXT, tfWords, tradesByMint, txns, urlPrefs, writePref,
-  type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown, type SubjectLine,
+  activeTheme, angleLine, buyLabel, shareOf, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinTag, copiesOf, copyFacts, dustLine, emptyFiltered, emptyTrending, filterStories,
+  listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativesOn, normSym, oneList, pageEntries, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
+  closeShrunk, showMore, sparkGeo, storiesView, storyHeader, storyMints, storySplit, subjectLine, themeLabel, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
+  type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
 import { glance } from "../lib/story-attention";
 import StoryChart from "../components/StoryChart";
+import { RowTags, SubjectLineBlock, plainRowSub } from "../components/DiscoverLine";
 import { NARRATIVE_FOOT } from "../lib/narrative";
 import { useEvents } from "../lib/events";
 import { useStats, useTick } from "../lib/hooks";
@@ -79,7 +80,6 @@ import "../components/primitives.css";
 import "../components/dsc.css";
 
 const coinLink = (mint: string) => `/c/${encodeURIComponent(mint)}`;
-const mapLink = (mint: string) => `/map?focus=${encodeURIComponent(mint)}`;
 const nowS = () => Math.floor(Date.now() / 1000);
 const store = () => (typeof window === "undefined" ? null : window.localStorage);
 /// Trades of the coins on screen are applied in batches: one render per LIVE_FLUSH_MS however busy the stream is, and
@@ -196,44 +196,6 @@ function Cols({ tf }: { tf: Tf }) {
   );
 }
 
-const XIcon = <svg className="dsc-x" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.8 3h3.1l-6.8 7.8 8 10.2h-6.3l-4.9-6.4L5.3 21H2.2l7.3-8.3L1.8 3h6.4l4.4 5.9L17.8 3Zm-1.1 16.2h1.7L7.4 4.7H5.6l11.1 14.5Z" /></svg>;
-
-/// A row's own chips: "No longer listed" for a row kept only while the page is in use (the dimming alone says nothing
-/// to a screen reader; "Moved to another story" when the coin is still listed elsewhere), "this hour" on a narrative
-/// story's coin created 30-60 minutes ago (newRowPill; a younger one's "new" tag already says it), "×3 copies" on a row others are folded under, why a dust row is dust, and
-/// its parent (on the map) where the list mixes parents.
-/// `story`: the row also names its narrative (a single coin while narratives are shown): the title as a small muted
-/// tag, a text node cut to one line. `sub`: a single coin's post or family, one muted line under its name.
-/// `theme`: the row also names its story's theme (a single coin under its subject line, which already says the story):
-/// one small muted tag, a model's word.
-function RowTags({ r, parent, story, fresh, sub, theme }: { r: StoryShown; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null; theme?: string }) {
-  const tag = parent ? parentTag(r) : null, copies = copiesMark(r), dust = dustChip(r.reason), nar = story ? narrativeOf(r) : null;
-  const line = sub && sub.text ? (
-    <span className="dsc-csub">
-      {sub.href
-        ? <a href={sub.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{XIcon}<span>{sub.text}</span></a>
-        : <span>{sub.text}</span>}
-    </span>
-  ) : null;
-  if (!tag && !copies && !dust && !r.left && !nar && !fresh && !theme) return line;
-  return (
-    <>
-      {line}
-      <span className="dsc-ptags">
-        {fresh && <span className="dsc-pill sm dsc-newp" title={NEW_ROW_TITLE}>{NEW_ROW_PILL}</span>}
-        {theme && <span className="dsc-st-ntag" title={TAG_NOTE}><span className="dsc-vh">Theme: </span>{theme}</span>}
-        {nar && <span className="dsc-st-ntag" title={TAG_NOTE}><span className="dsc-vh">Story: </span>{narrativeTitle(nar.title)}</span>}
-        {r.left && (r.moved
-          ? <span className="dsc-pill sm st-left" title={MOVED_TITLE}>{MOVED_PILL}</span>
-          : <span className="dsc-pill sm st-left" title="The server stopped listing this coin; the row goes once the page is idle">{LEFT_PILL}</span>)}
-        {dust && <span className="dsc-chip" title={dust.title}>{dust.text}</span>}
-        {copies && <span className="dsc-chip" title={COPIES_TITLE}>{copies}</span>}
-        {tag && r.parent && <Link className="dsc-ptag" to={mapLink(r.parent.mint)} title={`${tag.replace(/^under /, "")} and the coins under it on the map`}>{tag}</Link>}
-      </span>
-    </>
-  );
-}
-
 type RowOpts = { t: TradeCtl; tf: Tf; now: number; dups: ReadonlySet<string>; site: number | null };
 /// One coin row and, under it, the coins folded into it (same ticker and image), one line each.
 function RowAndCopies({ r, o, parent, story, fresh, sub, theme }: { r: StoryShown; o: RowOpts; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null; theme?: string }) {
@@ -259,47 +221,6 @@ function Rows({ rows, o, parent }: { rows: readonly StoryShown[]; o: RowOpts; pa
 /// The header sparkline's drawing box (CSS stretches it).
 const SPARK_W = 128, SPARK_H = 32;
 
-/// The "Subject: what happened" line (lib/discover.ts subjectLine), the same on a single coin's card and in a story's
-/// header: the subject in the accent with a colon, then the sentence in ink (two lines at most, never cut to one with
-/// an ellipsis); on the right, small and muted, the "AI" badge, who posted and how long ago (an outlined chip for a post
-/// older than a week); on a phone that sits on its own short line under the sentence. With a post the line is the
-/// summary of a native <details>: hovering shows the poster's own words, a click, a tap or Enter opens them in full
-/// with the note that a model wrote the summary and a link to the post on X (rebuilt from the id). Without a post
-/// there is nothing to open and it is plain text. Every text is a stranger's or a model's: React text nodes only.
-/// `pill`: a state pill drawn before the subject (a story that left the read).
-function SubjectLineBlock({ L, pill }: { L: SubjectLine; pill?: ReactNode }) {
-  const cls = `dsc-ln${L.tone === "personal" ? " dsc-ln-personal" : L.tone === "light" ? " dsc-ln-light" : ""}${L.quote ? " dsc-ln-quote" : ""}`;
-  const inner = (
-    <>
-      <span className="dsc-ln-t">
-        {pill}
-        <b className="dsc-ln-s">{L.subject}:</b>{" "}
-        <span className="dsc-ln-h">{L.quote ? `“${L.happened}”` : L.happened}</span>
-      </span>
-      {(L.badge || L.who || L.when || L.old) && (
-        <span className="dsc-ln-m">
-          {L.badge && <span className="dsc-ln-ai" title={L.badge.title}>{L.badge.text}<span className="dsc-vh">: {L.badge.title}</span></span>}
-          {L.who && <span className="dsc-ln-who">{L.who}</span>}
-          {L.old ? <span className="dsc-ln-old" title="How old the linked post is">{L.old}</span> : L.when && <span className="dsc-ln-when">{L.when}</span>}
-        </span>
-      )}
-    </>
-  );
-  if (!L.href && !L.words) return <div className={cls}><div className="dsc-ln-sum">{inner}</div></div>;
-  return (
-    <details className={cls}>
-      <summary className="dsc-ln-sum" title={L.words ? `${L.who ? `${L.who}: ` : ""}${L.words}` : undefined}>{inner}</summary>
-      <div className="dsc-ln-body">
-        {L.words ? <p className="dsc-ln-words">{L.words}</p> : <p className="dsc-ln-words dsc-ln-nowords">{NO_POST_TEXT}</p>}
-        <p className="dsc-ln-foot">
-          {L.auto && <span>{LINE_NOTE}</span>}
-          {L.href && <a className="dsc-link" href={L.href} target="_blank" rel="noopener noreferrer" title={`Open the post on X. ${NARRATIVE_FOOT}`}>{XIcon}Open post</a>}
-        </p>
-      </div>
-    </details>
-  );
-}
-
 /// One entry of the list. A single coin with a story (a one-coin post or family card, or a loose coin with a story's
 /// tag while narratives are shown): a slim card, the subject line on top and the coin's usual row under it, its copies
 /// folded under that as ever; a loose coin with no story is a plain row. A story: a block with a header (not a
@@ -314,7 +235,11 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
     // a one-coin card the read no longer has: its row says so, as a row would
     const row = e.left && !r.left ? { ...r, left: true, moved: e.moved } : r;
     const SL = subjectLine(e.card, o.now, nar, { row: r, coinsN: e.card ? e.coinsN : 1 });
-    if (!SL) return <RowAndCopies r={row} o={o} parent={parent} />;
+    // nothing to say about a single coin: its plain row, which keeps its "under $PARENT" mark (a family's coin too: no
+    // header names the family now) and, when the coin links a post, a small link to it
+    if (!SL) {
+      return <RowAndCopies r={row} o={o} parent sub={plainRowSub(e.card)} />;
+    }
     // the theme as one small tag in the row: the line above already names the story
     const theme = nar ? themeLabel((narrativeOf(e.card) ?? narrativeOf(r))?.theme) : "";
     return (

@@ -1,9 +1,13 @@
 // The post-text fetcher (lib/xposts.mjs): the one URL it asks, the line and its pace, the daily cap kept in kv, the low
 // class, what each answer stores (or does not), pauses and the breaker, rechecks, restarts, the asked_at touch, the
-// prune, flagged texts and the caps on what is kept in memory. A fake fetch answers real Responses (so the capped body read streams); a fake clock; sqlite in
-// memory. No network.
+// prune, flagged texts and the caps on what is kept in memory; and link reading (tests 21-28): the one t.co request with
+// redirects not followed and only the Location read, what a Location may lead to, the quoted post through the same embed
+// call and day, the chain from stored rows only, retries, the link reads' own pause, restarts and the prune.
+// A fake fetch answers real Responses (so the capped body read streams); a fake clock; sqlite in memory. No network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { linkCodeOf, hasPicture, classifyTarget, TCO_URL, LINK_KINDS, LINK_RETRY_S, LINK_BREAK_AFTER } from "../lib/xposts.mjs";
+import { postTime, parseOembed, TEXT_MAX } from "../lib/narrative.mjs";
 import { XPosts, XPOST_URL, XPOST_MAX_BYTES, MAX_WAITING, RETRY_MS, XPOST_PAUSE_MS, XPOST_PAUSE_MAX_MS, BREAK_AFTER, WAIT_AHEAD, XPOST_LRU, FAILED_MAX, XPOST_TOUCH_S, XPOST_KEEP_S, XPOST_FLUSH_MAX, RECHECK_GONE_S, RECHECK_DENIED_S, RECHECK_NEW_S, RECHECK_OLD_S } from "../lib/xposts.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
@@ -580,4 +584,284 @@ test("15. without a database the answers live in memory only; stop() ends a wait
   mem.x.want(id); await mem.x.idle();
   assert.deepEqual([mem.x.peek(id).state, mem.x.snapshot().cached], ["ok", 1]);
   mem.x.stop();
+});
+
+// ---------------------------------------------------------------- link reading
+/** A post's embed paragraph with a t.co link as X writes it (the link's own address is its visible text). */
+const tco = (code) => `<a href="https://t.co/${code}">https://t.co/${code}</a>`;
+/** A redirect answer whose body must never be read: reading it throws, letting go of it is counted. */
+function redirect(location, status = 301, headers = {}) {
+  const r = { status, headers: new Headers(location == null ? headers : { ...headers, location }), cancelled: 0, body: { cancel: async () => { r.cancelled++; } } };
+  for (const k of ["text", "json", "arrayBuffer", "blob", "bytes", "formData"]) r[k] = async () => { throw new Error("the body of a link answer was read"); };
+  return r;
+}
+/** A fake fetch for both hosts: `posts` id → { handle, text } (anything else is a 404), `links` t.co code → a Location, an answer object or a function of the call number. */
+function linkWorld({ posts = {}, links = {}, opts = {}, clock = fakeClock(NOW_S * 1000) } = {}) {
+  const calls = [], answers = [];
+  const fetch = async (url, init) => {
+    const u = new URL(url);
+    calls.push({ url: String(url), host: u.hostname, id: u.hostname === "t.co" ? null : idOf(url), code: u.hostname === "t.co" ? u.pathname.slice(1) : null, init, at: clock.now() });
+    if (u.hostname === "t.co") {
+      let a = links[u.pathname.slice(1)];
+      if (typeof a === "function") a = a(calls.length);
+      const r = typeof a === "string" ? redirect(a) : a ?? redirect(null, 404);
+      answers.push(r);
+      return r;
+    }
+    const id = idOf(url), p = posts[id];
+    return p ? json(embed(id, p)) : json({}, 404);
+  };
+  const x = new XPosts({ perMin: 600, fetch, now: clock.now, sleep: clock.sleep, log: quiet, timeoutMs: 20, ...opts });
+  return { x, clock, calls, answers, kinds: () => calls.map((c) => (c.code ? `link:${c.code}` : `post:${c.id}`)) };
+}
+
+test("21. links, pure: the last t.co code of a text; only an https x.com / twitter.com /status/<digits> address is a post, everything else is a kind", () => {
+  assert.equal(linkCodeOf("Sending 10%https://t.co/Ig0v1Mdtkc"), "Ig0v1Mdtkc");
+  assert.equal(linkCodeOf("a https://t.co/first b https://t.co/second pic.twitter.com/x"), "second", "the last one: X appends the quoted post's link");
+  // a link our own text cap cut in half is no link: half a code is somebody else's short link
+  assert.equal(linkCodeOf("https://t.co/Ab12… pic.twitter.com/9R"), null);
+  assert.equal(linkCodeOf("a long reply https://t.co/AbCdEf…"), null);
+  assert.equal(linkCodeOf("the text… https://t.co/Ab12"), "Ab12", "X's own shortening writes the mark before the link");
+  assert.equal(linkCodeOf("see https://t.co/whole1 and then https://t.co/Ab…"), "whole1", "an earlier whole link of the same post still counts");
+  // the very text the embed reader stores for a post over TEXT_MAX code points whose last link falls on the cut
+  for (const pad of [580, 584, 589]) {
+    const cut = parseOembed({ url: "https://twitter.com/p/status/1895000000000000001", author_url: "https://twitter.com/p", html: `<blockquote><p>${"@someone ".repeat(100).slice(0, pad)}https://t.co/AbCdEfGhIj and more words after it</p></blockquote>` }, "1895000000000000001");
+    assert.deepEqual([[...cut.text].length, cut.text.endsWith("…"), linkCodeOf(cut.text)], [TEXT_MAX + 1, true, null], `cut at ${pad}`);
+  }
+  for (const none of ["no link here", "http://t.co/Ab12", "https://t.co.evil.example/Ab12", "https://t.co/", "https://evil.example/t.co/Ab12", "pic.twitter.com/Ab12", "", null, 5]) assert.equal(linkCodeOf(none), null, String(none));
+  assert.equal(linkCodeOf("https://t.co/Ab12?x=1&url=https://evil.example"), "Ab12", "letters and digits only: nothing else of the text enters a URL");
+  assert.deepEqual([hasPicture("look pic.twitter.com/NOfAoq90Wx"), hasPicture("epic.twitter.com/x"), hasPicture("no"), hasPicture(null)], [true, false, false, false]);
+  assert.deepEqual(LINK_KINDS, ["post", "article", "website", "picture"]);
+  const own = "2125166956370186626", q = "2125000000000000001";
+  for (const url of [`https://x.com/someone/status/${q}`, `https://twitter.com/someone/status/${q}`, `https://www.twitter.com/someone/statuses/${q}`, `https://mobile.x.com/i/status/${q}`, `https://x.com/i/web/status/${q}?s=20`, `https://twitter.com/someone/status/${q}/`]) assert.deepEqual(classifyTarget(url, own), { kind: "post", id: q }, url);
+  // not a post: http, another host, a look-alike host, userinfo, a port, an id that is no id, the post's own pictures
+  assert.deepEqual(classifyTarget(`http://x.com/someone/status/${q}`, own), { kind: "website", host: "x.com" }, "only https is a post");
+  assert.deepEqual(classifyTarget(`https://x.com.evil.example/someone/status/${q}`, own), { kind: "website", host: "x.com.evil.example" });
+  assert.deepEqual(classifyTarget(`https://evil.example/x.com/someone/status/${q}`, own), { kind: "website", host: "evil.example" });
+  assert.deepEqual(classifyTarget(`https://user:pw@x.com/someone/status/${q}`, own), { kind: "website", host: "x.com" });
+  assert.deepEqual(classifyTarget(`https://x.com:8443/someone/status/${q}`, own), { kind: "website", host: "x.com" });
+  assert.deepEqual(classifyTarget("https://x.com/someone/status/12abc", own), { kind: "website", host: "x.com" });
+  assert.deepEqual(classifyTarget("https://x.com/someone", own), { kind: "website", host: "x.com" });
+  assert.deepEqual(classifyTarget(`https://twitter.com/someone/status/${own}/photo/1`, own), { kind: "picture", host: "twitter.com" });
+  assert.deepEqual(classifyTarget(`https://x.com/other/status/${q}/video/1`, own), { kind: "picture", host: "x.com" });
+  assert.deepEqual(classifyTarget(`https://x.com/someone/status/${own}`, own), { kind: "picture", host: "x.com" }, "the post's own address is no quoted post");
+  assert.deepEqual(classifyTarget("https://pic.twitter.com/NOfAoq90Wx", own), { kind: "picture", host: "pic.twitter.com" });
+  assert.deepEqual(classifyTarget("https://x.com/i/article/2125674407465246720", own), { kind: "article", host: "x.com" });
+  assert.deepEqual(classifyTarget("https://x.com/someone/article/2125674407465246720", own), { kind: "article", host: "x.com" });
+  assert.deepEqual(classifyTarget("https://liquidponzi.fun/", own), { kind: "website", host: "liquidponzi.fun" });
+  assert.deepEqual(classifyTarget("https://WWW.Reddit.com./r/dogelore/comments/x", own), { kind: "website", host: "www.reddit.com" });
+  assert.equal(classifyTarget(`https://${"a".repeat(60)}.${"b".repeat(60)}.example/`, own).host.length, 80);
+  for (const bad of ["/someone/status/1", "javascript:alert(1)", "file:///etc/passwd", "ftp://x.com/a", "data:text/html,x", "", null, undefined, 7, `https://x.com/${"a".repeat(3000)}`]) assert.equal(classifyTarget(bad, own), null, String(bad).slice(0, 30));
+});
+
+test("22. a link read: ONE request to https://t.co/<code>, redirects not followed, only the Location read; the quoted post then comes through the embed call, on the same line and day", async () => {
+  const P = idAt(3600, 1), Q = idAt(86_400, 2);
+  const w = linkWorld({ posts: { [P]: { handle: "poster", text: `Sending 10%${tco("Ig0v1Mdtkc")}` }, [Q]: { handle: "quoted", text: "A perp whale outdid Rasmr" } }, links: { Ig0v1Mdtkc: `https://twitter.com/quoted/status/${Q}` } });
+  const { x } = w;
+  assert.deepEqual([x.linkOf(P).state, x.canQueueLink(P), x.wantLink(P)], ["none", "nolink", "nolink"], "nothing is known of a post that is not stored: no link request");
+  x.want(P); await x.idle();
+  assert.equal(x.peek(P).text, "Sending 10%https://t.co/Ig0v1Mdtkc");
+  assert.deepEqual(x.linkOf(P), { state: "wait", kind: null, toId: null, host: null });
+  assert.deepEqual(x.quoteOf(P, { queue: false }), { state: "wait", kind: null, host: null, quoted: null, chain: null, retry: false });
+  assert.equal(w.calls.length, 1, "reading what is stored sends nothing");
+  assert.deepEqual(x.quoteOf(P), { state: "wait", kind: null, host: null, quoted: null, chain: null, retry: false });
+  assert.equal(x.canQueueLink(P), "queued");
+  await x.idle();
+  assert.deepEqual(w.kinds(), [`post:${P}`, "link:Ig0v1Mdtkc", `post:${Q}`]);
+  const link = w.calls[1];
+  assert.equal(link.url, "https://t.co/Ig0v1Mdtkc");
+  assert.equal(TCO_URL, "https://t.co/");
+  assert.equal(link.init.redirect, "manual", "the redirect is not followed");
+  assert.deepEqual(link.init.headers, { "user-agent": "spore-posts/1" });
+  assert.ok(link.init.signal instanceof AbortSignal);
+  assert.equal(w.answers[0].cancelled, 1, "the body is let go unread");
+  // the quoted post went out as any post does: the embed URL with only its digits
+  assert.equal(new URL(w.calls[2].url).searchParams.get("url"), `https://x.com/i/status/${Q}`);
+  assert.equal(w.calls[2].init.redirect, "error");
+  for (let i = 1; i < w.calls.length; i++) assert.ok(w.calls[i].at - w.calls[i - 1].at >= x.gapMs, "one line, gapMs apart");
+  assert.deepEqual(x.linkOf(P), { state: "ok", kind: "post", toId: Q, host: null });
+  assert.deepEqual(x.quoteOf(P), { state: "ok", kind: "post", host: null, quoted: { id: Q, handle: "quoted", text: "A perp whale outdid Rasmr", at: postTime(Q, w.clock.now()) }, chain: null, retry: false });
+  await x.idle();
+  assert.equal(w.calls.length, 3, "read once: asking again sends nothing");
+  const s = x.snapshot();
+  assert.deepEqual([s.callsToday, s.calls, s.links.calls, s.links.posts, s.links.waiting], [3, 3, 1, 1, 0], "the link request counts toward the same day");
+  assert.deepEqual([x.canQueueLink(P), x.wantLink(P)], ["cached", "cached"]);
+  x.stop();
+});
+
+test("23. everything that is not a post is a kind and is never fetched: an article on X, a website, a picture; a text with media and no link asks nothing at all", async () => {
+  const [A, W, PH, PIC, PLAIN] = [1, 2, 3, 4, 5].map((n) => idAt(3600, n));
+  const w = linkWorld({
+    posts: { [A]: { handle: "a", text: tco("oAQHWDkJWU") }, [W]: { handle: "w", text: `Introducing Liquid Ponzi${tco("e7TuXeL9Yy")}` }, [PH]: { handle: "p", text: `look ${tco("Ph0t0")}` }, [PIC]: { handle: "c", text: "cented sent to wrong person? pic.twitter.com/NOfAoq90Wx" }, [PLAIN]: { handle: "n", text: "no link at all" } },
+    links: { oAQHWDkJWU: "https://x.com/i/article/2125674407465246720", e7TuXeL9Yy: "https://liquidponzi.fun/", Ph0t0: `https://twitter.com/p/status/${PH}/photo/1` },
+  });
+  const { x } = w;
+  for (const id of [A, W, PH, PIC, PLAIN]) x.want(id);
+  await x.idle();
+  for (const id of [A, W, PH, PIC, PLAIN]) x.quoteOf(id);
+  await x.idle();
+  assert.deepEqual(w.kinds().slice(5), ["link:oAQHWDkJWU", "link:e7TuXeL9Yy", "link:Ph0t0"], "three redirects read; the two posts without a t.co link asked nothing");
+  assert.deepEqual(x.quoteOf(A), { state: "ok", kind: "article", host: "x.com", quoted: null, chain: null, retry: false });
+  assert.deepEqual(x.quoteOf(W), { state: "ok", kind: "website", host: "liquidponzi.fun", quoted: null, chain: null, retry: false });
+  assert.deepEqual(x.quoteOf(PH), { state: "ok", kind: "picture", host: "twitter.com", quoted: null, chain: null, retry: false });
+  assert.deepEqual(x.quoteOf(PIC), { state: "ok", kind: "picture", host: null, quoted: null, chain: null, retry: false });
+  assert.deepEqual(x.quoteOf(PLAIN), { state: "none", kind: null, host: null, quoted: null, chain: null, retry: false });
+  await x.idle();
+  assert.equal(w.calls.length, 8, "nothing else was ever requested: no article, no website, no picture");
+  assert.ok(w.calls.every((c) => c.host === "t.co" || c.host === "publish.x.com"), "two hosts only");
+  const s = x.snapshot().links;
+  assert.deepEqual([s.articles, s.websites, s.pictures, s.posts], [1, 1, 1, 0]);
+  x.stop();
+});
+
+test("24. the chain: the post a quoted post itself quotes is given only when its link row and its text are stored already; nothing is fetched for it", async () => {
+  const P = idAt(600, 1), Q = idAt(3600, 2), R = idAt(86_400 * 300, 3);
+  const w = linkWorld({
+    posts: { [P]: { handle: "p", text: `no moon in theos img${tco("vGyWI8E7Q8")}` }, [Q]: { handle: "q", text: `Speed says he wanted to team up with ELON${tco("OTXjvQD0SH")}` }, [R]: { handle: "gwrldmedia", text: "IShowSpeed wants to team up with Elon Musk. pic.twitter.com/LOzOKEyntq" } },
+    links: { vGyWI8E7Q8: `https://x.com/q/status/${Q}`, OTXjvQD0SH: `https://x.com/gwrldmedia/status/${R}` },
+  });
+  const { x } = w;
+  x.want(P); await x.idle();
+  x.quoteOf(P); await x.idle();
+  const one = x.quoteOf(P);
+  await x.idle();
+  assert.deepEqual([one.state, one.quoted.id, one.chain], ["ok", Q, null]);
+  assert.deepEqual(w.kinds(), [`post:${P}`, "link:vGyWI8E7Q8", `post:${Q}`], "the quoted post's own link is NOT read for the chain");
+  // the quoted post is a starting post of another card: its link is read for that card
+  x.quoteOf(Q); await x.idle();
+  assert.deepEqual(w.kinds().slice(3), ["link:OTXjvQD0SH", `post:${R}`]);
+  const two = x.quoteOf(P);
+  assert.deepEqual(two.chain, { id: R, handle: "gwrldmedia", text: "IShowSpeed wants to team up with Elon Musk. pic.twitter.com/LOzOKEyntq", at: postTime(R, w.clock.now()) });
+  assert.deepEqual(x.quoteOf(Q).chain, null, "one hop further is never followed");
+  await x.idle();
+  assert.equal(w.calls.length, 5);
+  x.stop();
+});
+
+test("25. a link that cannot be read is tried again after 10 min, 1 h and 6 h, then left; a quoted post that is gone or flagged gives no text", async () => {
+  assert.deepEqual(LINK_RETRY_S, [600, 3_600, 21_600]);
+  const P = idAt(3600, 1), G = idAt(3600, 2), GONE = idAt(7200, 3), F = idAt(3600, 4), BAD = idAt(7200, 5);
+  const w = linkWorld({
+    posts: { [P]: { handle: "p", text: `SENDING 5%${tco("9IXTi6yoBB")}` }, [G]: { handle: "g", text: `look${tco("Gone1")}` }, [F]: { handle: "f", text: `look${tco("Flag1")}` }, [BAD]: { handle: "b", text: "a blockedword here" } },
+    links: { Gone1: `https://x.com/a/status/${GONE}`, Flag1: `https://x.com/b/status/${BAD}` },
+    opts: { flag: (t) => t.includes("blockedword") },
+  });
+  const { x, clock } = w;
+  x.want(P); await x.idle();
+  const tries = () => w.calls.filter((c) => c.code === "9IXTi6yoBB").length;
+  x.quoteOf(P); await x.idle();
+  assert.deepEqual([tries(), x.quoteOf(P).state, x.canQueueLink(P)], [1, "unread", "retry"], "a 404 without a Location");
+  assert.deepEqual([x.linkOf(P), x.quoteOf(P).retry], [{ state: "unread", kind: null, toId: null, host: null, retry: true }, true], "another try is scheduled: a caller may wait for it");
+  for (const [i, wait] of LINK_RETRY_S.entries()) {
+    clock.t += (wait - 5) * 1000;
+    x.quoteOf(P); await x.idle();
+    assert.equal(tries(), i + 1, `not before ${wait} s`);
+    clock.t += 10_000;
+    x.quoteOf(P); await x.idle();
+    assert.equal(tries(), i + 2, `again after ${wait} s`);
+  }
+  clock.t += 86_400_000;
+  assert.deepEqual([x.canQueueLink(P), x.quoteOf(P).state, tries()], ["cached", "unread", 4], "after the fourth read it is left");
+  assert.deepEqual([x.linkOf(P).retry, x.quoteOf(P).retry], [false, false], "no try is left: nothing to wait for");
+  await x.idle();
+  assert.equal(tries(), 4);
+  assert.equal(x.snapshot().links.unread, 4);
+  // other answers that are no usable redirect: a 200, a redirect without Location, one to no http(s) address, a network error
+  for (const [n, answer] of [[11, redirect(null, 200)], [12, redirect(null, 302)], [13, redirect("javascript:alert(1)")], [14, () => { throw new Error("boom"); }]]) {
+    const id = idAt(3600, n), ww = linkWorld({ posts: { [id]: { handle: "p", text: tco("Zz9") } }, links: { Zz9: answer } });
+    ww.x.want(id); await ww.x.idle(); ww.x.quoteOf(id); await ww.x.idle();
+    assert.deepEqual([ww.x.quoteOf(id).state, ww.calls.length], ["unread", 2], String(n));
+    ww.x.stop();
+  }
+  // the quoted post is gone (a 404 from the embed call), or its text is flagged: the link is read, there is no text
+  x.want(G); x.want(F); await x.idle();
+  x.quoteOf(G); x.quoteOf(F); await x.idle();
+  assert.deepEqual([x.linkOf(G).kind, x.quoteOf(G).state, x.quoteOf(G).quoted, x.quoteOf(G).retry, x.quoteOf(F).retry], ["post", "unread", null, false, false], "a quoted post that is gone or flagged is not waited for");
+  assert.deepEqual([x.linkOf(F).kind, x.peek(BAD).flagged, x.quoteOf(F).state, x.quoteOf(F).quoted], ["post", true, "unread", null], "a flagged text is never given");
+  x.stop();
+});
+
+test("26. a failing t.co pauses the link reads only: a 429 or 5 failed reads in a row; the posts' own reads go on", async () => {
+  assert.equal(LINK_BREAK_AFTER, 5);
+  const ids = Array.from({ length: 8 }, (_, i) => idAt(3600, i + 1)), other = idAt(3600, 50);
+  const posts = Object.fromEntries(ids.map((id, i) => [id, { handle: "p", text: tco(`L${i}`) }]));
+  posts[other] = { handle: "o", text: "just a post" };
+  // a 429 with Retry-After 120
+  const w = linkWorld({ posts, links: { L0: redirect(null, 429, { "retry-after": "120" }) } });
+  const { x, clock } = w;
+  x.want(ids[0]); x.want(ids[1]); await x.idle();
+  x.quoteOf(ids[0]); x.quoteOf(ids[1]); await x.idle();
+  assert.deepEqual(w.kinds().slice(2), ["link:L0"], "the line of links is emptied");
+  assert.deepEqual([x.snapshot().links.rateLimited, x.snapshot().links.pausedMs > 0, x.snapshot().pausedMs, x.canQueueLink(ids[1]), x.linkOf(ids[0]).state], [1, true, 0, "busy", "wait"], "not a try of that link, and no pause of the posts");
+  assert.equal(x.want(other), "ok");
+  await x.idle();
+  assert.equal(x.peek(other).state, "ok", "a post is read while the links wait");
+  clock.t += 121_000;
+  assert.equal(x.canQueueLink(ids[1]), "ok");
+  x.stop();
+  // five reads in a row without a redirect
+  const b = linkWorld({ posts });
+  for (const id of ids) b.x.want(id);
+  await b.x.idle();
+  for (const id of ids) b.x.quoteOf(id);
+  await b.x.idle();
+  assert.deepEqual([b.calls.filter((c) => c.code).length, b.x.snapshot().links.tripped, b.x.snapshot().links.pausedMs, b.x.snapshot().pausedMs, b.x.snapshot().tripped], [5, 1, XPOST_PAUSE_MS, 0, 0], "5 link reads, then the link reads pause; the posts' breaker is untouched");
+  assert.equal(b.x.want(other), "ok");
+  await b.x.idle();
+  assert.equal(b.x.peek(other).state, "ok");
+  b.x.stop();
+});
+
+test("27. the day and the line: link reads stop at half the day's requests, wait behind the posts, and a spent day sends none", async () => {
+  const ids = Array.from({ length: 6 }, (_, i) => idAt(3600, i + 1));
+  const posts = Object.fromEntries(ids.map((id, i) => [id, { handle: "p", text: tco(`L${i}`) }]));
+  const links = Object.fromEntries(ids.map((_, i) => [`L${i}`, "https://example.org/"]));
+  const w = linkWorld({ posts, links, opts: { daily: 10 } });
+  const { x } = w;
+  for (const id of ids.slice(0, 4)) x.want(id);
+  await x.idle();
+  assert.equal(x.snapshot().callsToday, 4);
+  assert.deepEqual([x.wantLink(ids[0]), x.wantLink(ids[1])], ["ok", "ok"]);
+  // a post asked for while links wait goes first
+  assert.equal(x.want(ids[4]), "ok");
+  await x.idle();
+  assert.deepEqual(w.kinds().slice(4), [`post:${ids[4]}`, "link:L0", "link:L1"], "the post before the links");
+  assert.deepEqual([x.snapshot().callsToday, x.canQueueLink(ids[2]), x.wantLink(ids[2]), x.quoteOf(ids[2]).state], [7, "budget", "budget", "wait"], "from half the day on no link is read");
+  assert.equal(x.want(ids[5]), "ok", "the other half of the day is the posts'");
+  await x.idle();
+  assert.equal(w.kinds().at(-1), `post:${ids[5]}`);
+  x.stop();
+});
+
+test("28. a restart keeps what the links led to; the prune drops a link row with its post; a row this build cannot read is as never read", async () => {
+  const db = new Db(":memory:");
+  const P = idAt(3600, 1), Q = idAt(7200, 2), S = idAt(3600, 3);
+  const world = () => linkWorld({ posts: { [P]: { handle: "p", text: `Sending 10%${tco("Ab12")}` }, [Q]: { handle: "q", text: "the quoted words" }, [S]: { handle: "s", text: tco("Cd34") } }, links: { Ab12: `https://x.com/q/status/${Q}`, Cd34: "https://example.org/a" }, opts: { db } });
+  const a = world();
+  a.x.want(P); a.x.want(S); await a.x.idle();
+  a.x.quoteOf(P); a.x.quoteOf(S); await a.x.idle();
+  assert.equal(a.calls.length, 5);
+  assert.deepEqual(db.linkGet(P), { postId: P, kind: "post", toId: Q, host: null, tries: 1, nextTryAt: 0, at: db.linkGet(P).at });
+  assert.deepEqual([db.linkGet(S).kind, db.linkGet(S).host, db.linkCount()], ["website", "example.org", 2]);
+  a.x.stop();
+  const b = world();
+  assert.deepEqual(b.x.quoteOf(P).quoted, { id: Q, handle: "q", text: "the quoted words", at: postTime(Q, b.clock.now()) });
+  assert.deepEqual(b.x.quoteOf(S), { state: "ok", kind: "website", host: "example.org", quoted: null, chain: null, retry: false });
+  await b.x.idle();
+  assert.equal(b.calls.length, 0, "nothing is asked again");
+  // a row with a kind this build does not know, or a post row without a post id: read as never read
+  const keep = [db.linkGet(P), db.linkGet(S)];
+  db.linkSet({ postId: S, kind: "video", host: "example.org", tries: 1, at: 1 });
+  db.linkSet({ postId: P, kind: "post", toId: "not-an-id", tries: 1, at: 1 });
+  const c = world();
+  assert.deepEqual([c.x.linkOf(S).state, c.x.linkOf(P).state], ["wait", "wait"]);
+  c.x.stop();
+  for (const r of keep) db.linkSet(r);
+  // the prune: the starting post S is not asked for 30 days and goes; its link row goes with it
+  b.clock.t += (XPOST_KEEP_S - 10) * 1000;
+  b.x.peek(P); b.x.peek(Q);
+  b.clock.t += 20_000;
+  assert.equal(b.x.prune(), 1);
+  assert.deepEqual([db.xpostGet(S), db.linkGet(S), !!db.linkGet(P)], [null, null, true]);
+  b.x.stop(); db.close();
 });

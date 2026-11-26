@@ -9,10 +9,21 @@
 // When X pauses us (a 429) or the endpoint stops answering usefully (BREAK_AFTER failed answers in a row, the breaker),
 // the line is emptied and nothing is queued until the pause ends: the people who asked are gone by then, and a later
 // ask starts over. A 401 or 403 is X's answer about that one post (protected, withheld) and no sign of that.
+//
+// Link reading (for the post lines, lib/post-lines.mjs): a starting post often says little itself and links the post
+// it is about ("Sending 10% https://t.co/…"). For such a post the last t.co link of its stored text is resolved by ONE
+// request to https://t.co/<code> (the code is letters and digits only) with redirects not followed: only the status and
+// the Location header are read, never a body. A Location that is an https x.com / twitter.com /status/<digits> link is
+// the quoted post, and that post is then read through the same embed call as any other (only its digits enter the
+// URL). Everything else is stored as a kind ("article", "website", "picture") with its host and is never fetched. A
+// link request waits in the same line (behind the pages' own posts), `gapMs` apart, counts toward the same day's
+// budget and stops at half of it; what it found is kept in sqlite (`post_links`). A link that could not be read is
+// tried again after 10 min, 1 h and 6 h, then left. A failing t.co pauses the link reads only, never the post reads.
+// Whatever a quoted post says is a stranger's text like any other: stored through the same flag, shown and sent as data.
 import { performance } from "node:perf_hooks";
 import { readText } from "./rpc.mjs";
 import { abortableSleep } from "./tx-events.mjs";
-import { parseOembed, postTime, postUrl } from "./narrative.mjs";
+import { parseOembed, parsePost, postTime, postUrl } from "./narrative.mjs";
 
 export const XPOST_URL = "https://publish.x.com/oembed";
 export const XPOST_TIMEOUT_MS = 8_000, XPOST_MAX_BYTES = 64 * 1024;
@@ -48,6 +59,68 @@ export const FAILED_MAX = 2_000;
 const ID_RE = /^[1-9]\d{0,18}$/;
 const isId = (id) => typeof id === "string" && ID_RE.test(id);
 
+// ---------------------------------------------------------------- link reading (pure)
+/** The one host a link request goes to, and what a code may be made of. */
+export const TCO_URL = "https://t.co/";
+// A code directly followed by the cut mark is not taken: our own text cap (narrative.mjs parseOembed, TEXT_MAX code
+// points and "…") can end a stored text inside its last link, and half a code is somebody else's link. X's own
+// shortening writes the mark before a link ("text… https://t.co/x"), so a whole link never has one behind it.
+const TCO_RE = /https:\/\/t\.co\/([A-Za-z0-9]{1,40})(?![A-Za-z0-9…])/g;
+const PIC_RE = /(?<![\p{L}\p{N}.])pic\.(?:twitter|x)\.com\/[A-Za-z0-9]/u;
+/** What a link can lead to. "post": another post on X (the only kind that is read); the others are never fetched. */
+export const LINK_KINDS = Object.freeze(["post", "article", "website", "picture"]);
+/** A link that could not be read is tried again this long after its 1st, 2nd and 3rd failed read (s); after the 4th it is left. */
+export const LINK_RETRY_S = Object.freeze([600, 3_600, 21_600]);
+/** This many link reads in a row without a redirect pause the link reads (only them), doubling like the posts' pause. */
+export const LINK_BREAK_AFTER = 5;
+/** Link rows kept in memory in front of sqlite. */
+export const LINK_LRU = 5_000;
+const X_HOSTS = new Set(["x.com", "twitter.com"].flatMap((h) => [h, `www.${h}`, `mobile.${h}`, `m.${h}`]));
+
+/**
+ * The code of the last whole t.co link in a post's text ("https://t.co/Ab12" gives "Ab12"), or null. Letters and digits
+ * only. A link the text cap cut ("https://t.co/Ab…") has no code: only a link the post really carries is ever read.
+ */
+export function linkCodeOf(text) {
+  if (typeof text !== "string") return null;
+  let code = null;
+  for (const m of text.matchAll(TCO_RE)) code = m[1];
+  return code;
+}
+/** Whether a post's text shows attached media ("pic.twitter.com/…" is what the embed writes for a picture or a video). */
+export const hasPicture = (text) => typeof text === "string" && PIC_RE.test(text);
+
+/**
+ * What a redirect's Location leads to, read from the URL alone (nothing is fetched): `{ kind: "post", id }` for an
+ * https x.com / twitter.com link to a post (`<handle>/status/<digits>`, `i/status/<digits>`, `i/web/status/<digits>`)
+ * that is not `ownId` itself and not one of its pictures; `{ kind: "picture", host }` for a post's photo or video or the
+ * post's own link; `{ kind: "article", host }` for an article on X; `{ kind: "website", host }` for any other http(s)
+ * address (an http link to a post included: only https is accepted as a post); null for anything that is no absolute
+ * http(s) URL. `host` is the address's host name, lower case, at most 80 characters: a label, never a place we go.
+ */
+export function classifyTarget(location, ownId = null) {
+  if (typeof location !== "string" || !location || location.length > 2048) return null;
+  let u;
+  try { u = new URL(location); } catch { return null; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  let host = u.hostname.toLowerCase();
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  host = host.slice(0, 80);
+  if (!host) return null;
+  if (/^pic\.(?:twitter|x)\.com$/.test(host)) return { kind: "picture", host };
+  if (X_HOSTS.has(host) && !u.username && !u.password && !u.port) {
+    const seg = u.pathname.split("/").filter(Boolean);
+    const post = u.protocol === "https:" ? parsePost(u.href) : null;
+    if (post) {
+      const i = seg.indexOf(post.id);
+      const media = i >= 0 && (seg[i + 1] === "photo" || seg[i + 1] === "video");
+      return media || post.id === ownId ? { kind: "picture", host } : { kind: "post", id: post.id };
+    }
+    if (seg.length >= 3 && seg[seg.length - 2] === "article" && /^\d{1,20}$/.test(seg[seg.length - 1])) return { kind: "article", host };
+  }
+  return { kind: "website", host };
+}
+
 export class XPosts {
   /**
    * `perMin`: requests a minute (XPOST_PER_MIN); `daily`: requests a UTC day (0 = no cap); `db`: where the answers
@@ -73,6 +146,10 @@ export class XPosts {
     this.touches = new Map(); this.flushTimer = null; // post id → asked-for time not yet written (flushTouches)
     this.ac = new AbortController(); this.started = false; this.stopped = false; this.idleWaiters = [];
     this.stats = { calls: 0, ok: 0, notFound: 0, denied: 0, unparsed: 0, rateLimited: 0, errors: 0, timeouts: 0, tooLarge: 0, badJson: 0, flagged: 0, tripped: 0, pruned: 0, touched: 0, touchErrors: 0, pruneDeferred: 0, lastFlushMs: null, maxFlushMs: 0, lastError: null, lastMs: null };
+    // Link reading: `linkQueue` the starting posts whose link waits to be resolved (behind `queue`), `linkInFlight` the
+    // one being resolved, `links` post id → its link row (least recently used first), and the link reads' own pause.
+    this.linkQueue = []; this.linkInFlight = null; this.links = new Map(); this.linkPausedUntil = 0; this.linkBackoffMs = 0; this.linkBad = 0;
+    this.linkStats = { calls: 0, posts: 0, articles: 0, websites: 0, pictures: 0, unread: 0, rateLimited: 0, tripped: 0, lastError: null };
   }
   #day() { return Math.floor(this.now() / DAY_MS); }
   #nowS() { return Math.floor(this.now() / 1000); }
@@ -93,7 +170,7 @@ export class XPosts {
     this.#rollDay();
     let cached = this.lru.size;
     try { cached = this.db?.xpostCount() ?? cached; } catch { /* the in-memory count */ }
-    return { callsToday: this.budget.used, daily: this.daily, perMin: this.perMin, waiting: this.queue.length, touchesWaiting: this.touches.size, pausedMs: Math.max(0, this.pausedUntil - this.now()), cached, ...this.stats };
+    return { callsToday: this.budget.used, daily: this.daily, perMin: this.perMin, waiting: this.queue.length, touchesWaiting: this.touches.size, pausedMs: Math.max(0, this.pausedUntil - this.now()), cached, ...this.stats, links: { waiting: this.linkQueue.length, pausedMs: Math.max(0, this.linkPausedUntil - this.now()), ...this.linkStats } };
   }
   /** Starts the hourly prune (the fetches need no start: a want() runs them). */
   start() {
@@ -107,7 +184,7 @@ export class XPosts {
   /** Saves the day's count and ends every wait; no request goes out after this. */
   stop() {
     if (this.stopped) return;
-    this.stopped = true; clearInterval(this.pruneTimer); clearInterval(this.flushTimer); this.flushTouches(Infinity); this.queue.length = 0;
+    this.stopped = true; clearInterval(this.pruneTimer); clearInterval(this.flushTimer); this.flushTouches(Infinity); this.queue.length = 0; this.linkQueue.length = 0;
     this.#save(); this.ac.abort(new Error("stopping")); this.#wake();
   }
   /**
@@ -128,9 +205,9 @@ export class XPosts {
     this.stats.touched += moved;
     return rows.length;
   }
-  #wake() { if (!this.running && !this.queue.length) for (const r of this.idleWaiters.splice(0)) r(); }
+  #wake() { if (!this.running && !this.queue.length && !this.linkQueue.length) for (const r of this.idleWaiters.splice(0)) r(); }
   /** Resolves when no fetch runs and none waits (tests). */
-  idle() { return !this.running && !this.queue.length ? Promise.resolve() : new Promise((r) => this.idleWaiters.push(r)); }
+  idle() { return !this.running && !this.queue.length && !this.linkQueue.length ? Promise.resolve() : new Promise((r) => this.idleWaiters.push(r)); }
   /** Drops rows not asked for XPOST_KEEP_S, then the least recently asked past XPOST_MAX_ROWS; returns how many went. */
   prune() {
     let n = 0;
@@ -140,7 +217,8 @@ export class XPosts {
     if (this.touches.size && !this.stopped) { this.stats.pruneDeferred++; return 0; }
     try {
       n = this.db?.xpostPrune(this.#nowS() - XPOST_KEEP_S, XPOST_MAX_ROWS) ?? 0;
-      if (n) { this.stats.pruned += n; this.lru.clear(); }
+      // a link row goes with its starting post
+      if (n) { this.stats.pruned += n; this.lru.clear(); this.links.clear(); this.db?.linkPrune?.(); }
     } catch (e) { this.log.warn?.(`posts: prune failed: ${String(e?.message ?? e).slice(0, 160)}`); }
     for (const [id, at] of this.failed) if (this.now() - at >= RETRY_MS) this.failed.delete(id);
     return n;
@@ -232,15 +310,25 @@ export class XPosts {
     if (this.running) return;
     this.running = true;
     try {
-      while (this.queue.length && !this.stopped) {
-        if (this.spent()) { this.queue.length = 0; break; }
+      // One line, one request at a time, `gapMs` apart: the posts first, a link only when no post waits.
+      while ((this.queue.length || this.linkQueue.length) && !this.stopped) {
+        if (this.spent()) { this.queue.length = 0; this.linkQueue.length = 0; break; }
+        if (!this.queue.length && this.linkPausedUntil > this.now()) { this.linkQueue.length = 0; break; }
         const at = Math.max(this.lastAt + this.gapMs, this.pausedUntil);
         if (at > this.now()) { await this.sleep(at - this.now(), this.ac.signal); continue; }
-        const id = this.queue.shift();
-        this.inFlight = id; this.lastAt = this.now();
-        try { await this.#fetchOne(id); }
-        catch (e) { this.log.warn?.(`posts: ${id}: ${String(e?.message ?? e).slice(0, 160)}`); }
-        finally { this.inFlight = null; }
+        if (this.queue.length) {
+          const id = this.queue.shift();
+          this.inFlight = id; this.lastAt = this.now();
+          try { await this.#fetchOne(id); }
+          catch (e) { this.log.warn?.(`posts: ${id}: ${String(e?.message ?? e).slice(0, 160)}`); }
+          finally { this.inFlight = null; }
+        } else {
+          const id = this.linkQueue.shift();
+          this.linkInFlight = id; this.lastAt = this.now();
+          try { await this.#fetchLink(id); }
+          catch (e) { this.log.warn?.(`posts: link of ${id}: ${String(e?.code ?? e?.name ?? "error").slice(0, 40)}`); }
+          finally { this.linkInFlight = null; }
+        }
       }
     } finally { this.running = false; this.#wake(); }
   }
@@ -248,7 +336,7 @@ export class XPosts {
   #pause(wait = null) {
     if (wait == null) { this.backoffMs = this.backoffMs ? Math.min(this.backoffMs * 2, XPOST_PAUSE_MAX_MS) : XPOST_PAUSE_MS; wait = this.backoffMs; }
     this.pausedUntil = Math.max(this.pausedUntil, this.now() + wait);
-    this.queue.length = 0;
+    this.queue.length = 0; this.linkQueue.length = 0;
     return wait;
   }
   /** A parsed post or a 404: the endpoint is answering, the run of failed answers is over. */
@@ -335,5 +423,156 @@ export class XPosts {
     this.#store(id, "ok", at != null && this.#nowS() - at < RECHECK_YOUNG_S ? RECHECK_NEW_S : RECHECK_OLD_S, { handle: post.handle, text: flagged ? "" : post.text, flagged });
     this.stats.ok++;
     this.#good();
+  }
+
+  // ---------------------------------------------------------------- link reading
+  /** The link row of starting post `id` from memory, else sqlite: `{ postId, kind, toId, host, tries, nextTryAt, at }`, or null when its link was never read. */
+  #linkRec(id) {
+    let r = this.links.get(id);
+    if (r !== undefined) { this.links.delete(id); this.links.set(id, r); return r; }
+    try { r = this.db?.linkGet?.(id) ?? null; } catch { r = null; }
+    if (r && r.kind != null && (!LINK_KINDS.includes(r.kind) || (r.kind === "post" && !isId(r.toId)))) r = null; // a row this build cannot read: as never read
+    this.#linkRemember(id, r);
+    return r;
+  }
+  #linkRemember(id, r) {
+    this.links.delete(id); this.links.set(id, r);
+    while (this.links.size > LINK_LRU) this.links.delete(this.links.keys().next().value);
+  }
+  #linkPut(row) {
+    this.#linkRemember(row.postId, row);
+    try { this.db?.linkSet?.(row); } catch (e) { this.log.warn?.(`posts: link of ${row.postId} not stored (${e?.code ?? "error"})`); }
+  }
+  /**
+   * What the stored text of post `id` links, from what is stored (never a request): `{ state, kind, toId, host }`.
+   * state "none": no stored post, or its text has no link; "ok" with `kind` "post" (`toId`: the quoted post),
+   * "article", "website" or "picture" (`host`: where it points; a text with attached media and no link is a "picture"
+   * without any request); "wait": it has a t.co link that was never read; "unread": the link could not be read (it is
+   * tried again after 10 min, 1 h and 6 h, then left; `retry`: another try is still scheduled).
+   */
+  linkOf(id) {
+    const none = { state: "none", kind: null, toId: null, host: null };
+    if (!isId(id)) return none;
+    const rec = this.#rec(id);
+    if (!rec || rec.state !== "ok") return none;
+    if (!linkCodeOf(rec.text)) return hasPicture(rec.text) ? { state: "ok", kind: "picture", toId: null, host: null } : none;
+    const l = this.#linkRec(id);
+    if (!l) return { ...none, state: "wait" };
+    if (l.kind) return { state: "ok", kind: l.kind, toId: l.toId ?? null, host: l.host ?? null };
+    return { ...none, state: "unread", retry: l.nextTryAt > 0 };
+  }
+  /**
+   * Whether a read of post `id`'s link would be queued now: "ok", or why not. "nolink": no stored post or no t.co link
+   * in its text; "cached": read already, or given up; "queued"; "retry": its last read failed and its next try is not
+   * due; "busy": the link line is full or a pause is on; "budget": half the day's requests are used (link reads never
+   * take the other half: it is the posts'); "stopped".
+   */
+  canQueueLink(id) {
+    if (this.stopped || !isId(id)) return "stopped";
+    const rec = this.#rec(id);
+    if (!rec || rec.state !== "ok" || !linkCodeOf(rec.text)) return "nolink";
+    const l = this.#linkRec(id);
+    if (l && (l.kind || !l.nextTryAt)) return "cached";
+    if (this.linkInFlight === id || this.linkQueue.includes(id)) return "queued";
+    if (l && l.nextTryAt > this.#nowS()) return "retry";
+    if (this.linkQueue.length >= MAX_WAITING / 2 || this.#paused() || this.linkPausedUntil > this.now()) return "busy";
+    if (this.spent() || (this.daily > 0 && this.budget.used >= this.daily / 2)) return "budget";
+    return "ok";
+  }
+  /** canQueueLink, and on "ok" the post's link joins the line (behind the posts). */
+  wantLink(id) {
+    const r = this.canQueueLink(id);
+    if (r === "ok") { this.linkQueue.push(id); this.#pump(); }
+    return r;
+  }
+  /** The link reads (only they) wait `wait` ms, or the next step of their own doubling pause; their line is emptied. */
+  #linkPause(wait = null) {
+    if (wait == null) { this.linkBackoffMs = this.linkBackoffMs ? Math.min(this.linkBackoffMs * 2, XPOST_PAUSE_MAX_MS) : XPOST_PAUSE_MS; wait = this.linkBackoffMs; }
+    this.linkPausedUntil = Math.max(this.linkPausedUntil, this.now() + wait);
+    this.linkQueue.length = 0;
+    return wait;
+  }
+  /** A link read that gave no usable redirect: the try is counted and the next one scheduled (LINK_RETRY_S), then none. */
+  #linkFailed(id, why) {
+    const prev = this.#linkRec(id), tries = (prev?.tries ?? 0) + 1, nowS = this.#nowS(), wait = LINK_RETRY_S[tries - 1];
+    this.#linkPut({ postId: id, kind: null, toId: null, host: null, tries, nextTryAt: wait ? nowS + wait : 0, at: nowS });
+    this.linkStats.unread++; this.linkStats.lastError = why;
+    if (++this.linkBad >= LINK_BREAK_AFTER) {
+      const n = this.linkBad, ms = this.#linkPause();
+      this.linkBad = 0; this.linkStats.tripped++;
+      this.log.warn?.(`posts: ${n} link reads in a row failed (${why}); no link is read for ${Math.round(ms / 1000)} s (post texts go on)`);
+    }
+  }
+  /**
+   * One request to https://t.co/<code> for the last link of post `id`'s stored text, redirects not followed: the status
+   * and the Location header are all that is read (the body is let go unread). What the Location leads to is stored
+   * (classifyTarget); a quoted post is then asked for through the embed line like any post. Counts toward the day.
+   */
+  async #fetchLink(id) {
+    const rec = this.#rec(id), code = rec?.state === "ok" ? linkCodeOf(rec.text) : null;
+    if (!code) return;
+    this.#rollDay();
+    this.budget.used++; this.stats.calls++; this.linkStats.calls++;
+    if (this.budget.used % SAVE_EVERY === 0) this.#save();
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    let res;
+    try {
+      res = await this.fetch(`${TCO_URL}${code}`, { headers: { "user-agent": "spore-posts/1" }, redirect: "manual", signal: AbortSignal.any([timeout, this.ac.signal]) });
+      res.body?.cancel?.().catch(() => {});
+    } catch {
+      if (this.stopped) return;
+      return this.#linkFailed(id, timeout.aborted ? "timeout" : "unreachable");
+    } finally { this.spent(); }
+    if (this.stopped) return;
+    const status = Number(res?.status);
+    if (status === 429) {
+      // t.co asks us to slow down: the link reads wait (not a try of this link; it is asked again after the pause)
+      this.linkStats.rateLimited++;
+      const ra = Number(res.headers?.get?.("retry-after"));
+      const ms = this.#linkPause(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, XPOST_PAUSE_MAX_MS) : null);
+      this.linkStats.lastError = `429: link reads wait ${Math.round(ms / 1000)} s`;
+      return;
+    }
+    let loc = null;
+    try { loc = status >= 300 && status < 400 ? res.headers?.get?.("location") ?? null : null; } catch { loc = null; }
+    const to = loc ? classifyTarget(loc, id) : null;
+    if (!to) return this.#linkFailed(id, `HTTP ${Number.isInteger(status) ? status : "?"} without a usable redirect`);
+    this.linkBad = 0; this.linkBackoffMs = 0;
+    const prev = this.#linkRec(id);
+    this.#linkPut({ postId: id, kind: to.kind, toId: to.kind === "post" ? to.id : null, host: to.kind === "post" ? null : to.host, tries: (prev?.tries ?? 0) + 1, nextTryAt: 0, at: this.#nowS() });
+    this.linkStats[to.kind === "post" ? "posts" : to.kind === "article" ? "articles" : to.kind === "picture" ? "pictures" : "websites"]++;
+    if (to.kind === "post") this.want(to.id, { low: true }); // the quoted post's text; nothing is sent when it is stored already
+  }
+  /**
+   * The post that starting post `id` quotes, for the post lines: `{ state, kind, host, quoted, chain }`.
+   * - state "none": the post has no link. "ok": the link was read; `kind` says what it leads to ("post", "article",
+   *   "website", "picture"), and for a post that can be shown `quoted` is `{ id, handle, text, at }` (`at` from its id).
+   * - "wait": the link, or the quoted post's text, is still to be read. "unread": it could not be read (for now);
+   *   `retry` then says whether another try is scheduled (a link with tries left, a quoted post whose fetch failed
+   *   a moment ago), so a caller may wait for it. A quoted post that is gone, withheld or flagged has none.
+   * - `chain`: the post the quoted post itself quotes, `{ id, handle, text, at }`, ONLY when both its link row and its
+   *   text are stored already (the quoted post is a starting post we hold too); nothing is ever fetched for it.
+   * With `queue` (the default) a link not read yet, one whose retry is due, and a quoted post without stored text are
+   * asked for (low priority, the shared line and day); without it nothing is queued. A flagged text is never given.
+   */
+  quoteOf(id, { queue = true } = {}) {
+    const out = { state: "none", kind: null, host: null, quoted: null, chain: null, retry: false };
+    if (!isId(id)) return out;
+    const l = this.linkOf(id);
+    out.state = l.state; out.kind = l.kind; out.host = l.host; out.retry = l.state === "unread" && l.retry === true;
+    if (l.state === "wait" || l.state === "unread") { if (queue) this.wantLink(id); return out; }
+    if (l.kind !== "post" || !isId(l.toId)) return out;
+    const shown = (pid) => { const r = this.peek(pid); return r && r.state === "ok" && !r.flagged && r.handle && typeof r.text === "string" ? { id: pid, handle: r.handle, text: r.text, at: postTime(pid, this.now()) } : null; };
+    if (!this.peek(l.toId)) {
+      const w = queue ? this.want(l.toId, { low: true }) : this.canQueue(l.toId, { low: true });
+      out.state = w === "retry" || w === "stopped" ? "unread" : "wait"; out.retry = w === "retry";
+      return out;
+    }
+    if (queue) this.want(l.toId, { low: true }); // a recheck that is due
+    out.quoted = shown(l.toId);
+    if (!out.quoted) { out.state = "unread"; return out; }
+    const l2 = this.#linkRec(l.toId);
+    if (l2?.kind === "post" && isId(l2.toId) && l2.toId !== id && l2.toId !== l.toId) out.chain = shown(l2.toId);
+    return out;
   }
 }

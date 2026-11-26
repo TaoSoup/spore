@@ -137,6 +137,13 @@ CREATE TABLE IF NOT EXISTS x_posts (
   fetched_at INTEGER NOT NULL, asked_at INTEGER NOT NULL, recheck_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS x_posts_asked ON x_posts(asked_at);
+-- What a starting post's t.co link leads to (lib/xposts.mjs link reading): to_kind 'post' (to_post_id: the quoted
+-- post, read through the same embed call), 'article', 'website' or 'picture' (host: where it points; never fetched), or
+-- NULL while the redirect could not be read (tries so far; next_try_at unix s, 0 = no further try). at: the last read.
+CREATE TABLE IF NOT EXISTS post_links (
+  post_id TEXT PRIMARY KEY, to_kind TEXT, to_post_id TEXT, host TEXT,
+  tries INTEGER NOT NULL DEFAULT 0, next_try_at INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 -- The trending gate (lib/trend-gate.mjs): every launch it passed, in shadow mode too, with what it measured (why: JSON)
 -- and what was done: "shadow" (only recorded), "promoted" (inserted into the tree) or "capped" (over the hourly cap).
 -- The story gate (lib/story-gate.mjs): a story that passed, once per story per hour (the first pass of the hour), with
@@ -148,11 +155,15 @@ CREATE INDEX IF NOT EXISTS trend_gate_at ON trend_gate(at);
 CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT NULL, sold REAL NOT NULL, created_at INTEGER NOT NULL, sniped REAL) WITHOUT ROWID;
 -- Post lines (lib/post-lines.mjs): per starting X post the "subject: what happened" line a language model wrote from
 -- the post's own text, kept for good by post id (a post does not change). state 'ok' (shown), 'rejected' (it failed the
--- server's checks twice: never shown, never asked again) or 'gave-up' (no usable answer); asks: requests it was part of;
--- coin: the mint of the coin named to the model (a line of kind 'mismatch' is about that coin and shown only on its card).
+-- server's checks twice: never shown, never asked again), 'thin' (the model found nothing stated: no sentence is kept,
+-- the server writes the card's line itself) or 'gave-up' (no usable answer); asks: requests it was part of;
+-- coin: the mint of the coin named to the model (a line of kind 'mismatch' is about that coin and shown only on its card);
+-- source: what the sentence was written from ('post', 'quoted' or 'both'); quoted_id / chain_id: the quoted post and
+-- the post that one quotes, when they were part of the request; chips: a JSON array of the chip codes the server set.
 CREATE TABLE IF NOT EXISTS post_lines (
   post_id TEXT PRIMARY KEY, subject TEXT, happened TEXT, kind TEXT, state TEXT NOT NULL,
-  asks INTEGER NOT NULL DEFAULT 1, model TEXT, at INTEGER NOT NULL, coin TEXT
+  asks INTEGER NOT NULL DEFAULT 1, model TEXT, at INTEGER NOT NULL, coin TEXT,
+  source TEXT, quoted_id TEXT, chain_id TEXT, chips TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
@@ -312,6 +323,10 @@ export class Db {
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
     if (!this.db.prepare("PRAGMA table_info(post_lines)").all().some((c) => c.name === "coin")) this.db.exec("ALTER TABLE post_lines ADD COLUMN coin TEXT"); // a table made before the column was in its CREATE
+    // `post_lines.source`, `quoted_id`, `chain_id` and `chips` (line rules version 3: the quoted post a line drew on and
+    // the chips the server set) are added when absent; NULL in rows from before, which the new rules version deletes anyway.
+    // `post_links` (what a starting post's link leads to) is a new table only.
+    { const lineCols = this.db.prepare("PRAGMA table_info(post_lines)").all(); for (const c of ["source", "quoted_id", "chain_id", "chips"]) if (!lineCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE post_lines ADD COLUMN ${c} TEXT`); }
     if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
@@ -439,6 +454,12 @@ export class Db {
       xpostPruneOld: p("DELETE FROM x_posts WHERE asked_at < ?"),
       xpostPruneOver: p("DELETE FROM x_posts WHERE id IN (SELECT id FROM x_posts ORDER BY asked_at ASC, id ASC LIMIT ?)"),
       xpostCount: p("SELECT COUNT(*) AS n FROM x_posts"),
+      // What a starting post's link leads to (lib/xposts.mjs).
+      linkGet: p("SELECT post_id, to_kind, to_post_id, host, tries, next_try_at, at FROM post_links WHERE post_id = ?"),
+      linkSet: p(`INSERT OR REPLACE INTO post_links (post_id, to_kind, to_post_id, host, tries, next_try_at, at)
+        VALUES (:postId, :kind, :toId, :host, :tries, :nextTryAt, :at)`),
+      linkPrune: p("DELETE FROM post_links WHERE post_id NOT IN (SELECT id FROM x_posts)"),
+      linkCount: p("SELECT COUNT(*) AS n FROM post_links"),
       // The narrative tags (lib/narrtags.mjs).
       narrRecent: p("SELECT id, title, theme FROM narratives ORDER BY last_seen_at DESC, id DESC LIMIT ?"),
       narrGet: p("SELECT id, title, theme FROM narratives WHERE id = ?"),
@@ -456,9 +477,9 @@ export class Db {
         VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare)`),
       tagCounts: p("SELECT COUNT(narrative_id) AS tagged, COUNT(*) AS n FROM coin_tags"),
       tagRecentCreated: p("SELECT c.mint AS mint, t.narrative_id AS id, c.created_at AS created_at FROM coins c JOIN coin_tags t ON t.mint = c.mint WHERE c.created_at > ? AND t.narrative_id IS NOT NULL"),
-      lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin FROM post_lines WHERE post_id = ?"),
-      lineSet: p(`INSERT OR REPLACE INTO post_lines (post_id, subject, happened, kind, state, asks, model, at, coin)
-        VALUES (:postId, :subject, :happened, :kind, :state, :asks, :model, :at, :coin)`),
+      lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips FROM post_lines WHERE post_id = ?"),
+      lineSet: p(`INSERT OR REPLACE INTO post_lines (post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips)
+        VALUES (:postId, :subject, :happened, :kind, :state, :asks, :model, :at, :coin, :source, :quotedId, :chainId, :chips)`),
       lineWipe: p("DELETE FROM post_lines"),
       lineCounts: p("SELECT state, COUNT(*) AS n FROM post_lines GROUP BY state"),
       spendGet: p("SELECT in_tokens, out_tokens, usd, requests FROM narrative_spend WHERE day = ?"),
@@ -783,6 +804,13 @@ export class Db {
   /** Drops the rows not asked for since `beforeS`, then the least recently asked past `maxRows`; returns how many went. */
   xpostPrune(beforeS, maxRows) { return this.transaction(() => { let n = Number(this.q.xpostPruneOld.run(beforeS).changes); const over = this.q.xpostCount.get().n - maxRows; if (over > 0) n += Number(this.q.xpostPruneOver.run(over).changes); return n; }); }
   xpostCount() { return this.q.xpostCount.get().n; }
+  // ---- what a starting post's link leads to (lib/xposts.mjs link reading): one row per starting post id, times in unix s
+  /** `{ postId, kind, toId, host, tries, nextTryAt, at }` or null: `kind` null while the redirect could not be read. */
+  linkGet(postId) { const r = this.q.linkGet.get(postId); return r ? { postId: r.post_id, kind: r.to_kind ?? null, toId: r.to_post_id ?? null, host: r.host ?? null, tries: r.tries, nextTryAt: r.next_try_at, at: r.at } : null; }
+  linkSet(l) { this.q.linkSet.run({ postId: l.postId, kind: l.kind ?? null, toId: l.toId ?? null, host: l.host ?? null, tries: l.tries ?? 0, nextTryAt: l.nextTryAt ?? 0, at: l.at ?? 0 }); }
+  /** Drops the link rows whose starting post is no longer stored; returns how many went. */
+  linkPrune() { return Number(this.q.linkPrune.run().changes); }
+  linkCount() { return this.q.linkCount.get().n; }
 
   // ---- the narrative tags (lib/narrtags.mjs): the store its tagger reads and writes; times in unix s
   narrRecent(limit = 150) { return this.q.narrRecent.all(limit).map((r) => ({ id: Number(r.id), title: r.title, theme: r.theme })); }
@@ -817,9 +845,18 @@ export class Db {
   tagCounts() { const r = this.q.tagCounts.get(); return { tagged: r.tagged, none: r.n - r.tagged }; }
   /** The tagged coins created after `sinceS`, `[{ mint, id, createdAt }]` (the coins_created index: a boot read of the last hour). */
   tagRecentCreated(sinceS) { return this.q.tagRecentCreated.all(sinceS).map((r) => ({ mint: r.mint, id: Number(r.id), createdAt: r.created_at })); }
-  /** A post's stored line (lib/post-lines.mjs) `{ postId, subject, happened, kind, state, asks, model, at, coin }`, or null: one indexed read. */
-  lineGet(postId) { const r = this.q.lineGet.get(postId); return r ? { postId: r.post_id, subject: r.subject, happened: r.happened, kind: r.kind, state: r.state, asks: r.asks, model: r.model, at: r.at, coin: r.coin ?? null } : null; }
-  lineSet(l) { this.q.lineSet.run({ postId: l.postId, subject: l.subject ?? null, happened: l.happened ?? null, kind: l.kind ?? null, state: l.state, asks: l.asks ?? 1, model: l.model ?? null, at: l.at, coin: l.coin ?? null }); }
+  /**
+   * A post's stored line (lib/post-lines.mjs) `{ postId, subject, happened, kind, state, asks, model, at, coin, source,
+   * quotedId, chainId, chips }`, or null: one indexed read. `chips`: the chip codes as an array (a damaged value reads as none).
+   */
+  lineGet(postId) {
+    const r = this.q.lineGet.get(postId);
+    if (!r) return null;
+    let chips = [];
+    try { const c = r.chips ? JSON.parse(r.chips) : []; if (Array.isArray(c)) chips = c.filter((x) => typeof x === "string"); } catch { chips = []; }
+    return { postId: r.post_id, subject: r.subject, happened: r.happened, kind: r.kind, state: r.state, asks: r.asks, model: r.model, at: r.at, coin: r.coin ?? null, source: r.source ?? null, quotedId: r.quoted_id ?? null, chainId: r.chain_id ?? null, chips };
+  }
+  lineSet(l) { this.q.lineSet.run({ postId: l.postId, subject: l.subject ?? null, happened: l.happened ?? null, kind: l.kind ?? null, state: l.state, asks: l.asks ?? 1, model: l.model ?? null, at: l.at, coin: l.coin ?? null, source: l.source ?? null, quotedId: l.quotedId ?? null, chainId: l.chainId ?? null, chips: Array.isArray(l.chips) && l.chips.length ? JSON.stringify(l.chips) : null }); }
   /**
    * The rules of the post lines changed (lib/post-lines.mjs applyLineRules): when the version stored under `key` is
    * below `version` (no row = 1), every row of `post_lines` is deleted and `version` stored, in one transaction;
@@ -834,8 +871,8 @@ export class Db {
       return { reset: true, from, lines };
     });
   }
-  /** How many stored lines there are per state: `{ ok, rejected, gaveUp }`. */
-  lineCounts() { const o = { ok: 0, rejected: 0, gaveUp: 0 }; for (const r of this.q.lineCounts.all()) { if (r.state === "ok") o.ok = r.n; else if (r.state === "rejected") o.rejected = r.n; else if (r.state === "gave-up") o.gaveUp = r.n; } return o; }
+  /** How many stored lines there are per state: `{ ok, rejected, gaveUp, thin }`. */
+  lineCounts() { const o = { ok: 0, rejected: 0, gaveUp: 0, thin: 0 }; for (const r of this.q.lineCounts.all()) { if (r.state === "ok") o.ok = r.n; else if (r.state === "rejected") o.rejected = r.n; else if (r.state === "gave-up") o.gaveUp = r.n; else if (r.state === "thin") o.thin = r.n; } return o; }
   spendGet(day) { const r = this.q.spendGet.get(day); return r ? { inTokens: r.in_tokens, outTokens: r.out_tokens, usd: r.usd, requests: r.requests } : { inTokens: 0, outTokens: 0, usd: 0, requests: 0 }; }
   spendAdd(day, { inTokens = 0, outTokens = 0, usd = 0, requests = 0 } = {}) { this.q.spendAdd.run({ day, inTokens, outTokens, usd, requests }); }
   priceRef(mint, t) { const r = this.q.priceBefore.get(mint, t) ?? this.q.priceAfter.get(mint, t); return r ? { priceQuote: r.price_quote, priceUsd: r.price_usd, time: r.time } : null; }
