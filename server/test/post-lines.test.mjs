@@ -10,11 +10,12 @@
 // rules version, storage by post id, and that it is off by default; a link whose retry is scheduled is waited for, a
 // post settled without its quoted post is asked once more (and only once), the quote's own refusal list (predictions,
 // promises of gain, calls to buy), noise only in its context, words counted in scripts written without spaces, a coin
-// named like an act word as the subject, and one row as a single coin. A fake client and a fake clock: no network, no
+// named like an act word as the subject, and one row as a single coin; the key phrases (keys) the model picks, kept
+// only when written in the sentence, stored with the line and served on it. A fake client and a fake clock: no network, no
 // model provider.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules } from "../lib/post-lines.mjs";
+import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules, keepKeys, KEYS_MAX, KEY_WORDS_MAX, KEY_CHARS_MAX, OUT_BASE, OUT_PER_POST } from "../lib/post-lines.mjs";
 import { DEFAULT_MODEL, GAVE_UP, userText } from "../lib/narrtags.mjs";
 import { LINK_RETRY_S } from "../lib/xposts.mjs";
 import { loadConfig } from "../lib/config.mjs";
@@ -884,4 +885,102 @@ test("the rows take the lines by attach (the stories body's own use: test/coinro
   const { l } = lines();
   assert.equal(rows.attach({ lines: l }).lines, l);
   assert.equal(rows.attach({}).lines, l, "an attach without `lines` leaves it");
+});
+
+test("key phrases: asked for in the schema and the instructions; kept only when written in the sentence on word boundaries, short, apart and at most 3", () => {
+  const item = REPLY_SCHEMA.properties.posts.items;
+  assert.deepEqual(item.properties.keys, { type: "array", items: { type: "string" } });
+  assert.ok(item.required.includes("keys"), "every field is returned; keys may be []");
+  for (const t of ["11. KEYS.", "copied word for word from happened", "[\"profile picture\", \"dog\"]", "[\"Cupsey\", \"Top Floor Boss\"]", "[] for kind thin", "keys is [] only for kind thin"]) assert.ok(SYSTEM_TEXT.includes(t), t);
+  assert.deepEqual([KEYS_MAX, KEY_WORDS_MAX, KEY_CHARS_MAX], [3, 4, 40]);
+  // the output allowance grows for them, modestly
+  assert.equal(OUT_PER_POST, 120);
+  assert.equal(buildRequest({ posts: Array.from({ length: BATCH }, () => post()), nowS: T0 }).max_tokens, OUT_BASE + 120 * BATCH);
+  const H = "Poster says Cupsey changed his name to Top Floor Boss on a stream";
+  // the owner's examples: kept as the sentence writes them, in sentence order (not the model's)
+  assert.deepEqual(keepKeys(["Top Floor Boss", "Cupsey"], H), ["Cupsey", "Top Floor Boss"]);
+  assert.deepEqual(keepKeys(["profile picture", "dog"], "Elon Musk changes his profile picture to a dog"), ["profile picture", "dog"]);
+  // any case in the model's copy; the sentence's own case is kept
+  assert.deepEqual(keepKeys(["top floor boss"], H), ["Top Floor Boss"]);
+  // not in the sentence, only part of a word, or not on word boundaries: dropped
+  assert.deepEqual(keepKeys(["Elon Musk", "Cups", "floor bo", "ame"], H), []);
+  // the whole sentence, over 4 words, over 40 characters, no letter or digit, not a string: dropped
+  assert.deepEqual(keepKeys([H, "changed his name to Top", "a".repeat(41), "--", 7, null, { k: 1 }, ["Cupsey"]], H), []);
+  assert.deepEqual(keepKeys(["Top Floor Boss on"], H), ["Top Floor Boss on"], "four words are fine");
+  // the whole sentence but for its punctuation is still the whole sentence
+  assert.deepEqual(keepKeys(["Elon Musk changes picture"], "Elon Musk changes picture!"), []);
+  assert.deepEqual(keepKeys(["Elon Musk changes picture"], "\"Elon Musk changes picture.\""), []);
+  // overlapping a phrase kept before it: dropped (the first one stays)
+  assert.deepEqual(keepKeys(["Top Floor Boss", "Boss", "Floor"], H), ["Top Floor Boss"]);
+  assert.deepEqual(keepKeys(["Floor", "Top Floor Boss"], H), ["Floor"]);
+  // the same phrase twice: once
+  assert.deepEqual(keepKeys(["Cupsey", "cupsey"], H), ["Cupsey"]);
+  // at most 3, the first 3 good ones the model gave
+  assert.deepEqual(keepKeys(["stream", "Cupsey", "name", "Top Floor Boss"], H), ["Cupsey", "name", "stream"]);
+  // cleaned like the other fields: wrapping quotes, spaces, a final stop
+  assert.deepEqual(keepKeys(["  \"Cupsey\"  ", "stream."], H), ["Cupsey", "stream"]);
+  // a phrase the block list flags is dropped, and a failing block list keeps nothing
+  assert.deepEqual(keepKeys(["Cupsey", "stream"], H, { flag: (t) => t === "Cupsey" }), ["stream"]);
+  assert.deepEqual(keepKeys(["Cupsey"], H, { flag: () => { throw new Error("x"); } }), []);
+  // nothing to mark: no array, an empty sentence
+  assert.deepEqual([keepKeys(undefined, H), keepKeys("Cupsey", H), keepKeys(["Cupsey"], ""), keepKeys(["Cupsey"], null)], [[], [], [], []]);
+  // regex characters in a phrase are plain text
+  assert.deepEqual(keepKeys(["C++ (beta)", ".*"], "Poster says C++ (beta) ships"), ["C++ (beta)"]);
+});
+
+test("key phrases in the reply: read when present, none on a thin answer, a reply without keys (old output) still reads; a bad key never refuses the line", () => {
+  const r = readReply(JSON.stringify({ posts: [
+    { n: 1, subject: "Cupsey", happened: "Poster says Cupsey changed his name to Top Floor Boss.", kind: "claim", keys: ["Top Floor Boss", "Cupsey", "nope"] },
+    { n: 2, subject: "Pepe", happened: "whatever", kind: "thin", keys: ["whatever"] },
+    { n: 3, subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event" },
+    { n: 4, subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event", keys: "zoo" },
+    { n: 5, subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event", keys: ["giraffe"] },
+  ] }), { count: 5 });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.answers, [
+    { subject: "Cupsey", happened: "Poster says Cupsey changed his name to Top Floor Boss", kind: "claim", keys: ["Cupsey", "Top Floor Boss"] },
+    { subject: "Pepe", happened: "", kind: "thin" },
+    { subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event" },
+    { subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event" },
+    { subject: "Baby hippo", happened: "A zoo names its newborn hippo", kind: "event" },
+  ]);
+  assert.equal(checkLine(r.answers[4], "a zoo names its newborn baby hippo"), null, "a line whose keys were all dropped is checked like any other");
+});
+
+test("key phrases: stored with the line, read back by a new instance and served on it; old rows and server lines have none; the column is added to an older table", async () => {
+  const KEYED = (n) => good(n, { keys: ["wizard hat", "stage", "a cat in a wizard hat walks across a stage"] });
+  const client = fakeClient((req) => reply(sentPosts(req).map((p) => (tagOf(p) === "k" ? KEYED(p.n) : good(p.n)))));
+  const results = [];
+  const { l, db, clock } = lines({ client, onResult: (x) => results.push(x) });
+  l.offer(id(1), post(T("k"))); l.offer(id(2), post(T("plain")));
+  await run(l, clock);
+  assert.deepEqual(l.lineOf(id(1)), { ...MODEL_LINE, keys: ["wizard hat", "stage"] });
+  assert.deepEqual(l.lineOf(id(2)), MODEL_LINE, "a line without keys carries no field");
+  assert.deepEqual([db.lineGet(id(1)).keys, "keys" in db.lineGet(id(2))], [["wizard hat", "stage"], false]);
+  assert.deepEqual(db.db.prepare("SELECT post_id, keys FROM post_lines ORDER BY post_id").all().map((x) => x.keys), ["[\"wizard hat\",\"stage\"]", null]);
+  assert.deepEqual(results.find((x) => x.id === id(1)).line.keys, ["wizard hat", "stage"]);
+  // a new instance over the same sqlite
+  assert.deepEqual(lines({ db }).l.lineOf(id(1)).keys, ["wizard hat", "stage"]);
+  // a row stored before keys (NULL), a damaged value, and a stored key the sentence does not have: no keys served for those
+  db.lineSet({ postId: id(3), subject: "Old", happened: "An old line about a stage", kind: "event", state: "ok", asks: 1, model: DEFAULT_MODEL, at: T0 });
+  db.lineSet({ postId: id(4), subject: "Odd", happened: "An odd line about a stage", kind: "event", state: "ok", asks: 1, model: DEFAULT_MODEL, at: T0, keys: ["giraffe", "stage"] });
+  db.db.prepare("UPDATE post_lines SET keys = ? WHERE post_id = ?").run("{not json", id(1));
+  const fresh = lines({ db }).l;
+  assert.deepEqual([fresh.lineOf(id(3)).subject, "keys" in fresh.lineOf(id(3)), "keys" in fresh.lineOf(id(1)), fresh.lineOf(id(4)).keys], ["Old", false, false, ["stage"]]);
+  // the server's own lines never carry keys
+  assert.equal("keys" in serverLine({ post: { text: "the bears are done for this week" }, coins: [{ name: "A", symbol: "A" }, { name: "B", symbol: "B" }] }), false);
+  // an older table without the column: it is added, no line is lost and no rules version is spent
+  const { mkdtempSync, rmSync } = await import("node:fs"), { tmpdir } = await import("node:os"), { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "lines-keys-")), file = join(dir, "x.db");
+  try {
+    let d = new Db(file);
+    d.lineSet({ postId: id(5), subject: "Old", happened: "An old line", kind: "event", state: "ok", asks: 1, model: DEFAULT_MODEL, at: T0 });
+    d.db.exec("ALTER TABLE post_lines DROP COLUMN keys");
+    d.close();
+    d = new Db(file);
+    assert.ok(d.db.prepare("PRAGMA table_info(post_lines)").all().some((c) => c.name === "keys"), "the column is added");
+    assert.deepEqual([d.lineGet(id(5)).subject, "keys" in d.lineGet(id(5))], ["Old", false]);
+    d.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  assert.equal(LINE_RULES_VERSION, 3, "keys did not change the rules version: no stored line is wiped");
 });

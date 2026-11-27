@@ -252,7 +252,7 @@ test("11. the line as drawn: the AI badge and the chips, the opened body with bo
   const via = D.subjectLine(card({ post: post({ text: "Sending 10%https://t.co/abc" }), quoted: quoted({ handle: "dv3333333", at: NOW - 30 * DAY }), line: line({ subject: "Rasmr and big trader", happened: "Quoted post says a big futures trader outdid Rasmr", kind: "claim", chips: ["ai", "via_quoted"] }) }), NOW)!;
   let html = draw(via);
   assert.ok(html.startsWith("<details class=\"dsc-ln\">"), "a line with a post opens");
-  assert.ok(html.includes("<b class=\"dsc-ln-s\">Rasmr and big trader:</b>") && html.includes("<span class=\"dsc-ln-h\">Quoted post says a big futures trader outdid Rasmr</span>"));
+  assert.ok(html.includes("<b class=\"dsc-ln-s\">Rasmr and big trader:</b>") && html.includes("<span class=\"dsc-ln-h\">Quoted post says a big futures trader outdid <mark class=\"dsc-key\">Rasmr</mark></span>"));
   assert.deepEqual(chipsIn(html), ["via quoted post @dv3333333", "quoted post 30 d old"]);
   assert.equal(count(html, "class=\"dsc-ln-ai\""), 1, "the AI badge");
   assert.equal(count(html, `</svg>${OPEN_POST}</a>`), 2, "each post has its own link");

@@ -590,7 +590,7 @@ test("stories with post lines: a listed card that shows a post offers it with it
   const plain = await w.rows.stories("1h");
   assert.equal("line" in plain.cards[0], false, "without post lines a card has no such field");
   const calls = [];
-  const client = async () => ({ messages: { create: async (req) => { calls.push(req); return { stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: "text", text: JSON.stringify({ posts: [{ n: 1, subject: "Big news", happened: "Poster says there is big news", kind: "claim" }] }) }] }; } } });
+  const client = async () => ({ messages: { create: async (req) => { calls.push(req); return { stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: "text", text: JSON.stringify({ posts: [{ n: 1, subject: "Big news", happened: "Poster says there is big news", kind: "claim", keys: ["big news", "not in it"] }] }) }] }; } } });
   const lines = new PostLines({ db: w.model.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1 }, on: true, clientFactory: client, now: w.clock.now, fillMs: 0, log: quiet });
   w.rows.attach({ lines });
   w.wk.forget(); w.rows.story.clear();
@@ -601,7 +601,7 @@ test("stories with post lines: a listed card that shows a post offers it with it
   assert.deepEqual(sent, [{ n: 1, post: { by: "poster", text: "big news: a wizard cat walks across a wide stage tonight", age_days: 0 }, coins: [{ name: "E0 coin", symbol: "E0", parent: "PAR" }, { name: "E1 coin", symbol: "E1", parent: "PAR" }, { name: "E2 coin", symbol: "E2", parent: "PAR" }] }], "the coin that links the post first; no link, no launch tool's line");
   w.wk.forget(); w.rows.story.clear();
   b = await w.rows.stories("1h");
-  assert.deepEqual(b.cards[0].line, { subject: "Big news", happened: "Poster says there is big news", kind: "claim", by: "model", quote: false, chips: ["ai"] });
+  assert.deepEqual(b.cards[0].line, { subject: "Big news", happened: "Poster says there is big news", kind: "claim", by: "model", quote: false, chips: ["ai"], keys: ["big news"] }, "the key phrases the server kept ride on the line (a phrase not in the sentence is dropped)");
   const { line, ...rest } = b.cards[0];
   assert.deepEqual(rest, plain.cards[0], "every other field as without post lines");
   assert.equal(calls.length, 1);

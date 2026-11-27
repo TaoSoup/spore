@@ -159,11 +159,12 @@ CREATE TABLE IF NOT EXISTS launch_flow (mint TEXT PRIMARY KEY, bought REAL NOT N
 -- the server writes the card's line itself) or 'gave-up' (no usable answer); asks: requests it was part of;
 -- coin: the mint of the coin named to the model (a line of kind 'mismatch' is about that coin and shown only on its card);
 -- source: what the sentence was written from ('post', 'quoted' or 'both'); quoted_id / chain_id: the quoted post and
--- the post that one quotes, when they were part of the request; chips: a JSON array of the chip codes the server set.
+-- the post that one quotes, when they were part of the request; chips: a JSON array of the chip codes the server set;
+-- keys: a JSON array of the key phrases of the sentence (the words the page marks; added Nov 27, NULL = none).
 CREATE TABLE IF NOT EXISTS post_lines (
   post_id TEXT PRIMARY KEY, subject TEXT, happened TEXT, kind TEXT, state TEXT NOT NULL,
   asks INTEGER NOT NULL DEFAULT 1, model TEXT, at INTEGER NOT NULL, coin TEXT,
-  source TEXT, quoted_id TEXT, chain_id TEXT, chips TEXT
+  source TEXT, quoted_id TEXT, chain_id TEXT, chips TEXT, keys TEXT
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS narratives (
   id INTEGER PRIMARY KEY, title TEXT NOT NULL, theme TEXT NOT NULL, key TEXT NOT NULL,
@@ -366,8 +367,10 @@ export class Db {
     if (!this.db.prepare("PRAGMA table_info(post_lines)").all().some((c) => c.name === "coin")) this.db.exec("ALTER TABLE post_lines ADD COLUMN coin TEXT"); // a table made before the column was in its CREATE
     // `post_lines.source`, `quoted_id`, `chain_id` and `chips` (line rules version 3: the quoted post a line drew on and
     // the chips the server set) are added when absent; NULL in rows from before, which the new rules version deletes anyway.
+    // `post_lines.keys` (the key phrases, Nov 27) the same way, without a new rules version: NULL in older rows, which
+    // keep their lines and simply have no keys.
     // `post_links` (what a starting post's link leads to) is a new table only.
-    { const lineCols = this.db.prepare("PRAGMA table_info(post_lines)").all(); for (const c of ["source", "quoted_id", "chain_id", "chips"]) if (!lineCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE post_lines ADD COLUMN ${c} TEXT`); }
+    { const lineCols = this.db.prepare("PRAGMA table_info(post_lines)").all(); for (const c of ["source", "quoted_id", "chain_id", "chips", "keys"]) if (!lineCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE post_lines ADD COLUMN ${c} TEXT`); }
     { const tagCols = this.db.prepare("PRAGMA table_info(coin_tags)").all(); for (const c of ["bare", "had_img"]) if (!tagCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE coin_tags ADD COLUMN ${c} INTEGER NOT NULL DEFAULT 0`); }
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
@@ -518,9 +521,9 @@ export class Db {
         VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare, :hadImg)`),
       tagCounts: p("SELECT COUNT(narrative_id) AS tagged, COUNT(*) AS n FROM coin_tags"),
       tagRecentCreated: p("SELECT c.mint AS mint, t.narrative_id AS id, c.created_at AS created_at FROM coins c JOIN coin_tags t ON t.mint = c.mint WHERE c.created_at > ? AND t.narrative_id IS NOT NULL"),
-      lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips FROM post_lines WHERE post_id = ?"),
-      lineSet: p(`INSERT OR REPLACE INTO post_lines (post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips)
-        VALUES (:postId, :subject, :happened, :kind, :state, :asks, :model, :at, :coin, :source, :quotedId, :chainId, :chips)`),
+      lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips, keys FROM post_lines WHERE post_id = ?"),
+      lineSet: p(`INSERT OR REPLACE INTO post_lines (post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips, keys)
+        VALUES (:postId, :subject, :happened, :kind, :state, :asks, :model, :at, :coin, :source, :quotedId, :chainId, :chips, :keys)`),
       lineWipe: p("DELETE FROM post_lines"),
       lineCounts: p("SELECT state, COUNT(*) AS n FROM post_lines GROUP BY state"),
       spendGet: p("SELECT in_tokens, out_tokens, usd, requests FROM narrative_spend WHERE day = ?"),
@@ -917,16 +920,18 @@ export class Db {
   tagRecentCreated(sinceS) { return this.q.tagRecentCreated.all(sinceS).map((r) => ({ mint: r.mint, id: Number(r.id), createdAt: r.created_at })); }
   /**
    * A post's stored line (lib/post-lines.mjs) `{ postId, subject, happened, kind, state, asks, model, at, coin, source,
-   * quotedId, chainId, chips }`, or null: one indexed read. `chips`: the chip codes as an array (a damaged value reads as none).
+   * quotedId, chainId, chips, keys? }`, or null: one indexed read. `chips`: the chip codes as an array (a damaged value reads as none);
+   * `keys`: the key phrases as an array, only when the row has any (NULL, a damaged value or an empty array: no field).
    */
   lineGet(postId) {
     const r = this.q.lineGet.get(postId);
     if (!r) return null;
-    let chips = [];
+    let chips = [], keys = [];
+    try { const k = r.keys ? JSON.parse(r.keys) : []; if (Array.isArray(k)) keys = k.filter((x) => typeof x === "string"); } catch { keys = []; }
     try { const c = r.chips ? JSON.parse(r.chips) : []; if (Array.isArray(c)) chips = c.filter((x) => typeof x === "string"); } catch { chips = []; }
-    return { postId: r.post_id, subject: r.subject, happened: r.happened, kind: r.kind, state: r.state, asks: r.asks, model: r.model, at: r.at, coin: r.coin ?? null, source: r.source ?? null, quotedId: r.quoted_id ?? null, chainId: r.chain_id ?? null, chips };
+    return { postId: r.post_id, subject: r.subject, happened: r.happened, kind: r.kind, state: r.state, asks: r.asks, model: r.model, at: r.at, coin: r.coin ?? null, source: r.source ?? null, quotedId: r.quoted_id ?? null, chainId: r.chain_id ?? null, chips, ...(keys.length ? { keys } : null) };
   }
-  lineSet(l) { this.q.lineSet.run({ postId: l.postId, subject: l.subject ?? null, happened: l.happened ?? null, kind: l.kind ?? null, state: l.state, asks: l.asks ?? 1, model: l.model ?? null, at: l.at, coin: l.coin ?? null, source: l.source ?? null, quotedId: l.quotedId ?? null, chainId: l.chainId ?? null, chips: Array.isArray(l.chips) && l.chips.length ? JSON.stringify(l.chips) : null }); }
+  lineSet(l) { this.q.lineSet.run({ postId: l.postId, subject: l.subject ?? null, happened: l.happened ?? null, kind: l.kind ?? null, state: l.state, asks: l.asks ?? 1, model: l.model ?? null, at: l.at, coin: l.coin ?? null, source: l.source ?? null, quotedId: l.quotedId ?? null, chainId: l.chainId ?? null, chips: Array.isArray(l.chips) && l.chips.length ? JSON.stringify(l.chips) : null, keys: Array.isArray(l.keys) && l.keys.length ? JSON.stringify(l.keys) : null }); }
   /**
    * The rules of the post lines changed (lib/post-lines.mjs applyLineRules): when the version stored under `key` is
    * below `version` (no row = 1), every row of `post_lines` is deleted and `version` stored, in one transaction;

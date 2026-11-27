@@ -125,8 +125,9 @@ function Safety({ s }: { s: CoinSafety | undefined }) {
 }
 
 
-/// One coin, shared by every list: a table row on a wide screen, two lines in a narrow list and three in a phone-width
-/// one (dsc.css container queries; on a phone the liquidity, volume and txns cells, marked `opt`, are not drawn).
+/// One coin, shared by every list: a table row on a wide screen, the same row without the liquidity and volume cells
+/// (marked `dsc-wide`) in a middle-width list, two lines in a narrow list and three in a phone-width one (dsc.css
+/// container queries; on a phone the liquidity, volume and txns cells, marked `opt`, are not drawn). The logo is 36 px.
 /// `dup`: another row of the list has this ticker, so the start of the mint tells them apart; `extra`: the row's own
 /// chips (copies, why it is dust, its parent, its story).
 function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf: Tf; now: number; extra?: ReactNode; dup?: boolean }) {
@@ -143,7 +144,7 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
     <li className={`dsc-coin${c.left ? " left" : ""}`}>
       <div className="dsc-coin-main">
         <Link to={coinLink(c.mint)} className="dsc-coin-name" title={nameOf(c)}>
-          <Logo src={c.image} label={c.symbol} size={24} />
+          <Logo src={c.image} label={c.symbol} size={36} />
           <span className="dsc-coin-id">
             <span className="dsc-coin-top">
               <b>{sym(c)}</b>
@@ -168,8 +169,8 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
             {c.thin === true && <><span className="dsc-dot" aria-hidden="true"> · </span><span className="dsc-thin" title={THIN_TITLE}>{THIN_TEXT}<span className="dsc-vh">: market cap over 100 times the liquidity</span></span></>}
           </span>
         </span>
-        <span className="dsc-num opt" title={LIQ_TITLE}><span className="dsc-k">Liquidity </span><span className="dsc-v">{usd(c.liqUsd)}</span></span>
-        <span className="dsc-num opt" title={`Volume over ${tfWords(tf)}`}><span className="dsc-k">Volume · {tf} </span><span className="dsc-v">{c.tf ? usd(c.tf.volUsd) : "—"}</span></span>
+        <span className="dsc-num opt dsc-wide" title={LIQ_TITLE}><span className="dsc-k">Liquidity </span><span className="dsc-v">{usd(c.liqUsd)}</span></span>
+        <span className="dsc-num opt dsc-wide" title={`Volume over ${tfWords(tf)}`}><span className="dsc-k">Volume · {tf} </span><span className="dsc-v">{c.tf ? usd(c.tf.volUsd) : "—"}</span></span>
         {/* buys and sells on one line when they fit (they wrap to two when not), each with a letter and the word for
             screen readers: never told apart by colour alone */}
         <span className="dsc-num opt" title={`Trades over ${tfWords(tf)}: buys (B) and sells (S)`}>
@@ -191,7 +192,7 @@ function CoinRow({ c, t, tf, now, extra, dup }: { c: StoryShown; t: TradeCtl; tf
 function Cols({ tf }: { tf: Tf }) {
   return (
     <div className="dsc-cols" aria-hidden="true">
-      <span>Coin</span><span>Last hour</span><span>Buyers · {tf}</span><span>Mcap · {tf}</span><span className="opt">Liquidity</span><span className="opt">Volume · {tf}</span><span className="opt">Txns · {tf}</span><span />
+      <span>Coin</span><span>Last hour</span><span>Buyers · {tf}</span><span>Mcap · {tf}</span><span className="opt dsc-wide">Liquidity</span><span className="opt dsc-wide">Volume · {tf}</span><span className="opt">Txns · {tf}</span><span />
     </div>
   );
 }
@@ -321,7 +322,8 @@ function AlertButton() {
   return (
     <button type="button" className={`btn sm ${ui === "on" ? "soft" : "ghost"} dsc-alert`} aria-pressed={ui === "on"} disabled={!live} title={ALERT_TITLE[ui]} onClick={toggle}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>
-      {ALERT_LABEL[ui]}
+      {/* the words in their own box, so a phone's header can cut them with an ellipsis (the title says them in full) */}
+      <span className="dsc-alert-t">{ALERT_LABEL[ui]}</span>
     </button>
   );
 }
@@ -438,7 +440,7 @@ function useHeld<B, S>(key: string, read: () => Promise<B>, merge: (b: B, was: S
 
 const Skel = ({ n = 3 }: { n?: number }) => (
   <ul className="dsc-list" aria-busy="true" aria-label="Loading the list">{Array.from({ length: n }, (_, i) => (
-    <li key={i} className="dsc-card dsc-skel"><div className="dsc-skel-head"><Skeleton h={32} w={32} r={999} /><span><Skeleton h={14} w={`${40 - i * 6}%`} /><Skeleton h={10} w={`${64 - i * 8}%`} /></span></div><Skeleton h={10} /><Skeleton h={10} w="80%" /></li>
+    <li key={i} className="dsc-card dsc-skel"><div className="dsc-skel-head"><Skeleton h={36} w={36} r={999} /><span><Skeleton h={14} w={`${40 - i * 6}%`} /><Skeleton h={10} w={`${64 - i * 8}%`} /></span></div><Skeleton h={10} /><Skeleton h={10} w="80%" /></li>
   ))}</ul>
 );
 

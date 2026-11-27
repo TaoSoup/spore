@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   COPIES_TITLE, LEFT_PILL, LINE_NOTE, MOVED_PILL, MOVED_TITLE, NEW_ROW_PILL, NEW_ROW_TITLE, NO_POST_TEXT, TAG_NOTE,
-  cardPostHref, copiesMark, dustChip, narrativeOf, narrativeTitle, parentTag,
+  cardPostHref, copiesMark, dustChip, keySpans, narrativeOf, narrativeTitle, parentTag,
   type StoryShown, type SubjectLine,
 } from "../lib/discover";
 import type { StoryCard } from "../lib/api";
@@ -64,8 +64,9 @@ export function RowTags({ r, parent, story, fresh, sub, theme }: { r: StoryShown
 }
 
 /// The "Subject: what happened" line (lib/discover.ts subjectLine), the same on a single coin's card and in a story's
-/// header: the subject in the accent with a colon, then the sentence in ink (two lines at most, never cut to one with
-/// an ellipsis); on the right, small and muted, the "AI" badge of a model-written line, the chips that say where it
+/// header: the subject in the accent with a colon, then the sentence in a quieter ink with its key points (`L.keys`:
+/// names, the thing that is new, lib/discover.ts keySpans) as <mark>s in the brightest ink, so a glance catches them
+/// (two lines at most, never cut to one with an ellipsis; the poster's own words in quote marks have none); on the right, small and muted, the "AI" badge of a model-written line, the chips that say where it
 /// came from ("via quoted post @handle", "quoted post from 2024", "post does not name this coin", "AI group", "no
 /// post": facts about our own data, kept out of the sentence), who posted and how long ago (an outlined chip for a post
 /// older than a week); on a phone that sits on its own short line under the sentence. With a post the line is the
@@ -81,7 +82,7 @@ export function SubjectLineBlock({ L, pill }: { L: SubjectLine; pill?: ReactNode
       <span className="dsc-ln-t">
         {pill}
         <b className="dsc-ln-s">{L.subject}:</b>{" "}
-        <span className="dsc-ln-h">{L.quote ? `“${L.happened}”` : L.happened}</span>
+        <span className="dsc-ln-h">{L.quote ? `“${L.happened}”` : keySpans(L.happened, L.keys).map((p, i) => (p.key ? <mark key={i} className="dsc-key">{p.text}</mark> : p.text))}</span>
       </span>
       {(L.badge || L.chips.length > 0 || L.who || L.when || L.old) && (
         <span className="dsc-ln-m">

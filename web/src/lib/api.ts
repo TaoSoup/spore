@@ -356,9 +356,12 @@ export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: 
 /// quoted post, or from the post that one quotes), "mismatch", "no_post", "ai_group" (a model grouped these coins).
 /// `n`: on a counted sentence, how many coins the server counted (copies included), so the page can tell when it shows
 /// another number of them (a size pill, a row that left) and count for itself.
+/// `keys`: on a model's line from a newer server, 1 to 3 short phrases copied from `happened` that a reader should
+/// catch first (names, the concrete thing that is new), drawn brighter in the sentence; absent on older lines and on
+/// the server's own. The page checks them again (lib/discover.ts lineKeysOf) and falls back to its own pick when absent.
 export type PostLineKind = "event" | "claim" | "pitch" | "personal" | "mismatch" | "thin";
 export type LineChip = "ai" | "via_quoted" | "names_quoted" | "names_chain" | "mismatch" | "no_post" | "ai_group";
-export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind; by?: "model" | "server"; quote?: boolean; chips?: LineChip[]; n?: number | null };
+export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind; by?: "model" | "server"; quote?: boolean; chips?: LineChip[]; n?: number | null; keys?: string[] };
 /// The post a card's post quotes, when the server could read it, and (`chain`) the post that one quotes when a name in the line comes from it.
 export type StoryQuoted = { id: string; handle: string | null; text: string | null; at: number | null; url?: string };
 export type StoryCard = {

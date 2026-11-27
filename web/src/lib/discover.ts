@@ -1360,7 +1360,8 @@ export function quoteCut(text: string | null | undefined, max = LINE_QUOTE_MAX):
 /// A usable line of a card: both texts and a known kind, with who wrote it (`by`: "server" only when the body says so),
 /// whether it is the poster's own words (`quote`: a server line's), the chip codes we know and, on a server's counted
 /// sentence, how many coins it counted (`n`, else null); null otherwise (an older server, a damaged body, `line: null`).
-export function lineOf(card: { line?: unknown } | null | undefined): (Required<Omit<StoryPostLine, "n">> & { n: number | null }) | null {
+/// Its key phrases are read apart (lineKeysOf), checked against the sentence.
+export function lineOf(card: { line?: unknown } | null | undefined): (Required<Omit<StoryPostLine, "n" | "keys">> & { n: number | null }) | null {
   const l = card && typeof card === "object" ? (card.line as Partial<StoryPostLine> | null | undefined) : null;
   if (!l || typeof l !== "object" || typeof l.subject !== "string" || typeof l.happened !== "string" || !LINE_KINDS.includes(l.kind as PostLineKind)) return null;
   const subject = plainText(l.subject), happened = plainText(l.happened);
@@ -1440,8 +1441,18 @@ export type SubjectLine = {
   chips: LineChipView[];
   who: string | null; when: string; old: string | null; href: string | null; words: string | null;
   quoted: QuotedView | null;
+  /// the key points of `happened`, drawn brighter (keySpans): a model's own `keys` (checked again, lineKeysOf), else
+  /// the page's own pick (fallbackKeys); none on the poster's own words in quote marks (it is their text).
+  keys: string[];
 };
 export function subjectLine(card: StoryCard | null | undefined, nowS: number, nar = true, o: { row?: (Pick<StoryRow, "name" | "symbol"> & { narrative?: unknown }) | null; coinsN?: number } = {}): SubjectLine | null {
+  const L = lineBase(card, nowS, nar, o);
+  if (!L) return null;
+  // only a model's line (`auto`) carries its own keys; an empty list from the model means "nothing to mark", not "pick"
+  const own = L.auto ? lineKeysOf(card, L.happened) : null;
+  return { ...L, keys: L.quote ? [] : own ?? fallbackKeys(L.happened) };
+}
+function lineBase(card: StoryCard | null | undefined, nowS: number, nar: boolean, o: { row?: (Pick<StoryRow, "name" | "symbol"> & { narrative?: unknown }) | null; coinsN?: number }): Omit<SubjectLine, "keys"> | null {
   const row = o.row ?? card?.coins?.[0] ?? null;
   const n = card?.kind === "narrative" ? narrativeOf(card) : nar ? narrativeOf(card) ?? (card ? null : narrativeOf(row)) : null;
   const title = n ? sentenceCase(card?.subject?.title ?? n.title) : "";
@@ -1479,6 +1490,152 @@ export function subjectLine(card: StoryCard | null | undefined, nowS: number, na
   if (title) return { ...base, subject: title, happened: card.kind === "family" && f ? `${plural(coins, "coin")} launched under ${famLabel(f)}` : plural(coins, "coin"), tone: "light", chips: [...(card.subject ? [] : [aiGroup]), noPost] };
   if (f) return { ...base, subject: f.symbol ? plainText(String(f.symbol)) || short(f.mint) : short(f.mint), happened: `${plural(coins, "coin")} launched under ${famLabel(f)}`, tone: "light", chips: [noPost] };
   return null;
+}
+
+// ---- key points: the few words of a line's sentence a reader should catch first ("Elon Musk changes his profile
+// picture to a dog": "Elon Musk", "profile picture"), drawn brighter in the sentence (components/DiscoverLine.tsx). A
+// newer server sends a model's own pick (`line.keys`); the page checks it again here and never trusts it. Without one
+// (an older line, a line the server wrote, a pending line) the page picks for itself (fallbackKeys): names, figures
+// with a sign or a unit, words in quote marks. The poster's own words in quote marks get none: it is their text.
+
+/// At most this many key phrases in one sentence, each of 1 to KEY_MAX_WORDS words and at most KEY_MAX_CHARS characters.
+export const KEY_MAX = 3;
+export const KEY_MAX_WORDS = 4;
+export const KEY_MAX_CHARS = 40;
+const WORD_CH = /[\p{L}\p{N}]/u;
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/// Where `key` stands in `text` as whole words, ignoring case: [start, end) of each place, in order. A key never
+/// starts or ends inside a word ("Musk" is not found in "Muskrat"); a key that starts or ends with a sign ("$1
+/// million", "95%") is bounded by the sign itself.
+function keyPlaces(text: string, key: string): [number, number][] {
+  if (!key) return [];
+  const out: [number, number][] = [], re = new RegExp(escapeRe(key), "giu");
+  const edgeA = WORD_CH.test(key[0]), edgeB = WORD_CH.test(key[key.length - 1]);
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    const a = m.index, b = a + m[0].length;
+    if ((edgeA && a > 0 && WORD_CH.test(text[a - 1])) || (edgeB && b < text.length && WORD_CH.test(text[b]))) { re.lastIndex = a + 1; continue; }
+    out.push([a, b]);
+  }
+  return out;
+}
+/// Each key at its first place that does not overlap a key placed before it (keys in the order given; one with no
+/// free place is left out), sorted by where they stand.
+function placeKeys(text: string, keys: readonly string[]): { key: string; at: [number, number] }[] {
+  const kept: { key: string; at: [number, number] }[] = [];
+  for (const key of keys) {
+    const at = keyPlaces(text, key).find(([a, b]) => !kept.some((k) => a < k.at[1] && k.at[0] < b));
+    if (at) kept.push({ key, at });
+  }
+  return kept.sort((x, y) => x.at[0] - y.at[0]);
+}
+/// One key phrase made plain and checked against its sentence: a string of 1 to KEY_MAX_WORDS words, at most
+/// KEY_MAX_CHARS characters, with a letter or a digit, found in `happened` as whole words and not the whole of it;
+/// null otherwise.
+function cleanKey(raw: unknown, happened: string): string | null {
+  if (typeof raw !== "string") return null;
+  const k = plainText(raw);
+  if (!k || k.length > KEY_MAX_CHARS || k.split(" ").length > KEY_MAX_WORDS || !WORD_CH.test(k)) return null;
+  if (k.toLowerCase() === happened.trim().toLowerCase() || !keyPlaces(happened, k).length) return null;
+  return k;
+}
+/// A model's key phrases for a card's line (`line.keys`), checked again: each kept only if cleanKey takes it and it
+/// does not overlap one kept before it; at most KEY_MAX, in the order they stand in `happened`. A bad key is dropped,
+/// never the line. null when the line carries no `keys` list at all (an older server or line): the page then picks
+/// for itself; [] when it does and none is left (a thin line: nothing to mark).
+export function lineKeysOf(card: { line?: unknown } | null | undefined, happened: string): string[] | null {
+  const l = card && typeof card === "object" ? (card.line as { keys?: unknown } | null | undefined) : null;
+  if (!l || typeof l !== "object" || !Array.isArray(l.keys)) return null;
+  const ok: string[] = [];
+  for (const raw of l.keys) {
+    const k = cleanKey(raw, happened);
+    if (k && !ok.some((o) => o.toLowerCase() === k.toLowerCase())) ok.push(k);
+  }
+  return placeKeys(happened, ok).slice(0, KEY_MAX).map((k) => k.key);
+}
+/// The sentence cut into plain parts and key parts, in order, covering the whole of it: each key at its first place,
+/// ignoring case and on word boundaries, that does not overlap a key placed before it. The parts keep the sentence's
+/// own letters (a key "profile picture" marks "Profile Picture" as written). No keys: one plain part.
+export type KeySpan = { text: string; key: boolean };
+export function keySpans(happened: string, keys: readonly string[]): KeySpan[] {
+  const out: KeySpan[] = [];
+  let at = 0;
+  for (const { at: [a, b] } of placeKeys(happened, keys.filter((k) => typeof k === "string" && k.length > 0))) {
+    if (a > at) out.push({ text: happened.slice(at, a), key: false });
+    out.push({ text: happened.slice(a, b), key: true });
+    at = b;
+  }
+  if (at < happened.length || !out.length) out.push({ text: happened.slice(at), key: false });
+  return out;
+}
+
+// Short words never marked on their own (a phrase of these only is no key point).
+const KEY_FILLER = new Set(["a", "an", "the", "of", "to", "on", "in", "at", "by", "for", "from", "with", "and", "or", "as", "is", "are", "was", "were", "be", "it", "its", "his", "her", "their", "this", "that", "says", "said", "say", "poster", "post", "posts", "i", "he", "she", "we", "they", "you", "new", "now"]);
+// A word that makes a number a figure: "$1 million", "5 billion".
+// The words dropped from the front of a run of capitals ("The White House": "White House"): articles only, since a
+// name may well start with one of the other short words ("New York Times", "Now TV", "In Bloom").
+const KEY_LEAD = new Set(["a", "an", "the"]);
+const KEY_UNIT = /^(?:million|millions|billion|billions|trillion|thousand|k|m|bn|mn)$/i;
+const OPEN_SIGNS = /^[("“‘'[]+/u, CLOSE_SIGNS = /[)"”’'\],.;:!?…]+$/u;
+/// The page's own key points for a sentence without a model's (an older line, a line the server wrote): at most
+/// KEY_MAX phrases, in the order they stand, never overlapping:
+/// - names: runs of 1 to KEY_MAX_WORDS words that start with a capital ("Top Floor Boss", "Cupsey"), the short words
+///   an article of KEY_LEAD ("The", "A", "An") dropped from the front. A run at the start of the sentence or of a clause (after ";", ":", ".",
+///   "!" or "?") is kept only when it is two or more words ("Elon Musk changes ...") or a possessive ("Trump's son
+///   ...": "Trump"); a lone capital there is just the first word of the sentence. A run ends at a comma or any other closing sign, and after a possessive ("Musk's
+///   dog": "Musk").
+/// - figures: a number with a sign or a unit ("95%", "$1.2M", "$1 million", "300k"); a bare number ("2014") is not.
+/// - words in quote marks inside the sentence ("named “Top G”": "Top G"), 1 to KEY_MAX_WORDS words.
+/// Never a phrase of filler words only, never the whole sentence.
+export function fallbackKeys(happened: string): string[] {
+  const text = typeof happened === "string" ? happened : "";
+  if (!text) return [];
+  // the words: where each one's letters stand (signs around it cut), whether a sign opens it or a sign or a
+  // possessive closes it, and whether it starts the sentence or a clause
+  type Tok = { a: number; b: number; core: string; open: boolean; close: boolean; poss: boolean; start: boolean };
+  const toks: Tok[] = [];
+  let clause = true;
+  for (const m of text.matchAll(/\S+/gu)) {
+    const raw = m[0], lead = raw.match(OPEN_SIGNS)?.[0].length ?? 0;
+    const body = raw.slice(lead), cut = body.replace(CLOSE_SIGNS, "");
+    const poss = /['’]s$/u.test(cut), core = poss ? cut.slice(0, -2) : cut;
+    const a = m.index + lead;
+    toks.push({ a, b: a + core.length, core, open: lead > 0, close: poss || cut.length < body.length, poss, start: clause });
+    clause = /[;:.!?]["”’)]*$/u.test(raw);
+  }
+  const cands: [number, number][] = [];
+  const isCap = (t: Tok) => /^\p{Lu}/u.test(t.core) && t.core !== "I";
+  for (let i = 0; i < toks.length; ) {
+    if (!isCap(toks[i])) { i++; continue; }
+    let j = i;
+    while (!toks[j].close && j + 1 < toks.length && isCap(toks[j + 1]) && !toks[j + 1].open) j++;
+    let s = i;
+    while (s <= j && KEY_LEAD.has(toks[s].core.toLowerCase())) s++;
+    const n = j - s + 1;
+    if (n > 0 && !(toks[s].start && n < 2 && !toks[s].poss)) cands.push([toks[s].a, toks[Math.min(j, s + KEY_MAX_WORDS - 1)].b]);
+    i = j + 1;
+  }
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i], next = toks[i + 1];
+    if (!/\d/.test(t.core)) continue;
+    if (/^[$€£]|%$/u.test(t.core) || /^\d[\d.,]*(?:k|m|b|bn|mn)$/i.test(t.core)) cands.push([t.a, t.b]);
+    if (next && !t.close && /^[$€£]?\d[\d.,]*$/u.test(t.core) && KEY_UNIT.test(next.core)) cands.push([t.a, next.b]);
+  }
+  for (const m of text.matchAll(/["“‘]([^"“”‘’]{1,60})["”’]/gu)) {
+    const inner = m[1].trim(), a = m.index + 1 + m[1].indexOf(inner);
+    if (inner) cands.push([a, a + inner.length]);
+  }
+  // in the order they stand; of two that start together the longer ("$1 million" over "$1"); never overlapping
+  const out: string[] = [], picked: [number, number][] = [];
+  for (const [a, b] of cands.sort((x, y) => x[0] - y[0] || y[1] - x[1])) {
+    if (out.length >= KEY_MAX) break;
+    const k = text.slice(a, b), words = k.split(/\s+/);
+    if (!k || k.length > KEY_MAX_CHARS || words.length > KEY_MAX_WORDS || !WORD_CH.test(k) || k.toLowerCase() === text.trim().toLowerCase()) continue;
+    if (words.every((w) => KEY_FILLER.has(w.toLowerCase())) || picked.some(([pa, pb]) => a < pb && pa < b)) continue;
+    if (out.some((o) => o.toLowerCase() === k.toLowerCase())) continue;
+    picked.push([a, b]);
+    out.push(k);
+  }
+  return out;
 }
 
 // ---- alerts
