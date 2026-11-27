@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Db } from "../lib/db.mjs";
-import { NameCounts, Baseline, readBaseline, readBootstrap, PARTIAL } from "../lib/name-counts.mjs";
+import { NameCounts, Baseline, readBaseline, readBootstrap, bootOpts, PARTIAL } from "../lib/name-counts.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
 const H0 = 498_600; // an hour number (unix s / 3600), Nov 2026
@@ -123,7 +123,7 @@ function baseFile(dir) {
   return { file, H };
 }
 
-test("readBaseline: clean hours only, orphans and the last 24 h left out, most creators first; known needs 5+ whole carriers on 2+ days; a cap is reported", () => {
+test("readBaseline: clean hours only, orphans and the last 24 h left out, most creators first; known needs 10+ whole carriers (and 3 in 10,000 launches) on 2+ days; a cap is reported", () => {
   const dir = mkdtempSync(join(tmpdir(), "spore-names-"));
   try {
     const { file, H } = baseFile(dir);
@@ -133,7 +133,11 @@ test("readBaseline: clean hours only, orphans and the last 24 h left out, most c
     assert.deepEqual(b.f, ["cat", "day2", "veto"], "C >= 2 or W >= 2; a singleton (once) is left to the prior");
     assert.deepEqual(of.veto, { C: 2, W: 2, known: false });
     assert.deepEqual(of.cat, { C: 90, W: 90, known: true });
-    assert.equal(of.day2.known, true, "6 whole carriers on 2 days");
+    assert.equal(of.day2.known, false, "rules v3: 6 whole carriers on 2 days is a scrap, not a known token");
+    const low = readBaseline(file, H, { knownLaunches: 5 });
+    assert.equal(!!low.k[low.f.indexOf("day2")], true, "6 on 2 days is known at the v2 floor of 5");
+    const share = readBaseline(file, H, { knownShare: 0.05 });
+    assert.equal(!!share.k[share.f.indexOf("cat")], false, "90 whole carriers in 4,000 launches is under a 5% share");
     const capped = readBaseline(file, H, { maxFeatures: 1 });
     assert.deepEqual([capped.f, capped.capHit], [["cat"], true]);
     const base = new Baseline({ H, hours: b.hours, launches: b.launches, at: 0, map: new Map() });
@@ -281,4 +285,18 @@ test("the bootstrap is pulled while under bootQueueMax rows wait to be written; 
   assert.equal(db.nameHoursIn(H0 - 40, H0 - 39).length, 0, "the bootstrap hour is not");
   assert.equal(db.kvGet("waveBoot", null), null, "the next start seeds again");
   db.close();
+});
+
+test("the bootstrap keeps its own known threshold (5+): the worker gets bootKnownLaunches and bootOpts never hands it the live baseline's 10", async () => {
+  FakeWorker.all = [];
+  const db = new Db(":memory:");
+  const { c } = counter(db, { file: "x.sqlite", Worker: FakeWorker });
+  const o = FakeWorker.all[0].opts.workerData.opts;
+  assert.deepEqual([o.knownLaunches, o.bootKnownLaunches], [10, 5]);
+  const b = bootOpts(o);
+  assert.equal(b.knownLaunches, 5);
+  assert.equal(b.knownShare, undefined);
+  assert.equal(b.knownDays, 2);
+  assert.equal(bootOpts({ knownLaunches: 10, bootKnownLaunches: 7 }).knownLaunches, 7);
+  await c.stop(); db.close();
 });

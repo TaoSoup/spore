@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Db } from "../lib/db.mjs";
 import { Baseline } from "../lib/name-counts.mjs";
-import { NameWaves, poissonTail, formTest, tierOf, waveKey, WAVE_DEFAULTS } from "../lib/waves.mjs";
+import { NameWaves, poissonTail, formTest, tierOf, tierFor, waveKey, WAVE_DEFAULTS, WAVE_RULES_V } from "../lib/waves.mjs";
 
 const quiet = { info() {}, warn() {}, error() {} };
 const NOW = 1_795_000_000; // 2026-11-18 (UTC)
@@ -69,10 +69,10 @@ test("formation at 5 distinct creators with 3x and the tail; a creator counts on
   await settle(w);
   const [row] = db.wavesOpen();
   assert.equal(row.key, `w:word-veto-${DAY}`);
-  assert.deepEqual([row.n, row.ctx, row.win, row.cBase, row.cMissing, row.baseN, row.baseHours, row.v], [5, 6, 6 * 3600, 2, false, 100_000, 600, 1]);
+  assert.deepEqual([row.n, row.ctx, row.win, row.cBase, row.cMissing, row.baseN, row.baseHours, row.v], [5, 6, 6 * 3600, 2, false, 100_000, 600, WAVE_RULES_V]);
   assert.ok(Math.abs(row.e - (2.5 / 100_000) * 1006) < 1e-6, "e = (C + 0.5) / N_base x N_W");
   assert.ok(row.tail < 1e-4 && row.r < 0.1);
-  assert.deepEqual(row.why.carriers, { w: 6, p: 0, s: 0 });
+  assert.deepEqual(row.why.carriers, { w: 6, p: 0, s: 0, y: 0 });
   assert.equal(row.why.first.length, 6);
   assert.equal(all(db, "SELECT COUNT(*) AS n FROM wave_coins WHERE wave_key = ?", row.key)[0].n, 6, "all six carriers join by name");
   db.close();
@@ -269,7 +269,8 @@ test("a pending coin decided by evidence, then offered lexically by a wave forme
 
 test("the formation r is the minimum over both windows: 6 h fires with r6 above 0.1 while r24 is under it, and every carrier, the one that formed it included, joins by name", async () => {
   const clock = { s: NOW - 12 * 3600 };
-  const { w, db, counts } = world({ clock, features: { delta: { C: 80, W: 80 } } });
+  // the clone path is off here: 20 creators of two names would form "delta", "one" and "two" as clone waves 12 h ago
+  const { w, db, counts } = world({ clock, features: { delta: { C: 80, W: 80 } }, cfg: { cloneN: Infinity } });
   // 12 h ago: 20 creators of two Delta names (two contexts: no formation in either window), among 1,000 launches
   fill(w, 1000);
   for (let i = 0; i < 20; i++) feed(w, i % 2 ? "Delta one" : "Delta two", `O${i}`);
@@ -500,4 +501,188 @@ test("a trim's step timers are let go as they fire", async () => {
   await w.trim();
   assert.equal(w.trimTimers.size, 0);
   db.close();
+});
+
+test("rules v2, the clone path: one exact name from many creators forms when only the contexts fail; a near miss keeps fail ctx", () => {
+  const z = formTest({ n: 48, e: 1.34, ctx: 1 });
+  assert.deepEqual([z.pass, z.fail, z.via], [true, null, "clone"], "Zerocoin: 48 creators, e 1.34, one context");
+  assert.ok(z.tail < 1e-8);
+  assert.deepEqual([formTest({ n: 9, e: 0.01, ctx: 1 }).fail, formTest({ n: 9, e: 0.01, ctx: 1 }).via], ["ctx", null], "under cloneN");
+  assert.equal(formTest({ n: 12, e: 2, ctx: 1 }).fail, "ctx", "12 < 10 x 2");
+  assert.equal(formTest({ n: 10, e: 1, ctx: 2 }).fail, "ctx", "the tail at e 1 is 1.1e-7, over cloneTail");
+  assert.equal(formTest({ n: 6, e: 0.5, ctx: 3 }).via, "ctx");
+  assert.equal(formTest({ n: 48, e: 20, ctx: 1 }).fail, "ratio", "the ratio and tail checks still come first");
+  assert.deepEqual([WAVE_DEFAULTS.cloneN, WAVE_DEFAULTS.cloneRatio, WAVE_DEFAULTS.cloneTail], [10, 10, 1e-8]);
+  assert.deepEqual([tierFor(0.05, "w"), tierFor(0.05, "y"), tierFor(0.2, "y"), tierFor(0.5, "y"), tierFor(null, "y")], ["lexical", "evidence", "evidence", null, "evidence"]);
+});
+
+test("rules v2: a Zerocoin burst forms a clone wave through the Waves class and its carriers join by name; six Vetocat clones still do not", async () => {
+  const { w, db } = world();
+  fill(w, 1000);
+  for (let i = 0; i < 9; i++) feed(w, "Zerocoin", `Z${i}`, { mint: `Z${i}m` });
+  assert.equal(w.open.size, 0, "nine creators: under cloneN");
+  feed(w, "Zerocoin", "Z9", { mint: "Z9m" });
+  const wave = w.open.get("zerocoin");
+  assert.ok(wave, "the tenth forms it");
+  assert.deepEqual([wave.kind, wave.key, wave.ctx, wave.why.via], ["clone", `w:clone-zerocoin-${DAY}`, 1, "clone"]);
+  for (let i = 10; i < 48; i++) feed(w, "Zerocoin", `Z${i}`, { mint: `Z${i}m` });
+  await settle(w);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM wave_coins WHERE wave_key = ? AND reason = 'lexical'", wave.key)[0].n, 48);
+  assert.deepEqual(all(db, "SELECT kind FROM waves").map((r) => r.kind), ["clone"]);
+  assert.deepEqual(all(db, "SELECT fail FROM wave_tests WHERE feature = 'zerocoin'").map((r) => r.fail), ["ctx"], "the near miss before the tenth");
+  ["Vetocat", "Vetocat 2", "Vetocat AI", "Vetocat Inu", "Vetocat 2.0", "Vetocat"].forEach((n, i) => feed(w, n, `K${i}`));
+  assert.equal(w.open.has("vetocat"), false);
+  db.close();
+});
+
+test("rules v2: a symbol-only carrier is listed but not counted; it never joins by name, only with evidence; the windows stay symmetric", async () => {
+  const model = fakeModel({ posts: { V0m: "555", Y0m: "555" } });
+  const { w, db, clock, counts } = world({ features: { veto: { C: 2, W: 2 } }, model });
+  fill(w, 1000);
+  for (let i = 0; i < 6; i++) feed(w, `qy${i.toString(36)}x`, `Y${i}`, { mint: `Y${i}m`, symbol: "VETO" });
+  ["Mr Veto", "Veto Cat", "Don Veto", "Veto King"].forEach((n, i) => feed(w, n, `V${i}`, { mint: `V${i}m` }));
+  const F = w.feats.get("veto");
+  assert.deepEqual([F.cr[0].size, F.cr[1].size, F.n[0], F.list.length - F.lh], [4, 4, 4, 10], "ten listed, four counted");
+  assert.equal(w.open.size, 0, "six ticker-only carriers do not make four name carriers a wave");
+  feed(w, "Veto Moon", "V4", { mint: "V4m" });
+  const wave = w.open.get("veto");
+  assert.ok(wave && wave.r <= 0.1);
+  feed(w, "qyafterx", "Y9", { mint: "Y9m", symbol: "VETO" });
+  await settle(w);
+  assert.deepEqual(wave.why.carriers, { w: 5, p: 0, s: 0, y: 6 });
+  const reasons = Object.fromEntries(all(db, "SELECT mint, reason, how FROM wave_coins").map((r) => [r.mint, `${r.reason}:${r.how}`]));
+  for (let i = 0; i < 5; i++) assert.equal(reasons[`V${i}m`], "lexical:w");
+  for (const m of ["Y0m", "Y1m", "Y5m", "Y9m"]) assert.equal(reasons[m], "pending:y", m);
+  await w.evidencePass(); flushAll(w);
+  assert.equal(coin(db, "Y0m").reason, "post", "the same post as a name carrier of another creator");
+  assert.equal(coin(db, "Y1m").reason, "pending");
+  // every launch leaves both windows: the counts return to exactly zero (the open wave keeps the entry)
+  clock.s += 6 * 3600 + 10; w.tick();
+  assert.deepEqual([F.cr[0].size, F.n[0], F.cr[1].size, F.n[1]], [0, 0, 5, 5], "the 6 h window is empty, the 24 h one holds the five name carriers");
+  clock.s += 18 * 3600; counts.base = baseOf(clock, { veto: { C: 2, W: 2 } }); w.tick();
+  const G = w.feats.get("veto");
+  assert.equal(G, F, "the wave was still open when its launches left");
+  assert.deepEqual([G.cr[0].size, G.cr[1].size, G.cx[1].size, G.n[0], G.n[1], G.s[1]], [0, 0, 0, 0, 0, 0]);
+  db.close();
+});
+
+/** A v1 wave row as the live database holds it. */
+const v1Wave = (key, feature, o = {}) => ({ key, feature, kind: "seg", v: 1, formedT: NOW - 3600, formedAt: NOW - 3600, win: 6 * 3600, n: 102, ctx: 40, e: 3, r: 0.03, tail: 1e-30, share0: 1e-4, cBase: 5, cMissing: false, baseN: 100_000, baseHours: 600, baseH: 1, nWin: 10_000, lastT: NOW - 60, endedT: null, reopens: 0, members: 102, pending: 0, unconfirmed: 0, why: { v: 1 }, ...o });
+
+test("rules v2, the version reset: v1 rows go once (waves, coins, candidacies, hours), near misses and launches stay, kv is set; a second start does nothing; a stray v1 row is never loaded", () => {
+  const db = new Db(":memory:"), clock = { s: NOW };
+  db.transaction(() => {
+    db.wavePut(v1Wave("w:seg-ing-20261118", "ing"));
+    db.waveCoinPut({ mint: "Q1", t: NOW - 600, reason: "lexical", waveKey: "w:seg-ing-20261118", how: "s" });
+    db.waveCandPut("Q1", "w:seg-ing-20261118", 0.03, "s", NOW - 600);
+    db.waveHourPut({ h: Math.floor(NOW / 3600) - 1, key: "w:seg-ing-20261118" });
+    db.waveTestPut({ h: Math.floor(NOW / 3600) - 1, feature: "zerocoin", v: 1, fail: "ctx" });
+    db.waveLaunchPut([NOW - 60, "Q2", NOW * 1000 - 60_000, "C2", "Big Dog", "BDOG", "big:w,dog:w,bdog:w", 1]);
+  });
+  assert.equal(db.kvGet("waveRulesV"), null);
+  const a = world({ db, clock });
+  const reset = a.w.snapshot().rules.reset;
+  assert.deepEqual([reset.from, reset.to, reset.waves, reset.coins, reset.cands, reset.hours], [null, WAVE_RULES_V, 1, 1, 1, 1]);
+  assert.equal(db.kvGet("waveRulesV"), WAVE_RULES_V);
+  for (const t of ["waves", "wave_coins", "wave_cands", "wave_hours"]) assert.equal(all(db, `SELECT COUNT(*) AS n FROM ${t}`)[0].n, 0, t);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM wave_tests")[0].n, 1, "near misses keep their v");
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM wave_launches")[0].n, 1);
+  // the restored v1 launch reads as v2: its ticker word is symbol-only and counted nowhere
+  assert.deepEqual(a.w.byMint.get("Q2").feats.map((x) => `${x.f}:${x.how}`), ["big:w", "dog:w", "bdog:y"]);
+  assert.equal(a.w.feats.get("bdog").cr[1].size, 0);
+  // rows written under v2, plus a stray v1 row: a second start deletes nothing and loads only its own version
+  db.wavePut(v1Wave("w:seg-ers-20261118", "ers"));
+  db.wavePut(v1Wave(`w:word-veto-${DAY}`, "veto", { kind: "word", v: WAVE_RULES_V }));
+  db.waveCoinPut({ mint: "Q3", t: NOW - 60, reason: "lexical", waveKey: `w:word-veto-${DAY}`, how: "w" });
+  const b = world({ db, clock });
+  assert.equal(b.w.snapshot().rules.reset, null);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM waves")[0].n, 2);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM wave_coins")[0].n, 1);
+  assert.deepEqual([b.w.open.has("veto"), b.w.open.has("ers"), b.w.snapshot().rules.skipped], [true, false, 1]);
+  // a clean database: kv set, nothing reset
+  const c = world();
+  assert.deepEqual([c.db.kvGet("waveRulesV"), c.w.snapshot().rules.reset], [WAVE_RULES_V, null]);
+  db.close(); c.db.close();
+});
+
+test("rules v2, restart: a v1 grammar-suffix cut restored from wave_launches is not counted, so a later ING ticker forms no 'ing' wave", () => {
+  const db = new Db(":memory:"), clock = { s: NOW };
+  const stems = ["buy", "farm", "pump", "jump", "talk", "walk", "cook", "read", "kick", "mark", "park", "bark", "dunk", "fish", "hunt", "lift", "melt", "pick", "rock", "surf"];
+  db.transaction(() => {
+    stems.forEach((st, i) => db.waveLaunchPut([NOW - 600 + i, `G${i}m`, (NOW - 600 + i) * 1000, `G${i}`, `${st}ing Dog`, "", `${st}ing:w,dog:w,${st}:s:ing,ing:s:${st}`, 1]));
+  });
+  const { w } = world({ db, clock });
+  assert.equal(w.byMint.get("G0m").feats.map((x) => `${x.f}:${x.how}`).join(","), "buying:w,dog:w");
+  assert.equal(w.feats.get("ing")?.cr[1].size ?? 0, 0, "no restored launch carries ing");
+  fill(w, 1000);
+  feed(w, "Totally Other", "T1", { mint: "T1m", symbol: "ING" });
+  assert.equal(w.open.size, 0);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM waves")[0].n, 0);
+  db.close();
+});
+
+test("rules v2: a failed version check keeps waves off in this process (no counts, no restore, launches dropped) and shows it in health", () => {
+  const db = new Db(":memory:"), clock = { s: NOW };
+  db.wavePut(v1Wave("w:seg-ing-20261118", "ing"));
+  db.waveLaunchPut([NOW - 60, "Q2", NOW * 1000 - 60_000, "C2", "Big Dog", "BDOG", "big:w,dog:w,bdog:w", 1]);
+  let calls = 0;
+  db.wavesRulesReset = () => { calls++; throw new Error("SQLITE_BUSY"); };
+  const counts = fakeCounts(baseOf(clock));
+  let started = 0; counts.start = () => { started++; };
+  const w = new NameWaves({ db, counts, now: () => clock.s * 1000, log: quiet, cfg: IDLE }).start();
+  assert.equal(calls, 2, "tried twice");
+  assert.equal(started, 0, "the counts are not started");
+  assert.equal(db.kvGet("waveRulesV"), null);
+  assert.equal(w.byMint.size, 0, "nothing restored");
+  assert.equal(w.timers.length, 0);
+  feed(w, "Zerocoin", "Z1");
+  assert.deepEqual([w.byMint.size, counts.added.length], [0, 0]);
+  const s = w.snapshot();
+  assert.match(s.rules.off, /SQLITE_BUSY/);
+  assert.equal(s.rules.offDropped, 1);
+  assert.equal(all(db, "SELECT COUNT(*) AS n FROM waves")[0].n, 1, "the v1 row is left for the next start");
+  db.close();
+});
+
+test("rules v3: a burst carried only as a split piece never forms through the clone path (Terrier -> ter + rier); the whole name still forms its clone wave", async () => {
+  const { w, db } = world({ features: { ter: { C: 8, W: 8, known: true } } });
+  fill(w, 1000);
+  for (let i = 0; i < 12; i++) feed(w, "Terrier", `R${i}`, { mint: `R${i}m` });
+  const F = w.feats.get("rier");
+  assert.deepEqual([F.cr[0].size, F.cx[0].size, F.s[0], F.n[0]], [12, 1, 12, 12], "twelve creators, one context, every carriage a split");
+  assert.equal(formTest({ n: 12, e: 0.02, ctx: 1 }).via, "clone", "the counts alone would pass the clone path");
+  assert.ok(!w.open.has("rier") && !w.open.has("ter"), "no wave from the split pieces");
+  const wave = w.open.get("terrier");
+  assert.ok(wave, "the whole name is a clone burst");
+  assert.deepEqual([wave.kind, wave.why.via], ["clone", "clone"]);
+  await settle(w);
+  assert.deepEqual(all(db, "SELECT kind, feature FROM waves").map((r) => `${r.kind}:${r.feature}`), ["clone:terrier"]);
+  assert.deepEqual(all(db, "SELECT DISTINCT fail FROM wave_tests WHERE feature IN ('rier', 'ter')").map((r) => r.fail), ["ctx"], "recorded as near misses on the context rule");
+  db.close();
+});
+
+test("rules v3, restart: launches stored before kv waveRulesAt lose their splits, later ones keep them; waveRulesAt is set on a version change, not on a normal restart", () => {
+  const db = new Db(":memory:"), clock = { s: NOW };
+  db.kvSet("waveRulesV", 2);
+  db.transaction(() => {
+    for (let i = 0; i < 5; i++) db.waveLaunchPut([NOW - 600 + i, `O${i}m`, (NOW - 600 + i) * 1000, `O${i}`, "Catmas", "", "catmas:w,cat:s:mas,mas:s:cat", 1]);
+  });
+  const a = world({ db, clock });
+  assert.equal(db.kvGet("waveRulesAt"), NOW, "set when the version changes");
+  assert.equal(db.kvGet("waveRulesV"), WAVE_RULES_V);
+  assert.deepEqual(a.w.byMint.get("O0m").feats.map((x) => `${x.f}:${x.how}`), ["catmas:w"]);
+  assert.equal(a.w.feats.get("mas")?.cr[1].size ?? 0, 0, "the old splits count no creator");
+  db.transaction(() => {
+    for (let i = 0; i < 3; i++) db.waveLaunchPut([NOW + 60 + i, `N${i}m`, (NOW + 60 + i) * 1000, `N${i}`, "Dogmas", "", "dogmas:w,dog:s:mas,mas:s:dog", 1]);
+  });
+  clock.s = NOW + 120;
+  const b = world({ db, clock });
+  assert.equal(db.kvGet("waveRulesAt"), NOW, "a normal restart leaves it");
+  assert.equal(b.w.snapshot().rules.reset, null);
+  assert.deepEqual(b.w.byMint.get("O1m").feats.map((x) => `${x.f}:${x.how}`), ["catmas:w"]);
+  assert.deepEqual(b.w.byMint.get("N0m").feats.map((x) => `${x.f}:${x.how}`), ["dogmas:w", "dog:s", "mas:s"]);
+  assert.deepEqual([b.w.feats.get("mas").cr[1].size, b.w.feats.get("mas").s[1], b.w.feats.get("cat")?.cr[1].size ?? 0], [3, 3, 0], "only the launches after waveRulesAt carry mas");
+  const c = world();
+  assert.equal(c.db.kvGet("waveRulesAt"), NOW, "a clean database records it too");
+  db.close(); c.db.close();
 });

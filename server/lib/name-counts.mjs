@@ -14,7 +14,8 @@
 // Baseline. A worker thread (this file, `workerData.role === "name-baseline"`, the lib/story-groups-live.mjs pattern) reads
 // the clean hours H-720 <= h < H-24 on its own read-only connection, hourly and at boot (the last 24 h are left out, so
 // a wave never raises its own baseline before it forms), and posts per feature C (sum of hourly distinct creators), W
-// (sum of whole-word carriers) and whether it is a known token (carried whole by 5+ launches on 2+ days), most creators
+// (sum of whole-word carriers) and whether it is a known token (rules v3: carried whole by max(10, 3e-4 x baseline
+// launches) launches on 2+ days; the one-time bootstrap vocabulary below keeps 5+, bootKnownLaunches), most creators
 // first, 2,000 per message; the hand-off is pulled: the worker posts one message and waits until the main thread, having
 // filed its 2,000 into a new Map, asks for the next ({ kind: "more" }), so each message gets its own event-loop turn
 // (Node delivers every queued port message in one callback: pushed back to back, 100 of them were filed in one block);
@@ -39,7 +40,7 @@ import { nameFeatures, nonAscii as hasNonAscii } from "./name-features.mjs";
 export const COUNT_DEFAULTS = Object.freeze({
   closeAfterS: 120, edgeS: 120, maxGapS: 120, minLaunches: 100,
   writeChunk: 200, writeStepMs: 250, tickMs: 5000,
-  baseHours: 720, excludeHours: 24, maxFeatures: 200_000, chunk: 2000, knownLaunches: 5, knownDays: 2,
+  baseHours: 720, excludeHours: 24, maxFeatures: 200_000, chunk: 2000, knownLaunches: 10, knownShare: 3e-4, knownDays: 2, bootKnownLaunches: 5,
   needHours: 24, needLaunches: 20_000, staleMs: 3 * 3600_000, everyMs: 3600_000, firstMs: 5000, restarts: 5,
   trimEveryMs: 3600_000, trimChunk: 2000, trimPauseMs: 250, bootQueueMax: 4000,
 });
@@ -57,7 +58,7 @@ const unpack = (v) => { const k = v % 2, r = (v - k) / 2; return { C: Math.floor
  * known, capHit, ms }`, features with C >= 2 or W >= 2, most creators first then by feature (a cap cuts the same ones
  * every time, so a replay recomputes it exactly), at most `maxFeatures` (capHit says it was cut).
  */
-export function readBaseline(file, H, { baseHours = 720, excludeHours = 24, maxFeatures = 200_000, knownLaunches = 5, knownDays = 2 } = {}) {
+export function readBaseline(file, H, { baseHours = 720, excludeHours = 24, maxFeatures = 200_000, knownLaunches = 10, knownShare = 3e-4, knownDays = 2 } = {}) {
   const t0 = Date.now();
   const db = new DatabaseSync(file, { readOnly: true });
   try {
@@ -71,10 +72,13 @@ export function readBaseline(file, H, { baseHours = 720, excludeHours = 24, maxF
     const n = Math.min(rows.length, maxFeatures);
     const f = new Array(n), c = new Uint32Array(n), w = new Uint32Array(n), k = new Uint8Array(n);
     let known = 0;
+    // rules v3: a known token is an established word (10+ whole carriers and 3 in 10,000 launches), so a rare scrap such
+    // as "ter" (8 whole carriers in three days) never splits "sister", "terrier" or "fighter"
+    const knownMin = Math.max(knownLaunches, knownShare * Number(hr.launches));
     for (let i = 0; i < n; i++) {
       const r = rows[i];
       f[i] = r.f; c[i] = Number(r.cr); w[i] = Number(r.wh);
-      if (w[i] >= knownLaunches && Number(r.days) >= knownDays) { k[i] = 1; known++; }
+      if (w[i] >= knownMin && Number(r.days) >= knownDays) { k[i] = 1; known++; }
     }
     return { H, hours: Number(hr.hours), launches: Number(hr.launches), f, c, w, k, known, capHit, ms: Date.now() - t0 };
   } finally { db.close(); }
@@ -131,6 +135,7 @@ export function readBootstrap(logFile, haveHours, H, { minLaunches = 100, edgeS 
       for (const ft of nameFeatures(x.name, x.symbol, vocab)) {
         let s = feats.get(ft.f);
         if (!s) feats.set(ft.f, s = { n: 0, w: 0, cr: new Set() });
+        // whole = every carriage but a split: a symbol-only word ("y", rules v2) counts as a whole word, as in v1
         s.n++; if (ft.how !== "s") s.w++; if (x.creator) s.cr.add(x.creator);
       }
     }
@@ -153,12 +158,20 @@ function* baseMessages(m, chunk) {
   }
   yield [{ kind: "base-end", id: m.id }];
 }
+/**
+ * The bootstrap's options from the worker's: its vocabulary keeps its own threshold (`bootKnownLaunches`, 5+ whole
+ * carriers on 2+ days, the rule the live bootstrap ran with), never the live baseline's `knownLaunches`.
+ */
+export function bootOpts(opts = {}) {
+  const { bootKnownLaunches = 5, knownLaunches: _live, knownShare: _share, ...rest } = opts;
+  return { ...rest, knownLaunches: bootKnownLaunches };
+}
 /** The bootstrap as worker messages: per hour its rows by 2,000 then its hour row; the end. */
 function* bootMessages(m, chunk) {
   const sdb = new DatabaseSync(workerData.file, { readOnly: true });
   let have;
   try { sdb.exec("PRAGMA query_only = ON"); have = new Set(sdb.prepare("SELECT h FROM name_hours").all().map((x) => x.h)); } finally { sdb.close(); }
-  const r = readBootstrap(m.logFile, have, m.H, workerData.opts ?? {});
+  const r = readBootstrap(m.logFile, have, m.H, bootOpts(workerData.opts ?? {}));
   let rows = 0;
   for (const hr of r.hours) {
     for (let i = 0; i < hr.rows.length; i += chunk) yield [{ kind: "boot-rows", id: m.id, rows: hr.rows.slice(i, i + chunk) }];
@@ -264,7 +277,7 @@ export class NameCounts {
   }
 
   #spawn() {
-    try { this.worker = new this.W(new URL(import.meta.url), { workerData: { role: "name-baseline", file: this.file, chunk: this.cfg.chunk, opts: { baseHours: this.cfg.baseHours, excludeHours: this.cfg.excludeHours, maxFeatures: this.cfg.maxFeatures, knownLaunches: this.cfg.knownLaunches, knownDays: this.cfg.knownDays, minLaunches: this.cfg.minLaunches, edgeS: this.cfg.edgeS } } }); }
+    try { this.worker = new this.W(new URL(import.meta.url), { workerData: { role: "name-baseline", file: this.file, chunk: this.cfg.chunk, opts: { baseHours: this.cfg.baseHours, excludeHours: this.cfg.excludeHours, maxFeatures: this.cfg.maxFeatures, knownLaunches: this.cfg.knownLaunches, knownShare: this.cfg.knownShare, knownDays: this.cfg.knownDays, bootKnownLaunches: this.cfg.bootKnownLaunches, minLaunches: this.cfg.minLaunches, edgeS: this.cfg.edgeS } } }); }
     catch (e) { this.worker = null; this.stats.fails++; this.stats.lastError = e?.message ?? String(e); this.firstDone = true; this.log.warn?.(`name counts: worker not started (${this.stats.lastError})`); return; }
     const w = this.worker;
     w.on("message", (m) => { if (w === this.worker) this.#onMessage(m); });
@@ -357,6 +370,7 @@ export class NameCounts {
     for (const ft of x.feats) {
       let s = a.feats.get(ft.f);
       if (!s) a.feats.set(ft.f, s = { n: 0, w: 0, cr: new Set() });
+      // whole = every carriage but a split: a symbol-only word ("y", rules v2) counts as a whole word, as in v1
       s.n++; if (ft.how !== "s") s.w++; else a.sFeats++;
       if (x.creator) s.cr.add(x.creator);
     }

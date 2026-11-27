@@ -2,7 +2,7 @@
 // inside a word that is itself new (critique fixes B and G), Unicode words (H), and the name folds the clone rule uses (F).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nameFeatures, nameKey, nameRest, camelParts, bestCut, featureOk, featsText, parseFeats, FUNCTION_WORDS, NAME_FILLER, MAX_FEATURES } from "../lib/name-features.mjs";
+import { nameFeatures, nameKey, nameRest, camelParts, bestCut, featureOk, featsText, parseFeats, featsV2, FUNCTION_WORDS, NAME_FILLER, SUFFIXES, MAX_FEATURES } from "../lib/name-features.mjs";
 
 // a vocabulary: elon, harry, cat, christ and leone are known tokens; christmas and thomas have their own history
 const WHOLE = { elon: 900, harry: 400, cat: 3000, christ: 60, christmas: 800, thomas: 200, leone: 50, dog: 2000, mas: 30 };
@@ -33,9 +33,9 @@ test("camel boundaries: XMASTree, iPhone, DeFi, a digit stays with the part befo
   assert.deepEqual(fs("DeFi"), ["defi:w"], "two-letter ASCII parts are no features");
 });
 
-test("symbol words are whole words; the strongest carriage wins; function words and numbers are dropped; at most 12 features", () => {
+test("symbol-only words are y (v2); the strongest carriage wins; function words and numbers are dropped; at most 12 features", () => {
   assert.deepEqual(fs("Mr Veto", "VETO"), ["veto:w"], "the symbol repeats a name word: one feature");
-  assert.deepEqual(fs("Big Dog", "BDOG"), ["big:w", "dog:w", "bdog:w"]);
+  assert.deepEqual(fs("Big Dog", "BDOG"), ["big:w", "dog:w", "bdog:y"], "a word only the symbol carries is the weakest label (v2)");
   assert.deepEqual(fs("DogCoin", "dogcoin"), ["dogcoin:w", "dog:p", "coin:p"], "dogcoin is whole (w) though a split would also carry it");
   assert.deepEqual(fs("The 2025 cat of the year"), ["cat:w", "year:w"], "the, of, numbers and short words are no features");
   for (const w of FUNCTION_WORDS) assert.equal(featureOk(w), false, w);
@@ -75,7 +75,67 @@ test("nameKey folds Veto, VETO coin and The Veto; nameRest is the rest of the na
 
 test("features round-trip through the stored text", () => {
   const f = nameFeatures("Elonmas", "XMAS", vocab());
-  assert.equal(featsText(f), "elonmas:w,xmas:w,elon:s:mas,mas:s:elon");
+  assert.equal(featsText(f), "elonmas:w,elon:s:mas,mas:s:elon,xmas:y");
   assert.deepEqual(parseFeats(featsText(f)), f);
   assert.deepEqual(parseFeats(""), []);
+});
+
+test("rules v2: no grammar-suffix cut (buy + ing, farm + ing, pump + ing); a new compound still splits; a prefix-side residual is unaffected", () => {
+  const v = vocab({ buy: 500, farm: 300, pump: 800 });
+  const known = (f) => ["elon", "harry", "cat", "christ", "leone", "dog", "buy", "farm", "pump"].includes(f);
+  const vk = { ...v, known };
+  assert.equal(bestCut("buying", vk), null, "buy + ing is grammar");
+  assert.equal(bestCut("farming", vk), null);
+  assert.equal(bestCut("pumping", vk), null);
+  assert.equal(bestCut("dogness", vk), null, "ness");
+  assert.deepEqual(fs("Buying Dog", "", vk), ["buying:w", "dog:w"]);
+  assert.deepEqual(bestCut("elonmas", vk), { known: "elon", rest: "mas" }, "-mas is not a grammar suffix");
+  assert.deepEqual(bestCut("ingcat", vk), { known: "cat", rest: "ing" }, "only the suffix side is refused");
+  assert.ok(Object.isFrozen(SUFFIXES) && SUFFIXES.includes("ing") && SUFFIXES.every((x) => x.length >= 3));
+});
+
+test("rules v2: the suffix cut is refused when the ending itself is a known token (ing + buy, less + hope)", () => {
+  const known = (f) => ["elon", "dog", "buy", "farm", "ing", "hope", "less", "care", "able", "drink", "fash", "ion"].includes(f);
+  const vk = { whole: (f) => ({ elon: 900, dog: 2000, buy: 500, farm: 300, ing: 50, hope: 400, less: 80, care: 300, able: 60, drink: 100, fash: 20, ion: 40 })[f] ?? 0, known, n: 1_000_000 };
+  for (const w of ["buying", "farming", "hopeless", "careless", "drinkable", "fashion"]) assert.equal(bestCut(w, vk), null, w);
+  assert.deepEqual(fs("Hopeless Dog", "HOPE", vk), ["hopeless:w", "dog:w", "hope:y"]);
+  assert.deepEqual(fs("Buying Dog", "ING", vk), ["buying:w", "dog:w", "ing:y"]);
+  assert.deepEqual(bestCut("elonmas", vk), { known: "elon", rest: "mas" }, "a new compound still splits");
+});
+
+test("rules v2: a word only the symbol carries is y; a word the name carries keeps w or p; symbol words are not split", () => {
+  assert.deepEqual(fs("Peter Waves", "URCOIN"), ["peter:w", "waves:w", "urcoin:y"]);
+  assert.deepEqual(fs("UrCoin", "URCOIN"), ["urcoin:w", "coin:p"], "the name carries it: w");
+  assert.deepEqual(fs("HarryMas", "MAS"), ["harrymas:w", "harry:p", "mas:p"], "a camel part beats the symbol");
+  assert.deepEqual(fs("Big", "ELONMAS"), ["big:w", "elonmas:y"], "no cut of a ticker");
+  assert.deepEqual(parseFeats("urcoin:y,peter:w,mas:p,elon:s:mas"), [{ f: "urcoin", how: "y" }, { f: "peter", how: "w" }, { f: "mas", how: "p" }, { f: "elon", how: "s", other: "mas" }]);
+  const f = nameFeatures("Peter Waves", "URCOIN", vocab());
+  assert.deepEqual(parseFeats(featsText(f)), f);
+});
+
+test("featsV2 reads v1 launch features as v2: a symbol word stored as w becomes y, a split of a symbol word goes, name features stay", () => {
+  assert.deepEqual(featsV2(parseFeats("big:w,dog:w,bdog:w"), "Big Dog"), [{ f: "big", how: "w" }, { f: "dog", how: "w" }, { f: "bdog", how: "y" }]);
+  assert.deepEqual(featsV2(parseFeats("big:w,elonmas:w,elon:s:mas,mas:s:elon"), "Big"), [{ f: "big", how: "w" }, { f: "elonmas", how: "y" }]);
+  assert.deepEqual(featsV2(parseFeats("harrymas:w,harry:p,mas:p,xmas:w"), "HarryMas"), [{ f: "harrymas", how: "w" }, { f: "harry", how: "p" }, { f: "mas", how: "p" }, { f: "xmas", how: "y" }]);
+  assert.deepEqual(featsV2(parseFeats("vetocat:w,cat:s:veto,veto:s:cat"), "The Vetocat"), parseFeats("vetocat:w,cat:s:veto,veto:s:cat"), "a split of a name word stays");
+  const v2 = nameFeatures("Elonmas", "XMAS", vocab());
+  assert.deepEqual(featsV2(parseFeats(featsText(v2)), "Elonmas"), v2, "a v2 row comes back unchanged");
+});
+
+test("featsV2 drops both halves of a v1 grammar-suffix cut, whichever side was known; other cuts of the same name stay", () => {
+  assert.deepEqual(featsV2(parseFeats("buying:w,buy:s:ing,ing:s:buy"), "Buying"), [{ f: "buying", how: "w" }]);
+  assert.deepEqual(featsV2(parseFeats("hopeless:w,less:s:hope,hope:s:less,dog:w"), "Hopeless Dog"), [{ f: "hopeless", how: "w" }, { f: "dog", how: "w" }]);
+  assert.deepEqual(featsV2(parseFeats("buying:w,elonmas:w,buy:s:ing,ing:s:buy,elon:s:mas,mas:s:elon"), "Buying Elonmas"),
+    parseFeats("buying:w,elonmas:w,elon:s:mas,mas:s:elon"));
+  assert.deepEqual(featsV2(parseFeats("ingcat:w,cat:s:ing,ing:s:cat"), "Ingcat"), parseFeats("ingcat:w,cat:s:ing,ing:s:cat"), "the ending on the prefix side is no suffix cut");
+});
+
+test("rules v3: featsV2 with dropCuts drops every split (made with an older vocabulary) and keeps whole words, parts and symbol words", () => {
+  const stored = parseFeats("sisterdog:w,sister:p,dog:p,elonmas:w,elon:s:mas,mas:s:elon,terrier:w,ter:s:rier,rier:s:ter,xmas:y");
+  const name = "SisterDog Elonmas Terrier";
+  const v3 = featsV2(stored, name, { dropCuts: true });
+  assert.equal(v3.filter((x) => x.how === "s").length, 0, "no split survives");
+  assert.deepEqual(v3, parseFeats("sisterdog:w,sister:p,dog:p,elonmas:w,terrier:w,xmas:y"));
+  assert.deepEqual(featsV2(stored, name).filter((x) => x.how === "s").map((x) => x.f), ["elon", "mas", "ter", "rier"], "without dropCuts a split of a name word stays");
+  assert.deepEqual(featsV2(parseFeats("big:w,dog:w,bdog:w"), "Big Dog", { dropCuts: true }), [{ f: "big", how: "w" }, { f: "dog", how: "w" }, { f: "bdog", how: "y" }], "a v1 symbol word still becomes y");
 });

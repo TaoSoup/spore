@@ -359,8 +359,9 @@ export class Db {
     // baseline split it (kept 26 h, for restarts); every wave formed with each input of its test (n, contexts, expected
     // count, the baseline's prior for the feature, tail, window, rules version) and its hourly state; every coin that
     // became a candidate of a wave with its home (set once: reason lexical, post, tag or buyers; pending; unconfirmed);
-    // every candidacy and association of a coin with a wave, a home or not (wave_cands: how 'w'/'p'/'s', 'companion',
-    // 'post-x'); and near misses. All kept 90 days. Written in small buffered transactions, never one per launch.
+    // every candidacy and association of a coin with a wave, a home or not (wave_cands: how 'w'/'p'/'s'/'y', 'companion',
+    // 'post-x'); and near misses. All kept 90 days. Written in small buffered transactions, never one per launch. A
+    // rules-version change (kv waveRulesV) empties waves, wave_coins, wave_cands and wave_hours (wavesRulesReset).
     if (!this.db.prepare("PRAGMA table_info(launch_flow)").all().some((c) => c.name === "sniped"))this.db.exec("ALTER TABLE launch_flow ADD COLUMN sniped REAL");
     if (!this.db.prepare("PRAGMA table_info(chart_samples)").all().some((c) => c.name === "retry_ext")) this.db.exec("ALTER TABLE chart_samples ADD COLUMN retry_ext INTEGER NOT NULL DEFAULT 0");
     if (!this.db.prepare("PRAGMA table_info(chart_history)").all().some((c) => c.name === "mig_at")) this.db.exec("ALTER TABLE chart_history ADD COLUMN mig_at INTEGER");
@@ -650,6 +651,11 @@ export class Db {
       waveHoursTrim: p("DELETE FROM wave_hours WHERE (h, key) IN (SELECT h, key FROM wave_hours WHERE h < ? ORDER BY h LIMIT ?)"),
       waveTestPut: p("INSERT OR IGNORE INTO wave_tests (h, feature, v, win, n, ctx, e, c_base, c_missing, tail, fail) VALUES (:h, :feature, :v, :win, :n, :ctx, :e, :cBase, :cMissing, :tail, :fail)"),
       waveTestsTrim: p("DELETE FROM wave_tests WHERE (h, feature) IN (SELECT h, feature FROM wave_tests WHERE h < ? ORDER BY h LIMIT ?)"),
+      wavesAnyRows: p("SELECT EXISTS (SELECT 1 FROM waves) OR EXISTS (SELECT 1 FROM wave_coins) AS n"),
+      wavesResetWaves: p("DELETE FROM waves"),
+      wavesResetCoins: p("DELETE FROM wave_coins"),
+      wavesResetCands: p("DELETE FROM wave_cands"),
+      wavesResetHours: p("DELETE FROM wave_hours"),
     };
   }
 
@@ -1131,6 +1137,19 @@ export class Db {
   waveHoursTrim(cutH, limit) { return Number(this.q.waveHoursTrim.run(cutH, limit).changes); }
   waveTestPut(r) { return Number(this.q.waveTestPut.run({ h: r.h, feature: r.feature, v: r.v, win: r.win ?? null, n: r.n ?? null, ctx: r.ctx ?? null, e: r.e ?? null, cBase: r.cBase ?? null, cMissing: r.cMissing == null ? null : r.cMissing ? 1 : 0, tail: r.tail ?? null, fail: r.fail ?? null }).changes) > 0; }
   waveTestsTrim(cutH, limit) { return Number(this.q.waveTestsTrim.run(cutH, limit).changes); }
+  /** Whether waves or wave_coins hold any row (lib/waves.mjs: a rules-version change resets only a non-empty store). */
+  wavesAnyRows() { return !!this.q.wavesAnyRows.get().n; }
+  /**
+   * A rules-version change (lib/waves.mjs WAVE_RULES_V): every row of waves, wave_coins, wave_cands and wave_hours goes,
+   * in one transaction, so rows of two rule sets are never mixed. wave_tests (it has a v column), wave_launches and the
+   * hourly counts stay. Returns the rows deleted per table.
+   */
+  wavesRulesReset() {
+    return this.transaction(() => ({
+      waves: Number(this.q.wavesResetWaves.run().changes), coins: Number(this.q.wavesResetCoins.run().changes),
+      cands: Number(this.q.wavesResetCands.run().changes), hours: Number(this.q.wavesResetHours.run().changes),
+    }));
+  }
 
   /** Folds the WAL into the main file so a shutdown (or a file-level copy) leaves one complete file. */
   checkpoint() { try { this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* read-only or already closed */ } }

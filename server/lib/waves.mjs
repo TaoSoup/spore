@@ -10,7 +10,19 @@
 // C = 1, so an unseen word's prior is 1.5 / N_base, recorded on every row as c_missing), it forms when n >= 5,
 // n >= 3 max(e, 1), the Poisson tail P(X >= n | e) <= 1e-4, its carriers have 3+ distinct contexts (fix F: the rest of the
 // name once the feature, filler and digits are gone, all bare names counting as one; "~other" for a split), and the
-// feature passes flagText (fix N). No formation before the baseline is ready (24+ clean hours, 20,000+ launches). The
+// feature passes flagText (fix N). Rules v2, the clone path: a burst of one exact name from many unrelated wallets is the
+// clearest single story ("Zerocoin" by 48 creators in an hour, e = 1.34), so when every test passes but the contexts, it
+// still forms with n >= 10 creators, n >= 10 max(e, 1) and a tail <= 1e-8, as kind "clone" (key w:clone-...); a near
+// miss keeps fail "ctx" when the clone path fails too. Only carriers that hold the feature in the name count: a
+// symbol-only carrier ("y", lib/name-features.mjs) is on the feature's list and may be offered as a candidate, but is in
+// none of the counts (creators, contexts, launches, splits), and never joins by name alone (tierFor: lexical becomes
+// evidence). Grammar-suffix cuts ("buy" + "ing") are no longer made (lib/name-features.mjs SUFFIXES). Rules v3 (current,
+// after the v2 run split ordinary words around rare scraps: sister -> sis + ter, terrier -> ter + rier): a known token
+// needs 10+ whole carriers and 3 in 10,000 baseline launches on 2+ days (lib/name-counts.mjs readBaseline; was 5); the
+// clone path is refused (fail "ctx") when the feature is carried mostly as a split piece in that window, so only a whole
+// name is a clone burst; and launches stored before the rules changed (kv waveRulesAt) are restored without their
+// splits, which were made with the older vocabulary. No formation before the baseline is ready (24+ clean hours,
+// 20,000+ launches). The
 // per-feature counts (creators and contexts per window) are kept incrementally as launches enter and leave the 6 h and
 // 24 h windows, so a test is O(1) whatever the feature's size, and when a wave forms never depends on the wall clock.
 //
@@ -34,16 +46,26 @@
 // scheduler; the baseline is read in a worker; trims are chunked. A restart reloads 24 h of launches, the open waves,
 // pending coins, and re-runs the back-fill of waves formed in the last 24 h (idempotent), so rows buffered at a crash
 // are found again.
+//
+// Rules versions (WAVE_RULES_V, kv "waveRulesV"): rows of two rules versions are never mixed. A start whose stored version differs
+// from this one, with rows in waves or wave_coins, deletes every row of waves, wave_coins, wave_cands and wave_hours in
+// one transaction (db.wavesRulesReset; wave_tests keeps its v column, wave_launches and the counts stay) and records the
+// reset in health (rules.reset). This is why the owner backs up the old tables by hand before restarting on new rules.
+// A version change also sets kv "waveRulesAt" (unix s; a normal restart leaves it). Restored launches stored under v1
+// are read as v2 (featsV2: a symbol word becomes "y", a v1 grammar-suffix cut goes); launches first seen before
+// waveRulesAt lose every split (featsV2 dropCuts, rules v3); and a wave row of another version is ignored on restore. If the version check or the reset fails (tried twice), waves stay
+// off in that process (no counts, no restore, launches dropped; health rules.off) rather than run on mixed rows.
 import { performance } from "node:perf_hooks";
-import { nameFeatures, nameRest, nonAscii as hasNonAscii, featsText, parseFeats } from "./name-features.mjs";
+import { nameFeatures, nameRest, nonAscii as hasNonAscii, featsText, parseFeats, featsV2 } from "./name-features.mjs";
 import { runSliced } from "./sliced.mjs";
 import { postOf } from "./narrative.mjs";
 
-export const WAVE_RULES_V = 1;
+export const WAVE_RULES_V = 3;
 
 /** Every threshold of the shadow step: hypotheses for the backtest, not settings. */
 export const WAVE_DEFAULTS = Object.freeze({
   w6: 6 * 3600, w24: 24 * 3600, minN: 5, ratio: 3, nearRatio: 2, tailMax: 1e-4, minCtx: 3, lexR: 0.1, evR: 1 / 3,
+  cloneN: 10, cloneRatio: 10, cloneTail: 1e-8,
   backfillMax: 2000, flushMs: 5000, flushLaunches: 500, flushOther: 200, launchBufMax: 20_000, otherBufMax: 15_000,
   ringMax: 100_000, listMax: 20_000, featuresMax: 200_000, pendingMax: 5000, openMax: 500, membersMax: 5000,
   endS: 24 * 3600, reuseS: 7 * 86_400, reopensMax: 20, testsPerHour: 300,
@@ -71,14 +93,21 @@ export function poissonTail(n, lambda, terms = 60) {
   return Math.min(1, Math.exp(max) * s);
 }
 
-/** The formation test of one window: `{ pass, fail ("count" | "ratio" | "tail" | "ctx" | null), tail }`. */
+/**
+ * The formation test of one window: `{ pass, fail ("count" | "ratio" | "tail" | "ctx" | null), tail, via }`. `via` is
+ * the path that passed: "ctx" (3+ contexts) or "clone" (rules v2: fewer contexts, but cloneN+ creators, cloneRatio x
+ * max(e, 1) and a tail <= cloneTail); null on a fail.
+ */
 export function formTest({ n, e, ctx }, cfg = WAVE_DEFAULTS) {
-  if (n < cfg.minN) return { pass: false, fail: "count", tail: null };
-  if (n < cfg.ratio * Math.max(e, 1)) return { pass: false, fail: "ratio", tail: null };
+  if (n < cfg.minN) return { pass: false, fail: "count", tail: null, via: null };
+  if (n < cfg.ratio * Math.max(e, 1)) return { pass: false, fail: "ratio", tail: null, via: null };
   const tail = poissonTail(n, e);
-  if (tail > cfg.tailMax) return { pass: false, fail: "tail", tail };
-  if (ctx < cfg.minCtx) return { pass: false, fail: "ctx", tail };
-  return { pass: true, fail: null, tail };
+  if (tail > cfg.tailMax) return { pass: false, fail: "tail", tail, via: null };
+  if (ctx < cfg.minCtx) {
+    if (n >= cfg.cloneN && n >= cfg.cloneRatio * Math.max(e, 1) && tail <= cfg.cloneTail) return { pass: true, fail: null, tail, via: "clone" };
+    return { pass: false, fail: "ctx", tail, via: null };
+  }
+  return { pass: true, fail: null, tail, via: "ctx" };
 }
 
 /** "lexical" (r <= lexR), "evidence" (r <= evR, or no window with 5 creators: r null), or null (not a candidate). */
@@ -88,6 +117,14 @@ export function tierOf(r, cfg = WAVE_DEFAULTS) {
   if (r <= cfg.evR) return "evidence";
   return null;
 }
+
+/** The tier of a carrier carried `how`: tierOf, except that a symbol-only carrier ("y") never joins by name (rules v2). */
+export function tierFor(r, how, cfg = WAVE_DEFAULTS) {
+  const t = tierOf(r, cfg);
+  return how === "y" && t === "lexical" ? "evidence" : t;
+}
+/** Whether a carriage counts toward a feature's formation counts: every one but the symbol-only "y" (rules v2). */
+const counted = (x) => x.how !== "y";
 
 /** `w:<kind>-<feature>-<YYYYMMDD of t, UTC>`. */
 export function waveKey(kind, feature, t) { return `w:${kind}-${feature}-${new Date(t * 1000).toISOString().slice(0, 10).replace(/-/g, "")}`; }
@@ -139,8 +176,9 @@ export class NameWaves {
     this.timers = []; this.trimTimers = new Set(); this.evBusy = false; this.started = false; this.stopped = false;
     this.jobs = []; this.jobRun = null;                      // sliced jobs: formation back-fills, companion passes, the hourly refresh
     this.hourMark = null;
+    this.off = null;                                         // why waves are off in this process (a failed rules reset)
     this.stats = {
-      launches: 0, dup: 0, ignored: 0, errors: 0, lastError: null, nonAscii: 0, untracked: 0, parts: 0, notReady: 0, loadMs: null, restored: 0, reBackfilled: 0,
+      launches: 0, dup: 0, ignored: 0, errors: 0, lastError: null, nonAscii: 0, untracked: 0, parts: 0, notReady: 0, loadMs: null, restored: 0, reBackfilled: 0, rulesReset: null, skippedV: 0, offDropped: 0,
       caps: { ring: 0, features: 0, list: 0, pending: 0, buffer: 0, bufferOther: 0, openWaves: 0, backfill: 0, watch: 0, wallets: 0, tests: 0, hold: 0 },
       rowsWritten: 0, dropped: 0, droppedOther: 0, writeErrors: 0, flushMs: 0, flushMaxMs: 0,
       waves: { formed: 0, reopened: 0, ended: 0, flagged: 0, tests: 0 },
@@ -158,6 +196,16 @@ export class NameWaves {
   start() {
     if (this.started || this.stopped) return this;
     this.started = true; this.startedAt = this.now();
+    // rules versions are never mixed: if the version check or reset fails (twice), this process records no waves at all
+    // (no counts, no restore, no timers; add() drops launches) and health shows why; the next start tries again
+    let rv = null;
+    for (let k = 0; k < 2; k++) { try { this.#rulesVersion(); rv = null; break; } catch (e) { rv = e; } }
+    if (rv) {
+      this.off = `rules reset: ${rv.message}`;
+      this.stats.errors++; this.stats.lastError = this.off;
+      this.log.warn?.(`waves: rules reset failed (${rv.message}); waves are off in this process`);
+      return this;
+    }
     this.counts?.start?.();
     try { this.#restore(); } catch (e) { this.stats.errors++; this.stats.lastError = `restore: ${e.message}`; this.log.warn?.(`waves: restore failed (${e.message})`); }
     this.hourMark = Math.floor(this.now() / 3600_000);
@@ -187,6 +235,7 @@ export class NameWaves {
   add(e, slot = null) { // eslint-disable-line no-unused-vars
     const t0 = performance.now();
     try {
+      if (this.off) { this.stats.offDropped++; return; }
       if (!e?.mint || !e?.creator) { this.stats.ignored++; return; }
       if (this.byMint.has(e.mint) || this.held.has(e.mint)) { this.stats.dup++; return; }
       const nowMs = this.now(), nowS = Math.floor(nowMs / 1000);
@@ -248,7 +297,7 @@ export class NameWaves {
       if (!F) continue;
       if (F.wave) { const c = this.#candidate(F, F.wave, x, nowS); if (c) cands.push(c); continue; }
       const got = this.#tryForm(F, nowMs, L);
-      if (got) cands.push({ key: got.wave.key, r: got.r, how: x.how, tier: tierOf(got.r, this.cfg), formedT: got.wave.formedT });
+      if (got) cands.push({ key: got.wave.key, r: got.r, how: x.how, tier: tierFor(got.r, x.how, this.cfg), formedT: got.wave.formedT });
     }
     if (cands.length) { for (const c of cands) this.#bufCand(L, c); this.#decideNew(L, cands, nowS); }
   }
@@ -265,14 +314,15 @@ export class NameWaves {
         this.feats.set(x.f, F = this.#newF(x.f));
       }
       if (F.list.length - F.lh >= this.cfg.listMax) { F.lh++; this.stats.caps.list++; }
-      F.list.push(L);
+      F.list.push(L); // a symbol-only carrier is listed (a candidate later) but counted nowhere; #leave mirrors this
+      if (!counted(x)) continue;
       for (const w of [0, 1]) { inc(F.cr[w], L.creator); inc(F.cx[w], x.ctx); F.n[w]++; if (x.how === "s") F.s[w]++; }
     }
   }
   #newF(f) { return { f, list: [], lh: 0, cr: [new Map(), new Map()], cx: [new Map(), new Map()], n: [0, 0], s: [0, 0], wave: null }; }
   #leave(L, w) {
     for (const x of L.feats) {
-      if (x.skip) continue;
+      if (x.skip || !counted(x)) continue;
       const F = this.feats.get(x.f);
       if (!F) continue;
       dec(F.cr[w], L.creator); dec(F.cx[w], x.ctx); F.n[w]--; if (x.how === "s") F.s[w]--;
@@ -332,8 +382,11 @@ export class NameWaves {
       const n = F.cr[w].size;
       if (n < this.cfg.minN) continue;
       const NW = this.#NW(w), e = share * NW, ctx = F.cx[w].size;
-      const t = formTest({ n, e, ctx }, this.cfg);
-      if (t.pass) { best = { w, n, e, NW, ctx, tail: t.tail }; break; }
+      let t = formTest({ n, e, ctx }, this.cfg);
+      // rules v3: the clone path is for one whole name; a feature carried mostly as a split piece ("rier" of "terrier")
+      // is never a clone burst
+      if (t.pass && t.via === "clone" && F.s[w] * 2 > F.n[w]) t = { pass: false, fail: "ctx", tail: t.tail, via: null };
+      if (t.pass) { best = { w, n, e, NW, ctx, tail: t.tail, via: t.via }; break; }
       if (!near && n >= this.cfg.nearRatio * Math.max(e, 1)) near = { w, n, e, NW, ctx, tail: t.tail ?? poissonTail(n, e), fail: t.fail };
     }
     if (best && this.#flagged(F.f)) {
@@ -378,7 +431,7 @@ export class NameWaves {
    */
   #form(F, best, sn, share, base, nowS, L) {
     const win = best.w === 0 ? this.cfg.w6 : this.cfg.w24;
-    const kind = F.s[best.w] * 2 > F.n[best.w] ? "seg" : "word";
+    const kind = best.via === "clone" ? "clone" : F.s[best.w] * 2 > F.n[best.w] ? "seg" : "word";
     let key = waveKey(kind, F.f, nowS);
     for (let i = 2; this.waves.has(key); i++) key = `${waveKey(kind, F.f, nowS)}-${i}`;
     const r = this.#rMin(F, share);
@@ -386,7 +439,7 @@ export class NameWaves {
       key, feature: F.f, kind, v: WAVE_RULES_V, formedT: nowS, formedAt: nowS, win, n: best.n, ctx: best.ctx, e: round(best.e, 6), r: round(r, 6), tail: round(best.tail, 4), share0: share,
       cBase: sn.C, cMissing: sn.missing, baseN: base.launches, baseHours: base.hours, baseH: base.H, nWin: best.NW, lastT: nowS, endedT: null, reopens: 0, members: 0, pending: 0, unconfirmed: 0,
       over: 0, mem: [], compDone: new Set(),
-      why: { v: WAVE_RULES_V, win6: this.#winStats(F, 0, share), win24: this.#winStats(F, 1, share), carriers: null, contexts: topK(F.cx[best.w], 5), first: [],
+      why: { v: WAVE_RULES_V, via: best.via, win6: this.#winStats(F, 0, share), win24: this.#winStats(F, 1, share), carriers: null, contexts: topK(F.cx[best.w], 5), first: [],
         elsewhere: null, prior: { C: sn.C, missing: sn.missing, share: round(share, 6), N: base.launches, hours: base.hours, H: base.H }, companions: [], reopens: [] },
     };
     F.wave = wave; this.open.set(F.f, wave); this.waves.set(key, wave);
@@ -401,7 +454,7 @@ export class NameWaves {
     wave.endedT = null; wave.reopens++; wave.lastT = nowS;
     if (!wave.mem) wave.mem = [];
     if (!wave.compDone) wave.compDone = new Set();
-    wave.why.reopens = [...(wave.why.reopens ?? []), { t: nowS, win: best.w === 0 ? this.cfg.w6 : this.cfg.w24, n: best.n, e: round(best.e, 6), ctx: best.ctx, tail: round(best.tail, 4), r: round(r, 6) }].slice(-this.cfg.reopensMax);
+    wave.why.reopens = [...(wave.why.reopens ?? []), { t: nowS, via: best.via, win: best.w === 0 ? this.cfg.w6 : this.cfg.w24, n: best.n, e: round(best.e, 6), ctx: best.ctx, tail: round(best.tail, 4), r: round(r, 6) }].slice(-this.cfg.reopensMax);
     F.wave = wave; this.open.set(F.f, wave); this.ended.delete(F.f); this.waves.set(wave.key, wave);
     this.dirty.add(wave.key); this.stats.waves.reopened++;
     this.#job(this.#fireJob(wave, F, best.w, this.#windowSeq(best.w), L.i, r, nowS, L, false));
@@ -415,8 +468,7 @@ export class NameWaves {
    * candidacy rows are INSERT OR IGNORE and only pending coins are decided. Yields every 1,024 list entries.
    */
   *#fireJob(wave, F, w, fromSeq, toSeq, r, nowS, skip, formed) {
-    const tier = tierOf(r, this.cfg);
-    const carriage = { w: 0, p: 0, s: 0 }, first = [], per = formed ? new Map() : null;
+    const carriage = { w: 0, p: 0, s: 0, y: 0 }, first = [], per = formed ? new Map() : null;
     let k = 0, seen = 0, elsewhere = 0;
     const list = F.list, j0 = F.lh; // an eviction may swap F.list between steps: this array still holds the window
     for (let j = j0; j < list.length; j++) {
@@ -434,7 +486,8 @@ export class NameWaves {
       if (x === skip) continue;
       if (k >= this.cfg.backfillMax) { if (k++ === this.cfg.backfillMax) this.stats.caps.backfill++; if (!formed) break; continue; }
       k++;
-      this.#offer(x, { key: wave.key, r, how: ft?.how ?? "w", tier, formedT: wave.formedT }, nowS);
+      const how = ft?.how ?? "w";
+      this.#offer(x, { key: wave.key, r, how, tier: tierFor(r, how, this.cfg), formedT: wave.formedT }, nowS);
     }
     if (formed) {
       Object.assign(wave.why, { carriers: carriage, first, elsewhere });
@@ -504,7 +557,7 @@ export class NameWaves {
     return this.#rMin(F, Math.max(wave.share0, sn?.share ?? 0));
   }
   #candidate(F, wave, x, nowS) {
-    const r = this.rOf(F, wave), tier = tierOf(r, this.cfg);
+    const r = this.rOf(F, wave), tier = tierFor(r, x.how, this.cfg);
     if (!tier) { wave.over++; this.stats.coins.overBase++; return null; } // counted on the wave, no row
     wave.lastT = nowS; this.dirty.add(wave.key);
     return { key: wave.key, r, how: x.how, tier, formedT: wave.formedT };
@@ -868,18 +921,42 @@ export class NameWaves {
   }
 
   // ---------------------------------------------------------------- restart
+  /**
+   * Rules versions are never mixed (see the header): when kv waveRulesV is not WAVE_RULES_V and waves or wave_coins hold
+   * rows, they and wave_cands and wave_hours are deleted in one transaction (the owner has backed the old tables up by
+   * hand), and the reset is recorded in health; then kv waveRulesV is set (on a clean database too).
+   */
+  #rulesVersion() {
+    const from = this.db.kvGet("waveRulesV", null);
+    if (from === WAVE_RULES_V) return;
+    // launches stored before this version was set had their name splits made with an older vocabulary: #restore drops them
+    this.db.kvSet("waveRulesAt", Math.floor(this.now() / 1000));
+    if (this.db.wavesAnyRows()) {
+      const n = this.db.wavesRulesReset();
+      this.stats.rulesReset = { from, to: WAVE_RULES_V, at: Math.floor(this.now() / 1000), ...n };
+      this.log.warn?.(`waves: rules v${from ?? "?"} -> v${WAVE_RULES_V}: deleted ${n.waves} waves, ${n.coins} coins, ${n.cands} candidacies, ${n.hours} wave hours`);
+    }
+    this.db.kvSet("waveRulesV", WAVE_RULES_V);
+  }
+
   #restore() {
     const t0 = performance.now(), nowS = Math.floor(this.now() / 1000);
     const rows = this.db.waveLaunchesSince(nowS - this.cfg.w24, this.cfg.restoreMax);
+    let rulesAt = 0;
+    try { rulesAt = Number(this.db.kvGet("waveRulesAt", 0)) || 0; } catch { rulesAt = 0; }
     rows.sort((x, y) => (x.seen - y.seen) || (x.t - y.t));
     for (const r of rows) {
       if (this.byMint.has(r.mint)) continue;
-      const feats = parseFeats(r.feats).map((x) => ({ ...x, ctx: nameRest(r.name, x.f, x.how, x.other) }));
+      // a launch stored under v1 labelled its symbol words "w" (and split them): read as v2 (featsV2)
+      // a launch stored before the current rules (kv waveRulesAt) keeps its words but not its splits (rules v3)
+      const feats = featsV2(parseFeats(r.feats), r.name ?? "", { dropCuts: (r.seen ?? r.t * 1000) < rulesAt * 1000 }).map((x) => ({ ...x, ctx: nameRest(r.name, x.f, x.how, x.other) }));
       this.#push({ mint: r.mint, t: r.t, seen: r.seen, creator: r.creator, name: r.name ?? "", symbol: r.symbol ?? "", bh: r.bh, home: null, pend: null, final: false, gone: false, i: 0, feats });
     }
     this.#advance(nowS);
     this.stats.restored = rows.length;
+    // after a version reset only rows of these rules exist; a row of another version is still never loaded (defensive)
     for (const w of this.db.wavesOpen()) {
+      if (w.v !== WAVE_RULES_V) { this.stats.skippedV++; continue; }
       const wave = { ...w, over: 0, mem: [], compDone: new Set() };
       this.waves.set(wave.key, wave); this.open.set(wave.feature, wave);
       let F = this.feats.get(wave.feature);
@@ -887,6 +964,7 @@ export class NameWaves {
       F.wave = wave;
     }
     for (const w of this.db.wavesRecent(nowS - this.cfg.reuseS)) {
+      if (w.v !== WAVE_RULES_V) { this.stats.skippedV++; continue; }
       if (this.open.has(w.feature)) continue;
       const wave = { ...w, over: 0, mem: [], compDone: new Set() };
       this.waves.set(wave.key, wave);
@@ -913,15 +991,14 @@ export class NameWaves {
       if (w.formedT < nowS - this.cfg.w24) continue;
       const F = this.feats.get(w.feature);
       if (!F) continue;
-      const tier = tierOf(w.r, this.cfg);
       let k = 0;
       for (let j = F.lh; j < F.list.length; j++) {
         const L = F.list[j];
         if (L.gone || L.t <= w.formedT - w.win || L.t > w.formedT + 60) continue;
         if (k++ >= this.cfg.backfillMax) break;
         if (!L.home && !L.final && !L.pend) re++;
-        const ft = L.feats.find((y) => y.f === w.feature);
-        this.#offer(L, { key: w.key, r: w.r, how: ft?.how ?? "w", tier, formedT: w.formedT }, nowS);
+        const ft = L.feats.find((y) => y.f === w.feature), how = ft?.how ?? "w";
+        this.#offer(L, { key: w.key, r: w.r, how, tier: tierFor(w.r, how, this.cfg), formedT: w.formedT }, nowS);
       }
     }
     this.stats.reBackfilled = re;
@@ -934,7 +1011,7 @@ export class NameWaves {
     let members = 0, pend = 0;
     for (const w of this.open.values()) { members += w.members; pend += w.pending; }
     return {
-      mode: "shadow", launches: s.launches, dup: s.dup, ignored: s.ignored, errors: s.errors, lastError: s.lastError, nonAscii: s.nonAscii, untracked: s.untracked,
+      mode: "shadow", rules: { v: WAVE_RULES_V, reset: s.rulesReset, skipped: s.skippedV, off: this.off ?? null, offDropped: s.offDropped }, launches: s.launches, dup: s.dup, ignored: s.ignored, errors: s.errors, lastError: s.lastError, nonAscii: s.nonAscii, untracked: s.untracked,
       ring: this.a.length - this.c24, features: this.feats.size, partsPerLaunch: s.launches ? Math.round((s.parts / s.launches) * 100) / 100 : 0, loadMs: s.loadMs, restored: s.restored, reBackfilled: s.reBackfilled,
       holding: this.holding ? this.hold.length : 0, notReady: s.notReady, caps: { ...s.caps },
       write: { rowsWritten: s.rowsWritten, buffered: this.bufL.length + this.bufO.length, dirty: this.dirty.size, dropped: s.dropped, droppedOther: s.droppedOther, errors: s.writeErrors, flushMs: s.flushMs, flushMaxMs: s.flushMaxMs },
