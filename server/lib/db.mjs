@@ -173,7 +173,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS narratives_key ON narratives(key);
 CREATE INDEX IF NOT EXISTS narratives_seen ON narratives(last_seen_at);
 CREATE TABLE IF NOT EXISTS coin_tags (
   mint TEXT PRIMARY KEY, narrative_id INTEGER, tagged_at INTEGER NOT NULL, model TEXT,
-  asks INTEGER NOT NULL DEFAULT 1, had_post INTEGER NOT NULL DEFAULT 0, bare INTEGER NOT NULL DEFAULT 0
+  asks INTEGER NOT NULL DEFAULT 1, had_post INTEGER NOT NULL DEFAULT 0, bare INTEGER NOT NULL DEFAULT 0,
+  had_img INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS coin_tags_narrative ON coin_tags(narrative_id);
 CREATE TABLE IF NOT EXISTS narrative_spend (
@@ -335,7 +336,8 @@ export class Db {
     // was made and last given to a coin; per coin the narrative a language model put it under (`narrative_id` NULL = it
     // answered "none"), when, by which model, how many times the coin was asked about (`asks`) and whether its linked
     // post's text was part of the last ask (`had_post`) and whether that ask carried neither a description nor a post
-    // (`bare`, added later: 0 in older rows); and per UTC day ('YYYY-MM-DD') the tokens, USD and requests
+    // (`bare`, added later: 0 in older rows) and whether the coin's picture was sent with it (`had_img`, added later
+    // still: 0 in older rows, which were all asked without one); and per UTC day ('YYYY-MM-DD') the tokens, USD and requests
     // spent, which is what the daily cap goes by across restarts. `narratives.retitled` (1 = its title was widened once,
     // which is the only time it may be: lib/narrtags.mjs TagEngine #retitle) came later: added when absent, 0 in older
     // rows. The version of the tagging rules the stored answers were made under is the kv row 'narr_rules_version'
@@ -366,7 +368,7 @@ export class Db {
     // the chips the server set) are added when absent; NULL in rows from before, which the new rules version deletes anyway.
     // `post_links` (what a starting post's link leads to) is a new table only.
     { const lineCols = this.db.prepare("PRAGMA table_info(post_lines)").all(); for (const c of ["source", "quoted_id", "chain_id", "chips"]) if (!lineCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE post_lines ADD COLUMN ${c} TEXT`); }
-    if (!this.db.prepare("PRAGMA table_info(coin_tags)").all().some((c) => c.name === "bare")) this.db.exec("ALTER TABLE coin_tags ADD COLUMN bare INTEGER NOT NULL DEFAULT 0");
+    { const tagCols = this.db.prepare("PRAGMA table_info(coin_tags)").all(); for (const c of ["bare", "had_img"]) if (!tagCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE coin_tags ADD COLUMN ${c} INTEGER NOT NULL DEFAULT 0`); }
     if (!this.db.prepare("PRAGMA table_info(narratives)").all().some((c) => c.name === "retitled")) this.db.exec("ALTER TABLE narratives ADD COLUMN retitled INTEGER NOT NULL DEFAULT 0");
     const calibCols = this.db.prepare("PRAGMA table_info(calib)").all();
     for (const c of ["cov_1h", "cov_6h"]) if (!calibCols.some((x) => x.name === c)) this.db.exec(`ALTER TABLE calib ADD COLUMN ${c} INTEGER`);
@@ -511,9 +513,9 @@ export class Db {
       narrTagged: p("SELECT COUNT(*) AS n FROM coin_tags WHERE narrative_id = ?"),
       narrWipe: p("DELETE FROM narratives"),
       tagWipe: p("DELETE FROM coin_tags"),
-      tagGet: p("SELECT mint, narrative_id, tagged_at, model, asks, had_post, bare FROM coin_tags WHERE mint = ?"),
-      tagSet: p(`INSERT OR REPLACE INTO coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare)
-        VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare)`),
+      tagGet: p("SELECT mint, narrative_id, tagged_at, model, asks, had_post, bare, had_img FROM coin_tags WHERE mint = ?"),
+      tagSet: p(`INSERT OR REPLACE INTO coin_tags (mint, narrative_id, tagged_at, model, asks, had_post, bare, had_img)
+        VALUES (:mint, :narrativeId, :at, :model, :asks, :hadPost, :bare, :hadImg)`),
       tagCounts: p("SELECT COUNT(narrative_id) AS tagged, COUNT(*) AS n FROM coin_tags"),
       tagRecentCreated: p("SELECT c.mint AS mint, t.narrative_id AS id, c.created_at AS created_at FROM coins c JOIN coin_tags t ON t.mint = c.mint WHERE c.created_at > ? AND t.narrative_id IS NOT NULL"),
       lineGet: p("SELECT post_id, subject, happened, kind, state, asks, model, at, coin, source, quoted_id, chain_id, chips FROM post_lines WHERE post_id = ?"),
@@ -907,8 +909,8 @@ export class Db {
       return { reset: true, from, tags, narratives };
     });
   }
-  tagGet(mint) { const r = this.q.tagGet.get(mint); return r ? { mint: r.mint, narrativeId: r.narrative_id == null ? null : Number(r.narrative_id), at: r.tagged_at, model: r.model, asks: r.asks, hadPost: !!r.had_post, bare: !!r.bare } : null; }
-  tagSet(t) { this.q.tagSet.run({ mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: t.hadPost ? 1 : 0, bare: t.bare ? 1 : 0 }); }
+  tagGet(mint) { const r = this.q.tagGet.get(mint); return r ? { mint: r.mint, narrativeId: r.narrative_id == null ? null : Number(r.narrative_id), at: r.tagged_at, model: r.model, asks: r.asks, hadPost: !!r.had_post, bare: !!r.bare, hadImg: !!r.had_img } : null; }
+  tagSet(t) { this.q.tagSet.run({ mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: t.hadPost ? 1 : 0, bare: t.bare ? 1 : 0, hadImg: t.hadImg ? 1 : 0 }); }
   /** `{ tagged, none }`: coins under a narrative, and coins the model answered "none" for. */
   tagCounts() { const r = this.q.tagCounts.get(); return { tagged: r.tagged, none: r.n - r.tagged }; }
   /** The tagged coins created after `sinceS`, `[{ mint, id, createdAt }]` (the coins_created index: a boot read of the last hour). */

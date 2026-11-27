@@ -29,6 +29,7 @@ import { units } from "./pricing.mjs";
 import { NATIVE_MINT } from "./sdk.mjs";
 import { usd, count, pctOf, ageOf, shortMint, underIt } from "./format.mjs";
 import { fonts, parseFont, FAMILY } from "./card-fonts.mjs";
+import { isPng, readThumb, makeLogo } from "./thumbs.mjs";
 
 export { fonts, parseFont };
 const require = createRequire(import.meta.url);
@@ -65,7 +66,6 @@ export const FOCUS_KIDS = 20;
 /** The svg handed to the rasterizer stays under this (base64 logos are most of it): logos are shed, smallest bubbles first, to keep it; never members. */
 export const SVG_MAX_BYTES = 800 * 1024;
 const SOL_MINT = NATIVE_MINT.toBase58();
-const PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 // ---------------------------------------------------------------- facts
 const createdOf = (c) => (typeof c?.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null);
@@ -968,7 +968,6 @@ function familyParts(data, self, maxW) {
 }
 
 // ---------------------------------------------------------------- raster
-const isPng = (b) => Buffer.isBuffer(b) && b.length > 24 && b.subarray(0, 8).equals(PNG_MAGIC);
 let ready = null;
 async function resvg() {
   ready ??= (async () => {
@@ -1003,20 +1002,7 @@ export async function rasterize(svg, work = null) {
 
 // ---------------------------------------------------------------- logos
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
-const readThumb = (images, url, w) => { try { const b = images?.thumbBytes?.(url, w); return isPng(b) ? b : null; } catch { return null; } };
-/**
- * Starts making the `w` px PNG of `url` in the image cache, the way /api/img makes it (`get` +
- * `thumb`: the cache's own negative memory of a dead upstream still holds, but not `warm`'s
- * hours-long skip list, which a rate-limited bulk pass fills with perfectly fetchable logos); a cache
- * without those two gets a warm ask. Returns the job (never rejects; its result is not the PNG: the
- * caller re-reads the thumbnail from disk), null when the cache can make nothing.
- */
-function makeLogo(images, url, w) {
-  const make = typeof images?.get === "function" && typeof images.thumb === "function"
-    ? async () => { const hit = await images.get(url); return hit ? images.thumb(url, hit, w) : null; }
-    : typeof images?.warm === "function" ? () => images.warm([url], w, 1) : null;
-  return make ? Promise.resolve().then(make).catch(() => null) : null;
-}
+// readThumb and makeLogo (reading a thumbnail from disk, making a missing one the /api/img way): lib/thumbs.mjs.
 const warmAsked = new Map(); // url → when it was last asked for, so a family's cards do not re-ask every render
 /**
  * The logos a card's bubbles embed (Map mint → PNG): members from the 64 px thumbnails on disk (a

@@ -153,7 +153,7 @@ const holders = cfg.holders ? new Holders({ model, rpc: rpc.lane("holders"), log
 // the switch nothing is constructed: no client, no timer, and /api/stories answers as before.
 // Answers made under older tagging rules are deleted once (a few thousand rows at most), with the tagger on or off.
 applyTagRules(db, log);
-const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, posts: narrative?.posts ?? null, log }) : null;
+const narrTags = cfg.narrTags.on ? new NarrTags({ model, db, cfg: cfg.narrTags, posts: narrative?.posts ?? null, images, log }) : null;
 // Post lines (lib/post-lines.mjs): only with POST_LINES=on beside a running tagger. One model-written "subject: what
 // happened" line per starting post on Discover, on the tagger's model, key file and day's spend (one cap for both).
 const postLines = narrTags?.on && cfg.postLines.on ? new PostLines({ db, cfg: cfg.narrTags, on: true, log }) : null;

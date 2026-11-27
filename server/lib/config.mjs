@@ -135,6 +135,10 @@ export function loadConfig(env = process.env, { here = process.cwd(), argv = [] 
     // The price of a model lib/narrtags.mjs has no price for (USD per million tokens; both or neither).
     inUsdPerM: get("NARRATIVE_IN_USD_PER_M", "") ? num("NARRATIVE_IN_USD_PER_M", 0, { min: 0, max: 10_000 }) : null,
     outUsdPerM: get("NARRATIVE_OUT_USD_PER_M", "") ? num("NARRATIVE_OUT_USD_PER_M", 0, { min: 0, max: 10_000 }) : null,
+    // NARRATIVE_IMAGES=on sends each coin's picture (its logo, the PNG thumbnail of NARRATIVE_IMAGE_PX: 128 or 256) with
+    // its text; a 256 px picture is about 90 input tokens (pixels / 750). Off: the requests are those without pictures.
+    images: oneOf("NARRATIVE_IMAGES", "off", ["off", "on"]) === "on",
+    imagePx: Number(oneOf("NARRATIVE_IMAGE_PX", "256", ["128", "256"])),
   };
   if ((narrTags.inUsdPerM == null) !== (narrTags.outUsdPerM == null)) errors.push("NARRATIVE_IN_USD_PER_M and NARRATIVE_OUT_USD_PER_M must be set together");
   // The Anthropic SDK adds the headers of ANTHROPIC_CUSTOM_HEADERS to every request and no option turns that off, so

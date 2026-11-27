@@ -144,14 +144,19 @@ test("narrative tags config: off by default with its own names; the key only fro
   const dir = tmp();
   try {
     const base = { DATA_DIR: join(dir, "data"), META_DIR: join(dir, "meta") };
-    assert.deepEqual(loadConfig(base, { here: dir }).narrTags, { on: false, keyFile: null, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10, inUsdPerM: null, outUsdPerM: null });
+    assert.deepEqual(loadConfig(base, { here: dir }).narrTags, { on: false, keyFile: null, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10, inUsdPerM: null, outUsdPerM: null, images: false, imagePx: 256 });
     // the agents' LLM_* settings are another feature: they neither switch this on nor give it a key
     writeFileSync(join(dir, "llm.key"), "agents-key-value");
     assert.equal(loadConfig({ ...base, LLM_URL: "https://llm.example/v1/chat/completions", LLM_KEY_FILE: join(dir, "llm.key"), LLM_MODEL: "m" }, { here: dir }).narrTags.on, false);
     writeFileSync(join(dir, "narr.key"), "sk-ant-narr-secret-value");
     const c = loadConfig({ ...base, NARRATIVES: "on", NARRATIVE_KEY_FILE: join(dir, "narr.key"), NARRATIVE_MODEL: "some-model", NARRATIVE_DAILY_USD: "0.25", NARRATIVE_MIN_BUYERS: "25", NARRATIVE_IN_USD_PER_M: "1", NARRATIVE_OUT_USD_PER_M: "5" }, { here: dir });
-    assert.deepEqual(c.narrTags, { on: true, keyFile: join(dir, "narr.key"), model: "some-model", dailyUsd: 0.25, minBuyers: 25, inUsdPerM: 1, outUsdPerM: 5 });
+    assert.deepEqual(c.narrTags, { on: true, keyFile: join(dir, "narr.key"), model: "some-model", dailyUsd: 0.25, minBuyers: 25, inUsdPerM: 1, outUsdPerM: 5, images: false, imagePx: 256 });
     assert.ok(!JSON.stringify(c).includes("sk-ant-narr-secret-value"), "the config holds the path, never the key");
+    // pictures: off by default; on with 128 or 256 px; any other value fails the boot like other bad settings
+    const pic = (o) => loadConfig({ ...base, ...o }, { here: dir }).narrTags;
+    assert.deepEqual([pic({ NARRATIVE_IMAGES: "on" }), pic({ NARRATIVE_IMAGES: "on", NARRATIVE_IMAGE_PX: "128" })].map((n) => [n.images, n.imagePx]), [[true, 256], [true, 128]]);
+    assert.throws(() => pic({ NARRATIVE_IMAGES: "yes" }), /NARRATIVE_IMAGES="yes" must be one of off, on/);
+    assert.throws(() => pic({ NARRATIVE_IMAGE_PX: "64" }), /NARRATIVE_IMAGE_PX="64" must be one of 128, 256/);
     // on without a key file is not an error: the tagger then stays off and says so (lib/narrtags.mjs)
     assert.deepEqual([loadConfig({ ...base, NARRATIVES: "on" }, { here: dir }).narrTags.on, loadConfig({ ...base, NARRATIVES: "on" }, { here: dir }).narrTags.keyFile], [true, null]);
     // extra request headers from the environment: refused with the tagger on (the value is not echoed), ignored with it off
