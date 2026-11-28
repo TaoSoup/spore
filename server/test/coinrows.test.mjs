@@ -550,7 +550,9 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
     assert.equal(all.find((r) => r.symbol === "LOOSE").storyLine.happened, "Name only: picture not read yet");
     // the family card has no post: its coins head it; none says more than its name, so the header says that (no counted sentence)
     assert.deepEqual(fam.line, { subject: "$PAR", happened: "Name only: these coins are not read yet", kind: "thin", by: "server", quote: false, chips: [] });
-    assert.equal("line" in post, false, "a worded post with the post lines off: no field, the page shows the poster's words");
+    // a worded post with the post lines off: never without a header. Its poster's words are too few to quote and no coin
+    // says more than its name, so the coins' name-only header (the page shows the poster's words under it)
+    assert.deepEqual(post.line, { subject: "R0 coin", happened: "Name only: these coins are not read yet", kind: "thin", by: "server", quote: false, chips: [] });
     // the other timeframes and the 400; discover still lists the family
     assert.deepEqual([(await app.get("/api/stories?tf=1h")).body.tf, (await app.get("/api/stories?tf=1h")).body.floor5m, (await app.get("/api/stories?tf=2m")).status], ["1h", ENTER_5M, 400]);
     assert.deepEqual((await app.get("/api/discover")).body.families.map((f) => f.parent.mint), [PAR]);
@@ -596,22 +598,25 @@ test("stories with post lines: a listed card that shows a post offers it with it
   w.wk.attach({ narrative: new Narrative({ model: w.model, posts, now: w.clock.now, log: quiet }) });
   w.clock.t = (T0 + 100) * 1000;
   const plain = await w.rows.stories("1h");
-  assert.equal("line" in plain.cards[0], false, "without post lines a card has no such field");
+  // without post lines a card is headed all the same: no coin says more than its name (its quote of the post is not
+  // used: the server's own line quotes that post under the card's subject)
+  const OWN = { subject: "$E0", happened: "big news: a wizard cat walks across a wide stage tonight", kind: "thin", by: "server", quote: true, chips: [] };
+  assert.deepEqual(plain.cards[0].line, OWN, "without post lines a card is headed all the same");
   const calls = [];
   const client = async () => ({ messages: { create: async (req) => { calls.push(req); return { stop_reason: "end_turn", usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: "text", text: JSON.stringify({ posts: [{ n: 1, subject: "Big news", happened: "Poster says there is big news", kind: "claim", keys: ["big news", "not in it"] }] }) }] }; } } });
   const lines = new PostLines({ db: w.model.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1 }, on: true, clientFactory: client, now: w.clock.now, fillMs: 0, log: quiet });
   w.rows.attach({ lines });
   w.wk.forget(); w.rows.story.clear();
   let b = await w.rows.stories("1h");
-  assert.deepEqual([b.cards.length, "line" in b.cards[0], "quoted" in b.cards[0], lines.pending()], [1, false, false, 1], "offered, not written yet: no field, the page shows the poster's words meanwhile");
+  assert.deepEqual([b.cards.length, b.cards[0].line, "quoted" in b.cards[0], lines.pending()], [1, OWN, false, 1], "offered, not written yet: the server's own line meanwhile, never a card without a header");
   await lines.pump();
   const sent = JSON.parse(calls[0].messages[0].content.split("<posts>\n")[1].split("\n</posts>")[0]);
   assert.deepEqual(sent, [{ n: 1, post: { by: "poster", text: "big news: a wizard cat walks across a wide stage tonight", age_days: 0 }, coins: [{ name: "E0 coin", symbol: "E0", parent: "PAR" }, { name: "E1 coin", symbol: "E1", parent: "PAR" }, { name: "E2 coin", symbol: "E2", parent: "PAR" }] }], "the coin that links the post first; no link, no launch tool's line");
   w.wk.forget(); w.rows.story.clear();
   b = await w.rows.stories("1h");
   assert.deepEqual(b.cards[0].line, { subject: "Big news", happened: "Poster says there is big news", kind: "claim", by: "model", quote: false, chips: ["ai"], keys: ["big news"] }, "the key phrases the server kept ride on the line (a phrase not in the sentence is dropped)");
-  const { line, ...rest } = b.cards[0];
-  assert.deepEqual(rest, plain.cards[0], "every other field as without post lines");
+  const { line, ...rest } = b.cards[0], { line: _plainLine, ...plainRest } = plain.cards[0];
+  assert.deepEqual(rest, plainRest, "every other field as without post lines");
   assert.equal(calls.length, 1);
   lines.stop();
   w.close();
@@ -807,7 +812,10 @@ test("stories with post lines: a post settled thin or refused gets the server's 
   w.model.db.lineSet({ postId: mine, ...mis, coin: mints.get("mine")[0] });
   w.model.db.lineSet({ postId: other, ...mis, coin: "SomeOtherCoinsMint" });
   let cards = await build();
-  assert.deepEqual([thin, bad].map((id) => "line" in cards.get(id)), [false, false], "a longer post waits for the model with no field");
+  assert.deepEqual([thin, bad].map((id) => cards.get(id).line), [
+    { subject: "$THINA", happened: "thin: a cat in a wizard hat walks across a wide stage", kind: "thin", by: "server", quote: true, chips: [] },
+    { subject: "$BADA", happened: "bad: a cat in a wizard hat walks across a wide stage", kind: "thin", by: "server", quote: true, chips: [] },
+  ], "a longer post waits for the model, headed meanwhile by the server's own line (no coin says more than its name)");
   assert.equal(lines.pending(), 2);
   await L.pump(12);
   assert.deepEqual([lines.stateOf(thin), lines.stateOf(bad), calls.length, calls.flat().filter((p) => p.fix).length], ["thin", "rejected", 2, 1], "the batch, then the refused line once more alone with the reason");
@@ -873,7 +881,7 @@ test("stories with post lines: a post settled before its link could be read is a
   const unread = (retry) => ({ state: "unread", kind: null, host: null, quoted: null, chain: null, retry });
   quotes.set(late, unread(false)); quotes.set(had, unread(false)); quotes.set(held, unread(true));
   let cards = await build();
-  assert.deepEqual([lines.pending(), lines.snapshot().waitedLink, "line" in cards.get(held)], [2, 1, false], "a link whose retry is scheduled is waited for: that post is not sent yet");
+  assert.deepEqual([lines.pending(), lines.snapshot().waitedLink, cards.get(held).line], [2, 1, { subject: "$HELDA", happened: "held: a cat in a wizard hat walks across a wide stage", kind: "thin", by: "server", quote: true, chips: [] }], "a link whose retry is scheduled is waited for: that post is not sent yet");
   await L.pump();
   assert.deepEqual([calls.length, calls[0].map((p) => "quoted" in p), lines.stateOf(late), lines.stateOf(had), lines.stateOf(held)], [1, [false, false], "thin", "ok", null]);
   cards = await build();
@@ -884,7 +892,7 @@ test("stories with post lines: a post settled before its link could be read is a
   for (const [i, id] of [late, had, held].entries()) quotes.set(id, { state: "ok", kind: "post", host: null, quoted: quoted(10 + i), chain: null, retry: false });
   cards = await build();
   assert.deepEqual([lines.pending(), lines.snapshot().reasked], [3, 2], "the two settled ones are asked once more, the held one for the first time");
-  assert.deepEqual([cards.get(late).line.by, cards.get(had).line, "line" in cards.get(held), cards.get(late).quoted.id], ["server", OLD_LINE, false, quoted(10).id], "what each card had stays until the new answer is stored");
+  assert.deepEqual([cards.get(late).line.by, cards.get(had).line, cards.get(held).line?.by, cards.get(held).line?.quote, cards.get(late).quoted.id], ["server", OLD_LINE, "server", true, quoted(10).id], "what each card had stays until the new answer is stored; the held one is headed meanwhile");
   await L.pump();
   assert.deepEqual([calls.length, calls[1].map((p) => p.quoted?.by).sort()], [2, ["quoted10", "quoted11", "quoted12"]]);
   cards = await build();
@@ -984,7 +992,7 @@ test("story lines in the stories body: a model's line rides on its row and heads
   const client = async () => ({ messages: { create: async (req) => {
     const coins = JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
     calls.push(coins.map((c) => c.symbol));
-    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", keys: ["AI bubble"] } : c.symbol === "OLDTAG" ? { subject: "Zoo hippo", happened: "A hippo was born at the zoo", keys: ["hippo"] } : { subject: "", happened: "", keys: [] });
+    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "The AI bubble about to pop", keys: ["AI bubble"] } : c.symbol === "OLDTAG" ? { subject: "Zoo hippo", happened: "A hippo was born at the zoo", keys: ["hippo"] } : { subject: "", happened: "", keys: [] });
     return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => ({ n: c.n, ...(c.symbol === "OLDTAG" ? { kind: "new", id: 0, title: "some other story", theme: "animals" } : { kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" }), retitle: "", line: line(c) })) }) }] };
   } } });
   const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, hotFillMs: 0, log: quiet });
@@ -1002,8 +1010,8 @@ test("story lines in the stories body: a model's line rides on its row and heads
   w.clock.t += 5_000;
   b = await w.rows.stories("5m");
   const card = b.cards[0];
-  assert.deepEqual(card.coins.map((r) => [r.symbol, r.storyLine.by, r.storyLine.happened]), [["NEEDLE", "model", "Description says the AI bubble is about to pop"], ["SWAN", "server", "Name only: its description names no clear subject"]]);
-  assert.deepEqual(card.line, { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", kind: "event", by: "model", quote: false, chips: ["ai", "coin_line", "ai_group"], keys: ["AI bubble"], of: { mint: A, symbol: "NEEDLE" } });
+  assert.deepEqual(card.coins.map((r) => [r.symbol, r.storyLine.by, r.storyLine.happened]), [["NEEDLE", "model", "The AI bubble about to pop"], ["SWAN", "server", "Name only: its description names no clear subject"]]);
+  assert.deepEqual(card.line, { subject: "AI bubble", happened: "The AI bubble about to pop", kind: "event", by: "model", quote: false, chips: ["ai", "coin_line", "ai_group"], keys: ["AI bubble"], of: { mint: A, symbol: "NEEDLE" } });
   // OLDTAG kept its answer ("none": no story card), and now has its line
   assert.deepEqual([loose("OLDTAG").storyLine, w.db.tagGet(D).narrativeId, w.db.narrByKey("some other story")], [{ subject: "Zoo hippo", happened: "A hippo was born at the zoo", keys: ["hippo"], by: "model", source: "description" }, null, null]);
   assert.equal(narr.pending(), 0, "read once: not queued again");
@@ -1019,7 +1027,7 @@ test("sticky groups in the stories body: a card's header coin is chosen once and
   for (const [m, n] of [[A, 12], [C, 11]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
   const client = async () => ({ messages: { create: async (req) => {
     const coins = JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
-    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", keys: ["AI bubble"] } : { subject: "AI bubble", happened: "Description says the AI bubble will pop", keys: ["AI bubble"] });
+    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "The AI bubble about to pop", keys: ["AI bubble"] } : { subject: "AI bubble", happened: "The AI bubble set to pop", keys: ["AI bubble"] });
     return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => ({ n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai", retitle: "", line: line(c) })) }) }] };
   } } });
   const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, hotFillMs: 0, log: quiet });
@@ -1045,4 +1053,58 @@ test("sticky groups in the stories body: a card's header coin is chosen once and
   b = await w.rows.stories("5m");
   assert.deepEqual(head(), [1, key, "PIN"]);
   narr.stop(); w.close();
+});
+
+test("never a card without a header: every way #cardLine can end (post lines off, offer wait / queued / dropped / null / known / server, settled, a gone quoted post, a throw) leaves card.line; a coin's own line first, the post's line replaces it", async () => {
+  const L = await lineWorld();
+  const { w, card, build, quotes, mints, quoted } = L;
+  // five cards with worded posts (longer than THIN_WORDS but "few"); "model" has a coin whose tagger line says something
+  const ids = Object.fromEntries(["model", "plain", "few", "gone", "boom"].map((t) => [t, card(t, t === "few" ? "few: big wizard news" : LONG(t))]));
+  const coinLines = new Map([[mints.get("model")[0], { read: true, line: { subject: "Wizard cat", happened: "A cat in a wizard hat on a stage", keys: ["wizard hat"], source: "description" }, hadImg: false, dropped: false }]]);
+  const narr = { on: true, offer() {}, tagOf: () => null, newCoins1h: () => 0, answered: () => false, storyLineOf: (m) => coinLines.get(m) ?? null, reline() {}, pageStats: () => ({ on: true, tagged: 0, pending: 0, capped: false }) };
+  w.rows.attach({ narr });
+  const COIN = { subject: "Wizard cat", happened: "A cat in a wizard hat on a stage", kind: "event", by: "model", quote: false, chips: ["ai", "coin_line"], keys: ["wizard hat"], of: { mint: mints.get("model")[0], symbol: "MODELA" } };
+  const own = (t) => ({ subject: "$" + t.toUpperCase() + "A", happened: t + ": a cat in a wizard hat walks across a wide stage", kind: "thin", by: "server", quote: true, chips: [] });
+  const POST_LINE = { subject: "Wizard cat", happened: "Poster says a wizard cat walks across a stage", kind: "claim", by: "model", quote: false, chips: ["ai"] };
+  // a fake post lines object: what offer answers, what is stored, what is settled
+  let answer = "queued", stored = new Map(), throwFor = null;
+  const settled = new Set();
+  const pl = {
+    on: true,
+    offer: (id) => { if (id === throwFor) throw new Error("boom"); return answer; },
+    lineOf: (id) => stored.get(id) ?? null, stateOf: (id) => (settled.has(id) || stored.has(id) ? "ok" : null),
+    lacksQuote: () => false, refsOf: () => ({ quotedId: quoted(1).id, chainId: null }),
+  };
+  w.rows.attach({ lines: pl });
+  const heads = async () => { const c = await build(); return Object.fromEntries(Object.entries(ids).map(([t, id]) => [t, c.get(id)?.line ?? null])); };
+  for (const a of ["wait", "queued", "dropped", null, "known"]) {
+    answer = a;
+    const h = await heads();
+    assert.deepEqual(h.model, COIN, `offer ${a}: a coin's own line that says more than its name heads the card`);
+    for (const t of ["plain", "gone", "boom"]) assert.deepEqual(h[t], own(t), `offer ${a}: no coin says more: the server's own line (${t})`);
+    assert.equal(h.few?.by, "server", `offer ${a}: a post of a few words`);
+  }
+  // "server": the server's own line at once (own(): the poster's words first)
+  answer = "server";
+  { const h = await heads(); assert.deepEqual([h.plain, h.model?.by, h.model?.quote], [own("plain"), "server", true]); }
+  // a throw inside: the card is headed all the same, and the build goes on
+  answer = "queued"; throwFor = ids.boom;
+  { const h = await heads(); assert.deepEqual([h.boom, h.plain], [own("boom"), own("plain")]); }
+  throwFor = null;
+  // the post's line arrives: it replaces the fallback
+  for (const t of ["model", "plain"]) stored.set(ids[t], POST_LINE);
+  { const h = await heads(); assert.deepEqual([h.model, h.plain], [POST_LINE, POST_LINE]); }
+  // settled without a line: the server's own (as before)
+  settled.add(ids.few);
+  assert.equal((await heads()).few?.by, "server");
+  // a line written from a quoted post that is gone: the server's own line, never nothing
+  stored.set(ids.gone, { ...POST_LINE, chips: ["ai", "via_quoted"] });
+  quotes.set(ids.gone, { state: "none", kind: null, host: null, quoted: null, chain: null, retry: false });
+  assert.deepEqual((await heads()).gone, own("gone"));
+  // post lines off: a worded post is headed by a coin's own line, else the server's own
+  w.rows.attach({ lines: null }); stored = new Map();
+  { const h = await heads(); assert.deepEqual([h.model, h.plain, h.gone], [COIN, own("plain"), own("gone")]); }
+  // nothing on the page is without a header
+  assert.ok([...(await build()).values()].every((c) => c.line && c.line.subject && c.line.happened));
+  L.close();
 });

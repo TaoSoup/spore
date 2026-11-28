@@ -21,7 +21,7 @@ test("1. a row's story line: a model's line is AI with what it read and its key 
   const L = D.rowLine(row())!;
   assert.deepEqual([L.subject, L.happened, L.auto, L.quote, L.tone, L.keys, L.chips, L.href], ["Moo Deng", "Baby pygmy hippo at a zoo in Thailand", true, false, "normal", ["pygmy hippo"], [], null]);
   assert.deepEqual(L.badge, { text: "AI", title: D.COIN_AI_TITLE.description });
-  assert.equal(D.rowLine(row({ storyLine: sl({ source: "picture" }) }))!.badge!.title, "Written by a model from this coin's picture. It can be wrong.");
+  assert.equal(D.rowLine(row({ storyLine: sl({ source: "picture" }) }))!.badge!.title, "Read from this coin's picture by a model. It can be wrong.");
   assert.deepEqual(D.rowLine(row({ storyLine: sl({ keys: ["not in it", "Thailand"] }) }))!.keys, ["Thailand"], "keys are checked again");
   const Q = D.rowLine(row({ storyLine: { subject: "Moo Deng", happened: "the hippo that bites", by: "server", source: "description", quote: true } }))!;
   assert.deepEqual([Q.auto, Q.badge, Q.quote, Q.keys, Q.tone], [false, null, true, [], "normal"]);

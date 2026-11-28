@@ -468,13 +468,25 @@ function leadSubject(coins, flag) {
   return "";
 }
 
+/** A stranger's text in its plain form (NFKC: full-width, mathematical and other styled letters and digits as ordinary
+ * ones, ligatures split), every run of white space one space; "" for anything that is not a string. */
+export function plainQuote(text) {
+  if (typeof text !== "string") return "";
+  let t = text;
+  try { t = t.normalize("NFKC"); } catch { /* as written */ }
+  return t.replace(/\s+/g, " ").trim();
+}
+
 /**
  * The poster's (or a coin's) own words as the server may show them in quote marks, cut to QUOTE_MAX, or null: QUOTE_MIN_WORDS
  * or more words (links aside); when THIN_WORDS or fewer, not noise (isNoise); the WHOLE text has no prediction, promise of
  * gain or call to buy (QUOTE_REFUSE); the shown part passes the block list (`flag`), the hype check (the coins' own names
- * of two or more words taken out first) and the price check. `coins`: `[{ name, symbol }]`. Never throws.
+ * of two or more words taken out first) and the price check. `coins`: `[{ name, symbol }]`. The text is read in its
+ * plain form first (plainQuote: full-width and styled letters as ordinary ones, "Ｂｉｌｌｉｏｎｓ" and "𝐁𝐢𝐥𝐥𝐢𝐨𝐧𝐬" as
+ * "Billions", one space between words), so it is checked and shown as a reader would type it. Never throws.
  */
 export function quoteText(text, coins = [], { flag = flagText } = {}) {
+  text = plainQuote(text);
   const say = postText(text), wc = countWords(say);
   if (wc < QUOTE_MIN_WORDS || (wc <= THIN_WORDS && isNoise(say))) return null;
   const shown = cutTo(say, QUOTE_MAX);

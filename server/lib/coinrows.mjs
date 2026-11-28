@@ -593,11 +593,64 @@ export class CoinRows {
    * chosen once per card key and kept (the card's story memory) while it is still in the card with a line that says more
    * than its name; it gives way only to a model's line when its own is the server's. null when no row has a story line.
    */
-  #coinHead(card, tf) {
+  #coinHead(card, tf, { said = false } = {}) {
     const mem = this.memory.get(tf) ?? null, keep = mem?.leadOf(card.key) ?? null;
     const { line, mint } = headerLine(card.coins, { keep, title: card.subject?.title ?? card.narrative?.title ?? null, familySymbol: card.family?.symbol ?? null, grouped: card.kind === "narrative" && !card.subject });
+    // `said`: only a coin's line that says more than its name, and not the server's quote of the post the card shows
+    // (the server's own line quotes that post under the card's own subject: serverLine)
+    if (said && (!mint || (line?.by === "server" && card.post?.id && card.coins?.find((r) => r.mint === mint)?.storyLine?.source === "post"))) return null;
     if (mint && mint !== keep) mem?.setLead(card.key, mint);
     return line;
+  }
+
+  /**
+   * The card's coins as the server's own line reads them (serverLine): the rows the page draws, the one that links the
+   * shown post first (`ordered`), and every coin, copies included, for the shared word (`all`).
+   */
+  #cardCoins(card, ids, post) {
+    const model = this.model;
+    const lead = card.coins?.find((r) => ids.get(r.mint) === post?.id) ?? card.coins?.[0] ?? null;
+    const ordered = lead ? [lead, ...(card.coins ?? []).filter((r) => r !== lead)] : [];
+    const all = [];
+    for (const r of ordered) {
+      all.push({ name: r.name ?? null, symbol: r.symbol ?? null, parent: r.parent?.symbol ?? null });
+      for (const cp of r.copies ?? []) {
+        let nm = null, parent = null;
+        try { nm = model.nameOf(cp.mint); const q = model.coins.get(cp.mint)?.quoteMint; parent = q && q !== SOL_MINT ? model.nameOf(q).symbol ?? null : null; } catch { /* named like its lead */ }
+        all.push({ name: nm?.name ?? r.name ?? null, symbol: nm?.symbol ?? r.symbol ?? null, parent });
+      }
+    }
+    return { lead, ordered, all };
+  }
+
+  /**
+   * The header of a card that would otherwise have none (its post's line not stored yet, waiting, not offered, or the
+   * post lines off): a coin's own line that says more than its name (#coinHead; not a coin's quote of the card's own
+   * post), else the server's own line from the post (serverLine: the poster's words in quote marks), else the coins'
+   * name-only header. The post's line takes its place once it is stored.
+   */
+  #fallbackLine(card, ids, tf) {
+    const head = this.#coinHead(card, tf, { said: true });
+    if (head) return head;
+    const post = card.post?.id ? card.post : null;
+    if (post) {
+      const { ordered, all } = this.#cardCoins(card, ids, post);
+      const title = card.subject?.title ?? card.narrative?.title ?? null;
+      const l = serverLine({ post, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject });
+      if (l) return l;
+    }
+    return this.#coinHead(card, tf);
+  }
+
+  /**
+   * One listed card's `line` (and `quoted` / `chain`): #cardLineOf, and a card it leaves without a line is headed by
+   * #fallbackLine, so no listed card is shown without a header (also when #cardLineOf throws).
+   */
+  #cardLine(pl, xp, card, ids, tf, nowS) {
+    let err = null;
+    try { this.#cardLineOf(pl, xp, card, ids, tf, nowS); } catch (e) { err = e; }
+    if (!card.line) { try { const l = this.#fallbackLine(card, ids, tf); if (l) card.line = l; } catch (e) { err ??= e; } }
+    if (err) throw err;
   }
 
   /**
@@ -617,29 +670,19 @@ export class CoinRows {
   }
 
   /**
-   * One listed card's `line` (and `quoted` / `chain`): see #storyGen. `pl`: the post lines, or null (off). `ids`: mint →
+   * One listed card's `line` (and `quoted` / `chain`), before the fallback (#cardLine): see #storyGen. `pl`: the post lines, or null (off). `ids`: mint →
    * the post it links. Memory and at most one indexed read; what it queues (a link read, a quoted post's text, a model
    * request) is never awaited.
    */
-  #cardLine(pl, xp, card, ids, tf, nowS) {
+  #cardLineOf(pl, xp, card, ids, tf, nowS) {
     const model = this.model, post = card.post?.id ? card.post : null;
     // A card whose post has no words of its own, or no post: its coins' story lines head it (the counted sentence is gone).
     if (!post || (!pl && wordCount(post.text) === 0)) { const h = this.#coinHead(card, tf); if (h) card.line = h; return; }
-    // With the post lines off a card with a worded post has no field: the page shows the poster's words.
+    // With the post lines off a card with a worded post gets no line here: #cardLine heads it (#fallbackLine).
     if (!pl) return;
     // The card's coins, the one that links the shown post first; every coin, copies included, for the shared word.
     // `ordered` are the rows the page draws: a coin with copies folded under it is ONE row.
-    const lead = card.coins?.find((r) => ids.get(r.mint) === post.id) ?? card.coins?.[0] ?? null;
-    const ordered = lead ? [lead, ...(card.coins ?? []).filter((r) => r !== lead)] : [];
-    const all = [];
-    for (const r of ordered) {
-      all.push({ name: r.name ?? null, symbol: r.symbol ?? null, parent: r.parent?.symbol ?? null });
-      for (const cp of r.copies ?? []) {
-        let nm = null, parent = null;
-        try { nm = model.nameOf(cp.mint); const q = model.coins.get(cp.mint)?.quoteMint; parent = q && q !== SOL_MINT ? model.nameOf(q).symbol ?? null : null; } catch { /* named like its lead */ }
-        all.push({ name: nm?.name ?? r.name ?? null, symbol: nm?.symbol ?? r.symbol ?? null, parent });
-      }
-    }
+    const { lead, ordered, all } = this.#cardCoins(card, ids, post);
     const title = card.subject?.title ?? card.narrative?.title ?? null;
     // The server's own line: the poster's words in quote marks, else the coins' story lines.
     const own = () => serverLine({ post, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject }) ?? this.#coinHead(card, tf);
@@ -673,7 +716,8 @@ export class CoinRows {
     if (!mine) {
       const r = offer();
       // No model call, or a post of a few words still waiting (for its link, or for the model with its quoted post):
-      // the server's line now, so "Sending 10%" is never shown as a story meanwhile. A longer post waits with no field.
+      // the server's line now, so "Sending 10%" is never shown as a story meanwhile. A longer post waits for its line,
+      // headed meanwhile by #cardLine (#fallbackLine: a coin's own line first).
       mine = r === "server" || (r != null && r !== "known" && wordCount(post.text) <= THIN_WORDS);
     }
     if (mine) card.line = own();
@@ -757,7 +801,10 @@ export class CoinRows {
     //   (lib/coin-lines.mjs headerLine: a model's line marked "ai" and "coin_line", else a quote), else its coins'
     //   shared name with "Name only: ...". The coin it came from is chosen once per card key and
     //   kept while it is in the card with such a line (#coinHead, the story memory). There is no counted sentence.
-    // Without `line` the card is as before (the page falls back to the poster's words): not decided yet.
+    // - Any card still without `line` (its post's line not stored yet, waiting or not offered, the post lines off, a
+    //   failure): a coin's own line that says more than its name, else the server's own line (the poster's words in
+    //   quote marks), else the coins' name-only header (#cardLine, #fallbackLine). The post's line replaces it once
+    //   it is stored. No listed card is without a header while any coin of it has a story line.
     const pl = this.lines?.on ? this.lines : null;
     if (!background) {
       const xp = pl ? model.wakeups?.narrative?.posts ?? null : null;

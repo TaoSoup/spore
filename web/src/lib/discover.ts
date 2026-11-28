@@ -1320,17 +1320,18 @@ export const NAMES_QUOTED_TITLE = "A name in the sentence is written in the quot
 export const NAMES_CHAIN_TITLE = "A name in the sentence is written in a post that the quoted post itself quotes";
 export const QUOTED_AGE_TITLE = "How old the quoted post is";
 export const LINE_NOTE = "Summary written by a model. It can be wrong.";
-/// A coin's own story line (StoryRow.storyLine) written by a model: what it read, by the server's source code.
+/// A coin's own story line (StoryRow.storyLine) written by a model: what it read, by the server's source code. The line
+/// itself never says where it was read (no "Description says ..."), so this title is where a reader finds it.
 export const COIN_AI_TITLE: Record<CoinLineSource, string> = {
-  description: "Written by a model from this coin's own description. It can be wrong.",
-  post: "Written by a model from the post this coin links. It can be wrong.",
-  picture: "Written by a model from this coin's picture. It can be wrong.",
-  name: "Written by a model from this coin's name. It can be wrong.",
+  description: "Read from this coin's own description by a model. It can be wrong.",
+  post: "Read from the post this coin links by a model. It can be wrong.",
+  picture: "Read from this coin's picture by a model. It can be wrong.",
+  name: "Read from this coin's name by a model. It can be wrong.",
 };
 /// The chip of a story header taken from one coin's own line (chip code "coin_line"): whose line it is.
 export const COIN_LINE_TITLE = "The line of the coin with the most buyers that says what it refers to, read from that coin's own text, picture and post";
 /// The "AI" badge of a story header that is a coin's own line written by a model.
-export const COIN_HEAD_AI_TITLE = "Written by a model from one coin's own name, description, picture and post. It can be wrong.";
+export const COIN_HEAD_AI_TITLE = "Read from one coin's own name, description, picture and post by a model. It can be wrong.";
 export const NO_POST_TEXT = "Linked post has no text";
 
 // Short words a model's lower-case title means in capitals: sentence case would write "Ai bubble popping".

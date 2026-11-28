@@ -327,7 +327,7 @@ test("a line-only re-read sent with the picture stores had_img with the line, so
   await t.pump();
   assert.equal(client.calls.length, 1);
   assert.deepEqual(sentCoins(client.calls[0].req).map((c) => [c.symbol, c.picture ?? false]), [["A", true]]);
-  assert.deepEqual([db.tagGet("a").narrativeId, db.tagGet("a").lineV, db.tagGet("a").line, db.tagGet("a").hadImg], [id, 1, null, true], "the tag stands; had_img is now set");
+  assert.deepEqual([db.tagGet("a").narrativeId, db.tagGet("a").lineV, db.tagGet("a").line, db.tagGet("a").hadImg], [id, 2, null, true], "the tag stands; had_img is now set");
   const m = t.storyLineOf("a");
   assert.equal(m.hadImg, true, "the cached answer knows the picture was read");
   const l = coinStoryLine(m, { name: "a coin", symbol: "A", description: null, post: null, image: true });

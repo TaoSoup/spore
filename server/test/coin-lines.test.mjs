@@ -11,13 +11,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  COIN_LINE_VERSION, NAME_ONLY, NAME_ONLY_MANY, NAME_ONLY_UNREAD, NAME_ONLY_SOME, readCoinLine, checkCoinLine, lineSource, storedLine, coinServerLine, coinStoryLine, headerLine, nameOnly,
+  COIN_LINE_VERSION, NAME_ONLY, NAME_ONLY_MANY, NAME_ONLY_UNREAD, NAME_ONLY_SOME, readCoinLine, checkCoinLine, lineSource, storedLine, coinServerLine, coinStoryLine, headerLine, nameOnly, lineOpener,
 } from "../lib/coin-lines.mjs";
 import {
   NarrTags, TagEngine, MemoryTagStore, DEFAULT_MODEL, REPLY_SCHEMA, SYSTEM_TEXT, SYSTEM_TEXT_PICTURES, OUT_BASE, OUT_PER_COIN, buildRequest, readReply, userText, RELINE_MAX, applyTagRules,
   LINE_SUBJECT_MAX, LINE_HAPPENED_MAX, LINE_WORDS_MAX, LINE_HAPPENED_TARGET, LINE_WORDS_TARGET,
 } from "../lib/narrtags.mjs";
-import { SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, HAPPENED_TARGET, WORDS_TARGET, CHIPS } from "../lib/post-lines.mjs";
+import { SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, HAPPENED_TARGET, WORDS_TARGET, CHIPS, quoteText, plainQuote } from "../lib/post-lines.mjs";
 import { Db } from "../lib/db.mjs";
 import { quiet } from "./helpers/tree.mjs";
 import { fakeClock, T0 } from "./helpers/chain.mjs";
@@ -51,7 +51,7 @@ test("the instructions and the schema carry the line; its caps are the post line
   assert.deepEqual(item.properties.line, { type: "object", properties: { subject: { type: "string" }, happened: { type: "string" }, keys: { type: "array", items: { type: "string" } } }, required: ["subject", "happened", "keys"], additionalProperties: false });
   assert.equal(OUT_PER_COIN, 112);
   assert.equal(buildRequest({ coins: [hippo, hippo, hippo, hippo, hippo, hippo, hippo] }).max_tokens, OUT_BASE + 7 * OUT_PER_COIN);
-  assert.equal(COIN_LINE_VERSION, 1);
+  assert.equal(COIN_LINE_VERSION, 2);
   assert.ok(CHIPS.includes("coin_line"));
 });
 
@@ -85,15 +85,15 @@ test("the checks: the post lines' checks over the coin's own texts; a picture le
   assert.equal(bad("Moo Deng", "Baby hippo born 3 times at a zoo"), "number");
   // with its picture sent the name or number may be the picture's; a price or hype word never is
   const bare = { ...hippo, description: null };
-  assert.equal(bad("Moo Deng", "Picture shows a baby hippo holding a sign that says 67", bare, { picture: true }), null);
-  assert.equal(bad("Duck King", "Picture shows Duck King in a golden crown", bare, { picture: true }), null);
-  assert.equal(bad("Duck King", "Picture shows Duck King in a golden crown", bare), "ungrounded");
-  assert.equal(bad("Duck King", "Picture shows a 10x gem", bare, { picture: true }), "hype");
+  assert.equal(bad("Moo Deng", "A baby hippo holding a sign that says 67", bare, { picture: true }), null);
+  assert.equal(bad("Duck King", "Duck King in a golden crown", bare, { picture: true }), null);
+  assert.equal(bad("Duck King", "Duck King in a golden crown", bare), "ungrounded");
+  assert.equal(bad("Duck King", "A 10x gem with a crown", bare, { picture: true }), "hype");
 });
 
 test("the source rule: post, then description, then picture; name when the line adds nothing to the name", () => {
   const d = { ...hippo, post: { handle: "zoo", text: "Our hippo learned to swim in the big pool" } };
-  assert.equal(lineSource(L("Moo Deng", "Zoo post says the hippo learned to swim"), d), "post");
+  assert.equal(lineSource(L("Moo Deng", "Zoo hippo learned to swim in the big pool"), d), "post");
   assert.equal(lineSource(L("Moo Deng", "Pygmy calf from Thailand"), d), "description");
   assert.equal(lineSource(L("Moo Deng", "Cartoon hippo with a crown"), { ...hippo, description: null }, { picture: true }), "picture");
   assert.equal(lineSource(L("Moo Deng", "Coin named Moo Deng"), hippo), "name");
@@ -174,7 +174,7 @@ test("the engine stores each coin's checked line beside its tag; a line that fai
   const r = await e.tag([hippo, { ...hippo, mint: "hype", symbol: "HYPE" }, { ...hippo, mint: "bare", symbol: "BARE" }]);
   assert.equal(r.ok, true);
   assert.deepEqual(store.tagGet("hippo").line, { subject: "Moo Deng", happened: "Baby pygmy hippo at a zoo in Thailand", keys: ["pygmy hippo"], source: "description" }, "a key phrase not in the sentence is dropped");
-  assert.deepEqual([store.tagGet("hippo").lineV, store.tagGet("hype").narrativeId, store.tagGet("hype").line, store.tagGet("bare").line, store.tagGet("bare").lineV], [1, 1, { dropped: true }, null, 1]);
+  assert.deepEqual([store.tagGet("hippo").lineV, store.tagGet("hype").narrativeId, store.tagGet("hype").line, store.tagGet("bare").line, store.tagGet("bare").lineV], [2, 1, { dropped: true }, null, 2]);
   assert.deepEqual([e.stats.linesKept, e.stats.linesDropped, e.stats.linesEmpty, e.stats.lastLineDrop], [1, 1, 1, "hype"]);
   assert.deepEqual([...r.lines.keys()], ["hippo", "hype", "bare"]);
 });
@@ -207,7 +207,7 @@ test("re-read for the line alone: a listed coin answered before lines waits once
   const id = db.narrAdd({ title: "hippo story", theme: "animals", key: "hippo story", at: T0 - 500 });
   for (const m of ["a", "b", "c"]) db.tagSet({ mint: m, narrativeId: m === "c" ? null : id, at: T0 - 400, model: DEFAULT_MODEL, asks: 2 });
   db.tagSet({ mint: "gone", narrativeId: null, at: T0 - 10, model: "gave-up", asks: 2 });
-  db.tagSet({ mint: "fresh", narrativeId: id, at: T0 - 400, model: DEFAULT_MODEL, line: { subject: "Fresh", happened: "fresh is a hippo at a zoo", keys: [], source: "description" }, lineV: 1 });
+  db.tagSet({ mint: "fresh", narrativeId: id, at: T0 - 400, model: DEFAULT_MODEL, line: { subject: "Fresh", happened: "fresh is a hippo at a zoo", keys: [], source: "description" }, lineV: COIN_LINE_VERSION });
   const client = fakeClient((req) => reply(sentCoins(req).map((c) => fresh(c.n, "some other story", L(c.name, `${c.symbol.toLowerCase()} is a hippo at a zoo`)))));
   const { t } = tagger({ db, model, client });
   for (const m of ["a", "b", "c", "gone", "fresh", "never"]) t.tagOf(m); // the stories build reads each row's answer first
@@ -227,7 +227,7 @@ test("re-read for the line alone: a listed coin answered before lines waits once
   for (const m of ["a", "b", "c"]) t.reline(m, 99);
   assert.equal(t.pending(), 0);
   const h = t.snapshot();
-  assert.deepEqual([h.lines.version, h.lines.reread, h.lines.rereadWaiting, h.lines.kept, h.lines.stored, h.tagged, h.none], [1, 3, 0, 3, 4, 3, 2]);
+  assert.deepEqual([h.lines.version, h.lines.reread, h.lines.rereadWaiting, h.lines.kept, h.lines.stored, h.tagged, h.none], [2, 3, 0, 3, 4, 3, 2]);
   assert.equal(client.calls.length, 1);
   assert.ok(RELINE_MAX >= 100);
   t.stop(); db.close();
@@ -242,7 +242,7 @@ test("a re-read that keeps failing is given up for its line only: the tag stays 
   const { t } = tagger({ db, model, client });
   t.tagOf("a"); t.reline("a", 4);
   for (let i = 0; i < 4 && t.pending(); i++) await t.pump();
-  assert.deepEqual([db.tagGet("a").model, db.tagGet("a").asks, db.tagGet("a").line, db.tagGet("a").lineV, t.snapshot().lines.rereadGaveUp], [DEFAULT_MODEL, 2, { dropped: true }, 1, 1]);
+  assert.deepEqual([db.tagGet("a").model, db.tagGet("a").asks, db.tagGet("a").line, db.tagGet("a").lineV, t.snapshot().lines.rereadGaveUp], [DEFAULT_MODEL, 2, { dropped: true }, 2, 1]);
   t.reline("a", 4);
   assert.equal(t.pending(), 0);
   t.stop(); db.close();
@@ -253,16 +253,101 @@ test("the checks: a coin line never carries a prediction, a promise of gain or a
   for (const [happened, picture] of [
     ["Pepe King will make every holder rich", false],
     ["Holders should buy now before it pumps", false],
-    ["Description says buy now before it pumps, guaranteed gains", false],
-    ["Picture shows a frog that will go up a lot", true],
-    ["Picture shows a frog; buy before it's gone", true],
-    ["Picture shows a frog; before it’s gone", true],
-    ["Picture shows a frog that is going to double", true],
-    ["Picture shows a frog; don't miss it", true],
+    ["Buy now before it pumps, guaranteed gains, per its description", false],
+    ["A frog that will go up a lot", true],
+    ["A frog; buy before it's gone", true],
+    ["A frog; before it’s gone", true],
+    ["A frog that is going to double", true],
+    ["A frog; don't miss it", true],
   ]) assert.equal(checkCoinLine(L("Pepe King", happened), d, { picture }).why, "promise", happened);
   assert.equal(checkCoinLine(L("Rich Frog", "A frog in a crown"), d, { picture: true }).why, "promise", "the subject is checked too");
-  assert.equal(checkCoinLine(L("Pepe King", "Picture shows a green frog wearing a crown"), d, { picture: true }).why, null);
-  assert.equal(checkCoinLine(L("Pepe King", "Description says the frog can run fast and grow a beard"), { ...d, description: "the frog can run fast and grow a beard" }).why, null, "ordinary words stay");
+  assert.equal(checkCoinLine(L("Pepe King", "A green frog wearing a crown"), d, { picture: true }).why, null);
+  assert.equal(checkCoinLine(L("Pepe King", "A frog that can run fast and grow a beard, per its description"), { ...d, description: "the frog can run fast and grow a beard" }).why, null, "ordinary words stay");
   // the server's own line refuses to quote the same description: the coin falls back to Name only
   assert.match(coinServerLine({ name: "Pepe King", symbol: "PK", description: d.description, post: null, image: false, read: true, dropped: true }).happened, /^Name only/);
+});
+
+test("a headline, not a report: a line that opens with its source is refused (\"opener\"); a light attribution at the end stays", () => {
+  const d = { name: "Fries Cat", symbol: "TATO", description: "a cat inside a McDonald's fries bag labeled tato; one small step for MoonBoy", website: "people.com/viral-pygmy-hippo-moo-deng", twitter: null, post: { handle: "zoo", text: "Elon Musk posted a frog" } };
+  for (const happened of [
+    "Description says it is a cat inside a fries bag",
+    "Picture shows a cat inside a McDonald's fries bag labeled tato",
+    "Site points to a People article about a viral pygmy hippo",
+    "Linked post says Elon Musk posted a frog",
+    "Post says Elon Musk posted a frog",
+    "The description says a cat in a fries bag",
+    "Its picture: a cat in a fries bag",
+    "This coin is a cat in a fries bag",
+    "The coin refers to a cat in a fries bag",
+    "Token shows a cat in a fries bag",
+    "Per its description, a cat in a fries bag",
+    "According to its post, Elon Musk posted a frog",
+    "“Description says a cat in a fries bag”",
+    "X post says a cat in a fries bag",
+    "Linked X post says a cat in a fries bag",
+    "Their post says a cat in a fries bag",
+    "Ticker refers to a cat in a fries bag",
+    "Name refers to a cat in a fries bag",
+    "Name means a cat in a fries bag",
+    "Dev says a cat in a fries bag",
+    "The dev's post says a cat in a fries bag",
+    "Symbol: a cat in a fries bag",
+  ]) {
+    assert.equal(lineOpener(happened), true, happened);
+    assert.deepEqual(checkCoinLine(L("Fries cat", happened), d, { picture: true }), { line: null, why: "opener" }, happened);
+  }
+  // the owner's examples of the new style pass, and so does a rare attribution at the end
+  for (const [subject, happened] of [
+    ["Fries cat", "A cat peeking out of a McDonald's fries bag"],
+    ["Moo Deng", "People article on viral pygmy hippo Moo Deng"],
+    ["Elon Musk", "Elon Musk posted a frog, per its post"],
+    ["MoonBoy", "One small step for MoonBoy"],
+  ]) {
+    assert.equal(lineOpener(happened), false, happened);
+    assert.equal(checkCoinLine(L(subject, happened), d, { picture: true }).why, null, happened);
+  }
+  // words that only look like a source stay: a name, a kind of thing, a source word later in the line
+  for (const happened of ["Post Malone fan art", "Page Six story on a hippo", "Token of love from a frog", "Pictures of cats in hats", "Text message meme from a dog", "Launchpad linking Hyperliquid perps to coins", "Name tag on a frog", "Dev team meme from a cat", "Ticker tape parade for a dog", "X marks the spot treasure map"]) assert.equal(lineOpener(happened), false, happened);
+  assert.equal(lineOpener(""), false);
+  assert.equal(lineOpener(null), false);
+  // the instructions ask for the headline and name the openers to avoid; the old "Description says ..." example is gone
+  for (const t of [SYSTEM_TEXT, SYSTEM_TEXT_PICTURES]) {
+    assert.match(t, /Aim for 6 to 12 words/);
+    assert.match(t, /Never open with the source \("Description says", "Picture shows", "Site points to", "Linked post says", "This coin is"\)/);
+    assert.match(t, /"A cat peeking out of a McDonald's fries bag"/);
+    assert.match(t, /per its post/);
+    assert.doesNotMatch(t, /An opinion, a claim or a plan is attributed: "Description says/);
+  }
+});
+
+test("quotes in full-width or styled letters are shown and checked in their plain form", () => {
+  assert.equal(plainQuote("Ｂｉｌｌｉｏｎｓ Ｍｕｓｔ Ｍｉｄｃｕｒｖｅ"), "Billions Must Midcurve");
+  assert.equal(plainQuote("𝐁𝐢𝐥𝐥𝐢𝐨𝐧𝐬  must\n\u00a0 𝘮𝘪𝘥𝘤𝘶𝘳𝘷𝘦"), "Billions must midcurve");
+  assert.equal(plainQuote(null), "");
+  assert.equal(quoteText("Ｂｉｌｌｉｏｎｓ Ｍｕｓｔ Ｍｉｄｃｕｒｖｅ", [], { flag }), "Billions Must Midcurve");
+  // the checks read the plain form: a call to buy in full-width letters is refused like the plain one
+  assert.equal(quoteText("ｂｕｙ ｎｏｗ ｂｅｆｏｒｅ ｉｔ ｉｓ ｔｏｏ ｌａｔｅ", [], { flag }), null);
+  assert.equal(quoteText("ａ ｃａｔ ｔｈａｔ ｉｓ ａ ｂａｄｗｏｒｄ", [], { flag }), null, "the block list reads the plain form");
+  // the server's coin line quotes the plain form
+  const l = coinServerLine({ name: "Billions", symbol: "BMM", description: "Ｂｉｌｌｉｏｎｓ Ｍｕｓｔ Ｍｉｄｃｕｒｖｅ" }, { flag });
+  assert.deepEqual([l.happened, l.quote, l.source], ["Billions Must Midcurve", true, "description"]);
+});
+
+test("version 2: a coin whose line was written under version 1 (\"Description says ...\") is not shown and is read once more for its line", async () => {
+  const db = new Db(":memory:"), model = fakeModel();
+  applyTagRules(db, quiet);
+  model.add("old", { name: "Fries Cat", symbol: "TATO", description: "a cat inside a McDonald's fries bag" });
+  db.tagSet({ mint: "old", narrativeId: null, at: T0 - 400, model: DEFAULT_MODEL, asks: 1, line: { subject: "Fries Cat", happened: "Description says it is a cat inside a McDonald's fries bag", keys: [], source: "description" }, lineV: 1 });
+  const client = fakeClient((req) => reply(sentCoins(req).map((c) => none(c.n, L("Fries cat", "A cat inside a McDonald's fries bag", ["fries bag"])))));
+  const { t } = tagger({ db, model, client });
+  t.tagOf("old");
+  assert.equal(t.storyLineOf("old").read, false, "a version 1 line is not shown as read");
+  t.reline("old", 3);
+  assert.equal(t.pending(), 1);
+  await t.pump();
+  assert.deepEqual([db.tagGet("old").lineV, db.tagGet("old").line.happened], [COIN_LINE_VERSION, "A cat inside a McDonald's fries bag"]);
+  assert.equal(t.storyLineOf("old").read, true);
+  t.reline("old", 3);
+  assert.equal(t.pending(), 0, "once");
+  t.stop(); db.close();
 });

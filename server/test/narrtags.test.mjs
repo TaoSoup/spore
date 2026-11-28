@@ -138,12 +138,12 @@ test("tagging a batch: existing and new narratives, a near-duplicate title merge
   assert.equal(r.ok, true);
   assert.deepEqual([[...r.done], r.missed], [[["a", 1], ["b", 1], ["c", null], ["x", 2]], ["d"]]);
   assert.deepEqual(store.narrRecent(), [{ id: 2, title: "dog in a hat", theme: "other" }, { id: 1, title: "ai bubble popping", theme: "ai" }]);
-  assert.deepEqual([store.tagGet("a"), store.tagGet("c"), store.tagGet("d")], [{ mint: "a", narrativeId: 1, at: T0, model: "claude-haiku-5-5", asks: 1, hadPost: false, bare: false, hadImg: false, line: null, lineV: 1 }, { mint: "c", narrativeId: null, at: T0, model: "claude-haiku-5-5", asks: 1, hadPost: false, bare: false, hadImg: false, line: null, lineV: 1 }, null]);
+  assert.deepEqual([store.tagGet("a"), store.tagGet("c"), store.tagGet("d")], [{ mint: "a", narrativeId: 1, at: T0, model: "claude-haiku-5-5", asks: 1, hadPost: false, bare: false, hadImg: false, line: null, lineV: 2 }, { mint: "c", narrativeId: null, at: T0, model: "claude-haiku-5-5", asks: 1, hadPost: false, bare: false, hadImg: false, line: null, lineV: 2 }, null]);
   assert.deepEqual(sentNarratives(client.calls[0].req), ["(none yet)"]);
   clock.t += 60_000;
   const r2 = await e.tag([coin("e"), coin("f", { post: { handle: "h", text: "woof" }, asks: 1 })]);
   assert.deepEqual([[...r2.done], sentNarratives(client.calls[1].req)], [[["e", 1], ["f", 2]], ["1 | ai | ai bubble popping", "2 | other | dog in a hat"]]);
-  assert.deepEqual(store.tagGet("f"), { mint: "f", narrativeId: 2, at: T0 + 60, model: "claude-haiku-5-5", asks: 2, hadPost: true, bare: false, hadImg: false, line: null, lineV: 1 });
+  assert.deepEqual(store.tagGet("f"), { mint: "f", narrativeId: 2, at: T0 + 60, model: "claude-haiku-5-5", asks: 2, hadPost: true, bare: false, hadImg: false, line: null, lineV: 2 });
   assert.equal(store.narrCount(), 2, "\"dogs in hats\" is the narrative that exists");
   assert.deepEqual([e.stats.requests, e.stats.ok, e.stats.newNarratives, e.stats.merged, e.stats.coinsTagged, e.stats.coinsNone, e.stats.coinsMissed], [2, 2, 2, 2, 5, 1, 1]);
   assert.equal(client.made(), 1, "one client for the engine's life");
@@ -483,7 +483,7 @@ test("a coin answered none is asked once more when the text of its linked post h
   t.offer("a", 15, { hot: true }); t.offer("b", 15, { hot: true });
   await t.pump();
   assert.deepEqual([client.calls.length, sentCoins(client.calls[1].req).map((c) => [c.symbol, c.post?.text])], [2, [["A", "the story behind it"]]]);
-  assert.deepEqual([db.tagGet("a"), t.tagOf("a").title, db.tagCounts(), t.pageStats().tagged], [{ mint: "a", narrativeId: 1, at: db.tagGet("a").at, model: DEFAULT_MODEL, asks: 2, hadPost: true, bare: false, hadImg: false, line: null, lineV: 1 }, "post story", { tagged: 1, none: 1 }, 1]);
+  assert.deepEqual([db.tagGet("a"), t.tagOf("a").title, db.tagCounts(), t.pageStats().tagged], [{ mint: "a", narrativeId: 1, at: db.tagGet("a").at, model: DEFAULT_MODEL, asks: 2, hadPost: true, bare: false, hadImg: false, line: null, lineV: 2 }, "post story", { tagged: 1, none: 1 }, 1]);
   // a flagged post's text is never sent
   model.add("f", { twitter: "https://x.com/who/status/1700000000000000002" });
   stored.set("1700000000000000002", { id: "1700000000000000002", state: "ok", handle: "rude", text: "", flagged: true });
@@ -864,7 +864,7 @@ test("the empty-coin guard: a coin with no text of its own, priced in another co
     assert.ok(ai && moo && store.narrCount() === 3, "the title a guarded coin asked for is made only by the coin with text");
     assert.deepEqual([e.stats.forcedNone, e.stats.coinsTagged, e.stats.coinsNone, e.stats.newNarratives, e.stats.merged, r.missed], [5, 6, 6, 2, 0, []]);
     assert.deepEqual([sentCoins(client.calls[0].req)[3], sentCoins(client.calls[0].req)[10].no_text], [{ n: 4, name: "Kid", symbol: "KID", paired_with: "Bigfoot (BIGFOOT)", pair_narrative: "trump files on bigfoot", no_text: true }, true], "the pairing is shown, and it does not stand in for text");
-    assert.deepEqual(store.tagGet("turkey"), { mint: "turkey", narrativeId: null, at: T0, model: DEFAULT_MODEL, asks: 1, hadPost: false, bare: true, hadImg: false, line: null, lineV: 1 }, "stored as an answer: the coin is not asked again and again");
+    assert.deepEqual(store.tagGet("turkey"), { mint: "turkey", narrativeId: null, at: T0, model: DEFAULT_MODEL, asks: 1, hadPost: false, bare: true, hadImg: false, line: null, lineV: 2 }, "stored as an answer: the coin is not asked again and again");
     assert.equal(sentCoins(client.calls[0].req)[0].description, undefined, "the model never saw the boilerplate");
     store.close?.();
   }

@@ -252,7 +252,7 @@ test("--also coins are read after the window's coins whatever their age or buyer
     assert.deepEqual(sentCoins(reqs[0]).map((c) => c.symbol), Array.from({ length: 12 }, (_, i) => `T${18 + i}`), "the window's coins first, alone");
     assert.deepEqual(sentCoins(reqs[1]).map((c) => c.symbol), ["OLD", "T3", "T7"], "then the --also coins, in the order given, each once");
     assert.equal(userText(reqs[1].messages[0]).split("<narratives>\n")[1].split("\n</narratives>")[0], "1 | animals | dog in a hat\n2 | ai | ai bubble popping", "they see the narratives the window made");
-    assert.deepEqual(r.also, [
+    assert.deepEqual(r.also.map(({ line, ...x }) => x), [ // each row also carries the coin's line (null here: the fake replies write none)
       { mint: "OLD", name: "Old", symbol: "OLD", found: true, inWindow: false, read: true, title: null, theme: null },
       { mint: "M003", name: "Coin 3", symbol: "T3", found: true, inWindow: false, read: true, title: "ai bubble popping", theme: "ai" },
       { mint: "NOPE", name: null, symbol: null, found: false, inWindow: false, read: false, title: null, theme: null },

@@ -6,8 +6,11 @@
 //   the request shows of that coin only (its name, ticker, description, site, X handle or search, its linked post's
 //   text and, with NARRATIVE_IMAGES=on, its picture). It is checked here (checkCoinLine) with the post lines' own
 //   checks (lib/post-lines.mjs checkLine: length caps, no price, hype, link, day, block-list words, no number or name
-//   the coin's texts do not have) and its key phrases with keepKeys. A line that fails is dropped: the tag is stored
-//   as ever, never held back by its line.
+//   the coin's texts do not have) and its key phrases with keepKeys. The line states what the coin is about like a
+//   short headline ("A cat peeking out of a McDonald's fries bag"), never where it was read: a line that opens with its
+//   source ("Description says", "Picture shows", "Site points to", "Linked post says", "This coin is") is refused
+//   (lineOpener; the page names what was read beside it). A line that fails is dropped: the tag is stored as ever,
+//   never held back by its line.
 // - by "server": everything else, written here from facts only (coinServerLine): a description, else the linked post,
 //   in quote marks when the server's quote rules let it through (lib/post-lines.mjs quoteText: no prediction, promise
 //   of gain or call to buy, no block-list, hype or price words, not noise) and the model has not read the coin;
@@ -28,7 +31,8 @@ import { checkLine, cleanField, keepKeys, quoteText, quoteRefused, sharedWord, p
 import { flagText } from "./narrative.mjs";
 import { cleanText } from "./narrtags.mjs";
 
-export const COIN_LINE_VERSION = 1;
+// 2 (Nov 28): headline lines without a source opener ("Description says ..." read mechanical); v1 lines are read again.
+export const COIN_LINE_VERSION = 2;
 /** The line of a coin that has no description, no picture and no post. */
 export const NAME_ONLY = "Name only: no description, picture or post";
 /** The header of a card whose coins have nothing but their names. */
@@ -44,7 +48,7 @@ export const SOURCES = Object.freeze(["description", "picture", "post", "name"])
 const hasWords = (s) => typeof s === "string" && /[\p{L}\p{N}]/u.test(s);
 const wordsOf = (s) => String(s ?? "").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 // Words that carry no substance of their own in a coin line.
-const STOP = new Set(["the", "and", "for", "with", "from", "into", "onto", "about", "after", "this", "that", "its", "it's", "his", "her", "their", "was", "are", "has", "had", "have", "says", "said", "named", "name", "names", "coin", "coins", "token", "tokens", "meme", "post", "posts", "linked", "description", "picture", "shows", "show", "showing", "called", "refers", "refer", "who", "what", "which", "not", "one"]);
+const STOP = new Set(["the", "per", "and", "for", "with", "from", "into", "onto", "about", "after", "this", "that", "its", "it's", "his", "her", "their", "was", "are", "has", "had", "have", "says", "said", "named", "name", "names", "coin", "coins", "token", "tokens", "meme", "post", "posts", "linked", "description", "picture", "shows", "show", "showing", "called", "refers", "refer", "who", "what", "which", "not", "one"]);
 // What a coin line never says, beyond the post lines' checks (a coin's description is mostly the dev's promotion, and
 // the model is asked to attribute its claims, so the claim itself would be on the page): a prediction (a modal or
 // "going to" before a rise word: "will go up", "is going to pump", "could double"), a call to act ("before it's gone",
@@ -54,6 +58,13 @@ const RISE = String.raw`(?:rise|rises|go(?:es)?\s+up|grow|increase|climb|soar|sk
 const PROMISE_RE = new RegExp(String.raw`(?<![\p{L}\p{N}])(?:(?:will|shall|gonna|could|might|may|should|(?:is|are|it['’]s)?\s*(?:going|set|about|bound)\s+to)\s+(?:[\p{L}']+\s+){0,2}?${RISE}(?![\p{L}\p{N}])|before\s+(?:it['’]?s|it\s+is|they['’]?re|its)\s+(?:gone|too\s+late|sold\s+out)|holders?\s+(?:should|must|need\s+to)|(?:don['’]?t|do\s+not)\s+miss|get\s+in(?![\p{L}\p{N}])|grab\s+(?:it|yours|some|a\s+bag)|to\s+the\s+moon)`, "iu");
 /** Whether a coin line (`subject` and `happened`) holds a prediction, a promise of gain or a call to act. */
 export const linePromises = (l) => { const t = `${l?.subject ?? ""} : ${l?.happened ?? ""}`; return quoteRefused(t) || PROMISE_RE.test(t); };
+// A line that opens with where it was read instead of what the coin is about: "Description says", "Picture shows",
+// "Site points to", "Linked post says", "Its post: ...", "This coin is", "The token refers to", "According to its post",
+// "Per its description", "X post says", "Ticker refers to", "Name refers to", "Dev says". The source is on the page already (the row's `source`, the AI badge's title); a light
+// attribution later in the line ("..., per its post") is not an opener.
+const OPENER_RE = /^[\s"'“‘(]*(?:(?:per|according\s+to|from|in)\s+(?:its|the|this|that)\s+(?:coin['’]s\s+)?(?:description|desc|picture|pic|image|logo|site|website|page|post|tweet|bio|text)(?![\p{L}\p{N}])|(?:(?:the|its|this|that|a|an|their|his|her|linked|quoted|pinned|x|twitter|(?:coin|token|dev|creator)['’]s)\s+)*(?:description|desc|picture|pic|image|logo|site|website|page|post|tweet|thread|bio|caption|text|coin|token|name|ticker|symbol|dev|developer|creator)\s*(?::|(?:says|said|say|shows|showed|show|depicts|depicted|points|pointed|reads|states|stated|claims|claimed|describes|described|mentions|calls|links|refers|references|means|features|names|is|was)(?![\p{L}\p{N}])))/iu;
+/** Whether a coin line's `happened` opens with its source ("Description says ...") instead of what the coin is about. */
+export const lineOpener = (happened) => OPENER_RE.test(String(happened ?? ""));
 const inHay = (w, hay) => hay.includes(w) || (w.length > 4 && w.endsWith("s") && hay.includes(w.slice(0, -1)));
 
 /**
@@ -92,8 +103,8 @@ export function lineSource(line, d, { picture = false } = {}) {
 /**
  * A model's line for coin `d` checked: `{ line, why }`. `line` `{ subject, happened, keys, source }` when it may be
  * shown, else null with `why`: "empty" (the model found nothing: happened ""), "missing" (no usable line in the reply),
- * "promise" (a prediction, a promise of gain or a call to act: linePromises, which the attribution check of a post's
- * claim does not cover, so "Description says buy before it pumps" is refused too), or a lib/post-lines.mjs checkLine
+ * "opener" (it opens with its source, "Description says ...", not with what the coin is about: lineOpener), "promise" (a prediction, a promise of gain or a call to act: linePromises, which the attribution check of a post's
+ * claim does not cover, so "buy before it pumps, per its description" is refused too), or a lib/post-lines.mjs checkLine
  * reason ("long", "hype", "price", "ungrounded", ...). The evidence is the coin's own
  * texts (its description and links count here: they are the coin's own words) and its name and ticker; with its picture
  * sent (`picture`), a name or number the texts do not have may come from the picture, so "ungrounded" and "number" are
@@ -103,6 +114,7 @@ export function checkCoinLine(raw, d, { picture = false } = {}) {
   const l = raw && typeof raw === "object" && "happened" in raw && "subject" in raw && typeof raw.happened === "string" ? raw : null;
   if (!l) return { line: null, why: "missing" };
   if (!hasWords(l.happened)) return { line: null, why: "empty" };
+  if (lineOpener(l.happened)) return { line: null, why: "opener" };
   if (linePromises(l)) return { line: null, why: "promise" };
   const ev = evidenceOf(d);
   const src = { handle: ev.handle, coins: [{ name: d?.name ?? "", symbol: d?.symbol ?? "" }] }, line = { subject: l.subject, happened: l.happened, kind: "event" };
