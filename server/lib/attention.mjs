@@ -91,6 +91,8 @@ export const BASE_REFRESH_MS = 30 * 60_000;
 export const TRIM_EVERY_S = 3600, TRIM_CHUNK = 2_000, STORY_TRIM_CHUNK = 200;
 /** Series bodies cached this long (ms), at most this many; rows a series reads at most (14 days). */
 export const SERIES_TTL_MS = 30_000, SERIES_MAX = 64, SERIES_ROWS = KEEP_S / BUCKET_S;
+/** Story keys one series request may sum at most (a card of several stories; the web asks for a card's first this many, web/src/lib/story-attention.ts SERIES_KEYS_MAX). */
+export const SERIES_KEYS_MAX = 24;
 /** Events: a coin is pre-existing when created this long before T (s); the recorder keeps an event's rows from REC_BEFORE_S before T to REC_AFTER_S after it. */
 export const PRE_EXISTING_S = 36 * 3600, REC_BEFORE_S = 14 * 86_400, REC_AFTER_S = 36 * 3600;
 export const EVENTS_FILE = new URL("../prereg/events.json", import.meta.url);
@@ -274,6 +276,9 @@ export class Attention {
     this.starts = new Map();   // story key → { startAt, source, firstBuyersAt } | null (LRU)
     this.posts = new Map();    // post id → { ok, at } (LRU): whether the post may be shown, checked at most every POST_TTL_S
     this.lastCoin = new Map(); this.lastK = -1; // the last closed bucket's buyers per coin (a card's leader)
+    // mint → { key, k }: the story key (or null) the coin's trades were last filed under, at close k (an hour kept): a
+    // card's "now" and leader count only the coins its series holds (cardAttention)
+    this.fileKey = new Map();
     this.launched = new Map(); // coin mint → the bucket its launch was counted in (the last 2 buckets)
     this.days = new Map();     // mint|day → the coin's day since the last flush
     this.events = []; this.evOpen = []; this.evMemo = new Map();
@@ -557,6 +562,7 @@ export class Attention {
       if (launch) { this.launched.set(x.m, K); siteLaunches++; }
       if (x.dust) continue; // bot dust: in the site row, in no story (as on the cards)
       const key = coinStoryKey({ narrativeId: x.tagId, narrativeCoins: narrOn.has(x.tagId) ? 2 : 0, postId: x.pid, postOk: x.pok, family: x.fam });
+      x.key = key;
       // a tagged coin is also filed under its subject (subjects/table.json, story rows) and its automatic group
       // (lib/story-groups-live.mjs), "t:..." keys, whatever card it is on: a subject's history spans all its angles
       let subjectKey = null, groupKey = null;
@@ -708,7 +714,7 @@ export class Attention {
       const firstBuyersAt = S.start?.firstBuyersAt;
       const multiple = whole ? multipleOf({ base: S.base, firstBuyersAt, nowS, last, lastSite: siteN, hourBuyers: last30 + prev30 }) : null;
       const newWhy = multiple != null ? null : !whole ? "unseen" : !historyReady({ base: S.base, firstBuyersAt, nowS }) ? "history" : "quiet";
-      S.att = { k: K, last, last30, prev30, hour: last30 + prev30, multiple, phase: phaseOf({ multiple, last30, prev30, peak30: S.peak30 }), newWhy };
+      S.att = { k: K, last, last30, prev30, hour: last30 + prev30, multiple, phase: phaseOf({ multiple, last30, prev30, peak30: S.peak30 }), newWhy, site: siteN };
     }
     yield st;
     // 7. calibration: a snapshot of the busiest stories (only when the last hour was seen whole: a restart's hole would
@@ -760,6 +766,8 @@ export class Attention {
     const lc = new Map();
     for (const x of list) { const nb = x.C.b?.size ?? 0; if (nb > 0) lc.set(x.m, nb); }
     this.lastCoin = lc; this.lastK = K;
+    for (const x of list) { this.fileKey.delete(x.m); this.fileKey.set(x.m, { key: x.key ?? null, k: K }); } // dust: null
+    for (const [m, f] of this.fileKey) { if (f.k > K - 12) break; this.fileKey.delete(m); }
     for (const [m, k] of this.launched) { if (k >= K - 1) break; this.launched.delete(m); }
     this.series.clear();
     // 11. the trims, once an hour, a few thousand rows a step
@@ -830,8 +838,12 @@ export class Attention {
    * series has not closed a bucket for yet is "new", with its post's time or its family's wake-up start.
    */
   cardAttention(card, nowS = this.#nowS()) {
+    // a card of two or more stories (lib/stories.mjs `keys`): its member stories summed (#mergedOf); a subject block
+    // reads as before whatever its keys
+    const keys = !card?.subject && Array.isArray(card?.keys) ? [...new Set(card.keys)].filter((k) => parseStoryKey(k)) : [];
+    const merged = keys.length > 1 ? this.#mergedOf(keys, card, nowS) : null;
     // a subject block's t: series is recorded, not shown yet (the header step will): its card reads as before
-    const S = card?.subject ? null : this.stories.get(card?.key) ?? null, open = this.#openNow(nowS), nowK = Math.floor(nowS / BUCKET_S);
+    const S = card?.subject || merged ? null : this.stories.get(card?.key) ?? null, open = this.#openNow(nowS), nowK = Math.floor(nowS / BUCKET_S);
     const fresh = this.lastK >= nowK - 2; // the last close's per-coin counts are still the last bucket's
     let first = null, u = null, best = null, bestN = 0, total = 0;
     const each = (mint, symbol) => {
@@ -841,12 +853,20 @@ export class Attention {
       total += v;
       if (v > bestN || (v > 0 && v === bestN && mint < best.mint)) { best = { mint, symbol: symbol ?? null }; bestN = v; }
     };
-    // a coin placed by name (lib/stories.mjs rule 2d) is not in the story's series until its tag files it: left out here
-    // too, so "now" and "last" count the same coins
-    for (const r of card?.coins ?? []) { if (r.byName) continue; each(r.mint, r.symbol); for (const cp of r.copies ?? []) each(cp.mint, r.symbol); }
-    const att = S?.att && S.att.k >= nowK - 2 ? S.att : null;
-    let start = S?.start ?? (card?.subject ? null : this.starts.get(card?.key)) ?? null;
-    if (!start) {
+    // "now" and "last" count the same coins: a coin placed by name (lib/stories.mjs rule 2d) is not in the story's series
+    // until its tag files it, and a coin the last hour's closes filed under a story that is not one of the card's (a
+    // family's parent coin, filed under no family; a coin the chaining guard kept off its narrative's card, filed under
+    // that narrative while it is on) is left out too. A coin no close has filed yet counts.
+    const filed = card?.subject ? null : new Set(merged ? keys : [card?.key]);
+    const inSeries = (mint) => { const f = filed ? this.fileKey.get(mint) : null; return !f || filed.has(f.key); };
+    for (const r of card?.coins ?? []) {
+      if (r.byName) continue;
+      if (inSeries(r.mint)) each(r.mint, r.symbol);
+      for (const cp of r.copies ?? []) if (inSeries(cp.mint)) each(cp.mint, r.symbol);
+    }
+    const att = merged ? merged.att : S?.att && S.att.k >= nowK - 2 ? S.att : null;
+    let start = merged ? merged.start : S?.start ?? (card?.subject ? null : this.starts.get(card?.key)) ?? null;
+    if (!start && !merged) {
       if (card?.kind === "post" && fin(card.post?.at)) start = { startAt: card.post.at, source: "post" };
       else if (card?.kind === "family" && fin(card.family?.startedAt)) start = { startAt: card.family.startedAt, source: "wake" };
     }
@@ -860,8 +880,63 @@ export class Attention {
       minutes: fin(start?.startAt) ? Math.max(0, Math.floor((nowS - start.startAt) / 60)) : null,
       leader: best && total > 0 ? { mint: best.mint, symbol: best.symbol, share: r2(bestN / total) } : null,
       // ends at the story's last closed bucket (the one `last` reads), not the clock's: a close runs seconds after its bucket ends
-      spark: S?.spark?.length ? sparkOf(S.spark, S.lastK >= nowK - 2 ? S.lastK : nowK - 1) : null,
+      spark: merged ? merged.spark : S?.spark?.length ? sparkOf(S.spark, S.lastK >= nowK - 2 ? S.lastK : nowK - 1) : null,
     };
+  }
+
+  /**
+   * A card of two or more stories (`keys`, lib/stories.mjs): the 5-minute series files each coin under one story, so the
+   * card's attention is its member stories' summed (a wallet that bought under two of them counts twice, as a card's
+   * `buyers5m` does). `{ att: { last, multiple, phase, newWhy } | null, start, spark }`:
+   * - `last`, the last 30 min and the hour before: the members' buyers summed by bucket (members with a fresh close);
+   *   `peak30`: the largest of the summed last 30 min, the summed 30 min before and the highest member peak (a floor of the summed peak: the
+   *   members' peaks can fall at different times);
+   * - `multiple`: only when every member with a buyer in the last hour has one: (summed last / site buyers) / (their
+   *   normals summed); else null and the phase is "new", `newWhy` the members' first of "unseen", "history", "quiet";
+   * - `start`: the earliest member start (stored, else a post's time or the card family's wake-up);
+   * - `spark`: the members' sparklines summed by bucket.
+   */
+  #mergedOf(keys, card, nowS) {
+    const nowK = Math.floor(nowS / BUCKET_S), ms = keys.map((k) => [k, this.stories.get(k) ?? null]);
+    let start = null;
+    for (const [k, S] of ms) {
+      let s = S?.start ?? this.starts.get(k) ?? null;
+      if (!s) {
+        const kind = parseStoryKey(k)?.kind;
+        if (kind === "post") { const at = postTime(k, this.now()); if (fin(at)) s = { startAt: at, source: "post" }; }
+        else if (kind === "family" && card?.family?.mint === k && fin(card.family.startedAt)) s = { startAt: card.family.startedAt, source: "wake" };
+      }
+      if (s && fin(s.startAt) && (!start || s.startAt < start.startAt)) start = s;
+    }
+    const fresh = ms.map(([, S]) => S).filter((S) => S?.att && S.att.k >= nowK - 2);
+    let att = null;
+    if (fresh.length) {
+      const K = Math.max(...fresh.map((S) => S.att.k)), byK = new Map();
+      let last = 0, site = 0, peak = 0;
+      for (const S of fresh) {
+        for (const x of S.hist) if (x.k > K - 12 && x.k <= K) byK.set(x.k, (byK.get(x.k) ?? 0) + x.b);
+        if (S.att.k === K) { last += S.att.last; if (S.att.site > 0) site = S.att.site; }
+        if (S.peak30 > peak) peak = S.peak30;
+      }
+      let last30 = 0, prev30 = 0;
+      for (const [k, b] of byK) { if (k > K - 6) last30 += b; else prev30 += b; }
+      const busy = fresh.filter((S) => S.att.hour > 0);
+      let ratio = 0, all = busy.length > 0;
+      for (const S of busy) { if (S.att.multiple == null || !(S.base?.ratio > 0)) all = false; else ratio += S.base.ratio; }
+      const multiple = all && site > 0 ? round1(last / site / ratio) : null;
+      const whys = new Set(fresh.filter((S) => S.att.multiple == null).map((S) => S.att.newWhy));
+      const newWhy = multiple != null ? null : ["unseen", "history", "quiet"].find((w) => whys.has(w)) ?? "history";
+      att = { last, multiple, newWhy, phase: phaseOf({ multiple, last30, prev30, peak30: Math.max(peak, last30, prev30) }) };
+    }
+    let spark = null;
+    const withSpark = ms.map(([, S]) => S).filter((S) => S?.spark?.length);
+    if (withSpark.length) {
+      const sum = new Map();
+      for (const S of withSpark) for (const x of S.spark) sum.set(x.k, (sum.get(x.k) ?? 0) + x.b);
+      const lastK = Math.max(...withSpark.map((S) => S.lastK));
+      spark = sparkOf([...sum].map(([k, b]) => ({ k, b })), lastK >= nowK - 2 ? lastK : nowK - 1);
+    }
+    return { att, start, spark };
   }
 
   /**
@@ -909,5 +984,38 @@ export class Attention {
     this.series.delete(ck); this.series.set(ck, { at: nowMs, body });
     while (this.series.size > SERIES_MAX) this.series.delete(this.series.keys().next().value);
     return body;
+  }
+
+  /**
+   * The series of a card of several stories (its `keys`; GET /api/story-series/<key>,<key>,...): one seriesOf per key
+   * (each cached as usual), summed per bucket. `key`: the keys joined by commas; `buckets`: `buyers`, `launchesFast`,
+   * `launches` and `buyUsd` summed (a wallet under two stories counts twice), `siteBuyers` the site row's (the same for
+   * all), `partial` when any member's is; `startAt` / `startSource` / `firstBuyersAt`: the earliest member's;
+   * `baseline`: only when every member with a buyer in the series has one: `ratio` their ratios summed, `buckets` the
+   * fewest, `ready` when all are ready; else null. One key: exactly seriesOf.
+   */
+  seriesOfKeys(keys, since = null) {
+    if (keys.length === 1) return this.seriesOf(keys[0], since);
+    const bodies = keys.map((k) => this.seriesOf(k, since)), byT = new Map();
+    let start = null, first = null, ratio = 0, n = Infinity, ready = true, all = true, any = false;
+    for (const b of bodies) {
+      for (const x of b.buckets) {
+        const y = byT.get(x.t);
+        if (!y) byT.set(x.t, { ...x });
+        else { y.buyers += x.buyers; y.launchesFast += x.launchesFast; y.launches += x.launches; y.buyUsd = r2(y.buyUsd + x.buyUsd); y.siteBuyers = Math.max(y.siteBuyers, x.siteBuyers); y.partial ||= x.partial; }
+      }
+      if (fin(b.startAt) && (!start || b.startAt < start.startAt)) start = b;
+      if (fin(b.firstBuyersAt) && (first == null || b.firstBuyersAt < first)) first = b.firstBuyersAt;
+      if (!b.buckets.some((x) => x.buyers > 0)) continue;
+      any = true;
+      if (!b.baseline) { all = false; continue; }
+      ratio += b.baseline.ratio; n = Math.min(n, b.baseline.buckets); ready &&= b.baseline.ready;
+    }
+    return {
+      key: keys.join(","), asOf: Math.max(...bodies.map((b) => b.asOf)), bucketS: BUCKET_S,
+      startAt: start?.startAt ?? null, startSource: start?.startSource ?? null, firstBuyersAt: first,
+      baseline: any && all ? { ratio, buckets: n, ready } : null,
+      buckets: [...byT.values()].sort((x, y) => x.t - y.t),
+    };
   }
 }

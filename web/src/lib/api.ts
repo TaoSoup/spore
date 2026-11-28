@@ -379,7 +379,13 @@ export type StoryCard = {
   /// against its own normal, capped net inflow in SOL, coins with 5+ buyers, its busiest same-word launch burst. A passing
   /// story is listed first, by `score` (lift x ln(1 + buyers)). Facts, never a forecast.
   gate?: StoryGate | null;
+  /// A card of two or more stories (a newer server; absent on a card of one story, whose only key is `key`): every
+  /// member story's key, `key` first, and each one's share of the card. The chart reads them all (GET /api/story-series
+  /// with the keys comma-separated, summed per bucket).
+  keys?: string[];
+  parts?: StoryPart[];
 };
+export type StoryPart = { kind: "subject" | "narrative" | "post" | "family"; key: string; title: string | null; coinsN: number; buyers5m: number };
 export type StoryGate = { pass: boolean; buyers30m: number; lift: number; inflowSol: number; coins5: number; word: { word: string; creators: number } | null; score: number };
 /// Story attention (a newer server; absent on an older one): how many wallets the story draws now, as context, never a
 /// forecast. `phase` describes the last hour against the hour before and the story's own peak ("new": no normal yet,
@@ -400,7 +406,7 @@ export type StoryAttention = {
   startAt: number | null; startSource: "post" | "wake" | "buyers" | null; minutes: number | null;
   leader: { mint: string; symbol: string | null; share: number } | null;
 };
-/// `GET /api/story-series/:key`: the story's 5-minute buckets (`t` its start, unix s) of up to the last 14 days, oldest
+/// `GET /api/story-series/:key` (or `:key,key,...`, a card's `keys`, summed per bucket): the story's 5-minute buckets (`t` its start, unix s) of up to the last 14 days, oldest
 /// first, with its start and normal (`baseline.ratio`: its median share of site buyers; `ready`: enough history for a
 /// multiple to mean something). `partial`: the bucket the server started in.
 export type StoryBucket = { t: number; buyers: number; siteBuyers: number; launchesFast: number; launches: number; buyUsd: number; partial: boolean };

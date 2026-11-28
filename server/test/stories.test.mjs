@@ -78,31 +78,48 @@ test("a post that may not be shown makes no card: nothing stored, no handle, no 
   assert.equal(asked, 1);
 });
 
-test("a family card: coins under a waking family with no post of their own; a coin's own post comes first", () => {
+// Changed with the linking step: before it, c (family P1, linking post 7) was split off into a card of its own; one
+// family's coins are one story, so c now joins the family's card, which is led by the post (post > family).
+test("a family card: coins under a waking family with no post of their own; a family coin that links a post joins the family under that post", () => {
   const wake = { mint: "P1", symbol: "PONE", image: "img-P1", startedAt: 1_769_999_400, postId: null };
   const rows = [row("a", { parent: under("P1"), buyers5m: 40 }), row("b", { parent: under("P1"), buyers5m: 20 }), row("c", { parent: under("P1"), buyers5m: 5 }), row("d", { parent: under("P2") }), row("root")];
+  const g0 = group(rows.filter((r) => r.mint !== "c"), { wakes: [wake] });
+  assert.deepEqual(g0.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, mints(c.coins), c.post, "keys" in c]), [["family", "P1", 60, 2, ["a", "b"], null, false]]);
+  assert.deepEqual(g0.cards[0].family, { mint: "P1", symbol: "PONE", image: "img-P1", startedAt: 1_769_999_400 });
   const g = group(rows, { links: { c: "7" }, posts: { 7: { handle: "h", text: "t" } }, wakes: [wake] });
-  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, mints(c.coins)]), [["family", "P1", 60, 2, ["a", "b"]], ["post", "7", 5, 1, ["c"]]]);
-  assert.deepEqual([g.cards[0].post, g.cards[0].family, g.cards[1].family], [null, { mint: "P1", symbol: "PONE", image: "img-P1", startedAt: 1_769_999_400 }, null]);
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, mints(c.coins), c.keys]), [["post", "7", 65, 3, ["a", "b", "c"], ["7", "P1"]]]);
+  assert.deepEqual(g.cards[0].parts, [{ kind: "post", key: "7", title: "h", coinsN: 1, buyers5m: 5 }, { kind: "family", key: "P1", title: "PONE", coinsN: 3, buyers5m: 65 }]);
+  assert.deepEqual([g.cards[0].post.id, g.cards[0].family.mint], ["7", "P1"]);
   assert.deepEqual(mints(g.loose), ["d", "root"], "a family that is not waking, and a coin with no parent");
   // every coin is in one place only
   const all = [...g.cards.flatMap((c) => mints(c.coins)), ...mints(g.loose)];
   assert.deepEqual([all.length, new Set(all).size], [5, 5]);
+  // the parent coin of a waking family joins its family's card; alone (none of its coins listed) it stays loose
+  const withRoot = group([row("P1", { buyers5m: 30 }), ...rows.slice(0, 2)], { wakes: [wake] });
+  assert.deepEqual(withRoot.cards.map((c) => [c.kind, c.key, mints(c.coins)]), [["family", "P1", ["P1", "a", "b"]]]);
+  const alone = group([row("P1"), row("q")], { wakes: [wake] });
+  assert.deepEqual([alone.cards.length, mints(alone.loose)], [0, ["P1", "q"]]);
 });
 
+// Changed with the linking step: y (family P1, linking post 8) used to be split off into a post-8 card; it now joins its
+// family's card, and post 8 is one of that card's stories.
 test("merge: a waking family whose chosen post may be shown has no card of its own; the post's card carries the family", () => {
   const wake = { mint: "P1", symbol: "PONE", image: "img-P1", startedAt: 500, postId: "7" };
   const rows = [row("a", { parent: under("P1"), buyers5m: 40 }), row("b", { parent: under("P1"), buyers5m: 20 }), row("x", { parent: under("P9"), buyers5m: 9 }), row("y", { parent: under("P1"), buyers5m: 3 })];
   const links = { a: "7", x: "7", y: "8" };
   const posts = { 7: { handle: "h", text: "t" }, 8: { handle: "other", text: "t8" } };
   const g = group(rows, { links, posts, wakes: [wake] });
-  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, mints(c.coins), c.family?.mint ?? null, c.post?.handle ?? null]), [
-    ["post", "7", 69, 3, ["a", "b", "x"], "P1", "h"], // b links nothing: it comes with its family; x is under another parent
-    ["post", "8", 3, 1, ["y"], null, "other"],        // y links another post: counted there, and that card names no family
+  // b links nothing: it comes with its family; x is under another parent; y links another post, a story of the same card.
+  // The family's coins are post 7's story (the series files them there): P1 is no key of its own.
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.buyers5m, c.coinsN, mints(c.coins), c.family?.mint ?? null, c.post?.handle ?? null, c.keys]), [
+    ["post", "7", 72, 4, ["a", "b", "x", "y"], "P1", "h", ["7", "8"]],
   ]);
-  // the family's post is not stored (or flagged): a family card without a post, and the coins linking it stay with the family
+  // a family and its shown post alone, the parent coin on the page too: one story, a card of one key as before
+  const solo = group([row("a", { parent: under("P1"), buyers5m: 4 }), row("b", { parent: under("P1"), buyers5m: 2 }), row("P1", { buyers5m: 40 })], { posts, wakes: [wake] });
+  assert.deepEqual(solo.cards.map((c) => [c.kind, c.key, mints(c.coins), c.family?.mint, "keys" in c, "parts" in c]), [["post", "7", ["a", "b", "P1"], "P1", false, false]]);
+  // the family's post is not stored (or flagged): the coins linking it stay with the family, under y's post (post > family)
   const g2 = group(rows, { links, posts: { 8: posts[8] }, wakes: [wake] });
-  assert.deepEqual(g2.cards.map((c) => [c.kind, c.key, mints(c.coins), c.post?.id ?? null]), [["family", "P1", ["a", "b"], null], ["post", "8", ["y"], "8"]]);
+  assert.deepEqual(g2.cards.map((c) => [c.kind, c.key, mints(c.coins), c.post?.id ?? null, c.family?.mint ?? null, c.keys]), [["post", "8", ["a", "b", "y"], "8", "P1", ["8", "P1"]]]);
   assert.deepEqual(mints(g2.loose), ["x"]);
   // two families showing the same post: one card, named after the family that brought more buyers (then the mint)
   const g3 = group([row("a", { parent: under("P1"), buyers5m: 5 }), row("b", { parent: under("P2"), buyers5m: 6 })], { posts, wakes: [wake, { mint: "P2", symbol: "PTWO", image: null, startedAt: 600, postId: "7" }] });
@@ -208,7 +225,10 @@ test("narrative cards: copies count once, so two copies of one coin make no card
   assert.deepEqual([g.cards.length, mints(g.loose), g.dust.map((r) => [r.mint, r.reason, r.narrative])], [0, ["a"], [["p", "paper", AI]]]);
 });
 
-test("narrative cards: their coins leave the post card and the family card; what is left there says which narrative it shares", () => {
+// Changed with the linking step: c links the same post as a and b and used to be left alone on a post card beside their
+// narrative card; it now shares their card. f1 is a lone bridge from the AI narrative into family P (the guard): it
+// stays with its family, which it used to leave.
+test("narrative cards: a narrative and the post its coins link are one card; a lone tagged coin of a family stays with the family", () => {
   const X = idAt(1_769_999_000), Y = idAt(1_769_999_500);
   const posts = { [X]: { handle: "poster", text: "big news" }, [Y]: { handle: "other", text: "second" } };
   const wakes = new Map([["P", { mint: "P", symbol: "P", image: "i", startedAt: 5, postId: null }]]);
@@ -221,18 +241,19 @@ test("narrative cards: their coins leave the post card and the family card; what
   ];
   const links = { a: X, b: X, c: X, f1: Y };
   const g = groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: (id) => posts[id] ?? null, wakes, nowMs: NOW_MS, tagOf: tagsOf({ a: AI, b: AI, f1: AI, c: CAT, f2: DOG }) });
-  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.coins.map((r) => r.mint), c.narrative?.id ?? null]), [
-    ["family", "P", ["f2", "f3"], null],   // 20 buyers on two coins: a DOG coin and an untagged one share no narrative
-    ["post", X, ["c"], 4],                 // 20 buyers on the one coin left: its narrative is the card's
-    ["narrative", "n:7", ["a", "b", "f1"], 7],
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, c.coins.map((r) => r.mint), c.narrative?.id ?? null, c.keys]), [
+    ["narrative", "n:7", ["a", "b", "c"], 7, ["n:7", X]], // 32 buyers: the narrative leads (narrative > post)
+    ["post", Y, ["f1", "f2", "f3"], null, [Y, "P"]],      // 27 buyers: f1's own post leads its family (post > family)
   ]);
-  const card = g.cards[2];
-  // the post shown is the one linked by its most-bought coin that links a usable one: b (9 buyers) links X
-  assert.deepEqual([card.buyers5m, card.post, card.family], [19, { id: X, handle: "poster", text: "big news", at: 1_769_999_000, url: `https://x.com/i/status/${X}` }, null]);
-  assert.deepEqual([g.cards[1].narrative, mints(g.loose)], [CAT, ["z"]]);
-  // without a usable post on any coin the card has none
+  const card = g.cards[0];
+  // the post shown is the one linked by its most-bought coin that links a usable one: c (20 buyers) links X
+  assert.deepEqual([card.buyers5m, card.post, card.family], [32, { id: X, handle: "poster", text: "big news", at: 1_769_999_000, url: `https://x.com/i/status/${X}` }, null]);
+  assert.deepEqual(card.coins.map((r) => [r.mint, r.narrative?.id ?? null, r.isNew]), [["a", 7, false], ["b", 7, false], ["c", 4, false]], "each row keeps its own tag");
+  assert.deepEqual([g.cards[1].family.mint, g.cards[1].coins[0].narrative, mints(g.loose)], ["P", AI, ["z"]]);
+  // without a usable post on any coin the narrative card has none, and the family keeps its own card
   const bare = groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: () => null, wakes, nowMs: NOW_MS, tagOf: tagsOf({ a: AI, b: AI }) });
   assert.equal(bare.cards.find((c) => c.kind === "narrative").post, null);
+  assert.deepEqual(bare.cards.map((c) => [c.kind, c.key, "keys" in c]), [["family", "P", false], ["narrative", "n:7", false]]);
 });
 
 test("narrative cards sort and cap with the others; themes count the narrative cards listed; a broken tag look-up tags nothing", () => {
@@ -318,4 +339,92 @@ test("narrative cards: a post that is only a link or a picture never leads the c
   assert.equal(card({ a: "1", b: "1" }).post, null, "only wordless posts: the card has no post (its counted line says more)");
   posts[3] = { handle: "quoter", text: "https://t.co/Ab12", quotes: true };
   assert.equal(card({ a: "3", c: "2" }).post.id, "3", "a wordless post that quotes a post with words may lead (the card gets the quoted line)");
+});
+
+// ---------------------------------------------------------------- the linking step (one card per connected story)
+const MINT = (c) => c.repeat(44);
+test("linking: the Enu case — a narrative, its coins' waking family and the family's parent coin are one card led by the narrative", () => {
+  const ENU = MINT("E"), GOLD = MINT("G"), ENUN = { id: 501, title: "enu", theme: "memes" };
+  const wake = { mint: ENU, symbol: "enu", image: "img-enu", startedAt: 1_769_990_000, postId: null };
+  const rows = [
+    row("AENU", { parent: under(ENU), buyers5m: 30 }),
+    row(ENU, { symbol: "enu", buyers5m: 25 }),
+    row("Denu", { parent: under(GOLD), buyers5m: 12 }),   // its own parent is not waking
+    row(GOLD, { symbol: "Goldenu", parent: under(ENU), buyers5m: 9 }),
+    row("Enuf", { parent: under(ENU), buyers5m: 4 }),
+    row("other", { buyers5m: 50 }),
+  ];
+  const g = groupStories({ rows, nowMs: NOW_MS, wakes: new Map([[ENU, wake]]), tagOf: tagsOf({ AENU: ENUN, [ENU]: ENUN, Denu: ENUN }) });
+  assert.equal(g.cards.length, 1, "one card, not a narrative card beside a family card");
+  const [c] = g.cards;
+  assert.deepEqual([c.kind, c.key, c.keys, mints(c.coins), c.coinsN, c.buyers5m, c.family], ["narrative", "n:501", ["n:501", ENU], ["AENU", ENU, "Denu", GOLD, "Enuf"], 5, 80, { mint: ENU, symbol: "enu", image: "img-enu", startedAt: 1_769_990_000 }]);
+  assert.deepEqual(c.parts, [{ kind: "narrative", key: "n:501", title: "enu", coinsN: 3, buyers5m: 67 }, { kind: "family", key: ENU, title: "enu", coinsN: 4, buyers5m: 68 }]);
+  assert.deepEqual([c.narrative.id, c.newN, c.olderN, c.coins.every((r) => "isNew" in r)], [501, 0, 5, true]);
+  assert.deepEqual(mints(g.loose), ["other"], "a coin with no label stays loose");
+});
+
+test("linking: the Zerocoin case — a post card and the narrative its tagged coin belongs to are one card", () => {
+  const P = idAt(1_769_999_000), ZRC = { id: 77, title: "zerocoin", theme: "crypto" };
+  const rows = [row("ZERO", { buyers5m: 40 }), row("ZRC1", { buyers5m: 20 }), row("ZRC2", { buyers5m: 8 }), row("ZRC3", { buyers5m: 6 })];
+  const links = { ZERO: P, ZRC1: P };
+  const posts = { [P]: { handle: "chamath", text: "https://t.co/abc" } }; // a link-only post
+  const g = groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: (id) => posts[id] ?? null, nowMs: NOW_MS, tagOf: tagsOf({ ZRC1: ZRC, ZRC2: ZRC, ZRC3: ZRC }) });
+  assert.equal(g.cards.length, 1);
+  const [c] = g.cards;
+  assert.deepEqual([c.kind, c.key, c.keys, mints(c.coins), c.coinsN, c.buyers5m], ["narrative", "n:77", ["n:77", P], ["ZERO", "ZRC1", "ZRC2", "ZRC3"], 4, 74]);
+  assert.equal(c.post, null, "a link-only post never leads a grouped card (as before)");
+  // without the tags it is the post card it was, with no keys or parts
+  const off = groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: (id) => posts[id] ?? null, nowMs: NOW_MS });
+  assert.deepEqual(off.cards.map((x) => [x.kind, x.key, mints(x.coins), "keys" in x, "parts" in x]), [["post", P, ["ZERO", "ZRC1"], false, false]]);
+});
+
+test("linking: the chaining guard — one tagged coin does not glue two stories together; two do, and a small side joins", () => {
+  const X = idAt(1_769_999_000), N = { id: 12, title: "frog", theme: "animals" };
+  const posts = { [X]: { handle: "poster", text: "news" } };
+  const run = (rows, links, tags) => groupStories({ rows, postIdOf: (r) => links[r.mint] ?? null, postOf: (id) => posts[id] ?? null, nowMs: NOW_MS, tagOf: tagsOf(tags) });
+  const rows = [row("p1", { buyers5m: 30 }), row("p2", { buyers5m: 20 }), row("p3", { buyers5m: 10 }), row("n1", { buyers5m: 9 }), row("n2", { buyers5m: 8 })];
+  // p3 is the only frog coin of post X's three: a lone bridge between a 2-coin post story and a 2-coin frog story
+  let g = run(rows, { p1: X, p2: X, p3: X }, { p3: N, n1: N, n2: N });
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, mints(c.coins), c.keys ?? null]), [["post", X, ["p1", "p2", "p3"], null], ["narrative", "n:12", ["n1", "n2"], null]]);
+  assert.deepEqual(g.cards[0].coins[2].narrative, N, "the bridge coin keeps its tag on its row");
+  // two frog coins in the post story: not a lone bridge, one card
+  g = run(rows, { p1: X, p2: X, p3: X }, { p2: N, p3: N, n1: N, n2: N });
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, mints(c.coins), c.keys]), [["narrative", "n:12", ["p1", "p2", "p3", "n1", "n2"], ["n:12", X]]]);
+  // the post story is only one other coin: it joins the frog story
+  g = run(rows.filter((r) => r.mint !== "p2"), { p1: X, p3: X }, { p3: N, n1: N, n2: N });
+  assert.deepEqual(g.cards.map((c) => [c.key, mints(c.coins)]), [["n:12", ["p1", "p3", "n1", "n2"]]]);
+  // the frog story has only one coin outside: it joins the post story
+  g = run(rows.filter((r) => r.mint !== "n2"), { p1: X, p2: X, p3: X }, { p3: N, n1: N });
+  assert.deepEqual(g.cards.map((c) => [c.key, mints(c.coins)]), [["n:12", ["p1", "p2", "p3", "n1"]]]);
+  // a copy of the bridge coin is still one coin: the bridge is cut
+  const twin = { symbol: "TW", image: "tw" };
+  g = run([...rows, row("p3b", { ...twin, buyers5m: 1 })].map((r) => (r.mint === "p3" ? { ...r, ...twin } : r)), { p1: X, p2: X, p3: X, p3b: X }, { p3: N, p3b: N, n1: N, n2: N });
+  assert.deepEqual(g.cards.map((c) => [c.key, mints(c.coins)]), [[X, ["p1", "p2", "p3"]], ["n:12", ["n1", "n2"]]]);
+  // a narrative cut from two big stories with one coin left over has no card: that coin is loose
+  const Y = idAt(1_769_999_100);
+  posts[Y] = { handle: "y", text: "y" };
+  const two = [...rows.slice(0, 3), row("q1"), row("q2"), row("q3"), row("lone", { buyers5m: 1 })];
+  g = run(two, { p1: X, p2: X, p3: X, q1: Y, q2: Y, q3: Y }, { p3: N, q3: N, lone: N });
+  assert.deepEqual([g.cards.map((c) => [c.key, mints(c.coins), c.keys ?? null]), mints(g.loose)], [[[X, ["p1", "p2", "p3"], null], [Y, ["q1", "q2", "q3"], null]], ["lone"]]);
+  // a 2-coin narrative whose coins sit in two big post stories joins neither: two post cards, the frog label dropped
+  g = run(two.filter((r) => r.mint !== "lone"), { p1: X, p2: X, p3: X, q1: Y, q2: Y, q3: Y }, { p3: N, q3: N });
+  assert.deepEqual([g.cards.map((c) => [c.kind, c.key, mints(c.coins), c.keys ?? null]), mints(g.loose)], [[["post", X, ["p1", "p2", "p3"], null], ["post", Y, ["q1", "q2", "q3"], null]], []]);
+  // a small post holding one coin of each of two big narratives glues neither: each narrative its own card, the post its own
+  const N2 = { id: 13, title: "toad", theme: "animals" };
+  const ab = ["a1", "a2", "a3", "a4", "b1", "b2", "b3", "b4"].map((m) => row(m));
+  g = run(ab, { a1: X, b1: X }, { a1: N, a2: N, a3: N, a4: N, b1: N2, b2: N2, b3: N2, b4: N2 });
+  assert.deepEqual(g.cards.map((c) => [c.kind, c.key, mints(c.coins), c.keys ?? null]).sort((x, y) => (x[1] < y[1] ? -1 : 1)),
+    [["post", X, ["a1", "b1"], null], ["narrative", "n:12", ["a2", "a3", "a4"], null], ["narrative", "n:13", ["b2", "b3", "b4"], null]].sort((x, y) => (x[1] < y[1] ? -1 : 1)));
+  // the same with the post holding a second coin of one narrative: that narrative and the post are one story, the other stays apart
+  g = run(ab, { a1: X, a2: X, b1: X }, { a1: N, a2: N, a3: N, a4: N, b1: N2, b2: N2, b3: N2, b4: N2 });
+  assert.deepEqual(g.cards.map((c) => [c.key, mints(c.coins)]).sort(), [["n:12", ["a1", "a2", "a3", "a4", "b1"]], ["n:13", ["b2", "b3", "b4"]]].sort());
+});
+
+test("linking: a card of one story is what it was (no keys, no parts); dust never links; the caps hold", () => {
+  const X = idAt(1_769_999_000);
+  const posts = { [X]: { handle: "h", text: "t" } };
+  const g = group([row("a"), row("b"), row("d", { mcapUsd: 1e9, liqUsd: 10, parent: under("P") })], { links: { a: X, d: X }, posts, wakes: [{ mint: "P", symbol: "P", image: null, startedAt: 1, postId: null }] });
+  assert.deepEqual(g.cards.map((c) => [c.kind, Object.keys(c), mints(c.coins)]), [["post", ["kind", "key", "post", "family", "buyers5m", "coinsN", "coins"], ["a"]]], "the dust coin brings no family label");
+  assert.deepEqual([mints(g.loose), mints(g.dust)], [["b"], ["d"]]);
+  assert.deepEqual([CARDS_MAX, LOOSE_MAX, DUST_MAX], [20, 30, 30]);
 });

@@ -61,7 +61,7 @@ import {
   type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
-import { glance } from "../lib/story-attention";
+import { chartKeyOf, glance } from "../lib/story-attention";
 import StoryChart from "../components/StoryChart";
 import { RowTags, SubjectLineBlock, plainRowSub } from "../components/DiscoverLine";
 import { NARRATIVE_FOOT } from "../lib/narrative";
@@ -303,7 +303,7 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
           {five && <button type="button" className="linkish dsc-link dsc-hx-chart" aria-expanded={chart} aria-controls={chartId} onClick={onChart}>{chart ? "Hide chart" : "Chart"}</button>}
         </div>
       </div>
-      {five && chart && e.card && <div id={chartId}><StoryChart storyKey={e.card.key} postAt={e.card.post?.at ?? null} label={label} /></div>}
+      {five && chart && e.card && <div id={chartId}><StoryChart storyKey={chartKeyOf(e.card)} postAt={e.card.post?.at ?? null} label={label} /></div>}
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
         {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
       </ul>

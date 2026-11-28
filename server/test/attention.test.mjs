@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Attention, baselineOf, multipleOf, phaseOf, median, nameWords, matchKeywords, parseEvent, eventResult, offsetS,
-  BUCKET_S, GRACE_S, PARTIAL, CHUNK, ROWS_MAX, MIN_HISTORY_S, MIN_BASE_BUCKETS, MIN_HOUR_BUYERS, FAST_S, PRE_EXISTING_S, SERIES_ROWS } from "../lib/attention.mjs";
+  BUCKET_S, GRACE_S, PARTIAL, CHUNK, ROWS_MAX, MIN_HISTORY_S, MIN_BASE_BUCKETS, MIN_HOUR_BUYERS, FAST_S, PRE_EXISTING_S, SERIES_ROWS, SERIES_KEYS_MAX } from "../lib/attention.mjs";
 import { storyKey, parseStoryKey, coinStoryKey, groupStories, SITE_KEY } from "../lib/stories.mjs";
 import { BASE_BUCKETS } from "../lib/wakeups.mjs";
 import { Narrative } from "../lib/narrative.mjs";
@@ -600,4 +600,95 @@ test("story header sparkline: the last 36 buckets' buyers, oldest first, zeros w
   assert.equal(s.length, SPARK_N);
   assert.deepEqual([s[0], s[34], s[35]], [2, 7, 5], "bucket 65 opens the window; 64 is before it");
   assert.equal(s.reduce((a, b) => a + b, 0), 14);
+});
+
+// ---------------------------------------------------------------- a card of several stories (lib/stories.mjs `keys`)
+test("merged cards: attention sums the member stories (last, spark, earliest start); one key reads exactly as before; GET /api/story-series/<k1>,<k2> sums per bucket", async () => {
+  const w = world();
+  const X = idAt(T0 - 120, 4), Y = idAt(T0 - 600, 9);
+  w.posts([X, Y]);
+  const A = w.coin(mintN(90), "AAA", { parent: null, post: X, createdAt: T0 - 100 }), C = w.coin(mintN(91), "CCC", { parent: null, post: Y, createdAt: T0 - 500 });
+  for (let i = 0; i < 3; i++) w.trade(A, `a${i}`, T0 + i);
+  w.trade(C, "a0", T0 + 5); w.trade(C, "c1", T0 + 6);
+  w.close(T0 + B + GRACE_S);
+  w.clock.t = (T0 + B + 60) * 1000;
+  const nowS = T0 + B + 60;
+  const rowOf = (mint, symbol) => ({ mint, symbol, buyers5m: 0 });
+  const one = { kind: "post", key: X, post: { id: X, at: T0 - 120 }, family: null, coins: [rowOf(A, "AAA")] };
+  const before = w.att.cardAttention(one, nowS);
+  assert.deepEqual(w.att.cardAttention({ ...one, keys: [X] }, nowS), before, "a card of one key is unchanged");
+  const card = { ...one, keys: [X, Y], parts: [], coins: [rowOf(A, "AAA"), rowOf(C, "CCC")] };
+  const m = w.att.cardAttention(card, nowS);
+  assert.deepEqual([before.buyers5m.last, m.buyers5m.last], [3, 5], "3 + 2: a wallet under both stories counts twice, as buyers5m does");
+  assert.deepEqual([m.phase, m.multiple, m.newWhy, m.startAt, m.startSource], ["new", null, "unseen", T0 - 600, "post"], "the earliest member start (Y's post)");
+  assert.equal(m.spark[35], 5);
+  assert.equal(m.leader.mint, A);
+  // a subject block's keys change nothing
+  assert.deepEqual(w.att.cardAttention({ ...card, subject: { key: "t:x" } }, nowS).spark, null);
+  const app = await serveApp(w);
+  try {
+    const sx = (await app.get(`/api/story-series/${X}`)).body, sy = (await app.get(`/api/story-series/${Y}`)).body;
+    const both = await app.get(`/api/story-series/${encodeURIComponent(`${X},${Y}`)}`);
+    assert.equal(both.status, 200);
+    assert.deepEqual(both.body, { key: `${X},${Y}`, asOf: nowS, bucketS: B, startAt: T0 - 600, startSource: "post", firstBuyersAt: T0, baseline: null,
+      buckets: [{ t: T0, buyers: sx.buckets[0].buyers + sy.buckets[0].buyers, siteBuyers: sx.buckets[0].siteBuyers, launchesFast: sx.buckets[0].launchesFast + sy.buckets[0].launchesFast,
+        launches: sx.buckets[0].launches + sy.buckets[0].launches, buyUsd: sx.buckets[0].buyUsd + sy.buckets[0].buyUsd, partial: false }] });
+    assert.deepEqual((await app.get(`/api/story-series/${X},${X}`)).body, sx, "a key named twice is one key");
+    const nine = Array.from({ length: SERIES_KEYS_MAX + 1 }, (_, i) => idAt(T0 - 1000 - i)).join(",");
+    assert.deepEqual([SERIES_KEYS_MAX, (await app.get(`/api/story-series/${nine.split(",").slice(0, SERIES_KEYS_MAX).join(",")}`)).status], [24, 200], "the web's cap (web/src/lib/story-attention.ts) is the server's");
+    assert.deepEqual([(await app.get(`/api/story-series/${nine}`)).status, (await app.get(`/api/story-series/${X},abc`)).status, (await app.get(`/api/story-series/${X},`)).status, (await app.get(`/api/story-series/${X},t%3Ax`)).status], [400, 400, 400, 400]);
+  } finally { await app.close(); }
+  w.end();
+});
+
+test("cards: \"now\" and the leader count only the coins the card's series holds (a family's parent coin; a coin the chaining guard kept off its narrative)", () => {
+  const w = world();
+  const X = idAt(T0 - 5000, 3);
+  w.posts([X]);
+  const KID = w.coin(mintN(40), "KID"), N1 = w.coin(mintN(41), "N1", { parent: null }), N2 = w.coin(mintN(42), "N2", { parent: null });
+  const CUT = w.coin(mintN(43), "CUT", { parent: null, post: X }), MATE = w.coin(mintN(44), "MATE", { parent: null, post: X });
+  const tags = new Map([[N1, { id: 7, title: "t", theme: "x" }], [N2, { id: 7, title: "t", theme: "x" }], [CUT, { id: 7, title: "t", theme: "x" }]]);
+  w.model.coinRows.narr = { on: true, tagOf: (m) => tags.get(m) ?? null };
+  w.wk.wakeOf = (m) => (m === PAR ? { startedAt: T0 - 900, live: true, silent: false, postId: null } : null);
+  for (const [m, u] of [[PAR, "p0"], [KID, "k0"], [N1, "n0"], [N2, "n1"], [CUT, "c0"], [MATE, "m0"]]) w.trade(m, u, T0 + 1);
+  w.close(T0 + B + GRACE_S);
+  // the parent (priced in SOL) is filed under no story; CUT under its narrative, which is on
+  assert.deepEqual([w.rowsOf(PAR)[0]?.buyers, w.rowsOf("n:7")[0]?.buyers, w.rowsOf(X)[0]?.buyers], [1, 3, 1]);
+  for (let i = 0; i < 5; i++) w.trade(PAR, `p${i + 1}`, T0 + B + 10 + i);
+  w.trade(KID, "k1", T0 + B + 20);
+  for (let i = 0; i < 4; i++) w.trade(CUT, `c${i + 1}`, T0 + B + 30 + i);
+  w.trade(MATE, "m1", T0 + B + 40);
+  const nowS = T0 + B + 60;
+  w.clock.t = nowS * 1000;
+  const r = (mint, symbol) => ({ mint, symbol, buyers5m: 0 });
+  const fam = w.att.cardAttention({ kind: "family", key: PAR, family: { mint: PAR, startedAt: T0 - 900 }, post: null, coins: [r(PAR, "PAR"), r(KID, "KID")] }, nowS);
+  assert.deepEqual([fam.buyers5m.now, fam.buyers5m.last, fam.leader], [1, 1, { mint: KID, symbol: "KID", share: 1 }], "the parent's 5 wallets are in no series of the card");
+  const post = w.att.cardAttention({ kind: "post", key: X, post: { id: X, at: T0 - 5000 }, family: null, coins: [r(CUT, "CUT"), r(MATE, "MATE")] }, nowS);
+  assert.deepEqual([post.buyers5m.now, post.buyers5m.last, post.leader.mint], [1, 1, MATE], "CUT is filed under n:7, not under X");
+  // a coin no close has filed yet counts (its next close files it)
+  const NEW = w.coin(mintN(45), "NEW", { parent: null, post: X });
+  w.trade(NEW, "z1", T0 + B + 50);
+  assert.equal(w.att.cardAttention({ kind: "post", key: X, post: { id: X, at: T0 - 5000 }, family: null, coins: [r(MATE, "MATE"), r(NEW, "NEW")] }, nowS).buyers5m.now, 2);
+  w.end();
+});
+
+test("merged cards: a multiple only when every member with buyers has one: summed buyers over the site, over the summed normals", () => {
+  const w = world();
+  const nowS = T0 + 60, K = K0 - 1, X = idAt(T0 - 9000), Y = idAt(T0 - 8000);
+  const state = (key, { last, multiple, ratio, hour = 20, newWhy = null }) => ({
+    key, hist: [{ k: K - 6, b: hour - last }, { k: K, b: last, s: 100 }], base: { ratio, n: 50, peak30: 0 }, peak30: 0, lastK: K, spark: [{ k: K, b: last }],
+    start: { startAt: T0 - 9000, source: "post", firstBuyersAt: T0 - DAY }, att: { k: K, last, last30: last, prev30: hour - last, hour, multiple, newWhy, phase: "steady", site: 100 },
+  });
+  w.att.stories.set(X, state(X, { last: 6, multiple: 3, ratio: 0.02 }));
+  w.att.stories.set(Y, state(Y, { last: 4, multiple: 4, ratio: 0.01 }));
+  const card = { kind: "post", key: X, keys: [X, Y], post: { id: X, at: T0 - 9000 }, family: null, coins: [] };
+  let a = w.att.cardAttention(card, nowS);
+  assert.deepEqual([a.buyers5m.last, a.multiple, a.phase, a.spark[35]], [10, 3.3, "fading", 10], "(10 / 100) / 0.03; 10 against 30 the half hour before");
+  w.att.stories.set(Y, state(Y, { last: 4, multiple: null, ratio: 0.01, newWhy: "history" }));
+  a = w.att.cardAttention(card, nowS);
+  assert.deepEqual([a.multiple, a.phase, a.newWhy], [null, "new", "history"], "Y has buyers and no normal: no multiple for the card");
+  w.att.stories.set(Y, state(Y, { last: 0, multiple: null, ratio: 0.01, hour: 0, newWhy: "quiet" }));
+  a = w.att.cardAttention(card, nowS);
+  assert.deepEqual([a.multiple, a.buyers5m.last], [3, 6], "Y had no buyer in the hour: X's normal alone");
+  w.end();
 });

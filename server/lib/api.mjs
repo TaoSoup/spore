@@ -19,6 +19,7 @@ import { AGENT_MODELS, DEFAULT_MODEL, modelInfo } from "./agents-live/models.mjs
 import { Wakeups } from "./wakeups.mjs";
 import { CoinRows, parseTf } from "./coinrows.mjs";
 import { parseStoryKey } from "./stories.mjs";
+import { SERIES_KEYS_MAX } from "./attention.mjs";
 import { securityHeaders, cors, rateLimit, requestLog, compression, sendCachedJson, sendSpaHtml, prepareJson, prepareJsonText, prepareJsonGen, preparedBytes, sendPrepared, RateLimiter, isEmbedPath, etagOf } from "./http.mjs";
 import { runSliced } from "./sliced.mjs";
 import { createV1, DEFAULT_PUBLIC_URL } from "./v1.mjs";
@@ -736,10 +737,15 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
   }));
   // One story's 5-minute series (README §API, lib/attention.mjs): its stored buckets of the last 14 days (or from
   // `since`), its start and its normal. `key` is a stories card's key: "n:<id>" (the client encodes the colon), a post id
-  // or a parent mint; 400 for anything else. One indexed read per key, cached 30 s in memory, header the same.
+  // or a parent mint; 400 for anything else. One indexed read per key, cached 30 s in memory, header the same. A card of
+  // several stories (its `keys`) asks for them comma-separated (at most SERIES_KEYS_MAX): their series summed per bucket.
   app.get("/api/story-series/:key", (req, res) => {
-    const key = String(req.params.key ?? ""), p = parseStoryKey(key);
-    if (!p || (p.kind === "family" && !isMint(key))) return res.status(400).json({ error: "invalid story key" });
+    const keys = [...new Set(String(req.params.key ?? "").split(","))];
+    if (keys.length > SERIES_KEYS_MAX) return res.status(400).json({ error: "too many story keys" });
+    for (const key of keys) {
+      const p = parseStoryKey(key);
+      if (!p || (p.kind === "family" && !isMint(key))) return res.status(400).json({ error: "invalid story key" });
+    }
     let since = null;
     if (req.query.since != null && req.query.since !== "") {
       since = Number(req.query.since);
@@ -747,7 +753,7 @@ export function createApp({ model, indexer, rpc, hub, images, meta, metahost = n
     }
     const att = model.attention;
     if (!att) return res.status(404).json({ error: "no story series on this server" });
-    sendCachedJson(req, res, att.seriesOf(key, since), { cacheControl: "public, max-age=30" });
+    sendCachedJson(req, res, att.seriesOfKeys(keys, since), { cacheControl: "public, max-age=30" });
   });
 
   // The story timeline (README §API, lib/timeline.mjs): every story the 5-minute series stored in a window of up to a day

@@ -3,7 +3,7 @@
 // Context, never a forecast: the words say what was measured (buyers, how long since the start, which coin most of them
 // bought, how that compares with the story's own normal), every phase is drawn in the same neutral style (no arrows, no
 // colour for up), and nothing says what comes next. Pure: no React, no DOM (test/story-attention.test.mts).
-import type { StoryAttention, StoryNewWhy, StoryPhase, StorySeries } from "./api";
+import type { StoryAttention, StoryCard, StoryNewWhy, StoryPhase, StorySeries } from "./api";
 import { count } from "./format";
 
 const fin = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
@@ -63,6 +63,15 @@ export type Glance = {
   /// "2.4× its normal", null for a story with no normal yet
   multiple: string | null; multipleTitle: string;
 };
+/// Story keys one series request may name (the server's SERIES_KEYS_MAX, server/lib/attention.mjs).
+export const SERIES_KEYS_MAX = 24;
+/// The key a story chart reads (GET /api/story-series): a card of several stories asks for its keys, comma-separated
+/// (the server sums them per bucket), at most SERIES_KEYS_MAX of them: the first, the largest by the card's precedence;
+/// a card of one story, its own key.
+export function chartKeyOf(card: Pick<StoryCard, "key" | "keys">): string {
+  return card.keys && card.keys.length > 1 ? card.keys.slice(0, SERIES_KEYS_MAX).join(",") : card.key;
+}
+
 /// The glance line of a story block, or null for a card without `attention` (an older server).
 export function glance(att: StoryAttention | null | undefined, nowS: number): Glance | null {
   if (!att || typeof att !== "object") return null;

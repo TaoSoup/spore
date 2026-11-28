@@ -132,3 +132,14 @@ test("the card's attention rides through the page's view, filters and one list u
   assert.deepEqual(r.entries.map((e) => [e.key, e.card?.attention ?? null]), [["post:1895000000000000001", a], ["post:1895000000000000002", null]]);
   assert.equal(glance(r.entries[1].card?.attention, T), null);
 });
+
+test("chartKeyOf: a card of several stories charts all its keys (comma-separated, the server sums them); one story, its key", async () => {
+  const { chartKeyOf } = await import("../src/lib/story-attention.ts");
+  assert.equal(chartKeyOf({ key: "n:7" }), "n:7");
+  assert.equal(chartKeyOf({ key: "n:7", keys: ["n:7"] }), "n:7");
+  assert.equal(chartKeyOf({ key: "n:7", keys: ["n:7", "1987238502124409321"] }), "n:7,1987238502124409321");
+  // a card of more stories than one request may name: its first SERIES_KEYS_MAX (the server answers 400 past it)
+  const { SERIES_KEYS_MAX } = await import("../src/lib/story-attention.ts");
+  const many = Array.from({ length: SERIES_KEYS_MAX + 5 }, (_, i) => String(1987238502124409321n + BigInt(i)));
+  assert.deepEqual(chartKeyOf({ key: many[0], keys: many }).split(","), many.slice(0, SERIES_KEYS_MAX));
+});
