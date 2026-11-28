@@ -139,16 +139,16 @@ test("a replay: old and new line per post, the quoted post read over the X fetch
     assert.deepEqual([by[A].state, by[A].new, by[A].source, by[A].chips, by[A].rejectReasons], ["ok", { subject: "Rasmr and big trader", happened: "Quoted post says a big futures trader outdid Rasmr", kind: "claim", by: "model", quote: false }, "quoted", ["ai", "via_quoted"], []]);
     assert.deepEqual([by[A].link, by[A].quoted, by[A].words], [{ state: "ok", kind: "post", host: null }, { id: Q, handle: "dv3333333", text: "New lore: a perp whale outdid Rasmr in the trenches" }, 2]);
     assert.deepEqual([by[B].state, by[B].new.happened, by[B].source, by[B].quoted], ["ok", "Poster says a wizard cat walks across a stage in a small town", "post", null]);
-    assert.deepEqual([by[C].state, by[C].new, by[C].link, by[C].chips], ["server", { subject: "$PVE", happened: "2 coins", kind: "thin", by: "server", quote: false }, { state: "ok", kind: "article", host: "x.com" }, []], "two coins: the server's plain sentence, no model");
+    assert.deepEqual([by[C].state, by[C].new, by[C].link, by[C].chips], ["server", null, { state: "ok", kind: "article", host: "x.com" }, []], "two coins, a post without words: no post line and no model (the page heads that card with its coins' story lines)");
     assert.deepEqual([by[D].state, by[D].new, by[D].link.state, by[D].coins.length], ["server", null, "unread", 1], "a single coin, fee noise and a link that could not be read: no line");
     assert.deepEqual([by[E].state, by[E].new, by[E].rejectReasons, by[E].old.state], ["rejected", { subject: "$WIZ", happened: `bad: ${LONG}`, kind: "thin", by: "server", quote: true }, ["hype", "hype"], "rejected"], "refused twice: the model's line is never shown; a card shows the poster's own words");
     assert.deepEqual([by[F].state, by[F].text, by[F].new], ["no_text", null, null]);
     assert.deepEqual([by[G].state, by[G].new, by[G].rejectReasons], ["thin", { subject: "$WIZ", happened: `thin: ${LONG}`, kind: "thin", by: "server", quote: true }, []], "nothing stated: the poster's own words are what a card shows");
     // the totals
     const t = r.totals;
-    assert.deepEqual([t.posts, t.withText, t.askedModel, t.requests, t.failedRequests, t.inputTokens, t.outputTokens, t.xRequests, t.noLine], [7, 6, 4, 2, 0, 4000, 600, 4, 1]);
+    assert.deepEqual([t.posts, t.withText, t.askedModel, t.requests, t.failedRequests, t.inputTokens, t.outputTokens, t.xRequests, t.noLine], [7, 6, 4, 2, 0, 4000, 600, 4, 2]);
     assert.deepEqual(t.byState, { ok: 2, server: 2, rejected: 1, no_text: 1, thin: 1 });
-    assert.deepEqual(t.byKind, { claim: 2, server: 1, "server:quote": 2 });
+    assert.deepEqual(t.byKind, { claim: 2, "server:quote": 2 });
     assert.deepEqual([t.bySource, t.byRejectReason, t.links], [{ quoted: 1, post: 1 }, { hype: 2 }, { read: 3, posts: 1, articles: 1, websites: 0, pictures: 0, unread: 1 }]);
     assert.ok(Math.abs(t.usd - 2 * (2000 * 0.10 + 300 * 0.50) / 1e6) < 1e-9, "the run's cost at the model's price");
     assert.deepEqual([r.stopped, r.dryRun, r.rulesVersion, r.model, r.maxUsd], [null, false, LINE_RULES_VERSION, "claude-haiku-5-5", 1]);

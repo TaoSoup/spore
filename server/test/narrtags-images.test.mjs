@@ -312,3 +312,25 @@ test("a picture re-ask is counted once, when it is answered, not each time its b
   assert.deepEqual([client.calls.length, t.snapshot().images.reasked, db.tagGet("hot").hadImg], [2, 1, true]);
   t.stop(); db.close();
 });
+
+test("a line-only re-read sent with the picture stores had_img with the line, so the page never says the picture was not read", async () => {
+  const { coinStoryLine } = await import("../lib/coin-lines.mjs");
+  const model = fakeModel();
+  model.add("a", { description: null });
+  const db = new Db(":memory:");
+  const images = fakeImages(); images.put("https://img.example/a.png");
+  const client = fakeClient((req) => reply(sentCoins(req).map((c) => ({ ...fresh(c.n, "another story"), line: { subject: c.name, happened: "", keys: [] } }))));
+  const { t } = tagger({ model, db, images, client }); // (made first: it stamps the rules version on the empty database)
+  const id = db.narrAdd({ title: "frog story", theme: "animals", key: "frog story", at: T0 - 500 });
+  db.tagSet({ mint: "a", narrativeId: id, at: T0 - 400, model: DEFAULT_MODEL, asks: 2 }); // tagged before lines and pictures
+  t.tagOf("a"); t.reline("a", 4);
+  await t.pump();
+  assert.equal(client.calls.length, 1);
+  assert.deepEqual(sentCoins(client.calls[0].req).map((c) => [c.symbol, c.picture ?? false]), [["A", true]]);
+  assert.deepEqual([db.tagGet("a").narrativeId, db.tagGet("a").lineV, db.tagGet("a").line, db.tagGet("a").hadImg], [id, 1, null, true], "the tag stands; had_img is now set");
+  const m = t.storyLineOf("a");
+  assert.equal(m.hadImg, true, "the cached answer knows the picture was read");
+  const l = coinStoryLine(m, { name: "a coin", symbol: "A", description: null, post: null, image: true });
+  assert.equal(l.happened, "Name only: its picture names no clear subject");
+  t.stop(); db.close();
+});

@@ -115,10 +115,11 @@ test("--max-usd is a hard stop, a failing provider ends the run by class, and an
     const file = fixture(dir, 60);
     let n = 0;
     const paid = async () => ({ messages: { create: async (req) => { n++; return { stop_reason: "end_turn", usage: { input_tokens: 5000, output_tokens: 1000 }, content: [{ type: "text", text: JSON.stringify({ coins: sentCoins(req).map((c) => ({ n: c.n, kind: "none", id: 0, title: "", theme: "other" })) }) }] }; } } });
-    // each request costs $0.001 for real and about that as its worst case: with $0.0025 a second fits, a third does not
-    const capped = await runReplay({ db: file, keyFile: "k", out: join(dir, "o1"), hours: 24, maxCoins: 1500, maxUsd: 0.0025, perMin: 1e6 }, { clientFactory: paid, print() {} });
+    // each request costs $0.001 for real and about $0.0016 as its worst case (the story line doubled the output
+    // allowance, Nov 28): with $0.003 a second fits, a third does not
+    const capped = await runReplay({ db: file, keyFile: "k", out: join(dir, "o1"), hours: 24, maxCoins: 1500, maxUsd: 0.003, perMin: 1e6 }, { clientFactory: paid, print() {} });
     assert.deepEqual([capped.stopped, capped.requests, n, capped.coinsRead, capped.coinsPicked], ["capped", 2, 2, 40, 50]);
-    assert.ok(capped.usd <= 0.0025);
+    assert.ok(capped.usd <= 0.003);
     const lines = [];
     const refused = async () => ({ messages: { create: async () => { throw Object.assign(new Error(`invalid x-api-key ${KEY}`), { status: 401 }); } } });
     const auth = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 1500, maxUsd: 0.5, perMin: 1e6 }, { clientFactory: refused, print: (l) => lines.push(l) });
@@ -143,18 +144,18 @@ test("--max-usd holds for the whole run: across a UTC midnight, and with a reque
     const now = () => t, sleep = async (ms) => { t += ms; };
     const answer = (req) => ({ stop_reason: "end_turn", usage: { input_tokens: 5000, output_tokens: 1000 }, content: [{ type: "text", text: JSON.stringify({ coins: sentCoins(req).map((c) => ({ n: c.n, kind: "none", id: 0, title: "", theme: "other" })) }) }] });
     const slow = async () => ({ messages: { create: async (req) => { n++; t += 60_000; return answer(req); } } });
-    // $0.001 a request: with $0.0025 a second fits and a third does not, whatever the date says by then
-    const r = await runReplay({ db: file, keyFile: "k", out: join(dir, "o1"), hours: 24, maxCoins: 1500, maxUsd: 0.0025, perMin: 1e6 }, { clientFactory: slow, print() {}, now, sleep });
+    // $0.001 a request (worst case about $0.0016): with $0.003 a second fits and a third does not, whatever the date says by then
+    const r = await runReplay({ db: file, keyFile: "k", out: join(dir, "o1"), hours: 24, maxCoins: 1500, maxUsd: 0.003, perMin: 1e6 }, { clientFactory: slow, print() {}, now, sleep });
     assert.deepEqual([r.stopped, r.requests, n, new Date(t).toISOString().slice(0, 10)], ["capped", 2, 2, "2026-01-02"]);
-    assert.ok(Math.abs(r.usd - 0.002) < 1e-12 && r.usd <= 0.0025);
+    assert.ok(Math.abs(r.usd - 0.002) < 1e-12 && r.usd <= 0.003);
     // the first request times out (it may have been billed): its worst case stays in the run's cost and in the cap
     let m = 0;
     const lines = [];
     const flaky = async () => ({ messages: { create: async (req) => { if (++m === 1) throw Object.assign(new Error("timed out"), { name: "APIConnectionTimeoutError" }); return answer(req); } } });
-    const f = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 1500, maxUsd: 0.0032, perMin: 1e6 }, { clientFactory: flaky, print: (l) => lines.push(l), now, sleep });
+    const f = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 1500, maxUsd: 0.0048, perMin: 1e6 }, { clientFactory: flaky, print: (l) => lines.push(l), now, sleep });
     // the answered requests cost $0.001 each; the reserve of the one without an answer takes the room of a third
     assert.deepEqual([f.stopped, f.failedRequests, f.requests, f.coinsRead], ["capped", 1, 3, 40]);
-    assert.ok(f.usd > 0.002 + 1e-4 && f.usd <= 0.0032, `the reserve is in the cost: ${f.usd}`);
+    assert.ok(f.usd > 0.002 + 1e-4 && f.usd <= 0.0048, `the reserve is in the cost: ${f.usd}`);
     assert.ok(lines.join("\n").includes("a request without an answer is counted at its worst case"));
     // every reply refused: not a coin's doing, so the run ends by class instead of halving its way through the budget
     let k = 0;
@@ -268,9 +269,9 @@ test("--also coins are read after the window's coins whatever their age or buyer
     assert.doesNotMatch(out, /recommend|likely to rise|\bearly\b|\bsignal\b|\balpha\b/i);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, "out", "replay.json"), "utf8")).also.length, 5);
     assert.equal(sha(file), before, "the database file is byte for byte what it was");
-    // toward --max-usd: a request now costs $0.001; with $0.0012 the window's request fits and the --also coins' does not
+    // toward --max-usd: a request now costs $0.001; with $0.0014 the window's request fits and the --also coins' does not
     inTokens = 8000;
-    const capped = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 12, maxUsd: 0.0012, perMin: 1e6, also: ["OLD", "M003"] }, { clientFactory, print: (l) => lines.push(l) });
+    const capped = await runReplay({ db: file, keyFile: "k", out: join(dir, "o2"), hours: 24, maxCoins: 12, maxUsd: 0.0014, perMin: 1e6, also: ["OLD", "M003"] }, { clientFactory, print: (l) => lines.push(l) });
     assert.deepEqual([capped.stopped, capped.coinsRead, capped.alsoRead, capped.also.map((a) => a.read)], ["capped", 12, 0, [false, false]]);
     assert.ok(lines.join("\n").includes("also: Old ($OLD) -> not read"));
     // a dry run with --until and --also together: nothing sent, every coin "none"

@@ -174,7 +174,7 @@ export async function runReplay(opts, { clientFactory = null, print = console.lo
     const alsoOut = alsoRows.map((a) => {
       const t = a.found ? store.tagGet(a.mint) : null, m = a.found ? mintQ.get(a.mint) ?? {} : {};
       const n = t?.narrativeId != null ? store.narrGet(t.narrativeId) : null;
-      return { mint: a.mint, name: m.name ?? null, symbol: m.symbol ?? null, found: a.found, inWindow: a.inWindow, read: !!t, title: n?.title ?? null, theme: n?.theme ?? null };
+      return { mint: a.mint, name: m.name ?? null, symbol: m.symbol ?? null, found: a.found, inWindow: a.inWindow, read: !!t, title: n?.title ?? null, theme: n?.theme ?? null, line: t?.line ?? null };
     });
     // "A day at that rate": every coin that met the bar in the window, scaled to 24 h, at this run's cost per coin.
     const perDay = perCoin * eligible.length * (24 / o.hours);

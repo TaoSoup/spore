@@ -50,9 +50,11 @@ import { imageProxyUrl } from "./meta.mjs";
 import { postOf, postUrl } from "./narrative.mjs";
 import { serverLine, wordCount, THIN_WORDS, CAPS as LINE_CAPS } from "./post-lines.mjs";
 import { groupStories, listCards } from "./stories.mjs";
+import { StoryMemory } from "./story-memory.mjs";
 import { storyGateGen } from "./story-gate.mjs";
 import { launchWords } from "./word-bursts.mjs";
 import { loadSubjects, TABLE_URL } from "./subjects.mjs";
+import { coinStoryLine, headerLine } from "./coin-lines.mjs";
 
 /** The timeframes a list can be asked over (s), in the order the snapshot keeps them. */
 export const TF_S = Object.freeze({ "1m": 60, "5m": 300, "30m": 1800, "1h": 3600 });
@@ -81,8 +83,6 @@ export const THIN_MCAP_USD = 1_000_000, THIN_RATIO = 100;
 export const FIRST_MAX = 20_000;
 /** A wallet's packed times (tfAgg): seconds past the window start, capped under OFF_N (the longest window is 3 600 s plus block-time slack). */
 const OFF_N = 8192;
-/** A no-post card's counted line is kept this long (s) while its coin count stays; lines remembered at most. */
-export const COUNTED_S = 3_600, COUNTED_MAX = 1_000;
 /** sqlite prices memoized per snapshot, at most. */
 const MEMO_MAX = 4_096;
 const NF = TF_KEYS.length;
@@ -118,7 +118,9 @@ export class CoinRows {
     this.story = new Map(); this.storyJobs = new Map(); // the same for the stories body
     this.listed = new Map();  // tf (30m, 1h), and "story:" + tf → { at, set }: the mints that list last showed (the stay rule)
     this.firstSeen = new Map(); // undated coin mint → its first stored trade's time (null when none), oldest first
-    this.counted = new Map();   // tf + ":" + card key → { at, n, line }: a no-post card's counted line (the post lines), oldest first
+    // tf → lib/story-memory.mjs: where the grouping placed each coin, each card's key, story, shown post and header coin
+    // (sticky groups; memory only, empty after a restart)
+    this.memory = new Map();
     // lastTrendMs / trendMaxSliceMs: a trending build's CPU and its longest share of one event-loop turn; lastTrendWaitMs:
     // what the last uncached request waited for, wall clock ({ snap, build, total }). Health had no figure for trending.
     this.stats = { trades: 0, seedRows: 0, capped: 0, snaps: 0, lastSnapMs: null, maxSliceMs: 0, snapCoins: 0, trendBuilt: 0, lastTrendMs: null, trendMaxSliceMs: 0, lastTrendWaitMs: null, storiesBuilt: 0, lastStoriesMs: null, storiesMaxSliceMs: 0, served: 0, dbReads: 0, firstReads: 0 };
@@ -587,16 +589,47 @@ export class CoinRows {
   }
 
   /**
-   * One listed card's `line` (and `quoted` / `chain`), with the post lines on: see #storyGen. `ids`: mint → the post
-   * it links. Memory and at most one indexed read; what it queues (a link read, a quoted post's text, a model request)
-   * is never awaited.
+   * The header line of a card from its coins' story lines (lib/coin-lines.mjs headerLine). The coin it came from is
+   * chosen once per card key and kept (the card's story memory) while it is still in the card with a line that says more
+   * than its name; it gives way only to a model's line when its own is the server's. null when no row has a story line.
+   */
+  #coinHead(card, tf) {
+    const mem = this.memory.get(tf) ?? null, keep = mem?.leadOf(card.key) ?? null;
+    const { line, mint } = headerLine(card.coins, { keep, title: card.subject?.title ?? card.narrative?.title ?? null, familySymbol: card.family?.symbol ?? null, grouped: card.kind === "narrative" && !card.subject });
+    if (mint && mint !== keep) mem?.setLead(card.key, mint);
+    return line;
+  }
+
+  /**
+   * A row's story line (lib/coin-lines.mjs coinStoryLine): the tagger's stored line when the model wrote one (`nt`
+   * on), else the server's own from the coin's facts: its description, its linked post's stored text (never fetched
+   * here), whether it has a picture. Memory and at most one indexed read (the tagger's answer, cached by it).
+   */
+  #rowStoryLine(r, ids, nt, posts) {
+    const c = this.model.coins.get(r.mint);
+    let meta = null, post = null;
+    try { meta = c ? this.model.metaFor(c) : null; } catch { meta = null; }
+    const id = ids.get(r.mint);
+    if (id && posts?.peek) { try { const p = posts.peek(id); if (p?.state === "ok" && !p.flagged && typeof p.text === "string") post = p.text; } catch { post = null; } }
+    let m = null;
+    try { m = nt ? nt.storyLineOf(r.mint) : null; } catch { m = null; }
+    return coinStoryLine(m, { name: r.name ?? null, symbol: r.symbol ?? null, description: meta?.description ?? null, post, image: !!(r.image || meta?.image) });
+  }
+
+  /**
+   * One listed card's `line` (and `quoted` / `chain`): see #storyGen. `pl`: the post lines, or null (off). `ids`: mint →
+   * the post it links. Memory and at most one indexed read; what it queues (a link read, a quoted post's text, a model
+   * request) is never awaited.
    */
   #cardLine(pl, xp, card, ids, tf, nowS) {
     const model = this.model, post = card.post?.id ? card.post : null;
-    // The card's coins, the one that links the shown post first; for the counted sentence every coin, copies included.
-    // `ordered` are the rows the page draws: a coin with copies folded under it is ONE row, and a card of one row is a
-    // single coin (no counted sentence: the page draws it as a plain row).
-    const lead = (post ? card.coins?.find((r) => ids.get(r.mint) === post.id) : null) ?? card.coins?.[0] ?? null;
+    // A card whose post has no words of its own, or no post: its coins' story lines head it (the counted sentence is gone).
+    if (!post || (!pl && wordCount(post.text) === 0)) { const h = this.#coinHead(card, tf); if (h) card.line = h; return; }
+    // With the post lines off a card with a worded post has no field: the page shows the poster's words.
+    if (!pl) return;
+    // The card's coins, the one that links the shown post first; every coin, copies included, for the shared word.
+    // `ordered` are the rows the page draws: a coin with copies folded under it is ONE row.
+    const lead = card.coins?.find((r) => ids.get(r.mint) === post.id) ?? card.coins?.[0] ?? null;
     const ordered = lead ? [lead, ...(card.coins ?? []).filter((r) => r !== lead)] : [];
     const all = [];
     for (const r of ordered) {
@@ -608,17 +641,8 @@ export class CoinRows {
       }
     }
     const title = card.subject?.title ?? card.narrative?.title ?? null;
-    const own = (linkKind, linkHost = null) => serverLine({ post, linkKind, linkHost, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject, familySymbol: card.family?.symbol ?? null });
-    if (!post) {
-      if (ordered.length < 2) return; // a single row with no post: no line, and no field
-      const key = `${tf}:${card.key}`, hit = this.counted.get(key);
-      if (hit && hit.n === all.length && hit.rows === ordered.length && nowS - hit.at < COUNTED_S) { card.line = hit.line; return; }
-      const line = own(null);
-      this.counted.delete(key); this.counted.set(key, { at: nowS, n: all.length, rows: ordered.length, line });
-      if (this.counted.size > COUNTED_MAX) this.counted.delete(this.counted.keys().next().value);
-      card.line = line;
-      return;
-    }
+    // The server's own line: the poster's words in quote marks, else the coins' story lines.
+    const own = () => serverLine({ post, coins: all, rows: ordered.length, title, titleAi: !!title && !card.subject, grouped: card.kind === "narrative" && !card.subject }) ?? this.#coinHead(card, tf);
     const q = xp?.quoteOf ? xp.quoteOf(post.id) : null;
     if (q?.quoted) card.quoted = { id: q.quoted.id, handle: q.quoted.handle, text: q.quoted.text, at: q.quoted.at ?? null, url: postUrl(q.quoted.id) };
     const offer = () => {
@@ -652,7 +676,7 @@ export class CoinRows {
       // the server's line now, so "Sending 10%" is never shown as a story meanwhile. A longer post waits with no field.
       mine = r === "server" || (r != null && r !== "known" && wordCount(post.text) <= THIN_WORDS);
     }
-    if (mine) card.line = own(q?.kind ?? null, q?.host ?? null);
+    if (mine) card.line = own();
   }
 
   /** In steps: the rows (#pickGen), each row's post link (a yield every 32: a metadata read each), the grouping, then the safety facts of the rows listed. */
@@ -684,17 +708,39 @@ export class CoinRows {
       }
       yield;
     }
+    let mem = this.memory.get(tf);
+    if (!mem) this.memory.set(tf, mem = new StoryMemory());
     const g = groupStories({ rows: p.rows, postIdOf: (r) => ids.get(r.mint) ?? null, postOf: (id) => this.#storyPost(id, { queue: !background }), wakes, nowMs: p.at,
       tagOf: nt ? (r) => tags.get(r.mint) ?? null : null, newCoins1hOf: nt ? (id) => nt.newCoins1h(id, snap.nowS) : undefined,
       subjectOf: nt ? (this.subjects ??= loadSubjects(TABLE_URL, this.log) ?? (() => null)) : null, keepAll: !!this.storyGate,
-      answeredOf: nt ? (r) => nt.answered(r.mint) : undefined });
+      answeredOf: nt ? (r) => nt.answered(r.mint) : undefined, sticky: mem.view(snap.nowS) });
+    // Sticky groups (lib/stories.mjs head 6): what this build placed where is kept for the next one (the gate's
+    // background build of 5m too: it groups the same rows, and keeps the memory going while nobody looks).
+    mem.record(g, snap.nowS);
     if (this.storyGate) yield* this.#storyGateGen(snap, tf, g);
     // Each card's buyers counted once: the distinct wallets with a $1+ buy in the timeframe (the snapshot's window) over
     // all its coins, copies included. A wallet in three Jensen coins is one buyer of the Jensen block, not three. One
     // pass over the held trades (a yield every 1024); the summed per-coin figures stay on the rows.
     const siteBuyers = yield* this.#cardBuyersGen(snap, tf, g.cards);
-    // Post lines (lib/post-lines.mjs), when the server runs them (never in the gate's background build, which nobody
-    // is served): each listed card carries `line` once there is something to say, one card a step.
+    // Story lines (lib/coin-lines.mjs): every row the body lists carries `storyLine`, one "Subject: what happened" line
+    // that is never blank (the model's line for the coin when it wrote one, else the server's own from its facts). A
+    // listed coin (a card's or a loose one) whose tagger answer predates the lines is put in line to be read once more
+    // for its line alone (lib/narrtags.mjs reline; most buyers of the last 5 minutes first). Not in the gate's
+    // background build, which nobody is served.
+    if (!background) {
+      const posts = model.wakeups?.narrative?.posts ?? null;
+      const put = (r, listed) => {
+        try { r.storyLine = this.#rowStoryLine(r, ids, nt, posts); } catch (e) { r.storyLine = coinStoryLine(null, { name: r.name, symbol: r.symbol }); this.log.warn?.(`coinrows: story line ${r.mint}: ${e?.code ?? e?.name ?? "error"}`); }
+        if (listed && nt) { try { nt.reline(r.mint, r.buyers5m ?? 0); } catch { /* next build */ } }
+      };
+      n = 0;
+      for (const card of g.cards) for (const r of card.coins ?? []) { if ((++n & 31) === 0) yield; put(r, true); }
+      for (const r of g.loose) { if ((++n & 31) === 0) yield; put(r, true); }
+      for (const r of g.dust) { if ((++n & 31) === 0) yield; put(r, false); }
+      yield;
+    }
+    // Card lines (never in the background build): each listed card carries `line` once there is something to say, one
+    // card a step. With the post lines (lib/post-lines.mjs) on:
     // - A card that shows a post: the post it quotes is read (lib/xposts.mjs quoteOf: the link's redirect, then the
     //   quoted post through the embed line; low priority, the shared day) and comes with the card as `quoted`. The
     //   post is offered to the model with it, the card's coins (the one that links the post first, at most four) and
@@ -703,15 +749,18 @@ export class CoinRows {
     //   carried only by that coin's card. A line that says "Quoted post" is carried only while that quoted post can
     //   be shown. A post settled before its link could be read is offered once more when the quoted post is there.
     // - A card the model is not asked about (a few words and no readable quoted post), one it found nothing stated in,
-    //   or one whose line failed the checks: the server's own line (serverLine: the poster's words in quote marks, else a
-    //   counted sentence, also for a post that is only a link or a picture), or `line: null` when there is nothing to say (the page then draws a plain row).
-    // - A card without a post, two rows or more: the counted sentence, kept while the card's coin count stays (an hour at most).
-    // - A card of ONE row (a coin, with or without copies folded under it) is a single coin: it never gets a counted
-    //   sentence, only a model's line or the poster's quoted words.
+    //   or one whose line failed the checks: the server's own line (serverLine: the poster's words in quote marks), else
+    //   the coins' story lines (below).
+    // Whether the post lines run or not:
+    // - A card without a post, or whose post has no words (only a link or a picture; with the post lines on, one whose
+    //   quoted post gave no line either): the story line of its most-bought coin that says more than its name
+    //   (lib/coin-lines.mjs headerLine: a model's line marked "ai" and "coin_line", else a quote), else its coins'
+    //   shared name with "Name only: ...". The coin it came from is chosen once per card key and
+    //   kept while it is in the card with such a line (#coinHead, the story memory). There is no counted sentence.
     // Without `line` the card is as before (the page falls back to the poster's words): not decided yet.
-    const pl = this.lines?.on && !background ? this.lines : null;
-    if (pl) {
-      const xp = model.wakeups?.narrative?.posts ?? null;
+    const pl = this.lines?.on ? this.lines : null;
+    if (!background) {
+      const xp = pl ? model.wakeups?.narrative?.posts ?? null : null;
       for (const card of g.cards) {
         yield;
         try { this.#cardLine(pl, xp, card, ids, tf, snap.nowS); }

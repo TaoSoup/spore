@@ -540,9 +540,17 @@ test("GET /api/stories: the trending rows as cards (a waking family, a post coin
     const t = (await app.get("/api/trending")).body;
     const all = [...b.cards.flatMap((c) => c.coins), ...b.loose, ...b.dust];
     assert.deepEqual(all.map((r) => r.mint).sort(), t.rows.map((r) => r.mint).sort(), "under 50 candidates: the very coins trending lists, each once");
-    const tr = t.rows.find((r) => r.mint === R[2]), sr = post.coins[2];
+    const tr = t.rows.find((r) => r.mint === R[2]), { storyLine, ...sr } = post.coins[2];
     assert.deepEqual(sr, tr);
-    assert.deepEqual([sr.parent.mint, sr.safety.state, Object.keys(b.dust[0]).filter((k) => !(k in tr))], [Q, "unknown", ["reason"]]);
+    assert.deepEqual([sr.parent.mint, sr.safety.state, Object.keys(b.dust[0]).filter((k) => !(k in tr))], [Q, "unknown", ["reason", "storyLine"]]);
+    // every row the body lists carries its story line, never blank; with no tagger it is the server's own: here a
+    // picture and a post of two words (too few to quote), neither read by a model
+    assert.deepEqual(storyLine, { subject: "R2 coin", happened: "Name only: picture and post not read yet", keys: [], by: "server", source: "name" });
+    assert.ok(all.every((r) => r.storyLine && r.storyLine.subject && r.storyLine.happened), "no row without a line");
+    assert.equal(all.find((r) => r.symbol === "LOOSE").storyLine.happened, "Name only: picture not read yet");
+    // the family card has no post: its coins head it; none says more than its name, so the header says that (no counted sentence)
+    assert.deepEqual(fam.line, { subject: "$PAR", happened: "Name only: these coins are not read yet", kind: "thin", by: "server", quote: false, chips: [] });
+    assert.equal("line" in post, false, "a worded post with the post lines off: no field, the page shows the poster's words");
     // the other timeframes and the 400; discover still lists the family
     assert.deepEqual([(await app.get("/api/stories?tf=1h")).body.tf, (await app.get("/api/stories?tf=1h")).body.floor5m, (await app.get("/api/stories?tf=2m")).status], ["1h", ENTER_5M, 400]);
     assert.deepEqual((await app.get("/api/discover")).body.families.map((f) => f.parent.mint), [PAR]);
@@ -609,7 +617,7 @@ test("stories with post lines: a listed card that shows a post offers it with it
   w.close();
 });
 
-test("stories with post lines: a post of a few words is not sent to a model (the server writes the card's line); with its quoted post read it is, and the card carries `quoted`; a card without a post gets a counted line", async () => {
+test("stories with post lines: a post of a few words is not sent to a model (the server writes the card's line); with its quoted post read it is, and the card carries `quoted`; a card without a post is headed by its coins' story lines", async () => {
   const { PostLines } = await import("../lib/post-lines.mjs");
   const w = world();
   const idAt = (s, n = 0) => String(((BigInt(s * 1000) - 1288834974657n) << 22n) + BigInt(n));
@@ -629,7 +637,8 @@ test("stories with post lines: a post of a few words is not sent to a model (the
   w.rows.attach({ lines });
   const build = async () => { w.wk.forget(); w.rows.story.clear(); return (await w.rows.stories("1h")).cards[0]; };
   // the link is not read yet: nothing is sent, and "Sending 10%" is never shown as a story meanwhile
-  const OWN = { subject: "$PAR", happened: "3 coins launched under $PAR", kind: "thin", by: "server", quote: false, chips: [], n: 3 };
+  // the coins' story lines head it (no counted sentence): none has more than its name, nothing is read by a model yet
+  const OWN = { subject: "$PAR", happened: "Name only: these coins are not read yet", kind: "thin", by: "server", quote: false, chips: [] };
   let c = await build();
   assert.deepEqual([c.kind, c.coinsN, c.line, "quoted" in c, lines.pending()], ["post", 3, OWN, false, 0]);
   assert.deepEqual(asked.at(-1), [X, null], "the quoted post is asked for (lib/xposts.mjs queues the reads)");
@@ -651,16 +660,11 @@ test("stories with post lines: a post of a few words is not sent to a model (the
   assert.equal(c.quoted.id, Q);
   assert.equal(w.model.db.lineGet(X).quotedId, Q);
   assert.equal(calls.length, 1);
-  // the post gets flagged: the family keeps a card without a post, and the server counts its coins
+  // the post gets flagged: the family keeps a card without a post, headed by its coins' story lines (no counted sentence)
   records.get(X).flagged = true; records.get(X).text = "";
   c = await build();
-  assert.deepEqual([c.kind, c.post, c.line, "quoted" in c], ["family", null, { subject: "$PAR", happened: "3 coins launched under $PAR", kind: "thin", by: "server", quote: false, chips: ["no_post"], n: 3 }, false]);
-  const kept = c.line;
-  assert.equal((await build()).line, kept, "kept while the card's coin count stays (an hour at most)");
-  w.clock.t += 3_601_000;
-  for (let i = 0; i < 51; i++) w.trade(E[i % 3], `v${i}`, Math.floor(w.clock.t / 1000) - 60 + (i % 50));
-  c = await build();
-  if (c?.kind === "family") assert.notEqual(c.line, kept, "rebuilt after an hour");
+  assert.deepEqual([c.kind, c.post, c.line.subject, c.line.by, c.line.happened.startsWith("Name only: "), "n" in c.line, "quoted" in c], ["family", null, "$PAR", "server", true, false, false]);
+  assert.deepEqual(c.coins.slice(0, 2).map((r) => r.storyLine.happened), ["Name only: no description, picture or post", "Name only: no description, picture or post"], "a flagged post is no post of the coin's own");
   assert.equal(calls.length, 1, "no model call for any of the server's lines");
   lines.stop();
   w.close();
@@ -698,7 +702,7 @@ test("stories with post lines: over the real post fetcher the post's link is rea
   let c = null, own = 0;
   for (let i = 0; i < 8 && c?.line?.by !== "model"; i++) {
     c = await build();
-    if (c?.post && c.line?.by === "server") { own++; assert.deepEqual([c.line.subject, c.line.happened, c.line.chips], ["$PAR", "3 coins launched under $PAR", []]); }
+    if (c?.post && c.line?.by === "server") { own++; assert.deepEqual([c.line.subject, c.line.happened, c.line.chips], ["$PAR", "Name only: these coins are not read yet", []]); }
     await lines.pump();
   }
   assert.ok(own >= 1, "the server's own line while the link and the quoted post were read");
@@ -758,7 +762,7 @@ const tagOfCard = (p) => p.post.text.split(":")[0];
 /** A post of more than 8 words that starts with `tag`. */
 const LONG = (tag) => `${tag}: a cat in a wizard hat walks across a wide stage`;
 
-test("stories with post lines: a card of ONE row is a single coin, with or without copies folded under it: nothing to say is `line: null`, no post is no field, a quotable post keeps its quote", async () => {
+test("stories with post lines: a card of ONE row is a single coin, with or without copies folded under it: nothing to quote is the coin's own story line, a quotable post keeps its quote", async () => {
   const L = await lineWorld();
   const { card, coin, build, quotes, lines, calls } = L;
   // single coins: a fee line whose link came back empty, a bare link to a website, a short post that says something
@@ -774,14 +778,18 @@ test("stories with post lines: a card of ONE row is a single coin, with or witho
   const shape = (c) => [c.kind, c.coins.length, c.coins[0].copies?.length ?? 0, c.coinsN];
   assert.deepEqual([noise, link, says].map((id) => shape(cards.get(id))), [["post", 1, 0, 1], ["post", 1, 0, 1], ["post", 1, 0, 1]]);
   assert.deepEqual([cNoise, cLink, cSays].map((id) => shape(cards.get(id))), [["post", 1, 1, 2], ["post", 1, 1, 2], ["post", 1, 1, 2]], "one row with a copy under it: two coins");
-  // nothing to say: decided, and null (the page draws the plain row with its Open post link)
-  for (const id of [noise, link, cNoise, cLink]) assert.deepEqual(["line" in cards.get(id), cards.get(id).line], [true, null], L.records.get(id).text);
+  // nothing to quote: the coin's own story line heads it (here "Name only", never blank and never a counted sentence)
+  for (const id of [noise, link, cNoise, cLink]) {
+    const c = cards.get(id);
+    assert.deepEqual([c.line.by, c.line.quote, c.line.subject, c.line.happened], ["server", false, c.coins[0].storyLine.subject, c.coins[0].storyLine.happened], L.records.get(id).text);
+    assert.ok(c.line.happened.startsWith("Name only: "));
+  }
   // a quotable post keeps its quote under the coin's own name, also on a row with a copy (never "Both coins are named ...")
   assert.deepEqual(cards.get(says).line, { subject: "$SAYS", happened: "the bears are done for this week", kind: "thin", by: "server", quote: true, chips: [] });
   assert.deepEqual(cards.get(cSays).line, { subject: "$CSAYS", happened: "a hippo was born at the zoo", kind: "thin", by: "server", quote: true, chips: [] });
-  // no post: a family of one row (with its copies) has no field at all, like a single coin: not "All 3 coins are named Whited"
+  // no post: a family of one row (with its copies) is headed by that row's story line, not "All 3 coins are named Whited"
   const f = cards.get(PAR);
-  assert.deepEqual([f.kind, f.post, f.coins.length, f.coins[0].copies.length, f.coinsN, "line" in f], ["family", null, 1, 2, 3, false]);
+  assert.deepEqual([f.kind, f.post, f.coins.length, f.coins[0].copies.length, f.coinsN, f.line.subject, f.line.happened], ["family", null, 1, 2, 3, f.coins[0].storyLine.subject, f.coins[0].storyLine.happened]);
   assert.ok(fam.includes(f.coins[0].mint));
   assert.equal(JSON.stringify([...cards.values()].map((c) => c.line ?? null)).includes("coins are named"), false, "no counted sentence anywhere on this page");
   await L.pump();
@@ -836,8 +844,8 @@ test("stories with post lines: `chain` only for a line that took a name from it 
   const VIA = { subject: "Wizard cat", happened: "Quoted post says a wizard cat walked across a wide stage", kind: "claim", by: "model", quote: false, chips: ["ai", "via_quoted"] };
   assert.deepEqual([cards.get(G).line, cards.get(G).quoted.id], [VIA, qg.id]);
   // the quoted post turns 404 (or is withheld, or flagged): the read is settled without it, so the summary of a post
-  // nobody can open is not shown; the server's own line takes its place (here the counted sentence: "Sending 10%" is noise)
-  const OWN = { subject: "$GONEA", happened: "2 coins", kind: "thin", by: "server", quote: false, chips: [], n: 2 };
+  // nobody can open is not shown; the server's own line takes its place (here the coins' story lines: "Sending 10%" is noise)
+  const OWN = { subject: "GONEA coin", happened: "Name only: these coins are not read yet", kind: "thin", by: "server", quote: false, chips: [] };
   quotes.set(G, { state: "unread", kind: "post", host: null, quoted: null, chain: null, retry: false });
   cards = await build();
   assert.deepEqual([cards.get(G).line, "quoted" in cards.get(G)], [OWN, false]);
@@ -963,4 +971,78 @@ test("story gate: shadow records a passing story and leaves the body unchanged; 
     assert.equal(w.rows.snapshot().storyGate.passing, 1);
     w.rows.stopStoryGate(); w.close();
   }
+});
+
+test("story lines in the stories body: a model's line rides on its row and heads a card with no post (the most-bought coin's, marked ai and coin_line); a listed coin tagged before lines is read once more for its line alone", async () => {
+  const w = world();
+  const T0 = K0 * B;
+  const A = w.coin(mintN(300), "NEEDLE", { parent: null, createdAt: T0 - 600 }), C = w.coin(mintN(301), "SWAN", { parent: null }), D = w.coin(mintN(302), "OLDTAG", { parent: null });
+  for (const m of [A, C]) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: "the ai bubble is about to pop", twitter: null, telegram: null, website: null, fetchedAt: 1, ok: true });
+  w.model.setMeta(`https://ipfs.io/ipfs/${D}`, { image: null, description: "a hippo was born at the zoo", twitter: null, telegram: null, website: null, fetchedAt: 1, ok: true });
+  for (const [m, n] of [[A, 12], [C, 11], [D, 10]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
+  const calls = [];
+  const client = async () => ({ messages: { create: async (req) => {
+    const coins = JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
+    calls.push(coins.map((c) => c.symbol));
+    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", keys: ["AI bubble"] } : c.symbol === "OLDTAG" ? { subject: "Zoo hippo", happened: "A hippo was born at the zoo", keys: ["hippo"] } : { subject: "", happened: "", keys: [] });
+    return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => ({ n: c.n, ...(c.symbol === "OLDTAG" ? { kind: "new", id: 0, title: "some other story", theme: "animals" } : { kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai" }), retitle: "", line: line(c) })) }) }] };
+  } } });
+  const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, hotFillMs: 0, log: quiet });
+  // OLDTAG was answered ("none", asked twice) before lines existed: no line, line_v 0
+  w.db.tagSet({ mint: D, narrativeId: null, at: T0 - 4000, model: "claude-haiku-5-5", asks: 2 });
+  w.rows.attach({ narr });
+  w.clock.t = (T0 + 100) * 1000;
+  let b = await w.rows.stories("5m");
+  const loose = (sym) => b.loose.find((r) => r.symbol === sym);
+  // nothing read yet: every row has the server's own line, quoting its description (no model has read it)
+  assert.deepEqual(loose("NEEDLE").storyLine, { subject: "NEEDLE coin", happened: "the ai bubble is about to pop", keys: [], by: "server", source: "description", quote: true });
+  assert.equal(narr.pending(), 4, "the page's three coins (OLDTAG is let go at its turn: it was answered) and OLDTAG to read once more for its line");
+  await narr.pump();
+  assert.deepEqual(calls.map((c) => [...c].sort()), [["NEEDLE", "OLDTAG", "SWAN"]], "one request: the line-only re-read shares the batch");
+  w.clock.t += 5_000;
+  b = await w.rows.stories("5m");
+  const card = b.cards[0];
+  assert.deepEqual(card.coins.map((r) => [r.symbol, r.storyLine.by, r.storyLine.happened]), [["NEEDLE", "model", "Description says the AI bubble is about to pop"], ["SWAN", "server", "Name only: its description names no clear subject"]]);
+  assert.deepEqual(card.line, { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", kind: "event", by: "model", quote: false, chips: ["ai", "coin_line", "ai_group"], keys: ["AI bubble"], of: { mint: A, symbol: "NEEDLE" } });
+  // OLDTAG kept its answer ("none": no story card), and now has its line
+  assert.deepEqual([loose("OLDTAG").storyLine, w.db.tagGet(D).narrativeId, w.db.narrByKey("some other story")], [{ subject: "Zoo hippo", happened: "A hippo was born at the zoo", keys: ["hippo"], by: "model", source: "description" }, null, null]);
+  assert.equal(narr.pending(), 0, "read once: not queued again");
+  assert.ok(!JSON.stringify(b).includes("coins are named"));
+  narr.stop(); w.close();
+});
+
+test("sticky groups in the stories body: a card's header coin is chosen once and kept as buyers move; the memory is per timeframe and starts empty", async () => {
+  const w = world();
+  const T0 = K0 * B;
+  const A = w.coin(mintN(310), "NEEDLE", { parent: null }), C = w.coin(mintN(311), "PIN", { parent: null });
+  for (const m of [A, C]) w.model.setMeta(`https://ipfs.io/ipfs/${m}`, { image: null, description: "the ai bubble is about to pop", twitter: null, telegram: null, website: null, fetchedAt: 1, ok: true });
+  for (const [m, n] of [[A, 12], [C, 11]]) for (let i = 0; i < n; i++) w.trade(m, `${m.slice(0, 4)}w${i}`, T0 + i, { usd: 20 });
+  const client = async () => ({ messages: { create: async (req) => {
+    const coins = JSON.parse(userText(req.messages[0]).split("<coins>\n")[1].split("\n</coins>")[0]);
+    const line = (c) => (c.symbol === "NEEDLE" ? { subject: "AI bubble", happened: "Description says the AI bubble is about to pop", keys: ["AI bubble"] } : { subject: "AI bubble", happened: "Description says the AI bubble will pop", keys: ["AI bubble"] });
+    return { stop_reason: "end_turn", usage: { input_tokens: 900, output_tokens: 90 }, content: [{ type: "text", text: JSON.stringify({ coins: coins.map((c) => ({ n: c.n, kind: "new", id: 0, title: "AI Bubble Popping", theme: "ai", retitle: "", line: line(c) })) }) }] };
+  } } });
+  const narr = new NarrTags({ model: w.model, db: w.db, cfg: { on: true, model: "claude-haiku-5-5", dailyUsd: 1, minBuyers: 10 }, clientFactory: client, now: w.clock.now, perMin: 600, hotFillMs: 0, log: quiet });
+  w.rows.attach({ narr });
+  w.clock.t = (T0 + 100) * 1000;
+  assert.equal(w.rows.memory.size, 0, "empty before the first build (and after a restart)");
+  await w.rows.stories("5m");
+  await narr.pump();
+  w.clock.t += 5_000;
+  let b = await w.rows.stories("5m");
+  const head = () => [b.cards.length, b.cards[0].key, b.cards[0].line?.of?.symbol];
+  assert.deepEqual(head(), [1, b.cards[0].key, "NEEDLE"], "the most-bought coin's line heads the card");
+  const key = b.cards[0].key;
+  // PIN gets more buyers than NEEDLE: without memory its line would head the card
+  for (let i = 0; i < 9; i++) w.trade(C, `late${i}`, T0 + 102 + i, { usd: 20 });
+  w.clock.t += 5_000;
+  b = await w.rows.stories("5m");
+  assert.deepEqual([b.cards[0].coins[0].symbol, ...head()], ["PIN", 1, key, "NEEDLE"], "the card keeps its key and its header coin");
+  assert.equal(w.rows.memory.get("5m").leadOf(key), A);
+  // the memory forgotten (a restart): the grouping alone decides again
+  w.rows.memory.clear();
+  w.clock.t += 5_000;
+  b = await w.rows.stories("5m");
+  assert.deepEqual(head(), [1, key, "PIN"]);
+  narr.stop(); w.close();
 });

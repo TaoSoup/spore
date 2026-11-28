@@ -34,6 +34,21 @@
 // 5. Inside a card and inside the loose list, coins with the same ticker and the same image fold into one row: the one
 //    with the most liquidity leads and lists the others as `copies`. Nothing here says which one came first or which
 //    one is "the" coin: the lead is only the deepest pool.
+// 6. Sticky groups (`sticky`, lib/story-memory.mjs; lib/coinrows.mjs keeps one memory per timeframe, in memory only, so
+//    a restart starts empty and the first build groups afresh). Each coin remembered in a card adds one more link, its
+//    prior card's key, joined in step 4 like any label and never cut. So once placed, a coin stays in its card while it
+//    is listed: a new tag, post or wake-up may ADD coins to a card or MERGE two cards, never pull a coin out. In the
+//    chaining guard (3) the prior cards are groups of their own, and a coin held in one is a bridge candidate on ANY label
+//    of another key (a post or family too): one coin's new link does not glue its card to another story, and the guard
+//    never cuts a coin from a label of its own card's key. A card holding coins of prior cards keeps the key of the
+//    oldest of them (first placed, then the key) whatever the precedence; that story leads it (its live label, else the
+//    story as the memory has it, `head`, e.g. a narrative whose other coins were re-read) and the other stories follow
+//    in `keys` / `parts`, so the 5-minute series still sums every member story (lib/attention.mjs cardAttention reads
+//    `keys`; a coin held only by its prior card counts there when the series files it under one of them). A narrative
+//    card keeps the post it shows while a coin of the card still links it. Stickiness ends when a coin has not been in
+//    a card for 60 min, when the card's key has carried no label for 6 h, or, for a post card, as soon as its post may
+//    not be shown any more (flagged, gone): those coins are placed afresh. Dust leaves cards as always (1). Without
+//    memory (or an empty one) the result is exactly as described above.
 // The numbers state what was measured. A card's `buyers5m` is the sum of its coins' 5-minute buyers (a wallet that
 // bought two of them counts twice), copies included; `coinsN` counts every coin of the card, copies included.
 import { PAPER_RATIO, TINY_USD, byMint } from "./rowshared.mjs";
@@ -176,8 +191,13 @@ export const KIND_RANK = Object.freeze({ subject: 0, narrative: 1, post: 2, fami
  * links one that may be shown and has words, else null; `family`: the waking family on the card, else null;
  * `newCoins1hOf(id)` gives `newCoins1h`); a post or family card has `narrative`: the one all its coins share, else
  * null. `themes`: `[{ theme, cards }]` of the narrative cards listed, most cards first.
+ *
+ * `sticky` (head of the file, 6; null: none): `{ keyOf(mint) → prior card key | null, cardOf(key) → { at (first
+ * placed), head, postId } | null }` (lib/story-memory.mjs view). With it the result also has `placed` (mint → card key,
+ * every card's coins, copies included), `kept` (card key → { head, postId }) and `liveKeys` (the keys of the labels
+ * that carry a coin now), for the caller's memory; they are not part of the body.
  */
-export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null, keepAll = false, answeredOf = () => false } = {}) {
+export function groupStories({ rows = [], postIdOf = () => null, postOf = () => null, wakes = new Map(), nowMs = Date.now(), tagOf = null, newCoins1hOf = () => 0, subjectOf = null, keepAll = false, answeredOf = () => false, sticky = null } = {}) {
   const posts = new Map(); // post id → { handle, text } | null, asked once
   const post = (id) => {
     if (id == null) return null;
@@ -257,16 +277,36 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   // The waking family's parent coin itself takes its family's label, when a coin of that family is on the page (alone it
   // would join nothing).
   live.forEach((row, i) => { const self = wakes.get(row.mint) ?? null; if (self && kids.has(self.mint) && !famOf.has(i)) famLabel(i, self); });
+  // Sticky groups (head of the file, 6): each coin's prior card key, when that card is still remembered. `stk[i]`: the
+  // key or null; `held`: prior key → the indices it holds together (a link of its own, never cut, apart from `labels`).
+  const stk = live.map(() => null), held = new Map(), priorOf = new Map(); // priorOf: prior key → its card's memory
+  if (sticky) live.forEach((row, i) => {
+    let k = null, c = null;
+    try { k = sticky.keyOf(row.mint) ?? null; c = typeof k === "string" ? sticky.cardOf(k) ?? null : null; } catch { k = null; c = null; }
+    if (!headOk(c?.head)) return;
+    if (c.head.kind === "post" && !post(c.head.id)) return; // a post that may not be shown any more (flagged, gone) holds nothing
+    stk[i] = k; priorOf.set(k, c);
+    let h = held.get(k);
+    if (!h) held.set(k, h = new Set());
+    h.add(i);
+  });
   const ck = live.map((r) => copyKey(r) ?? `\0${r.mint}`); // copies are one coin
   const distinct = (idx) => { const s = new Set(); for (const i of idx) s.add(ck[i]); return s.size; };
   // The chaining guard (head of the file): for each narrative or subject label, the groups the OTHER labels make (all of
   // them, as labelled, before any cut: the result does not depend on the order of the labels); a group that holds
   // exactly one of its coins (copies folded) is a lone bridge, cut when both sides are stories of their own.
+  // With sticky groups each prior card is a group of its own here, and a coin held in a prior card is a bridge candidate
+  // on ANY label of another key (a post's, a family's too) that would carry it towards another story; it is never cut
+  // from a label of its own prior card's key (its prior card holds it there anyway).
+  const cuttable = (L, i) => (L.kind === "narrative" || L.kind === "subject" ? stk[i] !== L.key : stk[i] != null && stk[i] !== L.key);
   const cuts = [];
   for (const L of labels.values()) {
-    if (L.kind !== "narrative" && L.kind !== "subject") continue;
+    if (L.kind !== "narrative" && L.kind !== "subject" && ![...L.idx].some((i) => cuttable(L, i))) continue;
     const uf0 = unionFind(live.length), inOther = new Set();
     for (const M of labels.values()) if (M !== L) { uf0.joinAll(M.idx); for (const i of M.idx) inOther.add(i); }
+    // a prior card and the live label of the same key are one story (else two cards could come out with one key): joined
+    // here for every label but L itself, whose own prior card stays a group of its own (its coins are never cut from L)
+    for (const [k, h] of held) { const K = labels.get(k); uf0.joinAll(K && K !== L ? [...h, ...K.idx] : h); for (const i of h) inOther.add(i); }
     const per = new Map(), free = []; // group root → L's indices in it; L's coins of no other label
     for (const i of L.idx) {
       if (!inOther.has(i)) { free.push(i); continue; }
@@ -282,7 +322,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       if (distinct(mine) !== 1) continue;
       const own = members.get(r).filter((j) => !L.idx.has(j)), rest = [...free];
       for (const [r2, m] of members) if (r2 !== r) rest.push(...m);
-      if (distinct(own) >= 2 && distinct(rest) >= 2) for (const i of mine) cuts.push([L, i]);
+      if (distinct(own) >= 2 && distinct(rest) >= 2) for (const i of mine) if (cuttable(L, i)) cuts.push([L, i]);
     }
   }
   for (const [L, i] of cuts) unlabel(L, i);
@@ -306,7 +346,7 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       }
     }
     live.forEach((row, i) => {
-      if (lab[i].size || !targets.length) return;
+      if (lab[i].size || stk[i] != null || !targets.length) return;
       let answered = true;
       try { answered = tags.has(row.mint) || !!answeredOf(row); } catch { answered = true; }
       if (answered) return;
@@ -321,10 +361,11 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   // 3. One card per connected component of coins that share a label.
   const uf = unionFind(live.length);
   for (const L of labels.values()) uf.joinAll(L.idx);
+  for (const [k, h] of held) uf.joinAll([...h, ...(labels.get(k)?.idx ?? [])]); // a prior card and its key's live label: one card, one key
   const comps = new Map(); // root → indices, rank order
   let loose = [];
   live.forEach((row, i) => {
-    if (!lab[i].size) { loose.push(tagged(row)); return; }
+    if (!lab[i].size && stk[i] == null) { loose.push(tagged(row)); return; }
     const r = uf.find(i);
     let c = comps.get(r);
     if (!c) comps.set(r, c = []);
@@ -337,8 +378,11 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
   // and pictures aside) or quotes a post that has (postOf's `quotes`), the one with the most 5-minute buyers (then the
   // mint). A post that is only a link or a picture never leads a grouped card: it says nothing about the story, and the
   // card's counted line says more.
-  const bestPost = (b) => {
-    for (const r of [...b].sort((x, y) => (y.buyers5m ?? 0) - (x.buyers5m ?? 0) || byMint(x.mint, y.mint))) {
+  // With sticky groups (`keep`) the post the card showed before comes first while a coin of the card still links it.
+  const bestPost = (b, keep = null) => {
+    const ord = [...b].sort((x, y) => (y.buyers5m ?? 0) - (x.buyers5m ?? 0) || byMint(x.mint, y.mint));
+    if (keep != null) { const k = ord.findIndex((r) => (postIdOf(r) ?? null) === keep); if (k > 0) ord.unshift(...ord.splice(k, 1)); }
+    for (const r of ord) {
       const own = postIdOf(r) ?? null;
       const p = own != null ? post(own) : null;
       if (p && (wordCount(p.text) > 0 || p.quotes === true)) return { id: own, handle: p.handle, text: p.text, at: postTime(own, nowMs), url: postUrl(own) };
@@ -346,17 +390,33 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     return null;
   };
   const newCoins = (id) => { try { return Number(newCoins1hOf(id)) || 0; } catch { return 0; } };
-  const cards = [];
+  const cards = [], placed = sticky ? new Map() : null, kept = sticky ? new Map() : null; // mint → card key; card key → its memory
   for (const idx of comps.values()) {
     // the stories of the component, by the precedence: kind, then most coins (copies folded), most 5-minute buyers, key
     const keys = new Set();
     for (const i of idx) for (const k of lab[i]) keys.add(k);
-    const parts = [...keys].map((k) => {
-      const L = labels.get(k), carried = idx.filter((i) => L.idx.has(i));
+    const partOf = (L, carried) => {
       let buyers5m = 0;
       for (const i of carried) buyers5m += live[i].buyers5m ?? 0;
       return { L, carried, folded: distinct(carried), buyers5m, coinsN: carried.length };
-    }).sort((x, y) => KIND_RANK[x.L.kind] - KIND_RANK[y.L.kind] || y.folded - x.folded || y.buyers5m - x.buyers5m || byMint(x.L.key, y.L.key));
+    };
+    const parts = [...keys].map((k) => { const L = labels.get(k); return partOf(L, idx.filter((i) => L.idx.has(i))); })
+      .sort((x, y) => KIND_RANK[x.L.kind] - KIND_RANK[y.L.kind] || y.folded - x.folded || y.buyers5m - x.buyers5m || byMint(x.L.key, y.L.key));
+    // Sticky groups: a component that holds coins of prior cards keeps the key of the oldest of them (first placed, then
+    // the key); that story leads the card (its live label, else the story as the card's memory has it), the rest follow.
+    let prior = null;
+    for (const i of idx) {
+      const k = stk[i];
+      if (k == null || k === prior) continue;
+      if (prior == null) { prior = k; continue; }
+      const a = Number(priorOf.get(k).at) || 0, b = Number(priorOf.get(prior).at) || 0;
+      if (a < b || (a === b && byMint(k, prior) < 0)) prior = k;
+    }
+    if (prior != null) {
+      const at = parts.findIndex((x) => x.L.key === prior);
+      if (at >= 0) parts.unshift(...parts.splice(at, 1));
+      else parts.unshift(partOf(rememberedLabel(prior, priorOf.get(prior).head), idx.filter((i) => stk[i] === prior)));
+    }
     const P = parts[0].L;
     // the card's family: of the waking families of its coins, the one whose coins brought the most 5-minute buyers, then the mint
     const famB = new Map();
@@ -370,14 +430,16 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
     if (grouped) {
       let newN = 0;
       for (const i of idx) if (isNew(live[i])) newN++;
-      const common = { post: bestPost(out), family, buyers5m: t.buyers5m, coinsN: t.coinsN, newN, olderN: idx.length - newN, coins };
+      const common = { post: bestPost(out, prior != null ? priorOf.get(prior).postId ?? null : null), family, buyers5m: t.buyers5m, coinsN: t.coinsN, newN, olderN: idx.length - newN, coins };
       if (P.kind === "narrative") card = { kind: "narrative", key: P.key, narrative: { id: P.n.id, title: P.n.title, theme: P.n.theme, newCoins1h: newCoins(P.n.id) }, ...common };
       else {
         // a subject: its narratives listed as `angles` (most 5-minute buyers first) over the coins that carry it;
         // `narrative.id` / `theme` are the leading angle's, `newCoins1h` the angles' sum
         const per = new Map(); // narrative id → { id, title, theme, buyers5m, coinsN }
         for (const c of foldCopies(parts[0].carried.map((i) => out[idx.indexOf(i)]))) {
-          const n = c.narrative, x = per.get(n.id) ?? { id: n.id, title: n.title, theme: n.theme, buyers5m: 0, coinsN: 0 };
+          const n = c.narrative ?? (P.remembered ? P.n : null); // a remembered subject's coin may carry no tag now
+          if (!n) continue;
+          const x = per.get(n.id) ?? { id: n.id, title: n.title, theme: n.theme, buyers5m: 0, coinsN: 0 };
           const one = totals([c]);
           x.buyers5m += one.buyers5m; x.coinsN += one.coinsN; per.set(n.id, x);
         }
@@ -405,19 +467,60 @@ export function groupStories({ rows = [], postIdOf = () => null, postOf = () => 
       card.parts = parts.map((x) => ({ kind: x.L.kind, key: x.L.key, title: partTitle(x.L, post, wakes), coinsN: x.coinsN, buyers5m: x.buyers5m }));
     }
     cards.push(card);
+    if (sticky) {
+      for (const i of idx) placed.set(live[i].mint, card.key);
+      kept.set(card.key, { head: P.remembered ? P.head : headOf(P, card, partTitle(P, post, wakes)), postId: card.post?.id ?? null });
+    }
   }
   cards.sort((x, y) => y.buyers5m - x.buyers5m || y.coinsN - x.coinsN || byMint(x.key, y.key));
   const sent = foldCopies(loose).slice(0, LOOSE_MAX);
   const l = listCards(cards);
-  return { cards: l.cards, ...(keepAll ? { all: cards } : {}), loose: sent, dust, themes: l.themes, hidden: { dust: dustN, cards: l.hidden, loose: loose.length - totals(sent).coinsN } };
+  return {
+    cards: l.cards, ...(keepAll ? { all: cards } : {}), loose: sent, dust, themes: l.themes, hidden: { dust: dustN, cards: l.hidden, loose: loose.length - totals(sent).coinsN },
+    // with sticky groups, for the caller's memory (never sent): `placed` every coin of every card (copies included, the
+    // cards not listed too) → its card's key; `kept` each card's key → { head (headOf), postId (the post it shows) };
+    // `liveKeys` the key of every label that carries a coin now
+    ...(sticky ? { placed, kept, liveKeys: new Set(labels.keys()) } : null),
+  };
+}
+
+/**
+ * What a card's memory keeps of its leading story (sticky groups): `{ kind, id, title, n?, s?, nids? }` (`n`: a
+ * narrative's tag, or a subject card's leading angle), enough to lead the card again (rememberedLabel) while no coin
+ * carries that story's label.
+ */
+function headOf(L, card, title) {
+  const h = { kind: L.kind, id: L.id, title: title ?? null };
+  if (L.kind === "narrative") h.n = { id: L.n.id, title: L.n.title, theme: L.n.theme };
+  if (L.kind === "subject") {
+    h.s = { key: L.s.key, title: L.s.title }; h.nids = [...L.nids];
+    const a = card.subject?.angles?.[0];
+    if (a) h.n = { id: a.id, title: a.title, theme: card.narrative?.theme ?? null };
+  }
+  return h;
+}
+const nOk = (n) => !!n && Number.isInteger(n.id) && typeof n.title === "string";
+/** Whether a card's memory can lead a card again: a known kind, a narrative's or a subject's own fields. */
+function headOk(h) {
+  if (!h || !Object.hasOwn(KIND_RANK, h.kind)) return false;
+  if (h.kind === "narrative") return nOk(h.n);
+  if (h.kind === "subject") return nOk(h.n) && typeof h.s?.key === "string" && typeof h.s.title === "string";
+  return h.id != null;
+}
+/** A label made from a card's memory (headOf): the story leads its card again although no coin carries it now. */
+function rememberedLabel(key, head) {
+  const L = { kind: head.kind, key, id: head.id, idx: new Set(), remembered: true, head };
+  if (head.kind === "narrative") L.n = head.n;
+  if (head.kind === "subject") { L.s = head.s; L.nids = new Set(head.nids ?? []); L.n = head.n ?? null; }
+  return L;
 }
 
 /** A part's title: the narrative's or subject's title, the post's handle, the family's ticker (null when unknown). */
 function partTitle(L, post, wakes) {
   if (L.kind === "narrative") return L.n.title;
   if (L.kind === "subject") return L.s.title;
-  if (L.kind === "post") return post(L.id)?.handle ?? null;
-  return wakes.get(L.id)?.symbol ?? null;
+  if (L.kind === "post") return post(L.id)?.handle ?? L.head?.title ?? null;
+  return wakes.get(L.id)?.symbol ?? L.head?.title ?? null;
 }
 
 /** Union-find over 0..n-1 (path halving, union by size). */

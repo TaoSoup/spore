@@ -15,7 +15,7 @@
 // model provider.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules, keepKeys, KEYS_MAX, KEY_WORDS_MAX, KEY_CHARS_MAX, OUT_BASE, OUT_PER_POST } from "../lib/post-lines.mjs";
+import { PostLines, KINDS, CHIPS, SUBJECT_MAX, HAPPENED_MAX, WORDS_MAX, BATCH, FILL_WAIT_MS, PER_MIN, MAX_WAITING, SOLO_FAILS, THIN_WORDS, LINK_WAIT_MS, LINE_RULES_VERSION, LINE_RULES_KEY, FIX_HINTS, INSTRUCTION_RE, SYSTEM_TEXT, REPLY_SCHEMA, CAPS, checkLine, lineFacts, clauseSources, cleanField, readReply, buildRequest, postBlock, evidenceOf, instructionLike, planOf, serverLine, sharedWord, quoteText, isNoise, quoteRefused, QUOTE_REFUSE, sayText, postText, wordCount, coinText, applyLineRules, keepKeys, KEYS_MAX, KEY_WORDS_MAX, KEY_CHARS_MAX, OUT_BASE, OUT_PER_POST } from "../lib/post-lines.mjs";
 import { DEFAULT_MODEL, GAVE_UP, userText } from "../lib/narrtags.mjs";
 import { LINK_RETRY_S } from "../lib/xposts.mjs";
 import { loadConfig } from "../lib/config.mjs";
@@ -212,7 +212,7 @@ test("the design's lines pass the checks with the texts they were written from",
 });
 
 test("where a line came from: the chips and the source are read off the sentence and the card, never taken from the model", () => {
-  assert.deepEqual(CHIPS, ["ai", "via_quoted", "names_quoted", "names_chain", "mismatch", "no_post", "ai_group"]);
+  assert.deepEqual(CHIPS, ["ai", "via_quoted", "names_quoted", "names_chain", "mismatch", "no_post", "ai_group", "coin_line"]);
   const coins = [{ name: "The Mooner", symbol: "SPEED", parent: "SPCX" }];
   const speedPost = "Speed says he wanted to team up with ELON for the space stream Should be paired to SPCX??";
   const old = { text: "IShowSpeed wants to team up with Elon Musk and be the first streamer to stream from space.", handle: "gwrldmedia", year: 2024 };
@@ -518,7 +518,7 @@ test("a thin answer: nothing is stated, so no sentence is kept and the post is n
   assert.deepEqual(results.map((r) => [r.id, r.state, r.line, r.reasons]), [[id(1), "thin", null, []]]);
 });
 
-test("the server's own lines: a quote, a counted sentence (also for a post that is only a link or a picture), and nothing at all for a single coin with nothing to say", () => {
+test("the server's own lines: the poster's words in quote marks or nothing; no counted sentence (a card with nothing to quote is headed by its coins' story lines)", () => {
   const flag = (t) => /badword/i.test(t);
   const sl = (c) => serverLine(c, { flag });
   const one = [{ name: "The White Bull", symbol: "Slingoor" }];
@@ -548,69 +548,39 @@ test("the server's own lines: a quote, a counted sentence (also for a post that 
     assert.equal(sl({ post: { text }, coins: one }), null, `a single coin keeps its plain row: ${text}`);
   }
   assert.equal(sl({ post: { text: `${"a quiet word and ".repeat(8)}then everyone will get rich` }, coins: one }), null, "also when the word is past the part that would be shown");
-  assert.deepEqual(sl({ post: { text: pitches[0] }, coins: [{ name: "Wizard Cat" }, { name: "Wizard Hat" }] }), { subject: "Wizard", happened: "Both coins are named Wizard", kind: "thin", by: "server", quote: false, chips: [], n: 2 }, "a story falls back to the counted sentence");
+  assert.equal(sl({ post: { text: pitches[0] }, coins: [{ name: "Wizard Cat" }, { name: "Wizard Hat" }] }), null, "a story is not headed by a counted sentence any more: its coins' story lines head it (lib/coin-lines.mjs)");
   for (const text of ["pump.fun adds a new fee switch", "the path is long and quiet", "a butterfly landed on Richard", "this ape escaped from the zoo"]) assert.equal(quoteRefused(text), false, text);
   assert.ok(Object.isFrozen(QUOTE_REFUSE) && QUOTE_REFUSE.length >= 20);
   // a script written without spaces: a sentence is quoted (two characters count as a word), two characters are not
   assert.equal(sl({ post: { text: "黄仁勋在中国电视上被做成了动物角色" }, coins: one })?.quote, true);
   assert.equal(sl({ post: { text: "你好" }, coins: one }), null);
-  // ONE row is a single coin, with or without copies folded under it: no counted sentence
-  // header (a copy has the same ticker by definition; the page draws no header over one row); a quote stays
+  // ONE row or several, copies or not: the quote stays; the shared word names a story of several rows
   const copy = [{ name: "WHITED", symbol: "WHITED", parent: "Slingoor" }, { name: "WHITED", symbol: "WHITED", parent: "Slingoor" }];
   assert.equal(sl({ post: null, coins: copy, rows: 1, familySymbol: "Slingoor" }), null, "no post");
   assert.equal(sl({ post: { text: "SENDING 5%https://t.co/9IXTi6yoBB" }, coins: [...one, ...one], rows: 1 }), null, "a noise post");
   assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", coins: [{ name: "safe inu", symbol: "SI" }, { name: "safe inu", symbol: "SI" }], rows: 1 }), null, "a bare link");
   assert.deepEqual(sl({ post: { text: "the bears are done for this week" }, coins: [...one, ...one], rows: 1 }), { subject: "$Slingoor", happened: "the bears are done for this week", kind: "thin", by: "server", quote: true, chips: [] });
-  assert.deepEqual(sl({ post: null, coins: [...copy, { name: "Whited Two", symbol: "W2", parent: "Slingoor" }], rows: 2 }), { subject: "Whited", happened: "All 3 coins are named Whited; all launched under $Slingoor", kind: "thin", by: "server", quote: false, chips: ["no_post"], n: 3 }, "two rows: the sentence counts every coin, copies included, and says how many it counted");
-  assert.equal(sl({ post: null, coins: copy }).happened, "Both coins are named Whited; all launched under $Slingoor", "without `rows` every coin is a row");
-  // a post without words on a card of two coins: never its header (Nov 26: "Post is only a picture" over 15 coins);
-  // the counted sentence, no "no post" chip (the post stays one tap away); a website link adds its host when it fits
+  assert.deepEqual(sl({ post: { text: "the bears are done for this week" }, coins: [{ name: "Wizard Cat" }, { name: "Wizard Hat" }], title: "wizard things", titleAi: true, grouped: true }), { subject: "Wizard", happened: "the bears are done for this week", kind: "thin", by: "server", quote: true, chips: ["ai_group"] });
+  assert.deepEqual(sl({ post: { text: "the bears are done for this week" }, coins: [{ name: "Alpha" }, { name: "Beta" }], title: "turkey pardon", titleAi: true }), { subject: "Turkey pardon", happened: "the bears are done for this week", kind: "thin", by: "server", quote: true, chips: ["ai_group"] }, "no shared word: a model's title, marked");
+  // no counted sentence anywhere: no post, a post without words, a noise post, several coins or one
   const two = [{ name: "PVE", symbol: "PVE", parent: "PUMP" }, { name: "safe inu", symbol: "SI", parent: "PVE" }];
-  const plain = { subject: "$PVE", happened: "2 coins; 1 launched under $PUMP", kind: "thin", by: "server", quote: false, chips: [], n: 2 };
-  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", coins: two }), plain);
-  assert.deepEqual(sl({ post: { text: "pic.twitter.com/NOfAoq90Wx" }, linkKind: "picture", coins: two }), plain);
-  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: null, coins: two }), plain, "a link not read yet");
-  assert.deepEqual(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "website", coins: two }), plain, "a website with no host label");
   const veto = [{ name: "vetocat", symbol: "vetocat", parent: "DJT" }, { name: "Veto Corleone", symbol: "VETO", parent: "DJT" }, { name: "Mr Veto", symbol: "VETO", parent: "DJT" }, { name: "Brando", symbol: "Brando", parent: "DJT" }];
-  assert.deepEqual(sl({ post: { text: "pic.twitter.com/t6ymnlwE8D" }, linkKind: "picture", coins: veto }), { subject: "Veto", happened: "2 of 4 coins are named Veto; all launched under $DJT", kind: "thin", by: "server", quote: false, chips: [], n: 4 }, "the shared word and parent, as for a card with no post");
-  assert.equal(sl({ post: { text: "pic.twitter.com/t6ymnlwE8D" }, linkKind: "picture", coins: veto, rows: 1 }), null, "one row: no header at all");
-  // a website link names its host (a label, never read); "www." off; a host that is not a plain host name, too long,
-  // or flagged by the block list adds nothing
-  const bare = [{ name: "Alpha", symbol: "ALP" }, { name: "Beta", symbol: "BET" }];
-  const site = (linkHost, f) => serverLine({ post: { text: "https://t.co/XuCyuPCzYc pic.twitter.com/IGobK4KxZN" }, linkKind: "website", linkHost, coins: bare }, { flag: f ?? flag }).happened;
-  assert.equal(site("ansemmas.fun"), "2 coins; the post links to ansemmas.fun");
-  assert.equal(site("WWW.Example.com"), "2 coins; the post links to example.com");
-  assert.equal(site(`www.${"x".repeat(36)}.com`), `2 coins; the post links to ${"x".repeat(36)}.com`, "40 characters once www. is off");
-  for (const bad of ["localhost", "a b.com", `${"x".repeat(37)}.com`, "", null, "evil..com", "1.2.3.4", "xn--80ak6aa92e.com", "shop.xn--p1ai", "elonmas.fun", "my-nvidia.io"]) assert.equal(site(bad), "2 coins", String(bad));
-  assert.equal(site("badword.fun", (t) => /badword/.test(t)), "2 coins", "the block list reads the host");
-  for (const split of ["bad-word.fun", "bad.word.fun"]) assert.equal(site(split, (t) => /badword/.test(t)), "2 coins", `a blocked word split across labels: ${split}`);
-  assert.equal(serverLine({ post: { text: "https://t.co/x" }, linkKind: "website", linkHost: `${"x".repeat(36)}.com`, coins: two }, { flag }).happened, plain.happened, "left off when the whole would pass HAPPENED_MAX (91 characters)");
-  assert.equal(sl({ post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", linkHost: "x.com", coins: two }).happened, plain.happened, "only a website names its host");
-  const long = Array.from({ length: 12 }, (_, i) => ({ name: `Coin${i} Extraordinarily`, symbol: `C${i}`, parent: `Parentfamilyticker${i % 2}` }));
-  const longLine = serverLine({ post: { text: "https://t.co/x" }, linkKind: "website", linkHost: `${"y".repeat(36)}.com`, coins: long }, { flag }).happened;
-  assert.ok([...longLine].length <= HAPPENED_MAX && !longLine.includes("links to"), `the host is left off when the whole would pass HAPPENED_MAX: ${longLine}`);
-  // no post, several coins: counted over EVERY coin; the shared word and the commonest parent
+  for (const c of [{ post: null, coins: copy }, { post: null, coins: veto, title: "veto", titleAi: true, grouped: true }, { post: { text: "https://t.co/oAQHWDkJWU" }, linkKind: "article", coins: two },
+    { post: { text: "pic.twitter.com/NOfAoq90Wx" }, linkKind: "picture", coins: veto }, { post: { text: "https://t.co/XuCyuPCzYc" }, linkKind: "website", linkHost: "ansemmas.fun", coins: two },
+    { post: { text: "Sending 10%https://t.co/Ig0v1Mdtkc" }, linkKind: "post", coins: [{ name: "ZeroSumEnjoyer", symbol: "Zero" }, { name: "ZeroSumEnjoyer", symbol: "SOLACE" }], title: "zerosumenjoyer", titleAi: true, grouped: true }]) assert.equal(sl(c), null, JSON.stringify(c).slice(0, 80));
+  // sharedWord still names what most coins share (the coin lines' name-only header uses it), never a flagged word
   const ansem = [{ name: "Badword Stealing Money", symbol: "ANSEM", parent: "Slingoor" }, { name: "The Black Badword", symbol: "ANSEM ", parent: "Slingoor" }, { name: "hacked", symbol: "hacked", parent: null }, { name: "Ansem Wasted", symbol: "ANSEM", parent: "WASTED" }];
-  const counted = sl({ post: null, coins: ansem, title: "ansem hacked black bull rug", titleAi: true, grouped: true });
-  assert.deepEqual(counted, { subject: "Ansem", happened: "3 of 4 coins are named Ansem; 2 launched under $Slingoor", kind: "thin", by: "server", quote: false, chips: ["ai_group", "no_post"], n: 4 });
-  assert.equal(/badword|wasted|hacked|rug|stealing|scammer/i.test(`${counted.subject} ${counted.happened}`), false, "no coin name and no model title is repeated");
   assert.deepEqual(sharedWord(ansem, flag), { word: "Ansem", n: 3 });
-  assert.equal(sl({ post: null, coins: [{ name: "Wizard Cat", symbol: "WIZ" }, { name: "wizard kitty", symbol: "KITTY" }] }).happened, "Both coins are named Wizard");
-  assert.equal(sl({ post: null, coins: [{ name: "Pepe", parent: "DOGE" }, { name: "PEPE", parent: "DOGE" }, { name: "pepe 2", parent: "DOGE" }] }).happened, "All 3 coins are named Pepe; all launched under $DOGE");
-  // a slur in a coin name on a no-post card: the word is never the subject and never in the sentence, whoever shares it
-  const slur = [{ name: "Badword Inu", symbol: "BADWORD", parent: "badword" }, { name: "badword cat", symbol: "BWC", parent: "badword" }, { name: "Badword Hat", symbol: "HAT" }];
-  const safe = sl({ post: null, coins: slur, title: "badword coins", titleAi: true, grouped: true });
-  assert.deepEqual(safe, { subject: "$BWC", happened: "3 coins", kind: "thin", by: "server", quote: false, chips: ["ai_group", "no_post"], n: 3 }, "the shared word, the title, the parent and the first coin's name are all withheld");
-  assert.equal(sl({ post: null, coins: [{ name: "badword", symbol: "badword" }, { name: "badword", symbol: "badword" }] }), null, "nothing that may be shown: no line");
-  assert.equal(serverLine({ post: null, coins: [{ name: "Wizard Cat" }, { name: "Wizard Hat" }] }).subject, "Wizard", "the real block list by default");
-  // no shared word: the title (a model's, so marked), else the family's ticker, else the first coin
-  assert.deepEqual(sl({ post: null, coins: [{ name: "Alpha", parent: "FAM" }, { name: "Beta", parent: "FAM" }], title: "turkey pardon", titleAi: true, grouped: true }), { subject: "Turkey pardon", happened: "2 coins launched under $FAM", kind: "thin", by: "server", quote: false, chips: ["ai_group", "no_post"], n: 2 });
-  assert.deepEqual(sl({ post: null, coins: [{ name: "Alpha", parent: "FAM" }, { name: "Beta" }, { name: "Gamma" }], familySymbol: "FAM" }), { subject: "$FAM", happened: "3 coins; 1 launched under $FAM", kind: "thin", by: "server", quote: false, chips: ["no_post"], n: 3 });
-  assert.deepEqual(sl({ post: null, coins: [{ name: "Alpha" }, { name: "Beta" }], title: "Jensen Huang", titleAi: false }).chips, ["no_post"], "the subjects table's title is ours");
-  // a noise post on a card of several coins: the counted sentence, and the post stays one tap away (no "no post" chip)
-  assert.deepEqual(sl({ post: { text: "Sending 10%https://t.co/Ig0v1Mdtkc" }, linkKind: "post", coins: [{ name: "ZeroSumEnjoyer", symbol: "Zero" }, { name: "ZeroSumEnjoyer", symbol: "SOLACE" }], title: "zerosumenjoyer", titleAi: true, grouped: true }), { subject: "ZeroSumEnjoyer", happened: "Both coins are named ZeroSumEnjoyer", kind: "thin", by: "server", quote: false, chips: ["ai_group"], n: 2 });
+  assert.equal(sharedWord([{ name: "badword", symbol: "badword" }, { name: "badword", symbol: "badword" }], flag), null);
+  // a slur in a coin name: never the subject of a quote
+  const slur = [{ name: "Badword Inu", symbol: "BADWORD" }, { name: "badword cat", symbol: "BWC" }];
+  assert.equal(sl({ post: { text: "the bears are done for this week" }, coins: slur }).subject, "$BWC");
+  assert.equal(serverLine({ post: { text: "the bears are done for this week" }, coins: [{ name: "Wizard Cat" }, { name: "Wizard Hat" }] }).subject, "Wizard", "the real block list by default");
+  // quoteText is the one quote rule (lib/coin-lines.mjs quotes a coin's description by it too)
+  assert.equal(quoteText("the bears are done for this week https://t.co/x"), "the bears are done for this week");
+  for (const t of ["lol", "this will pump hard soon", "a 100x gem", "it will hit a 2M market cap", "Sending 10%"]) assert.equal(quoteText(t), null, t);
   // nothing the server writes says anything about a price or praises a coin
-  for (const c of [counted, safe, cut]) assert.equal(/\$\d|market cap|will|safe|moon|gem/i.test(c.happened), false);
+  assert.equal(/\$\d|market cap|will|safe|moon|gem/i.test(cut.happened), false);
 });
 
 test("batching: 6 cards a request in page order; fewer wait until the oldest has waited 20 s; 2 requests a minute", async () => {

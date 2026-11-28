@@ -201,6 +201,10 @@ a.dsc-sh-sub:hover, a.dsc-sh-sub:focus-visible { color: var(--ink); }
 /* a coin folded under the row above it (same ticker and image): one muted line, in line with the ticker */
 .dsc-copyrow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 4px 0 4px var(--dsc-ind); border-bottom: 1px solid var(--line-soft); font-size: var(--fs-2xs); color: var(--muted); }
 .dsc-copyrow:last-child { border-bottom: 0; }
+/* a coin's own story line above its row inside a story or a slim card: the subject line, a step smaller, no rule under it */
+.dsc-rowln { list-style: none; min-width: 0; padding: 8px 0 0; }
+.dsc-rowln .dsc-ln-t { font-size: var(--fs-sm); line-height: 18px; }
+.dsc-rowln + .dsc-coin { padding-top: 4px; }
 .dsc-copy-mint { font-family: var(--mono); color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 2px; }
 .dsc-copy-mint:hover, .dsc-copy-mint:focus-visible { color: var(--ink); }
 .dsc-copy-facts { min-width: 0; }

@@ -15,8 +15,12 @@
 //   poster's own words are its hover title and open under it on a click or tap, with a link to the post. Without one
 //   it falls back to the poster's words in quote marks, a narrative's title, or the family.
 // - A post or family card of one coin, and a loose coin with a story's tag while narratives are shown, is a slim card:
-//   the subject line on top, the coin's usual row under it (the theme as one small tag). A loose coin with no story
-//   is a plain row.
+//   the subject line on top, the coin's usual row under it (the theme as one small tag). A coin with nothing else to
+//   say shows its own story line there (a newer server: StoryRow.storyLine, lib/discover.ts rowLine; "Name only: ..."
+//   when that is all there is); only a coin from an older server without one is a plain row.
+// - Inside a story every row shows its own story line above it, in the same calm style, when it says something the
+//   header does not (lib/discover.ts rowLineIn: never the header's sentence again, never a quote of the post the
+//   header already opens, never "Name only" under a "Name only" header).
 // - The first 20 entries (a story or a single coin), then "Show 20 more" until all are shown.
 // - "N hidden as bot dust · Show": coins left out of the list (a market cap over 100 times the liquidity, or under $5
 //   bought a buyer), each with a "Paper cap" or "Tiny buys" chip once shown.
@@ -57,8 +61,8 @@ import {
   SIZES, SIZE_KEY, SLOT_KEY, STORIES_SUB, TAG_NOTE, TAG_TITLE_QUIET, TFS, TF_KEY, TF_TITLE, THEME_KEY, THIN_TEXT, THIN_TITLE, TOUCH_HOLD_MS, PAGE_ENTRIES,
   activeTheme, angleLine, buyLabel, shareOf, buyersCell, carryLiveStories, chgText, coinSparkLabel, coinSparkPath, coinTag, copiesOf, copyFacts, dustLine, emptyFiltered, emptyTrending, filterStories,
   listStatus, liveStories, mintPrefix, moreCoins, nameIfDiffers, newRowPill, narrativeOf, narrativesOn, normSym, oneList, pageEntries, parseSize, parseSlot, parseTf, parseTheme, prefsUrl, readPref, repeatedSyms, rowAge, safetyChips,
-  closeShrunk, showMore, sparkGeo, storiesView, storyHeader, storyMints, storySplit, subjectLine, themeLabel, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
-  type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown,
+  closeShrunk, rowLine, rowLineIn, showMore, sparkGeo, storiesView, storyHeader, storyMints, storySplit, subjectLine, themeLabel, themePills, tfWords, tradesByMint, txns, urlPrefs, writePref,
+  type LiveTrade, type OneEntry, type OneOrder, type SizeKey, type StoriesView, type StoryShown, type SubjectLine,
 } from "../lib/discover";
 import { count, short, usd } from "../lib/format";
 import { chartKeyOf, glance } from "../lib/story-attention";
@@ -198,10 +202,12 @@ function Cols({ tf }: { tf: Tf }) {
 }
 
 type RowOpts = { t: TradeCtl; tf: Tf; now: number; dups: ReadonlySet<string>; site: number | null };
-/// One coin row and, under it, the coins folded into it (same ticker and image), one line each.
-function RowAndCopies({ r, o, parent, story, fresh, sub, theme }: { r: StoryShown; o: RowOpts; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null; theme?: string }) {
+/// One coin row and, under it, the coins folded into it (same ticker and image), one line each. `line`: the coin's own
+/// story line, drawn above its row (rowLineIn decided it says something the header does not).
+function RowAndCopies({ r, o, parent, story, fresh, sub, theme, line }: { r: StoryShown; o: RowOpts; parent: boolean; story?: boolean; fresh?: boolean; sub?: { text: string; href: string | null } | null; theme?: string; line?: SubjectLine | null }) {
   return (
     <>
+      {line && <li className="dsc-rowln"><SubjectLineBlock L={line} /></li>}
       <CoinRow c={r} t={o.t} tf={o.tf} now={o.now} dup={o.dups.has(normSym(r.symbol))} extra={<RowTags r={r} parent={parent} story={story} fresh={fresh} sub={sub} theme={theme} />} />
       {copiesOf(r).map((k) => (
         <li key={k.mint} className="dsc-copyrow" title={COPIES_TITLE}>
@@ -235,19 +241,23 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
     if (!r) return null;
     // a one-coin card the read no longer has: its row says so, as a row would
     const row = e.left && !r.left ? { ...r, left: true, moved: e.moved } : r;
-    const SL = subjectLine(e.card, o.now, nar, { row: r, coinsN: e.card ? e.coinsN : 1 });
-    // nothing to say about a single coin: its plain row, which keeps its "under $PARENT" mark (a family's coin too: no
-    // header names the family now) and, when the coin links a post, a small link to it
+    const cardSL = subjectLine(e.card, o.now, nar, { row: r, coinsN: e.card ? e.coinsN : 1 });
+    // nothing else to say about a single coin: its own story line heads it (the card's post, when it has one, stays a
+    // small link on the row); a coin without one (an older server) is a plain row, which keeps its "under $PARENT" mark
+    // (a family's coin too: no header names the family now) and, when the coin links a post, a small link to it
+    const SL = cardSL ?? rowLine(r);
     if (!SL) {
       return <RowAndCopies r={row} o={o} parent sub={plainRowSub(e.card)} />;
     }
+    // under a card's own line, the coin's line when it says something more (one calm line otherwise)
+    const own = cardSL ? rowLineIn(r, cardSL, e.card) : null;
     // the theme as one small tag in the row: the line above already names the story
     const theme = nar ? themeLabel((narrativeOf(e.card) ?? narrativeOf(r))?.theme) : "";
     return (
       <li className="dsc-solo">
         <SubjectLineBlock L={SL} />
         <ul className="dsc-st-rows" aria-label={`${SL.subject}: ${sym(r)}`}>
-          <RowAndCopies r={row} o={o} parent={parent} theme={theme || undefined} />
+          <RowAndCopies r={row} o={o} parent={parent} theme={theme || undefined} line={own} sub={cardSL ? undefined : plainRowSub(e.card)} />
         </ul>
       </li>
     );
@@ -305,7 +315,7 @@ function Entry({ e, o, nar, open, onToggle, chart, onChart }: { e: OneEntry; o: 
       </div>
       {five && chart && e.card && <div id={chartId}><StoryChart storyKey={chartKeyOf(e.card)} postAt={e.card.post?.at ?? null} label={label} /></div>}
       <ul id={id} className="dsc-st-rows" aria-label={`Coins of ${label}`}>
-        {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} /></Fragment>)}
+        {shown.map((r) => <Fragment key={r.mint}><RowAndCopies r={r} o={o} parent={parent} fresh={newRowPill(r, isNar)} line={rowLineIn(r, SL, e.card, { many: e.rows.length > 1 })} /></Fragment>)}
       </ul>
       {more > 0 && (
         <p className="dsc-st-more">

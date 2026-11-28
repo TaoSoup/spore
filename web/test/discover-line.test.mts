@@ -127,8 +127,8 @@ test("6. a damaged or unknown line is not shown: the card falls back to the post
     assert.deepEqual([L.auto, L.badge, L.quote], [false, null, true]);
   }
   assert.equal(D.lineOf({ line: null }), null);
-  assert.deepEqual(D.lineOf({ line: { subject: " X​ profiles\n", happened: "Users add jobs", kind: "event", extra: 1 } }), { subject: "X profiles", happened: "Users add jobs", kind: "event", by: "model", quote: false, chips: [], n: null }, "made plain; nothing else is carried");
-  assert.deepEqual(D.lineOf({ line: { subject: "A", happened: "B", kind: "thin", by: "server", quote: true, chips: ["no_post", "x", 5, "ai_group"] } }), { subject: "A", happened: "B", kind: "thin", by: "server", quote: true, chips: ["no_post", "ai_group"], n: null });
+  assert.deepEqual(D.lineOf({ line: { subject: " X​ profiles\n", happened: "Users add jobs", kind: "event", extra: 1 } }), { subject: "X profiles", happened: "Users add jobs", kind: "event", by: "model", quote: false, chips: [], n: null, of: null }, "made plain; nothing else is carried");
+  assert.deepEqual(D.lineOf({ line: { subject: "A", happened: "B", kind: "thin", by: "server", quote: true, chips: ["no_post", "x", 5, "ai_group"] } }), { subject: "A", happened: "B", kind: "thin", by: "server", quote: true, chips: ["no_post", "ai_group"], n: null, of: null });
   assert.equal(D.lineOf({ line: { subject: "A", happened: "B", kind: "event", by: "admin", quote: true } })!.by, "model", "an unknown writer is a model: marked AI, never quoted");
 });
 

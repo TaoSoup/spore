@@ -188,7 +188,7 @@ export async function runReplay(opts, { clientFactory = null, fetch = globalThis
       const hint = p.lead && hintQ ? hintQ.get(p.lead)?.title ?? null : null;
       const info = { mint: p.lead, handle: p.post.handle, text: p.post.text, at: p.post.at, link: { state: q.state === "wait" ? "unread" : q.state, kind: q.kind }, quoted: q.quoted, chain: q.chain, coins: p.coins.slice(0, CAPS.coins).map((c) => ({ name: c.name, symbol: c.symbol, parent: c.parent, text: c.text })), hint };
       const all = p.coins.map((c) => ({ name: c.name, symbol: c.symbol, parent: c.parent }));
-      const own = () => serverLine({ post: { text: p.post.text }, linkKind: q.kind, linkHost: q.host ?? null, coins: all, title: hint, titleAi: !!hint, grouped: false, familySymbol: null });
+      const own = () => serverLine({ post: { text: p.post.text }, coins: all, title: hint, titleAi: !!hint, grouped: false });
       cards.set(p.id, { q, info, own, plan: planOf(info), offered: o.dryRun ? (planOf(info).ask ? "would_ask" : "server") : lines.offer(p.id, info) });
     }
     const asked = [...cards.values()].filter((c) => c.offered === "queued").length;

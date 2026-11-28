@@ -335,7 +335,16 @@ export type StoryCopy = { mint: string; createdAt: number | null; firstSeenAt: n
 export type NarrativeRef = { id: number; title: string; theme: string };
 /// `byName`: the coin has no tag of its own yet and sits under the story because the story's title names it (the server's
 /// rule 2d, lib/stories.mjs); its own tag decides once read.
-export type StoryRow = TrendRow & { copies?: StoryCopy[]; narrative?: NarrativeRef | null; isNew?: boolean; byName?: boolean };
+/// `storyLine` (a newer server): the coin's own "Subject: what happened" line, on every row of GET /api/stories, never
+/// blank. `by` "model": a language model wrote it with the coin's tag, from the coin's name, ticker, description, links,
+/// linked post and picture only, and the server checked it (no price, praise, prediction, link or day word, no name the
+/// coin's texts do not have); it can be wrong. `by` "server": written by the server from facts: the coin's own
+/// description or post in quote marks (`quote`), or "Name only: ..." saying what the coin has and what was not read.
+/// `source`: where its substance is from, read by the server ("name": it says nothing beyond the coin's name).
+/// `keys`: up to 3 phrases of `happened` drawn brighter (a model's line only; checked again by the page).
+export type CoinLineSource = "description" | "picture" | "post" | "name";
+export type CoinStoryLine = { subject: string; happened: string; keys?: string[]; by: "model" | "server"; source: CoinLineSource; quote?: boolean };
+export type StoryRow = TrendRow & { copies?: StoryCopy[]; narrative?: NarrativeRef | null; isNew?: boolean; byName?: boolean; storyLine?: CoinStoryLine | null };
 export type DustReason = "paper" | "tiny";
 export type DustRow = StoryRow & { reason: DustReason };
 export type StoryPost = { id: string; handle: string | null; text: string | null; at: number | null; url: string };
@@ -349,19 +358,22 @@ export type StoryFamily = { mint: string; symbol: string | null; image: string |
 export type StoryAngle = { id: number; title: string; buyers5m: number; coinsN: number };
 /// A card's "subject: what happened" line (a server with POST_LINES=on). `by` "model": written by a language model from
 /// the card's post and the post it quotes, and checked by the server; it can be wrong. `by` "server": written by the
-/// server itself, no model (the poster's own words when `quote` is set, else a counted sentence over
-/// the card's coins). `kind`: what the post is ("event", an attributed "claim" or "pitch", "personal", "mismatch" for a
+/// server itself, no model (the poster's own words when `quote` is set; an older server also wrote a counted sentence
+/// over the card's coins). A card whose post has no words, or no post, is headed by its coins' story lines
+/// (StoryRow.storyLine): chip "coin_line" and `of` (the coin whose line it is), a model's line kind "event", a quote of a
+/// coin's own text `quote`, or "Name only: ..." with no chip. `kind`: what the post is ("event", an attributed "claim" or "pitch", "personal", "mismatch" for a
 /// post about something else than the coin; every server line is "thin"). `chips`: codes the server sets, never the
 /// model: "ai", "via_quoted" (the sentence is the quoted post's), "names_quoted" / "names_chain" (a name comes from the
-/// quoted post, or from the post that one quotes), "mismatch", "no_post", "ai_group" (a model grouped these coins).
+/// quoted post, or from the post that one quotes), "mismatch", "no_post", "ai_group" (a model grouped these coins),
+/// "coin_line" (the line is a coin's own story line, not the post's).
 /// `n`: on a counted sentence, how many coins the server counted (copies included), so the page can tell when it shows
 /// another number of them (a size pill, a row that left) and count for itself.
 /// `keys`: on a model's line from a newer server, 1 to 3 short phrases copied from `happened` that a reader should
 /// catch first (names, the concrete thing that is new), drawn brighter in the sentence; absent on older lines and on
 /// the server's own. The page checks them again (lib/discover.ts lineKeysOf) and falls back to its own pick when absent.
 export type PostLineKind = "event" | "claim" | "pitch" | "personal" | "mismatch" | "thin";
-export type LineChip = "ai" | "via_quoted" | "names_quoted" | "names_chain" | "mismatch" | "no_post" | "ai_group";
-export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind; by?: "model" | "server"; quote?: boolean; chips?: LineChip[]; n?: number | null; keys?: string[] };
+export type LineChip = "ai" | "via_quoted" | "names_quoted" | "names_chain" | "mismatch" | "no_post" | "ai_group" | "coin_line";
+export type StoryPostLine = { subject: string; happened: string; kind: PostLineKind; by?: "model" | "server"; quote?: boolean; chips?: LineChip[]; n?: number | null; keys?: string[]; of?: { mint: string; symbol: string | null } | null };
 /// The post a card's post quotes, when the server could read it, and (`chain`) the post that one quotes when a name in the line comes from it.
 export type StoryQuoted = { id: string; handle: string | null; text: string | null; at: number | null; url?: string };
 export type StoryCard = {

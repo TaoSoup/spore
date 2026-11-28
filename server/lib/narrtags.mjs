@@ -41,6 +41,14 @@
 //   the client, and no message of the provider or the SDK is ever logged or reported: failures are named by class
 //   ("rate_limited", "auth", ...). The client's host and logging are fixed here, not taken from ANTHROPIC_* variables.
 //
+// - The story line (lib/coin-lines.mjs): with every coin's tag the model writes `line`, one "Subject: what happened"
+//   sentence of what the coin refers to, from what this request shows of that coin only (SYSTEM_TEXT, THE LINE). It is
+//   checked like the post lines (checkCoinLine) and stored beside the tag (coin_tags.line, with line_v =
+//   COIN_LINE_VERSION; a line that fails is dropped, the tag is stored all the same). A coin answered under an older
+//   line version (0: before lines) is read once more for its line alone when the stories page lists it (NarrTags
+//   reline: page coins with no line, most buyers of the last 5 minutes first, in the same queue, the same cap and the
+//   same per-minute limit); its tag is kept, so a re-read never moves a coin between stories.
+//
 // RULES_VERSION names the rules above. Answers stored under older rules are deleted once at startup (applyTagRules):
 // every row of `coin_tags` and `narratives`, never `narrative_spend`.
 //
@@ -50,6 +58,7 @@ import { readFileSync, accessSync, constants as FS } from "node:fs";
 import { flagText, postOf, parsePost } from "./narrative.mjs";
 import { SOL_MINT } from "./jupiter.mjs";
 import { isPng, readThumb, makeLogo } from "./thumbs.mjs";
+import { COIN_LINE_VERSION, readCoinLine, checkCoinLine, storedLine } from "./coin-lines.mjs";
 
 /** The themes a narrative can have. Fixed here; the model picks from this list and anything else becomes "other". */
 export const THEMES = Object.freeze(["ai", "animals", "politics", "celebrity", "market crash", "tech & products", "gaming", "sports", "culture & memes", "finance & stocks", "crypto native", "world events", "other"]);
@@ -87,8 +96,14 @@ export const PAGE_MIN_BUYERS = 5;
 export const SNAP_MS = 15 * 60_000;
 /** Requests a minute at most, and the wait for one answer. */
 export const PER_MIN = 6, REQUEST_TIMEOUT_MS = 30_000;
-/** Output tokens allowed: a base plus this many per coin (an entry is about 30 tokens, 40 with a new title; the mostly empty `retitle` field adds about 5). */
-export const OUT_BASE = 64, OUT_PER_COIN = 56;
+/**
+ * Output tokens allowed: a base plus this many per coin. An entry was about 30 tokens, 40 with a new title (the mostly
+ * empty `retitle` adds about 5); the story line (Nov 28) adds about 35-50 more: `"line":{"subject":"...","happened":"...",
+ * "keys":[...]}` with a subject of 1-3 words, a sentence of about 13 words and up to 3 short key phrases. 56 became 112
+ * so a full batch is never cut off (a cut reply is unusable and billed); the day's worst-case reserve grows by 56 tokens
+ * a coin with it.
+ */
+export const OUT_BASE = 64, OUT_PER_COIN = 112;
 /** A request whose estimated input is over this many tokens is not sent (it would also leave the short-prompt price). */
 export const MAX_INPUT_TOKENS = 40_000;
 /** After a failed request nothing is sent for PAUSE_MS, doubling up to PAUSE_MAX_MS; a refused key or request waits PAUSE_CONFIG_MS. */
@@ -102,6 +117,8 @@ export const GAVE_UP = "gave-up", GAVE_UP_S = 86_400;
 export const MAX_WAITING = 2_000, TICK_MS = 5_000, FILL_WAIT_MS = 120_000, META_WAIT_MS = 120_000;
 /** NarrTags: page coins waiting at most (the oldest then joins the others); a page coin not offered again for this long joins the others too. */
 export const HOT_MAX = 600, HOT_STALE_MS = 300_000;
+/** NarrTags: page coins waiting to be read once more for their story line alone, at most (the oldest offer leaves first). */
+export const RELINE_MAX = 600;
 /** NarrTags: how often the last hour's new coins are swept. */
 export const SWEEP_MS = 60_000;
 /** NarrTags: answers kept in memory in front of sqlite; a "none" coin is looked at again for a late post at most this often. */
@@ -347,6 +364,14 @@ export function coinBlock(d, n) {
   return o;
 }
 
+/**
+ * The story line's caps as the instructions state them: the same numbers as lib/post-lines.mjs SUBJECT_MAX,
+ * HAPPENED_MAX, WORDS_MAX, HAPPENED_TARGET and WORDS_TARGET (checked by a test; that module imports this one, so they
+ * are written out here), and the version of the line rules (lib/coin-lines.mjs COIN_LINE_VERSION).
+ */
+export const LINE_SUBJECT_MAX = 24, LINE_HAPPENED_MAX = 90, LINE_WORDS_MAX = 18, LINE_HAPPENED_TARGET = 70, LINE_WORDS_TARGET = 13;
+export { COIN_LINE_VERSION };
+
 export const SYSTEM_TEXT = `You label crypto coins (mostly memecoins) with the story their public text points at, so that a reader can see which coins are about the same thing. This is a labelling task only. You never judge whether a coin is good, safe, or what its price will do, and none of your output says so.
 
 WHAT YOU GET
@@ -383,8 +408,18 @@ TITLES
 RETITLE (rarely needed)
 With kind "existing" only. First decide whether each coin joins, by the rules above, reading the listed title as it stands: retitle is never a reason for a coin to fit. Only then: when the listed title names one detail of that same story (one feature of the same game, one moment of the same event) and the coins that joined are about that game or event but not that detail, put the story's own name in retitle, using only words of the listed title: "gta 6" for "gta 6 birdwatching feature". Never widen a title to a kind of thing (cats, slang, a politician); a coin that shares only the kind is "new" or "none". It is a suggestion the server may ignore. Otherwise retitle is "".
 
+THE LINE (every coin, whatever its kind)
+line tells a reader at a glance WHO OR WHAT the coin refers to and the one fact its own material states about it. Write it ONLY from what this request shows of THAT coin: its name, symbol, description, site, x and post (and its picture when you get one). Never from another coin, a narrative's title, paired_with or outside knowledge.
+- subject: the person, animal, character, product, event or meme the coin refers to, 1 to 3 words, at most ${LINE_SUBJECT_MAX} characters, sentence case, its fullest name as the coin's own material writes it ("Moo Deng", "Jensen Huang"). The coin's name when its material names nothing else.
+- happened: one plain sentence, actor first, active voice. Aim for ${LINE_WORDS_TARGET} words and about ${LINE_HAPPENED_TARGET} characters; never more than ${LINE_WORDS_MAX} words or ${LINE_HAPPENED_MAX} characters; no final stop. Say what the material states or shows: "Baby pygmy hippo at a zoo in Thailand"; "Linked post says Elon Musk changed his profile picture to a frog"; "Picture shows a cartoon duck in a golden crown". An opinion, a claim or a plan is attributed: "Description says ...", "Linked post says ...".
+- keys: 1 to 3 short phrases of 1 to 4 words copied word for word from happened that a reader should catch first: the names and the concrete thing. Never the whole sentence.
+- Every name and every number must be written in the coin's name, symbol, description, site, x or post, or shown in its picture.
+- Never: a price, market cap or money figure; praise or a prediction (moon, gem, bullish, runner, 10x, next big, safe); a call to trade; a link, @handle, #hashtag or $ticker; "yesterday", "today" or "tomorrow"; anything that says or hints that a coin is good or safe or what its price will do; an insult or accusation against a named person. Never describe the request ("no description", "unclear").
+- When the coin's material states nothing beyond its name (a bare word or ticker, a slogan, launcher text, a generic picture), happened is "" and keys is []: do not guess. The server then says so itself.
+- The line is independent of kind: a coin answered "none" still gets its line when its material says what it refers to.
+
 OUTPUT
-Return one entry per coin, with the same n. Always fill every field: id is the existing narrative's id, or 0 when kind is not "existing"; title is the new title, or "" when kind is not "new"; theme is the theme of a new narrative, or "other" when kind is not "new"; retitle is "" unless you suggest a wider title for the existing narrative.`;
+Return one entry per coin, with the same n. Always fill every field: id is the existing narrative's id, or 0 when kind is not "existing"; title is the new title, or "" when kind is not "new"; theme is the theme of a new narrative, or "other" when kind is not "new"; retitle is "" unless you suggest a wider title for the existing narrative; line is always given, with happened "" and keys [] when nothing is stated.`;
 
 /** `s` with `from` replaced by `to`; throws at load when `from` is not in `s` exactly once (SYSTEM_TEXT_PICTURES is built from SYSTEM_TEXT). */
 function insertOnce(s, from, to) {
@@ -428,8 +463,14 @@ export const REPLY_SCHEMA = Object.freeze({
           title: { type: "string" },
           theme: { type: "string", enum: [...THEMES] },
           retitle: { type: "string" },
+          line: {
+            type: "object",
+            properties: { subject: { type: "string" }, happened: { type: "string" }, keys: { type: "array", items: { type: "string" } } },
+            required: ["subject", "happened", "keys"],
+            additionalProperties: false,
+          },
         },
-        required: ["n", "kind", "id", "title", "theme", "retitle"],
+        required: ["n", "kind", "id", "title", "theme", "retitle", "line"],
         additionalProperties: false,
       },
     },
@@ -544,6 +585,8 @@ export function costOf(usage, price) {
  * title suggested for that narrative, cleaned like any title; absent when none or unusable), `{ kind: "new", title, theme }`,
  * `{ kind: "none" }`, or null (no usable answer for that coin). `offered`: the narrative ids the request listed; any
  * other id is rejected. An entry for a number outside the batch is ignored; of two entries for one coin the first counts.
+ * An answer also carries `line`: the story line read (lib/coin-lines.mjs readCoinLine), left out when the entry has
+ * none or an unusable one; a bad line never makes the answer null (whether it may be shown is checkCoinLine's business).
  */
 export function readReply(text, { count, offered }) {
   let body;
@@ -553,6 +596,7 @@ export function readReply(text, { count, offered }) {
   for (const e of body.coins) {
     if (!e || typeof e !== "object" || !Number.isInteger(e.n) || e.n < 1 || e.n > count || seen.has(e.n)) continue;
     seen.add(e.n);
+    const line = readCoinLine(e.line);
     if (e.kind === "none") answers[e.n - 1] = { kind: "none" };
     else if (e.kind === "existing") {
       if (!Number.isInteger(e.id) || !offered.has(e.id)) continue;
@@ -564,6 +608,7 @@ export function readReply(text, { count, offered }) {
       // A title that cleans to nothing says no story we could show: the coin is filed as "none", not asked again.
       answers[e.n - 1] = title ? { kind: "new", title, theme: THEMES.includes(e.theme) ? e.theme : "other" } : { kind: "none" };
     }
+    if (answers[e.n - 1] && line) answers[e.n - 1].line = line;
   }
   return { ok: true, answers };
 }
@@ -605,8 +650,12 @@ export class MemoryTagStore {
   narrRetitle(id, title, key) { const n = this.narr.get(id); if (!n || n.retitled) return false; this.keys.delete(n.key); n.title = title; n.key = key; n.retitled = true; this.keys.set(key, id); return true; }
   narrTagged(id) { let k = 0; for (const t of this.tags.values()) if (t.narrativeId === id) k++; return k; }
   tagGet(mint) { return this.tags.get(mint) ?? null; }
-  tagSet(t) { this.tags.set(t.mint, { mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: !!t.hadPost, bare: !!t.bare, hadImg: !!t.hadImg }); }
+  tagSet(t) { this.tags.set(t.mint, { mint: t.mint, narrativeId: t.narrativeId ?? null, at: t.at, model: t.model ?? null, asks: t.asks ?? 1, hadPost: !!t.hadPost, bare: !!t.bare, hadImg: !!t.hadImg, ...(t.lineV ? { line: t.line ?? null, lineV: t.lineV } : null) }); }
+  /** Only the story line of a stored answer (a line-only re-read): the tag stays as it is, but `hadImg` (the picture was
+   * sent with this re-read) is kept, never lowered; false when the coin has no row. */
+  tagLineSet({ mint, line = null, lineV, hadImg = false }) { const t = this.tags.get(mint); if (!t) return false; t.line = line; t.lineV = lineV; if (hadImg) t.hadImg = true; return true; }
   tagCounts() { let tagged = 0; for (const t of this.tags.values()) if (t.narrativeId != null) tagged++; return { tagged, none: this.tags.size - tagged }; }
+  tagLineCount() { let n = 0; for (const t of this.tags.values()) if (t.line && !t.line.dropped) n++; return n; }
   tagRecentCreated() { return []; }
   spendGet(day) { return { inTokens: 0, outTokens: 0, usd: 0, requests: 0, ...this.spend.get(day) }; }
   spendAdd(day, { inTokens = 0, outTokens = 0, usd = 0, requests = 0 } = {}) { const s = this.spendGet(day); this.spend.set(day, { inTokens: s.inTokens + inTokens, outTokens: s.outTokens + outTokens, usd: Math.max(0, s.usd + usd), requests: s.requests + requests }); }
@@ -664,7 +713,7 @@ export class TagEngine {
     this.pausedUntil = 0; this.backoffMs = 0; this.cappedDay = null;
     this.badRun = 0; // unusable replies in a row
     this.ac = new AbortController();
-    this.stats = { requests: 0, ok: 0, failed: 0, malformed: 0, refusals: 0, cutOff: 0, refusedCap: 0, coinsTagged: 0, coinsNone: 0, coinsMissed: 0, newNarratives: 0, merged: 0, forcedNone: 0, retitled: 0, retitleRefused: 0, imagesSent: 0, inTokens: 0, outTokens: 0, cacheReadTokens: 0, usd: 0, lastError: null, lastMs: null };
+    this.stats = { requests: 0, ok: 0, failed: 0, malformed: 0, refusals: 0, cutOff: 0, refusedCap: 0, coinsTagged: 0, coinsNone: 0, coinsMissed: 0, newNarratives: 0, merged: 0, forcedNone: 0, retitled: 0, retitleRefused: 0, imagesSent: 0, linesKept: 0, linesEmpty: 0, linesDropped: 0, lastLineDrop: null, relined: 0, inTokens: 0, outTokens: 0, cacheReadTokens: 0, usd: 0, lastError: null, lastMs: null };
   }
   /** Whether a price is known for the model: without one no request is ever sent. */
   get ready() { return !!this.price && typeof this.clientFactory === "function"; }
@@ -691,8 +740,11 @@ export class TagEngine {
   }
 
   /**
-   * Asks the model about `coins` (`[{ mint, asks, ...description }]`, at most BATCH) and stores what passes the checks.
-   * Resolves `{ ok: true, done: Map<mint, narrativeId | null>, missed: [mint], retitled: [narrativeId] }` (`missed`:
+   * Asks the model about `coins` (`[{ mint, asks, reline?, ...description }]`, at most BATCH) and stores what passes the checks.
+   * Every answered coin's story line is checked (lib/coin-lines.mjs checkCoinLine) and stored with its tag (`line`,
+   * `lineV`); a coin marked `reline` (its tag stands, only its line is wanted) gets its line stored alone
+   * (store.tagLineSet) and nothing of its tag answer is used: no narrative is made, touched or retitled for it.
+   * Resolves `{ ok: true, done: Map<mint, narrativeId | null>, lines: Map<mint, line | null>, missed: [mint], retitled: [narrativeId] }` (`missed`:
    * coins without a usable answer, nothing stored for them; `retitled`: narratives whose title this reply widened), or `{ ok: false, why, waitMs? }` with nothing stored: "no_price", "no_client",
    * "paused", "capped", "rate" (`waitMs` until the limit allows it), "too_large", "malformed" (an unusable reply: `cls`
    * "refusal", "cut_off" or "malformed", and `systemic` when it is one of a run, so no coin is to blame), or the class
@@ -770,7 +822,8 @@ export class TagEngine {
       return { ok: false, why: "malformed", cls, systemic: setting || this.badRun >= this.badRunPause };
     }
     this.backoffMs = 0; this.badRun = 0; this.stats.ok++;
-    const done = new Map(), missed = [], retitled = [], nowS = Math.floor(this.now() / 1000);
+    const done = new Map(), lines = new Map(), relined = new Set(), missed = [], retitled = [], nowS = Math.floor(this.now() / 1000);
+    const lineCount = { kept: 0, empty: 0, dropped: 0, last: null };
     const count = { merged: 0, added: 0, forced: 0, retitled: 0, refused: 0 };
     const titles = new Map([...narratives, ...fresh].map((n) => [n.id, n.title]));
     const write = () => {
@@ -778,10 +831,21 @@ export class TagEngine {
       coins.forEach((c, i) => {
         const a = reply.answers[i];
         if (!a) { missed.push(c.mint); return; }
+        const pic = this.pictures && hasPicture(c);
+        // The story line: kept when it passes the checks; "" or no line is "nothing stated" (null); a line that fails is
+        // stored as dropped, so the server's own line may quote the coin's text instead. Never a reason to drop the tag.
+        const ck = checkCoinLine(a.line, c, { picture: pic });
+        const line = ck.line ?? (ck.why === "empty" || ck.why === "missing" ? null : { dropped: true });
+        if (ck.line) lineCount.kept++; else if (line) { lineCount.dropped++; lineCount.last = ck.why; } else lineCount.empty++;
+        lines.set(c.mint, line);
+        if (c.reline) {
+          this.store.tagLineSet({ mint: c.mint, line, lineV: COIN_LINE_VERSION, hadImg: pic });
+          relined.add(c.mint); done.set(c.mint, null);
+          return;
+        }
         // The empty-coin guard: a coin whose text names no subject (saysSubject: no text of its own, or only its own
         // name again) is filed only under a title that names it by its name or ticker (titleFitsName). The coin it is
         // priced in does not stand in for text. A coin sent with its picture is not guarded: the picture is its evidence.
-        const pic = this.pictures && hasPicture(c);
         const fits = (title) => pic || saysSubject(c) || titleFitsName(title, c);
         let id = null;
         if (a.kind === "existing") {
@@ -802,17 +866,19 @@ export class TagEngine {
           }
         }
         if (id != null) { this.store.narrTouch(id, nowS); filed.set(id, (filed.get(id) ?? 0) + 1); }
-        this.store.tagSet({ mint: c.mint, narrativeId: id, at: nowS, model: this.model, asks: (c.asks ?? 0) + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !descText(c.description), hadImg: pic });
+        this.store.tagSet({ mint: c.mint, narrativeId: id, at: nowS, model: this.model, asks: (c.asks ?? 0) + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !descText(c.description), hadImg: pic, line, lineV: COIN_LINE_VERSION });
         done.set(c.mint, id);
       });
       for (const [id, title] of wider) { if (this.#retitle(id, title, filed.get(id) ?? 0)) { count.retitled++; retitled.push(id); this.snap = null; } else count.refused++; }
     };
     try { if (typeof this.store.transaction === "function") this.store.transaction(write); else write(); }
     catch { this.stats.lastError = "store"; return { ok: false, why: "store" }; }
-    for (const id of done.values()) { if (id == null) this.stats.coinsNone++; else this.stats.coinsTagged++; }
+    for (const [mint, id] of done) { if (relined.has(mint)) continue; if (id == null) this.stats.coinsNone++; else this.stats.coinsTagged++; }
+    this.stats.linesKept += lineCount.kept; this.stats.linesEmpty += lineCount.empty; this.stats.linesDropped += lineCount.dropped; this.stats.relined += relined.size;
+    if (lineCount.last) this.stats.lastLineDrop = lineCount.last;
     this.stats.coinsMissed += missed.length; this.stats.merged += count.merged; this.stats.newNarratives += count.added;
     this.stats.forcedNone += count.forced; this.stats.retitled += count.retitled; this.stats.retitleRefused += count.refused;
-    return { ok: true, done, missed, retitled };
+    return { ok: true, done, lines, missed, retitled };
   }
   /**
    * A wider title the model suggested for narrative `id`, applied only when all of this holds: the narrative was never
@@ -857,14 +923,15 @@ export class NarrTags {
     this.minBuyers = cfg.minBuyers ?? 10; this.modelId = cfg.model || DEFAULT_MODEL;
     this.hot = new Map(); this.wait = new Map(); // mint → when it was first offered (ms): the stories page's coins, the rest
     this.hotSeen = new Map(); // mint → when a page coin was last offered (ms): only for coins in `hot`
+    this.relines = new Map(); // mint → { at (first offered, ms), b5 (its buyers in the last 5 minutes) }: page coins with an answer but no line under COIN_LINE_VERSION
     this.flight = new Set();
     this.attempts = new Map(); // mint → { lvl, ok }: its batch size level, and the engine's answered requests at its first failure
-    this.cache = new Map();  // mint → { id | null, asks, hadPost, bare, hadImg, model, at, chk } for a stored answer, or null (never answered); least recently used first
+    this.cache = new Map();  // mint → { id | null, asks, hadPost, bare, hadImg, model, at, chk, line, lineV } for a stored answer, or null (never answered); least recently used first
     this.narrs = new Map();  // narrative id → { id, title, theme }
     this.recent = new Map(); // narrative id → Map<mint, createdAt> of its coins created within NEW_S
     this.counts = { tagged: 0, none: 0 };
     this.running = false; this.stopped = false; this.started = false; this.idleWaiters = []; this.timer = null; this.sweptAt = 0;
-    this.stats = { offered: 0, gaveUp: 0, rechecked: 0, dropped: 0 };
+    this.stats = { offered: 0, gaveUp: 0, rechecked: 0, dropped: 0, relineOffered: 0, relineGaveUp: 0 };
     this.on = false; this.engine = null;
     // Answers made under older rules go before anything reads one, with the tagger on or off (applyTagRules: once).
     if (db && typeof db.narrRulesReset === "function") applyTagRules(db, log);
@@ -880,6 +947,7 @@ export class NarrTags {
     this.engine = new TagEngine({ store: db, model: this.modelId, clientFactory: clientFactory ?? anthropicClientFactory(cfg.keyFile), dailyUsd: cfg.dailyUsd ?? 1, perMin, price: cfg, pictures: this.pics.on, now, log });
     this.on = true;
     try { this.counts = db.tagCounts(); } catch { /* counted from here on */ }
+    try { this.counts.lined = db.tagLineCount?.() ?? 0; } catch { /* counted from here on */ }
   }
 
   /** Loads the last hour's tagged coins (for `newCoins1h`) and starts looking for work every TICK_MS. */
@@ -909,7 +977,7 @@ export class NarrTags {
   #rec(mint) {
     let r = this.cache.get(mint);
     if (r !== undefined) return r;
-    try { const t = this.db.tagGet(mint); r = t ? { id: t.narrativeId, asks: t.asks, hadPost: t.hadPost, bare: !!t.bare, hadImg: !!t.hadImg, model: t.model, at: t.at } : null; } catch { return null; }
+    try { const t = this.db.tagGet(mint); r = t ? { id: t.narrativeId, asks: t.asks, hadPost: t.hadPost, bare: !!t.bare, hadImg: !!t.hadImg, model: t.model, at: t.at, line: t.line ?? null, lineV: t.lineV ?? 0 } : null; } catch { return null; }
     this.#remember(mint, r);
     return r;
   }
@@ -927,6 +995,40 @@ export class NarrTags {
     if (!this.on) return null;
     const r = this.#rec(mint);
     return r?.id != null ? this.#narr(r.id) : null;
+  }
+  /**
+   * The stored story line of `mint` for lib/coin-lines.mjs coinStoryLine: `{ line, read, hadImg, dropped }` (`read`: the
+   * model answered it under COIN_LINE_VERSION; `line` the line it kept, checked again on the way out (storedLine), or
+   * null; `dropped`: its line failed the checks), or null (off, never answered, given up). Memory first; one indexed read
+   * the first time.
+   */
+  storyLineOf(mint) {
+    if (!this.on) return null;
+    const r = this.#rec(mint);
+    if (!r || r.model === GAVE_UP) return null;
+    const read = (r.lineV ?? 0) >= COIN_LINE_VERSION;
+    return { read, line: read ? storedLine(r.line) : null, hadImg: !!r.hadImg, dropped: read && !!r.line?.dropped };
+  }
+  /**
+   * A coin the stories page lists (`b5`: its buyers in the last 5 minutes): when its stored answer was made before its
+   * story line could be (lineV under COIN_LINE_VERSION) it waits to be read once more for that line alone, page coins
+   * with most buyers first, in the tagger's own line (#take after the page's new coins): the same cap, the same minute's
+   * limit, the same batches. Once: the answer (a line, nothing stated, a line that failed the checks, or giving up) is
+   * stored with the current version. Its tag is never changed by it. A coin not answered yet, given up, in a request or
+   * waiting to be asked in full is left alone (that ask brings its line anyway). Memory only: call it after tagOf, which
+   * reads the stored answer.
+   */
+  reline(mint, b5 = 0) {
+    if (!this.on || this.stopped || typeof mint !== "string") return;
+    const r = this.cache.get(mint);
+    if (!r || r.model === GAVE_UP || (r.lineV ?? 0) >= COIN_LINE_VERSION) return;
+    // A coin in a request is left alone; so is one waiting to be asked in full (not settled, or a page coin's picture
+    // re-ask): that ask brings its line. A settled coin in the line is let go there at its turn (#take), so it waits here.
+    if (this.flight.has(mint) || ((this.hot.has(mint) || this.wait.has(mint)) && (!this.#settled(r) || this.#picAsk(r, mint)))) return;
+    const had = this.relines.get(mint);
+    if (had) { had.b5 = Number(b5) || 0; return; }
+    this.relines.set(mint, { at: this.now(), b5: Number(b5) || 0 }); this.stats.relineOffered++;
+    if (this.relines.size > RELINE_MAX) this.relines.delete(this.relines.keys().next().value);
   }
   /** Whether the tagger has settled `mint` (a tag or a "none" that stands): lib/stories.mjs rule 2d places only coins not read yet. */
   answered(mint) {
@@ -980,7 +1082,7 @@ export class NarrTags {
   }
   /** `tagging` of the stories body. */
   pageStats() { return this.on ? { on: true, tagged: this.counts.tagged, pending: this.pending(), capped: this.engine.capped() } : { on: false, tagged: 0, pending: 0, capped: false }; }
-  pending() { return this.hot.size + this.wait.size + this.flight.size; }
+  pending() { return this.hot.size + this.wait.size + this.relines.size + this.flight.size; }
   /** Health: counts and the day's spend; `lastError` is a class name, never a provider's text. */
   snapshot() {
     if (!this.on) return { on: false };
@@ -988,7 +1090,10 @@ export class NarrTags {
     let narratives = null;
     try { narratives = this.db.narrCount(); } catch { /* unknown */ }
     return { on: true, model: this.modelId, tagged: this.counts.tagged, none: this.counts.none, narratives, pending: this.pending(), requestsToday: s.requests, usdToday: Math.round(s.usd * 1e6) / 1e6, dailyUsd: this.engine.dailyUsd, capped: this.engine.capped(), pausedMs: this.engine.pausedMs(), lastError: e.lastError, requests: e.requests, failed: e.failed, malformed: e.malformed, refusals: e.refusals, cutOff: e.cutOff, forcedNone: e.forcedNone, retitled: e.retitled, retitleRefused: e.retitleRefused, lastMs: e.lastMs, ...this.stats,
-      images: { on: this.pics.on, px: this.pics.px, sent: e.imagesSent, missing: this.imgStats.missing, waitedMs: this.imgStats.waitedMs, reasked: this.imgStats.reasked, refused: this.imgStats.refused } };
+      images: { on: this.pics.on, px: this.pics.px, sent: e.imagesSent, missing: this.imgStats.missing, waitedMs: this.imgStats.waitedMs, reasked: this.imgStats.reasked, refused: this.imgStats.refused },
+      // story lines: kept / nothing stated / failed the checks (since start; `lastDrop` a check's reason), coins with a
+      // line stored (sqlite, at start then counted), page coins waiting to be read for their line, and those read so
+      lines: { version: COIN_LINE_VERSION, stored: this.counts.lined ?? 0, kept: e.linesKept, empty: e.linesEmpty, dropped: e.linesDropped, lastDrop: e.lastLineDrop, rereadWaiting: this.relines.size, reread: e.relined, rereadOffered: this.stats.relineOffered, rereadGaveUp: this.stats.relineGaveUp } };
   }
 
   // ---------------------------------------------------------------- the queue
@@ -1053,7 +1158,26 @@ export class NarrTags {
   async #take() {
     const batch = [], t = this.now();
     let limit = BATCH, level = null, looked = 0, steps = 0;
-    for (const q of [this.hot, this.wait]) {
+    for (const q of [this.hot, this.relines, this.wait]) {
+      if (q === this.relines) {
+        // Page coins read once more for their story line alone, most buyers of the last 5 minutes first.
+        if (batch.length >= limit || !q.size) continue;
+        for (const [mint, e] of [...q].sort((x, y) => y[1].b5 - x[1].b5)) {
+          if (batch.length >= limit) break;
+          if (this.flight.has(mint)) continue;
+          const a = this.attempts.get(mint)?.lvl ?? 0;
+          if (level != null && a !== level) continue;
+          q.delete(mint);
+          const r = this.#rec(mint);
+          if (!r || r.model === GAVE_UP || (r.lineV ?? 0) >= COIN_LINE_VERSION) continue;
+          const d = this.describe(mint);
+          if (!d) continue;
+          if (level == null) { level = a; limit = BATCH_BY_ATTEMPT[Math.min(a, BATCH_BY_ATTEMPT.length - 1)]; }
+          this.flight.add(mint);
+          batch.push({ ...d, asks: r.asks ?? 0, reline: true, at: e.at, b5: e.b5 });
+        }
+        continue;
+      }
       const isHot = q === this.hot;
       for (const [mint, at] of q) {
         if (batch.length >= limit || looked >= 240) break;
@@ -1127,7 +1251,8 @@ export class NarrTags {
   /** Back in its line (and out of `flight`), with the times it had. */
   #back(c) {
     this.flight.delete(c.mint);
-    if (c.hot) { this.hot.set(c.mint, c.at); this.hotSeen.set(c.mint, c.seen ?? this.now()); } else this.wait.set(c.mint, c.at);
+    if (c.reline) this.relines.set(c.mint, { at: c.at ?? this.now(), b5: c.b5 ?? 0 });
+    else if (c.hot) { this.hot.set(c.mint, c.at); this.hotSeen.set(c.mint, c.seen ?? this.now()); } else this.wait.set(c.mint, c.at);
   }
   #requeue(batch) { for (const c of batch) this.#back(c); }
   /** `c` goes in a smaller batch next time (`solo`: alone). Remembers how many requests the engine had answered at its first failure. */
@@ -1137,9 +1262,17 @@ export class NarrTags {
     this.attempts.set(c.mint, a);
     if (this.attempts.size > MAX_WAITING * 2) this.attempts.delete(this.attempts.keys().next().value);
   }
-  /** `c` is stored as given up: not asked again for GAVE_UP_S. */
+  /** `c` is stored as given up: not asked again for GAVE_UP_S. A coin read for its line alone keeps its tag: its line is stored as dropped, so it is not read again for it. */
   #giveUp(c) {
-    this.flight.delete(c.mint); this.attempts.delete(c.mint); this.stats.gaveUp++;
+    this.flight.delete(c.mint); this.attempts.delete(c.mint);
+    if (c.reline) {
+      this.stats.relineGaveUp++;
+      const line = { dropped: true };
+      try { this.db.tagLineSet({ mint: c.mint, line, lineV: COIN_LINE_VERSION }); } catch { /* kept in memory */ }
+      const r = this.cache.get(c.mint); if (r) { r.line = line; r.lineV = COIN_LINE_VERSION; }
+      return;
+    }
+    this.stats.gaveUp++;
     const at = Math.floor(this.now() / 1000), rec = { id: null, asks: 2, hadPost: false, bare: false, hadImg: false, model: GAVE_UP, at };
     try { this.db.tagSet({ mint: c.mint, narrativeId: null, at, model: GAVE_UP, asks: 2, hadPost: false }); if (!this.cache.get(c.mint)) this.counts.none++; } catch { /* kept in memory */ }
     this.#remember(c.mint, rec);
@@ -1159,11 +1292,12 @@ export class NarrTags {
         // Page coins wait to fill a batch too: they arrive a few at a time, and a request of one or two coins pays for the
         // whole instruction and story list (measured live on Sonnet: ~4,500 tokens in, under 100 out, per request).
         // A batch goes when BATCH coins wait or the oldest has waited FILL_WAIT_MS; page coins still go first in it.
-        const waiting = this.hot.size + this.wait.size;
+        const waiting = this.hot.size + this.relines.size + this.wait.size;
         if (!waiting) break;
         if (waiting < BATCH) {
           const t = this.now(), oh = this.hot.size ? this.hot.values().next().value : Infinity, ow = this.wait.size ? this.wait.values().next().value : Infinity;
-          if (t - oh < this.hotFillMs && t - ow < FILL_WAIT_MS) break;
+          const or = this.relines.size ? this.relines.values().next().value.at : Infinity;
+          if (t - Math.min(oh, or) < this.hotFillMs && t - ow < FILL_WAIT_MS) break;
         }
         const batch = await this.#take();
         if (!batch.length) break;
@@ -1178,9 +1312,20 @@ export class NarrTags {
             // No answer for this coin in a usable reply: a smaller batch next, and given up when it was alone or at the smallest size.
             if (!r.done.has(c.mint)) { if (solo || (this.attempts.get(c.mint)?.lvl ?? 0) >= BATCH_BY_ATTEMPT.length - 1) this.#giveUp(c); else { this.#lower(c); this.#back(c); } continue; }
             this.flight.delete(c.mint);
+            const line = r.lines?.get(c.mint) ?? null;
+            if (c.reline) {
+              // its line alone: the stored answer stays, now with its line
+              this.attempts.delete(c.mint);
+              const had = this.cache.get(c.mint);
+              if (line && !line.dropped && !(had?.line && !had.line.dropped)) this.counts.lined = (this.counts.lined ?? 0) + 1;
+              if (had) { had.line = line; had.lineV = COIN_LINE_VERSION; if (this.pics.on && hasPicture(c)) had.hadImg = true; } // the picture was read with it: the page must not say it was not
+              if (c.reask && hasPicture(c)) this.imgStats.reasked++;
+              continue;
+            }
             const id = r.done.get(c.mint), had = this.cache.get(c.mint);
+            if (line && !line.dropped && !(had?.line && !had.line.dropped)) this.counts.lined = (this.counts.lined ?? 0) + 1;
             if (!had) { if (id != null) this.counts.tagged++; else this.counts.none++; } else if (id != null && had.id == null) { this.counts.tagged++; this.counts.none = Math.max(0, this.counts.none - 1); }
-            this.#remember(c.mint, { id, asks: c.asks + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !c.description, hadImg: this.pics.on && hasPicture(c), model: this.modelId, at: Math.floor(this.now() / 1000), chk: this.now() });
+            this.#remember(c.mint, { id, asks: c.asks + 1, hadPost: postSays(c.post?.text), bare: !postSays(c.post?.text) && !c.description, hadImg: this.pics.on && hasPicture(c), model: this.modelId, at: Math.floor(this.now() / 1000), chk: this.now(), line, lineV: COIN_LINE_VERSION });
             this.attempts.delete(c.mint);
             if (c.reask && hasPicture(c)) this.imgStats.reasked++;
             if (id != null) this.#noteNew(id, c.mint, this.model.coins.get(c.mint)?.createdAt ?? null);
